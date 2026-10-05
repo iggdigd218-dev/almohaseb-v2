@@ -411,7 +411,14 @@ class FirebaseAuthRest {
                 }),
               )
               .timeout(const Duration(seconds: 15));
-          if (res.statusCode < 200 || res.statusCode >= 300) continue;
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            if (res.body.contains('CONFIGURATION_NOT_FOUND') &&
+                (_anonUid == null || _anonUid!.isEmpty)) {
+              _anonUid = 'anon-$shortHash';
+              await _persist();
+            }
+            continue;
+          }
           final m = jsonDecode(utf8.decode(res.bodyBytes));
           if (m is! Map) continue;
           final tok = '${m['idToken'] ?? ''}'.trim();

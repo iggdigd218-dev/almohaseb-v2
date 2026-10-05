@@ -54,7 +54,7 @@ class MainActivity : FlutterFragmentActivity() {
         private const val PERMISSION_REQ_CODE = 7801
 
         /** نية تشغيل الزر العائم من بلاطة الإعدادات السريعة (الستارة). */
-        const val ACTION_QUICK_POS = "com.nexora.eradata.QUICK_POS"
+        const val ACTION_QUICK_POS = "com.nexora.almohaseb.QUICK_POS"
     }
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {

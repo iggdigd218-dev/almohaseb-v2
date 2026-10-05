@@ -11,7 +11,7 @@ void main() {
 
   test('CLOUD-CFG-01 الرابط الافتراضي مثبت على مشروع Firebase الرسمي', () {
     expect(kDefaultCloudBackendUrl,
-        'https://nexora-ledger-default-rtdb.europe-west1.firebasedatabase.app');
+        'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app');
     expect(kDefaultCloudBackendUrl, startsWith('https://'));
   });
 

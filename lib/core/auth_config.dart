@@ -23,7 +23,7 @@ library;
 /// المستودع العام، ويبقى التجاوز ممكناً للبناءات الخاصة.
 const String kFirebaseWebApiKey = String.fromEnvironment(
   'NEXORA_FIREBASE_API_KEY',
-  defaultValue: 'AIzaSyATvivcsVdgrPbvlwVDAWFHGQ-C3vlFySc',
+  defaultValue: 'AIzaSyAh6_kGvoPvse3Mt3Yy06dmDaCpTKHp0F4',
 );
 
 /// معرف عميل OAuth من نوع Web — يُمرَّر لـ GoogleSignIn(serverClientId)
@@ -32,8 +32,7 @@ const String kFirebaseWebApiKey = String.fromEnvironment(
 /// فتُستخدم هوية Google المؤقتة (sub) بدل uid الرسمي.
 const String kGoogleServerClientId = String.fromEnvironment(
   'NEXORA_GOOGLE_CLIENT_ID',
-  defaultValue:
-      '843243539740-knmm6opqabnt9aloiprh8d5e5d545j0n.apps.googleusercontent.com',
+  defaultValue: '',
 );
 
 /// (اختبارات فقط) تجاوز مفتاح API — null = القيمة المضمنة.
@@ -44,10 +43,13 @@ String get effectiveFirebaseApiKey {
   if (debugFirebaseApiKeyOverride != null) return debugFirebaseApiKeyOverride!;
   final k = kFirebaseWebApiKey.trim();
   // حماية من تمرير سر فارغ أو قديم تالف عبر --dart-define في CI
-  if (k.isNotEmpty && k.startsWith('AIzaSy') && !k.contains('0')) {
+  if (k.isNotEmpty &&
+      k.startsWith('AIzaSy') &&
+      k != 'AIzaSyBHmi_0Oj58JKi2kNLR8gqQHhRN3grRg3U' &&
+      k != 'AIzaSyATvivcsVdgrPbvlwVDAWFHGQ-C3vlFySc') {
     return k;
   }
-  return 'AIzaSyATvivcsVdgrPbvlwVDAWFHGQ-C3vlFySc';
+  return 'AIzaSyAh6_kGvoPvse3Mt3Yy06dmDaCpTKHp0F4';
 }
 
 /// هل ميزة الدخول بحساب Google مهيأة في هذا البناء؟

@@ -23,7 +23,7 @@ export 'license_model.dart';
 
 class RtdbClient {
   static const defaultBackendUrl =
-      'https://nexora-ledger-default-rtdb.europe-west1.firebasedatabase.app';
+      'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app';
 
   final String baseUrl;
   final http.Client _http;
@@ -1356,13 +1356,13 @@ class HttpException implements Exception {
 const String kOfficialRtdbUrl = String.fromEnvironment(
   'ADMIN_RTDB_URL',
   defaultValue:
-      'https://nexora-ledger-default-rtdb.europe-west1.firebasedatabase.app',
+      'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app',
 );
 
 /// مفتاح Firebase (Web API Key) لنفس المشروع.
 const String kFirebaseApiKey = String.fromEnvironment(
   'ADMIN_FIREBASE_API_KEY',
-  defaultValue: 'AIzaSyATvivcsVdgrPbvlwVDAWFHGQ-C3vlFySc',
+  defaultValue: 'AIzaSyAh6_kGvoPvse3Mt3Yy06dmDaCpTKHp0F4',
 );
 
 const int kMaxWorkspaceScan = 40;

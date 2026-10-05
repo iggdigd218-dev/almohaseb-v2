@@ -15,7 +15,7 @@ const String kDefaultCloudBackendUrl = String.fromEnvironment(
   // يموت الإقلاع صفري الإعداد (Zero-Config) وتفشل CLOUD-CFG-01: التراجع
   // الأخير تركه فارغاً بينما توثيق هذا الملف وعقد الاختبار يتطلبانه.
   defaultValue:
-      'https://nexora-ledger-default-rtdb.europe-west1.firebasedatabase.app',
+      'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app',
 );
 
 /// (اختبارات فقط) تجاوز الرابط الافتراضي — تضبطه حزم الاختبار على ''

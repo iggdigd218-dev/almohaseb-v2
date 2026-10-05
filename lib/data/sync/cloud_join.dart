@@ -602,12 +602,6 @@ class CloudJoin {
   static Future<void> _putJson(String url, Object body,
       {Duration timeout = const Duration(seconds: 60)}) async {
     var token = await _ensureToken();
-    if (token == null || token.isEmpty) {
-      throw const CloudJoinException(
-          'تعذّر إنشاء الدعوة: فشل الحصول على هوية سحابية (لا يوجد توكن). '
-          'تحقق من اتصال الإنترنت ومن أن مفتاح Firebase (ApiKey) مضبوط في auth_config.dart، '
-          'ثم أعد تشغيل التطبيق.');
-    }
     var uri = _authedUrl(url, token);
     var res = await http
         .put(uri,

@@ -148,9 +148,10 @@ List<String> releaseNoteLines(String notes, {int maxLines = 3}) =>
         .toList();
 
 class UpdateService {
-  /// الرابط الافتراضي لبيان الإصدار (يُقرأ من إصدارات المستودع المستقل).
+  /// الرابط الافتراضي لبيان الإصدار (يُقرأ من قاعدة Firebase RTDB العامة الموثوقة
+  /// للمشروع المستقل ولا يتأثر بخصوصية مستودع الأكواد).
   static const String kDefaultManifestUrl =
-      'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/version.json';
+      'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/version_manifest.json';
 
   /// رابط احتياطي على GitHub Releases للمستودع العام.
   static const String kFallbackManifestUrl =
