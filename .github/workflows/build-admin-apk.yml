@@ -76,24 +76,21 @@ jobs:
       - name: Run tests
         run: flutter test
 
-      - name: Build APK (Universal)
+      - name: Build APK (نسختان فقط: الهواتف الحديثة 64-بت والهواتف القديمة 32-بت)
         run: |
-          # حزم مُقسّمة حسب المعالج (نحو نصف الحجم): الرابط المعتاد
-          # license-admin.apk صار حزمة arm64 (أغلب الهواتف)، والبقية متاحة
-          # بأسماء صريحة. التوقيع واحد ⇒ التحديث فوق النسخة السابقة يعمل.
-          flutter build apk --release --split-per-abi --obfuscate \
-            --split-debug-info=build/app/symbols \
+          flutter build apk --release --split-per-abi \
+            --target-platform android-arm,android-arm64 \
+            --obfuscate --split-debug-info=build/app/symbols \
             --dart-define=ADMIN_REFRESH_TOKEN=AMf-vBy0fav-UQVlyVGr4fVIz7H0VS-RlxLbzXMVDIwm7kGTfjxUeMAwe1tZkwKx_u8geyYdiETw6yW9i3hmja0oDP3wi_M47tVAS6qiASt88Uw73uQv7tANn3W60_WUodhrQTRxpdpCt4aBPN_vVyXra2jCbanZnWxlEcUTOvdSc9y3Ny2pQ6U
           cp build/app/outputs/apk/release/app-arm64-v8a-release.apk ../license-admin.apk
           cp build/app/outputs/apk/release/app-armeabi-v7a-release.apk ../license-admin-armv7.apk
-          cp build/app/outputs/apk/release/app-x86_64-release.apk ../license-admin-x64.apk
-          ls -lh ../license-admin.apk
+          ls -lh ../license-admin.apk ../license-admin-armv7.apk
 
       - name: Generate admin version manifest (admin_version.json)
         run: |
           VER=$(grep -E '^version:' pubspec.yaml | awk '{print $2}')
           NAME="${VER%%+*}"; BUILD="${VER##*+}"
-          NOTES=$(python3 -c "import json,os; p='release_notes.txt'; lines=[l.strip() for l in open(p,encoding='utf-8').read().splitlines() if l.strip()] if os.path.exists(p) else ['تحديث تطبيق مدير التراخيص']; lines=lines[:3]; t='\\n'.join(lines); print(json.dumps(t,ensure_ascii=False)[1:-1])")
+          NOTES=$(python3 -c "import json,os; p='release_notes.txt'; lines=[l.strip() for l in open(p,encoding='utf-8').read().splitlines() if l.strip()] if os.path.exists(p) else ['تحديث تطبيق تراخيص المحاسب']; lines=lines[:3]; t='\\n'.join(lines); print(json.dumps(t,ensure_ascii=False)[1:-1])")
           cat > ../admin_version.json <<EOF
           {
             "version": "$NAME+$BUILD",
@@ -102,8 +99,7 @@ jobs:
               "android": "https://github.com/${{ github.repository }}/releases/download/admin-latest/license-admin.apk",
               "androidVariants": {
                 "arm64": "https://github.com/${{ github.repository }}/releases/download/admin-latest/license-admin.apk",
-                "armv7": "https://github.com/${{ github.repository }}/releases/download/admin-latest/license-admin-armv7.apk",
-                "x64": "https://github.com/${{ github.repository }}/releases/download/admin-latest/license-admin-x64.apk"
+                "armv7": "https://github.com/${{ github.repository }}/releases/download/admin-latest/license-admin-armv7.apk"
               }
             },
             "publishedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
@@ -120,7 +116,6 @@ jobs:
           path: |
             license-admin.apk
             license-admin-armv7.apk
-            license-admin-x64.apk
             admin_version.json
           retention-days: 30
 
@@ -129,21 +124,16 @@ jobs:
         if: github.ref == 'refs/heads/main'
         with:
           tag_name: admin-latest
-          name: 🔑 مدير التراخيص — أحدث إصدار (للمالك فقط)
+          name: 🔑 تراخيص المحاسب — أحدث إصدار (للمالك فقط)
           body: |
             ## ⚠️ تطبيق خاص بمالك النظام فقط — لا يوزَّع للعملاء
 
-            حمّل حزمة معالج هاتفك (أصغر بنحو الثلث من السابق):
-            - `license-admin.apk` — **arm64** (معظم الهواتف الحديثة، ~16 MB).
-            - `license-admin-armv7.apk` — الهواتف الأقدم 32-بت.
-            - `license-admin-x64.apk` — محاكيات/أجهزة x86 النادرة.
-
-            ثم اضبط رابط قاعدة البيانات من ⚙️ داخل التطبيق. التوقيع واحد
-            لكل الحزم ⇒ التحديثات تُثبَّت فوق بعضها بلا حذف.
+            ### 📱 نسختان فقط حسب نوع الهاتف:
+            1. **للهواتف الحديثة (64-بت):** حمّل **`license-admin.apk`** *(متوافقة مع أحدث إصدارات أندرويد)*.
+            2. **للهواتف القديمة (32-بت):** حمّل **`license-admin-armv7.apk`**.
           files: |
             license-admin.apk
             license-admin-armv7.apk
-            license-admin-x64.apk
             admin_version.json
           fail_on_unmatched_files: true
           prerelease: false

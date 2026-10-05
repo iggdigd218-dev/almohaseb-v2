@@ -28,7 +28,7 @@ android {
     defaultConfig {
         applicationId = "com.nexora.almohaseb"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         multiDexEnabled = true
@@ -55,6 +55,7 @@ android {
             }
             v1SigningEnabled true
             v2SigningEnabled true
+            v3SigningEnabled true
         }
     }
 
