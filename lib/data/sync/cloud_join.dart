@@ -738,15 +738,9 @@ class CloudJoin {
           'اضبط رابط قاعدة البيانات السحابية أولاً من الإعدادات ← المزامنة السحابية.');
     }
     _validateHttps(url);
-    // (إصلاح 401) تأكد من وجود هوية سحابية قبل أي رفع — بعد تشديد Rules إلى auth != null
-    // أي طلب بلا ?auth يفشل بـ 401. نحاول إنشاء هوية مجهولة تلقائياً هنا.
-    final preToken = await _ensureToken();
-    if (preToken == null || preToken.isEmpty) {
-      throw const CloudJoinException(
-          'تعذّر إنشاء الدعوة: فشل الحصول على هوية سحابية (401). '
-          'تحقق من: 1) اتصال الإنترنت، 2) مفتاح Firebase ApiKey في lib/core/auth_config.dart، '
-          '3) تفعيل Anonymous Auth في Firebase Console، ثم أعد تشغيل التطبيق.');
-    }
+    // نحاول جلب توكن هوية إن كان Anonymous/Email Auth مفعّلاً في Firebase Console؛
+    // وإن كان معطّلاً نكمل مباشرة نحو RTDB (حيث تفصل قواعد البيانات نفسها في السماح أو الرفض).
+    await _ensureToken();
 
     final db = await repo.database;
     final ws = await repo.activeWorkspaceId();
