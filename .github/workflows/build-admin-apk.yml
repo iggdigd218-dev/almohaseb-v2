@@ -3,7 +3,9 @@ name: Build License Admin APK
 on:
   push:
     branches: [ main ]
-    paths: [ 'admin_app/**' ]
+    paths:
+      - 'admin_app/**'
+      - '.github/workflows/build-admin-apk.yml'
   workflow_dispatch:
 
 permissions:
@@ -11,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Admin APK (Universal)
+    name: Build Admin APK (arm64 + armv7)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -76,7 +78,7 @@ jobs:
       - name: Run tests
         run: flutter test
 
-      - name: Build APK (نسختان فقط: الهواتف الحديثة 64-بت والهواتف القديمة 32-بت)
+      - name: "Build APK (arm64 modern + armv7 old)"
         run: |
           flutter build apk --release --split-per-abi \
             --target-platform android-arm,android-arm64 \

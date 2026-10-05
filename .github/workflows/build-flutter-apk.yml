@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Flutter Release APK (Universal)
+    name: Build Flutter Release APK (arm64 + armv7)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -93,7 +93,7 @@ jobs:
           sed -i "s/AppSemVer([0-9]*, [0-9]*, [0-9]*, kAppBuild)/AppSemVer($MAJ, $MIN, $PAT, kAppBuild)/" lib/core/app_version.dart
           echo "Verified app_version.dart matches $NAME+$BUILD"
 
-      - name: Build Android APK (نسختان فقط: الهواتف الحديثة 64-بت والهواتف القديمة 32-بت)
+      - name: "Build Android APK (arm64 modern + armv7 old)"
         env:
           GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g"
           JAVA_OPTS: "-Xmx3g"
