@@ -32,11 +32,11 @@ if ($src -notmatch '#include\s+"resource\.h"') {
   Write-Host '✔ أُضيف #include "resource.h"'
 }
 
-# 3) عنوان النافذة — نيكسورا (ترميز \u مستقل عن ترميز الملف)
+# 3) عنوان النافذة — المحاسب (ترميز \u مستقل عن ترميز الملف)
 if ($src -match 'window\.Create\(L"[^"]*"') {
-  $src = $src -replace 'window\.Create\(L"[^"]*"', 'window.Create(L"\u0646\u064A\u0643\u0633\u0648\u0631\u0627"'
+  $src = $src -replace 'window\.Create\(L"[^"]*"', 'window.Create(L"\u0627\u0644\u0645\u062D\u0627\u0633\u0628"'
   $changed = $true
-  Write-Host '✔ عُدّل عنوان النافذة إلى «نيكسورا»'
+  Write-Host '✔ عُدّل عنوان النافذة إلى «المحاسب»'
 }
 
 # 4) أيقونة شريط المهام وترويسة النافذة

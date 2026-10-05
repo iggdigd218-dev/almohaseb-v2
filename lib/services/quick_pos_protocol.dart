@@ -96,7 +96,7 @@ class QuickPosHello {
   const QuickPosHello({
     required this.currency,
     required this.symbol,
-    this.appName = 'مدير الحسابات',
+    this.appName = 'المحاسب',
   });
 
   Map<String, Object?> toMap() => <String, Object?>{

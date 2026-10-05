@@ -111,9 +111,6 @@ jobs:
           }
           EOF
           cat ../admin_version.json
-          curl -s -X PUT -H "Content-Type: application/json; charset=utf-8" \
-            -d @../admin_version.json \
-            "https://nexora-ledger-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/admin_version_manifest.json" || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

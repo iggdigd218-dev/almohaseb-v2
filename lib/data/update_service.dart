@@ -148,18 +148,17 @@ List<String> releaseNoteLines(String notes, {int maxLines = 3}) =>
         .toList();
 
 class UpdateService {
-  /// الرابط الافتراضي لبيان الإصدار (يُقرأ من قاعدة Firebase RTDB العامة الموثوقة
-  /// ولا يتأثر بخصوصية مستودع الأكواد).
+  /// الرابط الافتراضي لبيان الإصدار (يُقرأ من إصدارات المستودع المستقل).
   static const String kDefaultManifestUrl =
-      'https://nexora-ledger-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/version_manifest.json';
+      'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/version.json';
 
   /// رابط احتياطي على GitHub Releases للمستودع العام.
   static const String kFallbackManifestUrl =
-      'https://github.com/iggdigd218-dev/almohaseb/releases/download/latest/version.json';
+      'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/version.json';
 
   /// صفحة الإصدار الرسمية (احتياطي إذا لم يذكر البيان رابطًا).
   static const String kFallbackReleaseUrl =
-      'https://github.com/iggdigd218-dev/almohaseb/releases/latest';
+      'https://github.com/iggdigd218-dev/almohaseb-v2/releases/latest';
 
   final String manifestUrl;
   final http.Client Function() _clientFactory;
@@ -318,7 +317,7 @@ class UpdateService {
     }
     // احتياطي لويندوز: إذا كان البيان بلا رابط مباشر لويندوز
     if (downloadUrl == null && platform == UpdatePlatform.windows) {
-      downloadUrl = 'https://github.com/iggdigd218-dev/almohaseb/releases/download/latest/NexoraSetup.exe';
+      downloadUrl = 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe';
     }
     final release = map['releaseUrl'];
     final releaseUrl = (release is String && release.startsWith('https://'))

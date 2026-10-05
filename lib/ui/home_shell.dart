@@ -1598,7 +1598,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
               if (devName != null && devName.isNotEmpty) {
                 return Text(devName, overflow: TextOverflow.ellipsis);
               }
-              return const Text('مدير الحسابات');
+              return const Text('المحاسب');
             },
           ),
           actions: [
@@ -2198,7 +2198,9 @@ class _Drawer extends ConsumerWidget {
   ) async {
     Sfx.click();
     final ctl = TextEditingController(
-      text: currentName == 'مدير الحسابات' ? '' : currentName,
+      text: (currentName == 'المحاسب' || currentName == 'مدير الحسابات')
+          ? ''
+          : currentName,
     );
     final name = await showDialog<String>(
       context: context,
@@ -2532,7 +2534,7 @@ class _Drawer extends ConsumerWidget {
                                     ? user.name
                                     : ((devName != null && devName.isNotEmpty)
                                         ? devName
-                                        : 'مدير الحسابات');
+                                        : 'المحاسب');
                                 return Row(
                                   children: [
                                     Flexible(

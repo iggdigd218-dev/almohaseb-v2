@@ -3,18 +3,18 @@
 ; يُنتج ملف NexoraSetup.exe: يُثبّت في Program Files، ينشئ اختصارات
 ; قائمة ابدأ وسطح المكتب، وله برنامج إلغاء تثبيت — ويعمل رغم تحذير SmartScreen.
 
-#define MyAppName "مدير الحسابات"
+#define MyAppName "المحاسب"
 ; يُستبدل رقم الإصدار تلقائياً في CI من pubspec.yaml قبل الترجمة.
 #define MyAppVersion "1.0.0"
-#define MyAppPublisher "Nexora"
+#define MyAppPublisher "Almohaseb"
 #define MyAppExeName "nexora_app.exe"
 
 [Setup]
-AppId={{F4D92C7E-3B6A-4E1A-9C8F-2D7B5E0A1F34}
+AppId={{A7E48D12-9C3B-4F8A-8B2E-5D1A9F0C3E21}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={autopf}\Nexora
+DefaultDirName={autopf}\Almohaseb
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=output

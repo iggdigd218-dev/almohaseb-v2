@@ -293,7 +293,6 @@ jobs:
             echo "محاولة رفع ${attempt}/3: ${files[*]}"
             if gh release upload latest "${files[@]}" --clobber --repo "${{ github.repository }}"; then
               echo "✔ تم رفع الأصول في المحاولة ${attempt} إلى ${{ github.repository }}"
-              gh release upload latest "${files[@]}" --clobber --repo "iggdigd218-dev/Nexora" || true
               exit 0
             fi
             echo "⚠️ فشلت المحاولة ${attempt} — إعادة المحاولة بعد 20 ثانية"

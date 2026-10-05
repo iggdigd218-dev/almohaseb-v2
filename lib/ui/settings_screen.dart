@@ -1019,7 +1019,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                                   ),
                                   onTap: () async {
                                     final uri = Uri.parse(
-                                      'https://wa.me/967774190040?text=${Uri.encodeComponent('السلام عليكم، أحتاج الدعم الفني لتطبيق مدير الحسابات.')}',
+                                      'https://wa.me/967774190040?text=${Uri.encodeComponent('السلام عليكم، أحتاج الدعم الفني لتطبيق المحاسب.')}',
                                     );
                                     final ok = await canLaunchUrl(uri);
                                     if (ok) {
@@ -1164,7 +1164,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                               child: Column(
                                 children: [
                                   Text(
-                                    'مدير الحسابات',
+                                    'المحاسب',
                                     style:
                                         Theme.of(context).textTheme.titleMedium,
                                   ),

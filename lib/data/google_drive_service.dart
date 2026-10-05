@@ -54,7 +54,7 @@ class GoogleDriveException implements Exception {
 
 class GoogleDriveBackupNotFoundException extends GoogleDriveException {
   const GoogleDriveBackupNotFoundException()
-      : super('لا توجد نسخة احتياطية لمدير الحسابات في حساب Google المرتبط.');
+      : super('لا توجد نسخة احتياطية لتطبيق المحاسب في حساب Google المرتبط.');
 }
 
 class _DriveFile {

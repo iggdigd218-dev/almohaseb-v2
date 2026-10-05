@@ -518,7 +518,7 @@ class MainActivity : FlutterFragmentActivity() {
         } catch (_: Exception) {}
         getExternalFilesDir("updates")?.listFiles()?.forEach { it.delete() }
         val req = android.app.DownloadManager.Request(Uri.parse(url)).apply {
-            setTitle("تحديث مدير الحسابات")
+            setTitle("تحديث المحاسب")
             setDescription("جارٍ تنزيل التحديث…")
             setMimeType("application/vnd.android.package-archive")
             // إشعار النظام يظهر اكتمال التنزيل أيضاً (خدمة النظام نفسها).

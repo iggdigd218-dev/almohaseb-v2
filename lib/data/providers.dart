@@ -1149,9 +1149,10 @@ final ownDeviceNameProvider = FutureProvider<String?>((ref) async {
   );
   if (rows.isEmpty) return null;
   final n = (rows.first['name'] as String?)?.trim();
-  // الاسم الافتراضي قبل أي تخصيص لا يُعرض كعنوان — يبقى «مدير الحسابات».
+  // الاسم الافتراضي قبل أي تخصيص لا يُعرض كعنوان — يبقى «المحاسب».
   if (n == null ||
       n.isEmpty ||
+      n == 'جهاز المحاسب' ||
       n == 'جهاز مدير الحسابات' || // اسم افتراضي قديم.
       n == kDefaultMemberName) {
     return null;

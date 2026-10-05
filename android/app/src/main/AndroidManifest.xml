@@ -59,7 +59,7 @@
     <uses-feature android:name="android.hardware.wifi" android:required="false"/>
 
     <application
-        android:label="مدير الحسابات"
+        android:label="المحاسب"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -105,7 +105,7 @@
              بنقرة واحدة تُشغّل الزر العائم أو تفتح التطبيق لمنح الصلاحية. -->
         <service
             android:name=".QuickPosTileService"
-            android:label="استعلام نكسورا"
+            android:label="استعلام المحاسب"
             android:icon="@mipmap/ic_launcher"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
             android:exported="true">

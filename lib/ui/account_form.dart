@@ -247,7 +247,7 @@ class _State extends ConsumerState<AccountFormScreen> {
             showSnack(
               context,
               'لم يُمنح إذن جهات الاتصال — فعّله من إعدادات النظام: '
-              'التطبيقات ← مدير الحسابات ← الأذونات',
+              'التطبيقات ← المحاسب ← الأذونات',
               error: true,
             );
           }

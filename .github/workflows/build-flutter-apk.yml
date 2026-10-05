@@ -155,14 +155,6 @@ jobs:
           EOF
           cat version.json
 
-          # مزامنة فورية وموثوقة لبيان التحديث إلى Firebase RTDB العام
-          curl -s -X PATCH -H "Content-Type: application/json; charset=utf-8" \
-            -d @version.json \
-            "https://nexora-ledger-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/force_update.json" || true
-          curl -s -X PUT -H "Content-Type: application/json; charset=utf-8" \
-            -d @version.json \
-            "https://nexora-ledger-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/version_manifest.json" || true
-
       # الأصل الواحد يحمل ملفي النشر معاً: APK + version.json، فلا حاجة
       # لإعادة توليد أي شيء في وظيفة النشر، ولا لرفع مزدود للملف الكبير.
       - name: Upload build artifacts
@@ -279,8 +271,6 @@ jobs:
             echo "محاولة رفع ${attempt}/3 إلى ${{ github.repository }}: ${files[*]}"
             if gh release upload latest "${files[@]}" --clobber --repo "${{ github.repository }}"; then
               echo "✔ تم رفع الأصول في المحاولة ${attempt} إلى ${{ github.repository }}"
-              # رفع متزامن إلى المستودع الرديف iggdigd218-dev/Nexora لضمان عدم تأثر أي مستخدم بإصدار سابق
-              gh release upload latest "${files[@]}" --clobber --repo "iggdigd218-dev/Nexora" || true
               exit 0
             fi
             echo "⚠️ فشلت المحاولة ${attempt} — إعادة المحاولة بعد 20 ثانية"

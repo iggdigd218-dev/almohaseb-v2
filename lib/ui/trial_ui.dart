@@ -1031,7 +1031,7 @@ class _PurchaseScreenState extends ConsumerState<PurchaseScreen> {
       } catch (_) {}
 
       final msg =
-          'مرحباً، أود طلب ترخيص وتفعيل اشتراك تطبيق مدير الحسابات (Nexora):\n'
+          'مرحباً، أود طلب ترخيص وتفعيل اشتراك تطبيق المحاسب:\n'
           '🏢 اسم المنشأة: $storeName\n'
           '👤 اسم العميل / المسؤول: $clientName\n'
           '📱 رقم الهاتف: $phone\n'
@@ -1933,7 +1933,7 @@ class ForceUpdateBarrier extends StatelessWidget {
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                 ),
                 onPressed: () async {
-                  final uri = Uri.parse('https://github.com/iggdigd218-dev/Nexora/releases/tag/latest');
+                  final uri = Uri.parse('https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/latest');
                   try {
                     await launchUrl(uri, mode: LaunchMode.externalApplication);
                   } catch (_) {}
