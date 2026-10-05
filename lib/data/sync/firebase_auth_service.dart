@@ -171,6 +171,7 @@ class FirebaseAuthRest {
   static String? _anonIdToken;
   static String? _anonRefreshToken;
   static int _anonExpiryMs = 0;
+  static int _anonProviderDisabledUntilMs = 0;
   static bool _anonStarted = false;
   static Repo? _repo;
 
@@ -190,6 +191,7 @@ class FirebaseAuthRest {
     _anonIdToken = null;
     _anonRefreshToken = null;
     _anonExpiryMs = 0;
+    _anonProviderDisabledUntilMs = 0;
     _anonStarted = false;
     _repo = repo;
   }
@@ -249,6 +251,7 @@ class FirebaseAuthRest {
     _anonIdToken = null;
     _anonUid = null;
     _anonExpiryMs = 0;
+    _anonProviderDisabledUntilMs = 0;
     _accountIdToken = null;
     _accountUid = null;
     _accountExpiryMs = 0;
@@ -267,6 +270,9 @@ class FirebaseAuthRest {
       // تعذّر التجديد → نُكمل بالهوية المجهولة كيلا يُرسل طلب بلا مصادقة.
     }
     if (hasValidToken) return _anonIdToken;
+    if (DateTime.now().millisecondsSinceEpoch < _anonProviderDisabledUntilMs) {
+      return null;
+    }
     await _ensureFreshToken();
     return hasValidToken ? _anonIdToken : null;
   }
@@ -279,6 +285,7 @@ class FirebaseAuthRest {
       if (fresh != null) return fresh;
     }
     _anonExpiryMs = 0;
+    _anonProviderDisabledUntilMs = 0;
     await _ensureFreshToken();
     return hasValidToken ? _anonIdToken : null;
   }
@@ -412,10 +419,16 @@ class FirebaseAuthRest {
               )
               .timeout(const Duration(seconds: 15));
           if (res.statusCode < 200 || res.statusCode >= 300) {
-            if (res.body.contains('CONFIGURATION_NOT_FOUND') &&
-                (_anonUid == null || _anonUid!.isEmpty)) {
-              _anonUid = 'anon-$shortHash';
-              await _persist();
+            if (res.body.contains('CONFIGURATION_NOT_FOUND') ||
+                res.body.contains('OPERATION_NOT_ALLOWED') ||
+                res.body.contains('PASSWORD_LOGIN_DISABLED') ||
+                res.body.contains('ADMIN_ONLY_OPERATION')) {
+              _anonProviderDisabledUntilMs =
+                  DateTime.now().millisecondsSinceEpoch + 600000;
+              if (_anonUid == null || _anonUid!.isEmpty) {
+                _anonUid = 'anon-$shortHash';
+                await _persist();
+              }
             }
             continue;
           }

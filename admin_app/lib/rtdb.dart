@@ -1578,7 +1578,6 @@ class Rtdb {
             } catch (_) {}
           }
           _anonAuthFailed = true;
-          _useRegistryFallback = true;
         }
         lastAuthError =
             'تعذّر إنشاء هوية الدخول (${res.statusCode}) — تحقق من الاتصال.';
