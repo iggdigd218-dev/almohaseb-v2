@@ -30,6 +30,25 @@ export const Header: React.FC<HeaderProps> = ({
   });
 
   const [isFontMenuOpen, setIsFontMenuOpen] = useState(false);
+  const [isNotifOpen, setIsNotifOpen] = useState(false);
+  const [notifications, setNotifications] = useState([
+    {
+      id: 'n1',
+      title: 'نظام المزامنة والترخيص السحابي',
+      body: 'جميع الخدمات السحابية ومحرك المزامنة اللحظية تعمل بكفاءة.',
+      time: 'الآن',
+      unread: true,
+    },
+    {
+      id: 'n2',
+      title: 'المساعد المحاسبي الذكي (Gemini AI)',
+      body: 'جاهز لتحليل القيود والفواتير والأرصدة المالية في أي وقت.',
+      time: 'منذ 5 دقائق',
+      unread: true,
+    },
+  ]);
+
+  const unreadCount = notifications.filter((n) => n.unread).length;
 
   useEffect(() => {
     document.documentElement.setAttribute('data-font', currentFont);
@@ -156,6 +175,67 @@ export const Header: React.FC<HeaderProps> = ({
           <Plus className="w-4 h-4" />
           <span>عملية جديدة</span>
         </button>
+
+        {/* رمز الإشعارات أعلى يسار الشاشة 🔔 */}
+        <div className="relative">
+          <button
+            id="btn-header-notifications"
+            onClick={() => setIsNotifOpen(!isNotifOpen)}
+            className="relative flex items-center justify-center w-9 h-9 bg-amber-50/80 hover:bg-amber-100 border border-amber-200/80 rounded-xl transition-all shadow-2xs"
+            title="الإشعارات والتنبيهات"
+          >
+            <span className="text-base leading-none select-none" role="img" aria-label="الإشعارات">
+              🔔
+            </span>
+            {unreadCount > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-rose-600 text-white text-[10px] font-black flex items-center justify-center shadow-xs">
+                {unreadCount}
+              </span>
+            )}
+          </button>
+
+          {isNotifOpen && (
+            <div className="absolute left-0 mt-2 w-80 bg-white rounded-2xl shadow-2xl border border-slate-200 z-50 overflow-hidden text-right animate-in fade-in zoom-in-95">
+              <div className="px-4 py-3 bg-slate-900 text-white flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-base">🔔</span>
+                  <span className="text-xs font-black">مركز الإشعارات والتنبيهات</span>
+                </div>
+                {unreadCount > 0 && (
+                  <button
+                    onClick={() =>
+                      setNotifications((prev) => prev.map((n) => ({ ...n, unread: false })))
+                    }
+                    className="text-[11px] font-bold text-sky-400 hover:text-sky-300"
+                  >
+                    تحديد الكل كمقروء
+                  </button>
+                )}
+              </div>
+              <div className="max-h-72 overflow-y-auto divide-y divide-slate-100">
+                {notifications.map((n) => (
+                  <div
+                    key={n.id}
+                    onClick={() =>
+                      setNotifications((prev) =>
+                        prev.map((item) => (item.id === n.id ? { ...item, unread: false } : item))
+                      )
+                    }
+                    className={`p-3.5 cursor-pointer transition-colors ${
+                      n.unread ? 'bg-amber-50/40 hover:bg-amber-50/70' : 'hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <span className="text-xs font-extrabold text-slate-800">{n.title}</span>
+                      <span className="text-[10px] text-slate-400 font-semibold">{n.time}</span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 leading-relaxed">{n.body}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </header>
   );

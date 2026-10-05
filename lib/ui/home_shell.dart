@@ -1216,7 +1216,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
         AppScreen.inventory => const InventoryScreen(),
         AppScreen.currencies => const CurrenciesScreen(),
         AppScreen.chat => const ChatScreen(),
-        AppScreen.group => const GroupManagementScreen(),
+        AppScreen.group => const GroupManagementScreen(embedded: true),
         AppScreen.trash => const TrashScreen(),
         AppScreen.activity => const ActivityScreen(),
         AppScreen.backup => const BackupScreen(),
@@ -1632,50 +1632,6 @@ class _HomeShellState extends ConsumerState<HomeShell>
                 );
               },
             ),
-            Consumer(
-              builder: (ctx, rref, _) {
-                final unreadLocal =
-                    rref.watch(unreadCountProvider).valueOrNull ?? 0;
-                final isDark = Theme.of(ctx).brightness == Brightness.dark;
-                return ValueListenableBuilder<int>(
-                  valueListenable:
-                      CloudControlService.instance.unreadAlertCountNotifier,
-                  builder: (ctx, unreadCloud, _) {
-                    final unread = unreadLocal + unreadCloud;
-                    return _appBarSquircleAction(
-                      tooltip: 'الإشعارات',
-                      bg: isDark
-                          ? const Color(0xFF291E04)
-                          : const Color(0xFFFEF9C3),
-                      fg: const Color(0xFFB45309),
-                      border: Border.all(
-                        color: isDark
-                            ? const Color(0xFF854D0E)
-                            : const Color(0xFFFDE047),
-                        width: 1.1,
-                      ),
-                      icon: Badge(
-                        isLabelVisible: unread > 0,
-                        label: Text(
-                          '$unread',
-                          style: const TextStyle(
-                              fontSize: 10,
-                              fontWeight: FontWeight.w900,
-                              color: Colors.white),
-                        ),
-                        backgroundColor: const Color(0xFFDC2626),
-                        child: const GoldenBellIcon(size: 22),
-                      ),
-                      onTap: () => openNotifications(
-                        context,
-                        ref,
-                        onOpenEntity: openNotificationEntity,
-                      ),
-                    );
-                  },
-                );
-              },
-            ),
             // قائمة الخيارات الإضافية (⋮) — نقل الوضع الليلي، إخفاء الأرصدة، وتبديل الوردية
             Consumer(
               builder: (ctx, rref, _) {
@@ -1685,87 +1641,135 @@ class _HomeShellState extends ConsumerState<HomeShell>
                     (currentTheme == ThemeMode.system && isDark);
                 final hidden = rref.watch(hideBalancesProvider);
 
-                return Padding(
-                  padding: const EdgeInsetsDirectional.only(end: 8),
-                  child: PopupMenuButton<String>(
-                    tooltip: 'خيارات إضافية',
-                    icon: Container(
-                      width: 38,
-                      height: 38,
-                      decoration: BoxDecoration(
-                        color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(
-                        Icons.more_vert_rounded,
-                        size: 20,
-                        color: AppColors.textOf(ctx),
+                return PopupMenuButton<String>(
+                  tooltip: 'خيارات إضافية',
+                  icon: Container(
+                    width: 38,
+                    height: 38,
+                    decoration: BoxDecoration(
+                      color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(
+                      Icons.more_vert_rounded,
+                      size: 20,
+                      color: AppColors.textOf(ctx),
+                    ),
+                  ),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  onSelected: (val) {
+                    if (val == 'theme') {
+                      Sfx.tap();
+                      rref.read(themeModeProvider.notifier).state =
+                          darkActive ? ThemeMode.light : ThemeMode.dark;
+                    } else if (val == 'balances') {
+                      Sfx.tap();
+                      rref.read(hideBalancesProvider.notifier).state = !hidden;
+                    } else if (val == 'refresh') {
+                      bump(ref);
+                      _refreshSync();
+                      try {
+                        ref.read(syncEngineProvider).forceSyncNow();
+                      } catch (_) {}
+                      _checkForAppUpdate();
+                    }
+                  },
+                  itemBuilder: (c) => [
+                    PopupMenuItem(
+                      value: 'theme',
+                      child: Row(
+                        children: [
+                          Icon(
+                            darkActive ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+                            size: 19,
+                            color: darkActive ? const Color(0xFFFBBF24) : const Color(0xFFD97706),
+                          ),
+                          const SizedBox(width: 10),
+                          Text(darkActive ? 'التبديل إلى الوضع النهاري' : 'التبديل إلى الوضع الليلي'),
+                        ],
                       ),
                     ),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                    onSelected: (val) {
-                      if (val == 'theme') {
-                        Sfx.tap();
-                        rref.read(themeModeProvider.notifier).state =
-                            darkActive ? ThemeMode.light : ThemeMode.dark;
-                      } else if (val == 'balances') {
-                        Sfx.tap();
-                        rref.read(hideBalancesProvider.notifier).state = !hidden;
-                      } else if (val == 'refresh') {
-                        bump(ref);
-                        _refreshSync();
-                        try {
-                          ref.read(syncEngineProvider).forceSyncNow();
-                        } catch (_) {}
-                        _checkForAppUpdate();
-                      }
-                    },
-                    itemBuilder: (c) => [
-                      PopupMenuItem(
-                        value: 'theme',
-                        child: Row(
-                          children: [
-                            Icon(
-                              darkActive ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-                              size: 19,
-                              color: darkActive ? const Color(0xFFFBBF24) : const Color(0xFFD97706),
-                            ),
-                            const SizedBox(width: 10),
-                            Text(darkActive ? 'التبديل إلى الوضع النهاري' : 'التبديل إلى الوضع الليلي'),
-                          ],
-                        ),
-                      ),
-                      PopupMenuItem(
-                        value: 'balances',
-                        child: Row(
-                          children: [
-                            Icon(
-                              hidden ? Icons.visibility_outlined : Icons.visibility_off_outlined,
-                              size: 19,
-                              color: const Color(0xFF7C3AED),
-                            ),
-                            const SizedBox(width: 10),
-                            Text(hidden ? 'إظهار الأرصدة' : 'إخفاء الأرصدة'),
-                          ],
-                        ),
-                      ),
-                      if (desktop) ...[
-                        const PopupMenuDivider(),
-                        const PopupMenuItem(
-                          value: 'refresh',
-                          child: Row(
-                            children: [
-                              Icon(Icons.refresh_rounded, size: 19, color: Color(0xFF16A34A)),
-                              SizedBox(width: 10),
-                              Text('تحديث والتحقق من الإصدار'),
-                            ],
+                    PopupMenuItem(
+                      value: 'balances',
+                      child: Row(
+                        children: [
+                          Icon(
+                            hidden ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                            size: 19,
+                            color: const Color(0xFF7C3AED),
                           ),
+                          const SizedBox(width: 10),
+                          Text(hidden ? 'إظهار الأرصدة' : 'إخفاء الأرصدة'),
+                        ],
+                      ),
+                    ),
+                    if (desktop) ...[
+                      const PopupMenuDivider(),
+                      const PopupMenuItem(
+                        value: 'refresh',
+                        child: Row(
+                          children: [
+                            Icon(Icons.refresh_rounded, size: 19, color: Color(0xFF16A34A)),
+                            SizedBox(width: 10),
+                            Text('تحديث والتحقق من الإصدار'),
+                          ],
                         ),
-                      ],
+                      ),
                     ],
-                  ),
+                  ],
                 );
               },
+            ),
+            // رمز الإشعارات أعلى يسار الشاشة 🔔
+            Padding(
+              padding: const EdgeInsetsDirectional.only(end: 6),
+              child: Consumer(
+                builder: (ctx, rref, _) {
+                  final unreadLocal =
+                      rref.watch(unreadCountProvider).valueOrNull ?? 0;
+                  final isDark = Theme.of(ctx).brightness == Brightness.dark;
+                  return ValueListenableBuilder<int>(
+                    valueListenable:
+                        CloudControlService.instance.unreadAlertCountNotifier,
+                    builder: (ctx, unreadCloud, _) {
+                      final unread = unreadLocal + unreadCloud;
+                      return _appBarSquircleAction(
+                        tooltip: 'الإشعارات',
+                        bg: isDark
+                            ? const Color(0xFF291E04)
+                            : const Color(0xFFFEF9C3),
+                        fg: const Color(0xFFB45309),
+                        border: Border.all(
+                          color: isDark
+                              ? const Color(0xFF854D0E)
+                              : const Color(0xFFFDE047),
+                          width: 1.1,
+                        ),
+                        icon: Badge(
+                          isLabelVisible: unread > 0,
+                          label: Text(
+                            '$unread',
+                            style: const TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w900,
+                                color: Colors.white),
+                          ),
+                          backgroundColor: const Color(0xFFDC2626),
+                          child: GoldenBellIcon(
+                            size: 22,
+                            hasUnread: unread > 0,
+                          ),
+                        ),
+                        onTap: () => openNotifications(
+                          context,
+                          ref,
+                          onOpenEntity: openNotificationEntity,
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
             ),
           ],
         ),
@@ -1807,7 +1811,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
 }
 
 /// شريط التنقل السفلي الحديث ذو الأيقونات المُعلّمة والمميّزة بصرياً
-/// كما في هوية التطبيق (العملاء، الحركات، التقارير، الإعدادات).
+/// كما في هوية التطبيق (الرئيسية، العملاء، الحركات، التقارير، الإعدادات).
 class _MarkedBottomBar extends ConsumerWidget {
   final AppScreen currentScreen;
   final ValueChanged<AppScreen> onSelect;
@@ -1854,6 +1858,17 @@ class _MarkedBottomBar extends ConsumerWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
+          _BottomItem(
+            label: 'الرئيسية',
+            tone: AppTone.blue,
+            selected: currentScreen == AppScreen.dashboard,
+            icon: (sel, fg) => Icon(
+              Icons.dashboard_rounded,
+              color: fg,
+              size: 21,
+            ),
+            onTap: () => onSelect(AppScreen.dashboard),
+          ),
           _BottomItem(
             label: 'العملاء',
             tone: AppTone.blue,

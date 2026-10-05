@@ -33,10 +33,38 @@ class AdminApp extends StatelessWidget {
           Directionality(textDirection: TextDirection.rtl, child: child!),
       theme: ThemeData(
         useMaterial3: true,
-        colorSchemeSeed: const Color(0xFF7C3AED),
+        colorSchemeSeed: const Color(0xFF0284C7),
+        scaffoldBackgroundColor: const Color(0xFFF1F5F9),
         fontFamily: 'Roboto',
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xFFFFFFFF),
+          surfaceTintColor: Colors.transparent,
+          foregroundColor: Color(0xFF0F172A),
+          elevation: 0,
+          scrolledUnderElevation: 0.5,
+          centerTitle: false,
+        ),
+        cardTheme: CardThemeData(
+          color: const Color(0xFFFFFFFF),
+          surfaceTintColor: Colors.transparent,
+          elevation: 0,
+          margin: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: const BorderSide(color: Color(0xFFE2E8F0), width: 1),
+          ),
+        ),
         inputDecorationTheme: InputDecorationTheme(
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          filled: true,
+          fillColor: const Color(0xFFF8FAFC),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+          ),
           isDense: true,
         ),
       ),
@@ -160,7 +188,7 @@ class _HomeScreenState extends State<HomeScreen> {
               backgroundColor: Colors.redAccent,
               child: Icon(
                 Icons.system_update_alt_rounded,
-                color: hasUpdate ? const Color(0xFF7C3AED) : null,
+                color: hasUpdate ? const Color(0xFF0284C7) : null,
               ),
             ),
             onPressed: () async {
@@ -177,6 +205,14 @@ class _HomeScreenState extends State<HomeScreen> {
                   context: context, builder: (_) => const _ConfigDialog());
               if (mounted) setState(() {});
             },
+          ),
+          IconButton(
+            tooltip: 'الإشعارات وطلبات التفعيل والدعم',
+            onPressed: () => setState(() => _tab = 3),
+            icon: const Text(
+              '🔔',
+              style: TextStyle(fontSize: 20, height: 1.0),
+            ),
           ),
         ],
       ),
@@ -447,6 +483,48 @@ class _ActivationScreenState extends State<ActivationScreen> {
     }
   }
 
+  Future<void> _pasteFromClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = (data?.text ?? '').trim();
+    if (text.isEmpty) return;
+
+    String? extractField(List<String> keys) {
+      for (final line in text.split(RegExp(r'[\r\n]+'))) {
+        final clean = line.replaceAll('*', '').replaceAll('•', '').trim();
+        for (final k in keys) {
+          final idx = clean.indexOf(k);
+          if (idx >= 0) {
+            final after = clean.substring(idx + k.length).replaceFirst(RegExp(r'^[\s:：\-]+'), '').trim();
+            if (after.isNotEmpty) return after;
+          }
+        }
+      }
+      return null;
+    }
+
+    final parsedId = extractField(['معرف الجهاز', 'معرف مساحة العمل', 'المعرف', 'Device ID', 'Workspace']);
+    final parsedStore = extractField(['اسم المنشأة', 'المنشأة', 'المحل', 'المتجر']);
+    final parsedClient = extractField(['اسم العميل', 'العميل', 'المسؤول']);
+    final parsedPhone = extractField(['رقم الهاتف', 'الهاتف', 'الجوال', 'واتساب']);
+    final parsedKey = extractField(['كود الترخيص', 'الترخيص', 'License']);
+
+    setState(() {
+      if (parsedId != null && parsedId.isNotEmpty) {
+        _input.text = parsedId;
+      } else {
+        final devMatch = RegExp(r'(DEVICE-[A-Za-z0-9]+|[a-fA-F0-9]{24,64})').firstMatch(text);
+        _input.text = devMatch?.group(0) ?? text;
+      }
+      if (parsedStore != null && parsedStore.isNotEmpty) _storeName.text = parsedStore;
+      if (parsedClient != null && parsedClient.isNotEmpty) _clientName.text = parsedClient;
+      if (parsedPhone != null && parsedPhone.isNotEmpty) _phone.text = parsedPhone;
+      if (parsedKey != null && parsedKey.isNotEmpty) _licenseKey.text = parsedKey;
+      if (text.contains('مؤسسة') || text.toLowerCase().contains('enterprise')) {
+        _planType = 'enterprise';
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListView(
@@ -458,9 +536,20 @@ class _ActivationScreenState extends State<ActivationScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Text('🔑 تفعيل أو تجديد ترخيص عميل',
-                    style:
-                        TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text('🔑 تفعيل أو تجديد ترخيص عميل',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w800)),
+                    ),
+                    TextButton.icon(
+                      onPressed: _pasteFromClipboard,
+                      icon: const Icon(Icons.content_paste_go_rounded, size: 18),
+                      label: const Text('لصق طلب واتساب'),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 12),
                 TextField(
                   controller: _input,

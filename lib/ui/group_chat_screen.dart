@@ -26,7 +26,8 @@ import '../data/sync/sync_activity.dart';
 import 'widgets.dart';
 
 class GroupChatScreen extends ConsumerStatefulWidget {
-  const GroupChatScreen({super.key});
+  final bool embedded;
+  const GroupChatScreen({super.key, this.embedded = false});
 
   @override
   ConsumerState<GroupChatScreen> createState() => _GroupChatScreenState();
@@ -100,37 +101,42 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
         .map((p) => p.deviceId)
         .firstOrNull;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('دردشة المجموعة', style: TextStyle(fontSize: 16)),
-            Text(
-              'للتواصل بين أجهزة المجموعة فقط',
-              style: TextStyle(fontSize: 11, color: Colors.grey),
-            ),
-          ],
-        ),
-        // شريط الأجهزة: أسماء بخط صغير + شارة حالة ملونة لكل جهاز.
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(40),
-          child: Container(
+    final peerStrip = peers.isEmpty
+        ? const SizedBox.shrink()
+        : Container(
             height: 40,
             padding: const EdgeInsets.symmetric(horizontal: 10),
-            child: peers.isEmpty
-                ? const SizedBox.shrink()
-                : ListView.separated(
-                    scrollDirection: Axis.horizontal,
-                    itemCount: peers.length,
-                    separatorBuilder: (_, __) => const SizedBox(width: 8),
-                    itemBuilder: (_, i) => _PeerChip(peer: peers[i]),
+            color: AppColors.surfaceOf(context),
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: peers.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (_, i) => _PeerChip(peer: peers[i]),
+            ),
+          );
+
+    return Scaffold(
+      appBar: widget.embedded
+          ? null
+          : AppBar(
+              title: const Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('دردشة المجموعة', style: TextStyle(fontSize: 16)),
+                  Text(
+                    'للتواصل بين أجهزة المجموعة فقط',
+                    style: TextStyle(fontSize: 11, color: Colors.grey),
                   ),
-          ),
-        ),
-      ),
+                ],
+              ),
+              bottom: PreferredSize(
+                preferredSize: const Size.fromHeight(40),
+                child: peerStrip,
+              ),
+            ),
       body: Column(
         children: [
+          if (widget.embedded && peers.isNotEmpty) peerStrip,
           // ملاحظة دائمة: نطاق الدردشة داخلي فقط.
           Container(
             width: double.infinity,

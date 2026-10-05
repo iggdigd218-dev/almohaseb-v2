@@ -514,7 +514,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   Expanded(
                     child: TabBarView(
                       children: [
-                        // [بطاقة المظهر]
+                        // [بطاقة المظهر والمنشأة]
                         _tabPage([
                           Card(
                             child: ListTile(
@@ -529,6 +529,31 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                               ),
                             ),
                           ),
+                          if (canEditOrg) ...[
+                            const SizedBox(height: 18),
+                            _Collapsible(
+                              title: 'بيانات المؤسسة',
+                              icon: Icons.storefront_outlined,
+                              color: AppColors.primary,
+                              initiallyExpanded: false,
+                              children: [
+                                for (final f in _orgFields)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 10),
+                                    child: TextField(
+                                      controller: _ctrls[f.$1],
+                                      keyboardType: f.$4,
+                                      maxLines: f.$5,
+                                      decoration: InputDecoration(
+                                        labelText: f.$2,
+                                        prefixIcon: Icon(f.$3, size: 19),
+                                        isDense: true,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ],
                           const SizedBox(height: 18),
                         ]),
                         // [بطاقة الفواتير ونقطة البيع]

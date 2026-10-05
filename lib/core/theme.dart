@@ -9,28 +9,28 @@ String? get uiFontFamily => 'Tajawal';
 
 /// ألوان نكسورا — متطابقة تماماً مع تصميم نسخة الويب الأنيقة والعصرية.
 class AppColors {
-  // ===== الوضع الفاتح (نسخة الويب الحديثة) =====
-  static const bg = Color(0xFFF4F6F9); // خلفية نقية وناعمة
-  static const bg2 = Color(0xFFF1F5F9); // Slate-100
-  static const surface = Color(0xFFFFFFFF); // أبيض ناصع للكروت
-  static const surface2 = Color(0xFFF8FAFC); // أوف وايت للبطاقات الداخلية
-  static const text = Color(0xFF0F172A); // Slate-900 — نصوص داكنة حادة ومريحة
+  // ===== الوضع الفاتح (نسخة الويب العالمية للأنظمة المحاسبية ERP) =====
+  static const bg = Color(0xFFF1F5F9); // Slate-100 خلفية النظام الموحدة
+  static const bg2 = Color(0xFFF8FAFC); // Slate-50
+  static const surface = Color(0xFFFFFFFF); // أبيض ناصع للبطاقات
+  static const surface2 = Color(0xFFF8FAFC); // Slate-50 للبطاقات الداخلية
+  static const text = Color(0xFF0F172A); // Slate-900 نصوص داكنة حادة
   static const text2 = Color(0xFF475569); // Slate-600
-  static const text3 = Color(0xFF94A3B8); // Slate-400
-  static const border = Color(0xFFE2E8F0); // Slate-200
+  static const text3 = Color(0xFF64748B); // Slate-500
+  static const border = Color(0xFFE2E8F0); // Slate-200 حدود البطاقات الدقيقة
 
-  static const primary = Color(0xFF0D6EFD); // أزرق ملكي عصري
-  static const primary2 = Color(0xFF0066FF);
+  static const primary = Color(0xFF0284C7); // Sky-600 هوية النظام المحاسبي
+  static const primary2 = Color(0xFF0F766E); // Teal-700
   static const primarySoft = Color(0xFFE0F2FE); // Sky-100
   static const accent = Color(0xFFF59E0B); // Amber-500
   static const accentSoft = Color(0xFFFEF3C7); // Amber-100
-  static const danger = Color(0xFFEF4444); // Red-500
-  static const dangerSoft = Color(0xFFFEE2E2); // Red-100
-  static const green = Color(0xFF16A34A); // أخضر زمردي إيجابي
+  static const danger = Color(0xFFE11D48); // Rose-600
+  static const dangerSoft = Color(0xFFFFE4E6); // Rose-100
+  static const green = Color(0xFF059669); // Emerald-600
   static const greenSoft = Color(0xFFD1FAE5); // Emerald-100
-  static const info = Color(0xFF0EA5E9); // Sky-500
+  static const info = Color(0xFF0284C7); // Sky-600
   static const infoSoft = Color(0xFFE0F2FE); // Sky-100
-  static const violet = Color(0xFF8B5CF6); // Violet-500
+  static const violet = Color(0xFF7C3AED); // Violet-600
   static const violetSoft = Color(0xFFEDE9FE); // Violet-100
 
   // ===== الوضع الداكن =====
@@ -286,14 +286,12 @@ class AppTheme {
       cardTheme: CardThemeData(
         color: surface,
         surfaceTintColor: Colors.transparent,
-        // (2026-09-24) هوية حديثة: بلا حدود سميكة — ظل ناعم خفيف جداً
-        // وزاوية موحّدة 16px على كل المنصات.
-        elevation: 1,
-        shadowColor: const Color(0xFF0D6EFD).withValues(alpha: .10),
+        elevation: 0,
+        shadowColor: Colors.black.withValues(alpha: .04),
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppRadius.card),
-          side: BorderSide.none,
+          side: BorderSide(color: border, width: 1),
         ),
       ),
       inputDecorationTheme: InputDecorationTheme(

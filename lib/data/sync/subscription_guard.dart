@@ -598,6 +598,21 @@ class SubscriptionGuard {
       // معرف الجهاز صراحة: تطبيق الأدمن يطابق DEVICE-… مباشرة.
       'device_id': devId,
     });
+    // فهرس ربط الجهاز بمساحة العمل لتطبيق مدير التراخيص (O(1) lookup).
+    final baseClean = backendUrl.replaceAll(RegExp(r'/+$'), '');
+    final devKey = devId.replaceAll(RegExp(r'[.#$\[\]/]'), '_');
+    try {
+      await _putJson(
+        '$baseClean/workspaces/_registry/device_index/${Uri.encodeComponent(devKey)}.json',
+        {
+          'workspace_id': workspaceId,
+          'workspaceId': workspaceId,
+          'device_id': devId,
+          'license_key': licenseKey,
+          'updated_at': createdMs,
+        },
+      );
+    } catch (_) {}
     return _stateFrom(finalRec, createdMs);
   }
 
@@ -618,6 +633,8 @@ class SubscriptionGuard {
     final hwFp = fingerprintHash(raw);
     final trialIdx = '${_trialsRoot(backendUrl)}/$hwFp.json';
     final reqPath = '${_wsRoot(backendUrl, workspaceId)}/license_request.json';
+    final baseClean = backendUrl.replaceAll(RegExp(r'/+$'), '');
+    final devKey = devId.replaceAll(RegExp(r'[.#$\[\]/]'), '_');
 
     final data = {
       'clientName': clientName,
@@ -649,6 +666,20 @@ class SubscriptionGuard {
         'workspace_id': workspaceId,
       });
     } catch (_) {}
+    try {
+      await _putJson(
+        '$baseClean/workspaces/_registry/device_index/${Uri.encodeComponent(devKey)}.json',
+        {
+          'workspace_id': workspaceId,
+          'workspaceId': workspaceId,
+          'device_id': devId,
+          'license_key': key,
+          'store_name': storeName,
+          'client_name': clientName,
+          'phone': phone,
+        },
+      );
+    } catch (_) {}
   }
 
   /// الفحص المرجعي: يقرأ العقدة ويقارن بوقت الخادم. يحدّث الكاش
@@ -671,6 +702,31 @@ class SubscriptionGuard {
     try {
       final wsSub = '${_wsRoot(backendUrl, workspaceId)}/subscription.json';
       var rec = await _readJson(wsSub);
+      // (توافق شامل مع تطبيق مدير التراخيص) إن لم يكن الاشتراك المدفوع
+      // مفعّلاً على مساحة العمل الحالية بعد، نفحص مسارات التفعيل البديلة
+      // التي قد يكتب إليها الأدمن عند التفعيل بمعرف الجهاز (DEVICE-XXXX)
+      // ونرحّل الاشتراك الفعّال تلقائياً إلى مساحة العمل الحالية.
+      if (rec == null || '${rec['status'] ?? ''}' != 'active') {
+        try {
+          final devId = await ensureDeviceId(repo);
+          if (devId.isNotEmpty) {
+            final baseClean = backendUrl.replaceAll(RegExp(r'/+$'), '');
+            final devKey = devId.replaceAll(RegExp(r'[.#$\[\]/]'), '_');
+            final altPaths = <String>[
+              '$baseClean/workspaces/_index/${Uri.encodeComponent(devKey)}.json',
+              '$baseClean/workspaces/${Uri.encodeComponent('ws_$devKey')}/subscription.json',
+            ];
+            for (final alt in altPaths) {
+              final altRec = await _readJson(alt);
+              if (altRec != null && '${altRec['status'] ?? ''}' == 'active') {
+                rec = {...?rec, ...altRec, 'workspace_id': workspaceId};
+                unawaited(_putJson(wsSub, rec).catchError((_) {}));
+                break;
+              }
+            }
+          }
+        } catch (_) {}
+      }
       final now = await serverNowMs(backendUrl);
       if (rec == null ||
           (_asInt(rec['expires_at']) <= 0 &&

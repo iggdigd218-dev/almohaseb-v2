@@ -5,6 +5,7 @@ import '../core/accounting.dart';
 import '../core/format.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
+import 'gemini_assistant_sheet.dart';
 import 'widgets.dart';
 import 'home_shell.dart' show AppScreen;
 
@@ -144,6 +145,12 @@ class DashboardScreen extends ConsumerWidget {
                     spacing: 10,
                     runSpacing: 10,
                     children: [
+                      _ChipSection(
+                        label: 'المساعد الذكي',
+                        icon: Icons.smart_toy_rounded,
+                        color: AppColors.greenOf(context),
+                        onTap: () => openGeminiAssistantSheet(context, ref),
+                      ),
                       _ChipSection(
                         label: 'العملات',
                         icon: Icons.currency_exchange_rounded,
@@ -581,20 +588,20 @@ class _FeatureTile extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Container(
-                width: big ? 56 : 48,
-                height: big ? 56 : 48,
+                width: big ? 54 : 46,
+                height: big ? 54 : 46,
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
                     begin: Alignment.topLeft,
                     end: Alignment.bottomRight,
                     colors: [tile.g1, tile.g2],
                   ),
-                  shape: BoxShape.circle,
+                  borderRadius: BorderRadius.circular(16),
                   boxShadow: [
                     BoxShadow(
-                      color: tile.g2.withValues(alpha: .38),
-                      blurRadius: 14,
-                      offset: const Offset(0, 7),
+                      color: tile.g2.withValues(alpha: .28),
+                      blurRadius: 12,
+                      offset: const Offset(0, 5),
                     ),
                   ],
                 ),
@@ -602,14 +609,7 @@ class _FeatureTile extends StatelessWidget {
                 child: Icon(
                   tile.icon,
                   color: Colors.white,
-                  size: big ? 28 : 24,
-                  shadows: const [
-                    Shadow(
-                      color: Colors.black26,
-                      blurRadius: 3,
-                      offset: Offset(0, 1),
-                    ),
-                  ],
+                  size: big ? 26 : 22,
                 ),
               ),
               const SizedBox(height: 7),

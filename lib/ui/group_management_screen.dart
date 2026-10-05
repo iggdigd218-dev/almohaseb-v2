@@ -25,7 +25,8 @@ import 'widgets.dart';
 import '../core/cloud_config.dart';
 
 class GroupManagementScreen extends ConsumerStatefulWidget {
-  const GroupManagementScreen({super.key});
+  final bool embedded;
+  const GroupManagementScreen({super.key, this.embedded = false});
 
   @override
   ConsumerState<GroupManagementScreen> createState() => _State();
@@ -165,7 +166,9 @@ class _State extends ConsumerState<GroupManagementScreen> {
       loading: () =>
           const Scaffold(body: Center(child: CircularProgressIndicator())),
       error: (e, _) => Scaffold(
-        appBar: AppBar(title: const Text('إدارة المجموعة')),
+        appBar: widget.embedded
+            ? null
+            : AppBar(title: const Text('إدارة المجموعة')),
         body: EmptyState(
           icon: Icons.error_outline,
           title: 'خطأ',
@@ -175,7 +178,9 @@ class _State extends ConsumerState<GroupManagementScreen> {
       data: (isOwner) {
         if (!isOwner) {
           return Scaffold(
-            appBar: AppBar(title: const Text('إدارة المجموعة')),
+            appBar: widget.embedded
+                ? null
+                : AppBar(title: const Text('إدارة المجموعة')),
             body: const EmptyState(
               icon: Icons.block,
               title: 'غير مصرّح',
@@ -184,32 +189,68 @@ class _State extends ConsumerState<GroupManagementScreen> {
             ),
           );
         }
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text('أجهزة وأعضاء المجموعة'),
-            actions: [
-              // (باقة المؤسسات) عدّاد المقاعد الدائم أمام المدير.
-              const Center(child: SeatUsageBadge()),
-              const SizedBox(width: 8),
-              // (دفعة 56) تنظيف كل الأجهزة المطرودة دفعة واحدة.
-              IconButton(
-                tooltip: 'تنظيف الأجهزة المطرودة',
-                icon: const Icon(Icons.delete_sweep_outlined),
-                onPressed: () => _purgeAllExpelled(context),
-              ),
-              IconButton(
-                tooltip: 'إضافة جهاز جديد',
-                icon: const Icon(Icons.add_link),
-                // (3.70.0) بوابة الأمان: حساب Google موثق شرط للربط.
-                onPressed: () async {
-                  if (await _ensureGoogleLinked(context) && context.mounted) {
-                    _showPairHub(context);
-                  }
-                },
-              ),
-            ],
+        final actionRow = [
+          const Center(child: SeatUsageBadge()),
+          const SizedBox(width: 8),
+          IconButton(
+            tooltip: 'تنظيف الأجهزة المطرودة',
+            icon: const Icon(Icons.delete_sweep_outlined),
+            onPressed: () => _purgeAllExpelled(context),
           ),
-          body: const _DevicesTab(),
+          IconButton(
+            tooltip: 'إضافة جهاز جديد',
+            icon: const Icon(Icons.add_link),
+            onPressed: () async {
+              if (await _ensureGoogleLinked(context) && context.mounted) {
+                _showPairHub(context);
+              }
+            },
+          ),
+        ];
+        return Scaffold(
+          appBar: widget.embedded
+              ? null
+              : AppBar(
+                  title: const Text('أجهزة وأعضاء المجموعة'),
+                  actions: actionRow,
+                ),
+          body: widget.embedded
+              ? Column(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: AppColors.surfaceOf(context),
+                        border: Border(
+                          bottom: BorderSide(
+                            color: AppColors.borderOf(context),
+                            width: 1,
+                          ),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.hub_outlined,
+                              size: 18, color: AppColors.primaryOf(context)),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text(
+                              'أجهزة وأعضاء المجموعة',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          ...actionRow,
+                        ],
+                      ),
+                    ),
+                    const Expanded(child: _DevicesTab()),
+                  ],
+                )
+              : const _DevicesTab(),
           floatingActionButton: FloatingActionButton.extended(
             onPressed: () async {
               if (await _ensureGoogleLinked(context) && context.mounted) {
