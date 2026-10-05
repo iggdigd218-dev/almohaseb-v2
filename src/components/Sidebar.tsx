@@ -95,6 +95,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       items: [
         { id: 'dashboard', label: 'لوحة التحكم', icon: LayoutDashboard },
         { id: 'pos', label: 'نقطة البيع (POS)', icon: ShoppingCart },
+        { id: 'assistant', label: 'روبوت المحاسب الذكي (Gemini)', icon: Sparkles },
       ],
     },
     {

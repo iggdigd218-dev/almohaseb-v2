@@ -45,6 +45,7 @@ import '../data/sync/sync_service.dart';
 
 import 'group_management_screen.dart';
 import 'notifications_sheet.dart';
+import 'gemini_assistant_sheet.dart';
 import 'app_notice.dart';
 import '../core/sfx.dart';
 import '../core/keep_alive_service.dart';
@@ -1603,6 +1604,34 @@ class _HomeShellState extends ConsumerState<HomeShell>
           ),
           actions: [
             const SyncArrowsIndicator(),
+            Builder(
+              builder: (ctx) {
+                final isDark = Theme.of(ctx).brightness == Brightness.dark;
+                return _appBarSquircleAction(
+                  tooltip: 'روبوت المحاسب الذكي (Gemini)',
+                  bg: isDark
+                      ? const Color(0xFF064E3B)
+                      : const Color(0xFFD1FAE5),
+                  fg: isDark
+                      ? const Color(0xFFFCD34D)
+                      : const Color(0xFF047857),
+                  border: Border.all(
+                    color: isDark
+                        ? const Color(0xFF10B981)
+                        : const Color(0xFF6EE7B7),
+                    width: 1.1,
+                  ),
+                  icon: Icon(
+                    Icons.smart_toy_rounded,
+                    size: 21,
+                    color: isDark
+                        ? const Color(0xFFFCD34D)
+                        : const Color(0xFF047857),
+                  ),
+                  onTap: () => openGeminiAssistantSheet(context, ref),
+                );
+              },
+            ),
             Consumer(
               builder: (ctx, rref, _) {
                 final unreadLocal =

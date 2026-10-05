@@ -10,6 +10,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@google/genai": "^2.27.0",
     "clsx": "^2.1.1",
     "cors": "^2.8.5",
     "express": "^4.21.2",

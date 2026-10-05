@@ -11,6 +11,7 @@ import { UsersView } from './components/UsersView';
 import { ReportsView } from './components/ReportsView';
 import { SettingsView } from './components/SettingsView';
 import { BackupView } from './components/BackupView';
+import { GeminiChatbot } from './components/GeminiChatbot';
 import { LoginModal } from './components/LoginModal';
 import { WorkspaceModeModal } from './components/WorkspaceModeModal';
 import { AccountStatementModal } from './components/AccountStatementModal';
@@ -207,6 +208,8 @@ export function App() {
         return 'لوحة التحكم والمؤشرات المالية';
       case 'pos':
         return 'نقطة البيع وإصدار الفواتير (POS)';
+      case 'assistant':
+        return 'روبوت المحاسب الذكي (Gemini AI)';
       case 'accounts':
         return 'إدارة الحسابات والعملاء والموردين';
       case 'transactions':
@@ -445,7 +448,15 @@ export function App() {
           {currentScreen === 'backup' && (
             <BackupView onShowToast={showToast} />
           )}
+
+          {currentScreen === 'assistant' && (
+            <GeminiChatbot mode="screen" onShowToast={showToast} />
+          )}
         </main>
+
+        {currentScreen !== 'assistant' && (
+          <GeminiChatbot mode="floating" onShowToast={showToast} />
+        )}
 
         {/* الشريط السفلي المعلم للمعاملات والتنقل السريع في المعاينة الجانبية والأجهزة */}
         <MarkedBottomNav

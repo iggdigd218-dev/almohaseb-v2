@@ -5,6 +5,16 @@ import { DatabaseSync } from 'node:sqlite';
 import { v4 as uuidv4 } from 'uuid';
 import QRCode from 'qrcode';
 import { createServer as createViteServer } from 'vite';
+import { GoogleGenAI } from '@google/genai';
+
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    },
+  },
+});
 
 const PORT = 3000;
 const dbPath = path.join(process.cwd(), 'nexora.db');
@@ -307,6 +317,7 @@ async function startServer() {
   app.use((req, res, next) => {
     if (
       req.path.startsWith('/api/auth') ||
+      req.path.startsWith('/api/gemini') ||
       req.path === '/api/devices/my-status' ||
       req.path === '/api/qr' ||
       !req.path.startsWith('/api/')
@@ -1700,6 +1711,137 @@ async function startServer() {
       res.json({ ok: true, message: 'تمت استعادة النسخة الاحتياطية بنجاح' });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // -------------------------------------------------------------
+  // Gemini Multi-Turn Accounting Chatbot Endpoint
+  // -------------------------------------------------------------
+  app.post('/api/gemini/chat', async (req, res) => {
+    try {
+      const {
+        message,
+        history = [],
+        role = 'accountant',
+        model: requestedModel = 'gemini-3.8-flash',
+        customSystemInstruction,
+        clientContext,
+      } = req.body || {};
+
+      if (!message || typeof message !== 'string' || !message.trim()) {
+        return res.status(400).json({ error: 'يرجى كتابة رسالة لإرسالها للمساعد الذكي.' });
+      }
+
+      // Build live financial summary from local database if not supplied by mobile client
+      let financialSummary = '';
+      if (clientContext && typeof clientContext === 'string' && clientContext.trim()) {
+        financialSummary = clientContext.trim();
+      } else {
+        try {
+          const totalSales = db.prepare(`SELECT COALESCE(SUM(amount),0) as total FROM transactions WHERE type IN ('debit','inflow','revenue') AND deleted_at=''`).get() as any;
+          const totalDebts = db.prepare(`SELECT COALESCE(SUM(amount),0) as total FROM transactions WHERE type='debit' AND deleted_at=''`).get() as any;
+          const totalCredits = db.prepare(`SELECT COALESCE(SUM(amount),0) as total FROM transactions WHERE type='credit' AND deleted_at=''`).get() as any;
+          const accountsCount = db.prepare(`SELECT COUNT(*) as c FROM accounts WHERE deleted_at=''`).get() as any;
+          const lowStockItems = db.prepare(`SELECT name, quantity, min_quantity, sell_price FROM items WHERE quantity <= min_quantity AND deleted_at='' LIMIT 8`).all() as any[];
+          const topDebtors = db.prepare(`
+            SELECT a.name, a.phone, a.currency,
+                   COALESCE(SUM(CASE WHEN t.type='debit' THEN t.amount WHEN t.type='credit' THEN -t.amount ELSE 0 END),0) + a.opening_balance as balance
+            FROM accounts a
+            LEFT JOIN transactions t ON t.account_id = a.id AND t.deleted_at=''
+            WHERE a.deleted_at=''
+            GROUP BY a.id HAVING balance > 0 ORDER BY balance DESC LIMIT 6
+          `).all() as any[];
+
+          financialSummary = [
+            `إجمالي الحسابات النشطة: ${accountsCount?.c || 0}`,
+            `إجمالي المبيعات/المدين: ${totalSales?.total || 0}`,
+            `إجمالي الديون (لنا): ${totalDebts?.total || 0}`,
+            `إجمالي الدائن (علينا/المدفوعات): ${totalCredits?.total || 0}`,
+            topDebtors.length > 0
+              ? `أعلى المدينين حالياً: ${topDebtors.map((d) => `${d.name} (${d.balance} ${d.currency || 'YER'})`).join('، ')}`
+              : 'لا توجد ديون متأخرة حالياً.',
+            lowStockItems.length > 0
+              ? `أصناف أوشكت على النفاد: ${lowStockItems.map((i) => `${i.name} (المتبقي: ${i.quantity})`).join('، ')}`
+              : 'المخزون مكتمل ولا توجد نواقص حرجة.',
+          ].join('\n');
+        } catch {}
+      }
+
+      const roleInstructions: Record<string, string> = {
+        accountant:
+          'أنت «روبوت المحاسب الذكي» في تطبيق «المحاسب». دورك هو محاسب مالي قانوني وخبير في إدارة المبيعات والديون والقيود المحاسبية وسندات القبض والصرف. قدّم إجابات دقيقة ومنظمة باللغة العربية مع أرقام واضحة ونصائح عملية لتحسين التدفق النقدي.',
+        collector:
+          'أنت «مستشار تحصيل الديون الذكي» في تطبيق «المحاسب». دورك هو مساعدة التاجر أو المدير في متابعة ديون العملاء، جدولة السداد، وصياغة رسائل مطالبة وتذكير احترافية ولَبِقة عبر واتساب أو الرسائل النصية لتحصيل المستحقات بسرعة دون خسارة العملاء.',
+        inventory:
+          'أنت «خبير المخزون والمشتريات الذكي» في تطبيق «المحاسب». دورك هو تحليل حركة الأصناف، تنبيه المدير للأصناف التي أوشكت على النفاد، واقتراح كميات إعادة الطلب وهوامش الربح المناسبة.',
+      };
+
+      const baseInstruction =
+        customSystemInstruction && String(customSystemInstruction).trim()
+          ? String(customSystemInstruction).trim()
+          : roleInstructions[role] || roleInstructions.accountant;
+
+      const systemInstruction = `${baseInstruction}\n\nبيانات المنشأة الحالية للاستئناس بها عند الإجابة:\n${financialSummary}`;
+
+      // Map requested model to active @google/genai models
+      const resolveModel = (m: string): string => {
+        if (m === 'gemini-3.1-flash-lite' || m === 'fast') return 'gemini-3.1-flash-lite';
+        if (m === 'gemini-3.1-pro-preview' || m === 'pro') return 'gemini-3.1-pro-preview';
+        return 'gemini-3.8-flash';
+      };
+
+      const targetModel = resolveModel(String(requestedModel));
+
+      const formattedHistory = Array.isArray(history)
+        ? history
+            .filter((h: any) => h && (h.role === 'user' || h.role === 'model') && typeof h.text === 'string' && h.text.trim())
+            .map((h: any) => ({
+              role: h.role as 'user' | 'model',
+              parts: [{ text: h.text.trim() }],
+            }))
+        : [];
+
+      let activeModel = targetModel;
+      let replyText = '';
+
+      try {
+        const chat = ai.chats.create({
+          model: activeModel,
+          config: {
+            systemInstruction,
+          },
+          history: formattedHistory,
+        });
+        const response = await chat.sendMessage({ message: message.trim() });
+        replyText = response.text || '';
+      } catch (primaryErr: any) {
+        // If gemini-3.1-pro-preview fails on a standard key, gracefully fall back to gemini-3.8-flash
+        if (activeModel !== 'gemini-3.8-flash') {
+          activeModel = 'gemini-3.8-flash';
+          const fallbackChat = ai.chats.create({
+            model: activeModel,
+            config: {
+              systemInstruction,
+            },
+            history: formattedHistory,
+          });
+          const fallbackRes = await fallbackChat.sendMessage({ message: message.trim() });
+          replyText = fallbackRes.text || '';
+        } else {
+          throw primaryErr;
+        }
+      }
+
+      res.json({
+        reply: replyText || 'تم استلام رسالتك، كيف يمكنني مساعدتك محاسبياً اليوم؟',
+        modelUsed: activeModel,
+        role,
+      });
+    } catch (e: any) {
+      console.error('Gemini chat error:', e);
+      res.status(500).json({
+        error: e?.message || 'تعذّر الاتصال بمساعد Gemini الذكي حالياً.',
+      });
     }
   });
 
