@@ -399,6 +399,18 @@ class _ConfigDialogState extends State<_ConfigDialog> {
                 prefixIcon: Icon(Icons.link_rounded),
               ),
             ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.bolt_rounded, size: 16),
+              label: const Text('تعبئة المفتاح المدمج والجاهز تلقائياً'),
+              onPressed: () {
+                setState(() {
+                  _geminiKey.text = kDefaultInjectedDiwaniyaKey;
+                  _grokKey.text = kDefaultInjectedDiwaniyaKey;
+                  _grokBaseUrl.text = kDefaultGroqBaseUrl;
+                });
+              },
+            ),
           ],
         ),
       ),
@@ -3807,10 +3819,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
             _scrollToBottom();
           }
         } catch (turnErr) {
-          if (successfulTurns == 0) {
-            firstTurnError = turnErr;
-            break;
-          }
+          firstTurnError ??= turnErr;
         }
       }
 

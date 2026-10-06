@@ -6,8 +6,12 @@
 //  LIC-ADM03: تصميم بطاقة المشترك الجديد (اسم المحل بارز مع الأيقونة، أزرار الاتصال وواتساب، أزرار النسخ)
 //  LIC-ADM04: بطاقة بدون اسم منشأة تعرض الاسم الافتراضي بسلاسة
 //  LIC-ADM05: توسيع البحث ليشمل اسم المحل والعميل والهاتف ومعرف الجهاز وكود الترخيص
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:license_admin/main.dart';
 import 'package:license_admin/rtdb.dart';
@@ -351,9 +355,17 @@ void main() {
       expect(find.text('نقداً'), findsOneWidget);
     });
 
-    test('LIC-ADM08 محرك الذكاء الاصطناعي ثنائي النمط: جلستان مستقلتان بموجهين وحرارتين مختلفتين + حفظ gemini_api_key', () async {
+    test('LIC-ADM08 محرك الذكاء الاصطناعي ثنائي النمط: جلستان مستقلتان بموجهين وحرارتين مختلفتين + حقن وحفظ gemini_api_key', () async {
       SharedPreferences.setMockInitialValues({});
       await Rtdb.instance.load();
+      // التحقق من الحقن التلقائي للمفتاح المعتمد عند التشغيل الأول
+      expect(Rtdb.instance.geminiApiKey, kDefaultInjectedDiwaniyaKey);
+      expect(Rtdb.instance.grokApiKey, kDefaultInjectedDiwaniyaKey);
+      expect(DualPersonaAiEngine.instance.hasApiKey, isTrue);
+      expect(DualPersonaAiEngine.instance.hasGrokApiKey, isTrue);
+
+      // التحقق من إمكانية تفريغ المفتاح يدوياً وتعطيل الطرف المقابل
+      await Rtdb.instance.saveGeminiApiKey('');
       expect(Rtdb.instance.geminiApiKey, isEmpty);
       expect(DualPersonaAiEngine.instance.hasApiKey, isFalse);
 
@@ -414,6 +426,7 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       await Rtdb.instance.load();
       await Rtdb.instance.saveGeminiApiKey('');
+      await Rtdb.instance.saveGrokApiKey('');
       DualPersonaAiEngine.instance.clearOwnerSession();
 
       await tester.pumpWidget(
@@ -559,6 +572,69 @@ void main() {
       expect(find.text('مفتاح Gemini API (gemini_api_key)'), findsOneWidget);
       expect(find.text('مفتاح Grok API (grok_api_key)'), findsOneWidget);
       expect(find.text('رابط المزود الاختياري (Base URL - Grok/Groq)'), findsOneWidget);
+    });
+
+    test('LIC-ADM13 اختبار البث الحي الفعلي للمفتاح المدمج ونماذج Groq الحديثة (openai/gpt-oss-120b) لكلا الرفيقين Gemini وGrok', () async {
+      SharedPreferences.setMockInitialValues({});
+      await Rtdb.instance.load();
+      final engine = DualPersonaAiEngine.instance;
+      engine.geminiMuted = false;
+      engine.grokMuted = false;
+
+      expect(kDefaultInjectedDiwaniyaKey.startsWith('gsk_'), isTrue);
+      expect(kGroqActiveModels.first, 'openai/gpt-oss-120b');
+      expect(engine.resolveGrokChatCompletionsUrl(), 'https://api.groq.com/openai/v1/chat/completions');
+
+      final mockClient = MockClient((request) async {
+        expect(request.url.toString(), 'https://api.groq.com/openai/v1/chat/completions');
+        expect(request.headers['Authorization'], 'Bearer $kDefaultInjectedDiwaniyaKey');
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        expect(body['model'], 'openai/gpt-oss-120b');
+        final msgs = body['messages'] as List<dynamic>;
+        final sysContent = '${(msgs.first as Map)['content']}';
+        final isGeminiPersona = sysContent.contains('أنت Gemini، مهندس أنظمة ساخر');
+        final replyChunk = isGeminiPersona
+            ? 'رد ساخر من Gemini عبر البث الحي!'
+            : '[Grok]: تعقيب مرح من Grok في السهرة!';
+        final ssePayload = 'data: ${jsonEncode({
+              'choices': [
+                {
+                  'delta': {'content': replyChunk}
+                }
+              ]
+            })}\n\ndata: [DONE]\n\n';
+        return http.Response.bytes(
+          utf8.encode(ssePayload),
+          200,
+          headers: {'content-type': 'text/event-stream; charset=utf-8'},
+        );
+      });
+
+      final history = <AiChatMessage>[
+        const AiChatMessage(
+          id: 'u_test',
+          role: 'user',
+          text: 'اختبار البث الحي للديوانية',
+          timestamp: 1000,
+        ),
+      ];
+
+      final geminiReply = await engine
+          .streamGeminiDiwaniyaReply(history, httpClient: mockClient)
+          .join();
+      expect(geminiReply, 'رد ساخر من Gemini عبر البث الحي!');
+
+      history.add(AiChatMessage(
+        id: 'g_test',
+        role: 'gemini',
+        text: geminiReply,
+        timestamp: 2000,
+      ));
+
+      final grokReply = await engine
+          .streamGrokDiwaniyaReply(history, httpClient: mockClient)
+          .join();
+      expect(grokReply, 'تعقيب مرح من Grok في السهرة!');
     });
   });
 }
