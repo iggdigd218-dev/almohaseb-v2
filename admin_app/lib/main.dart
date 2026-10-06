@@ -7,7 +7,6 @@ import 'package:intl/intl.dart' hide TextDirection;
 import 'package:url_launcher/url_launcher.dart';
 
 import 'admin_updater.dart';
-import 'license_model.dart';
 import 'rtdb.dart';
 
 Future<void> main() async {
