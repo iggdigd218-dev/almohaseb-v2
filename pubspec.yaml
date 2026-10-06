@@ -1,7 +1,7 @@
 name: nexora_app
 description: مدير الحسابات — سجل المبيعات والديون
 publish_to: 'none'
-version: 3.85.9+219
+version: 3.86.0+220
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -85,3 +85,10 @@ flutter:
           weight: 600
         - asset: assets/fonts/Cairo-Bold.ttf
           weight: 700
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/images/logo.png"
+  adaptive_icon_background: "#0A9681"
+  adaptive_icon_foreground: "assets/icons/user_foreground.png"
