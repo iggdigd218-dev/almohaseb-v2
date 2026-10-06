@@ -84,9 +84,9 @@ String fmtDate(int ms, {bool lifetime = false}) {
   }
 }
 
-Future<void> copyText(BuildContext context, String label, String value) async {
+void copyText(BuildContext context, String label, String value) {
   if (value.isEmpty) return;
-  unawaited(Clipboard.setData(ClipboardData(text: value)));
+  Clipboard.setData(ClipboardData(text: value));
   if (!context.mounted) return;
   ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()
