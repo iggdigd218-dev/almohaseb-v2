@@ -2023,8 +2023,22 @@ const double kClientSupportTemperature = 0.2;
 const String kMandatoryEscalationText =
     'تم تسجيل المشكلة والبيانات بالكامل. يرجى الانتظار قليلاً حتى يدخل مدير المشروع بنفسه لمراجعة الحالة والرد عليك مباشرة.';
 
-/// اسم نموذج Gemini المعتمد للخدمة ثنائية النمط.
-const String kGeminiModelName = 'models/gemini-3.8-flash';
+/// اسم نموذج Gemini الخفيف المعتمد للمحادثات الموسعة ذات الحصة العالية (تجنب حد الـ 20 طلباً).
+const String kGeminiModelName = 'models/gemini-2.5-flash-lite';
+
+/// سلسلة النماذج الخفيفة البديلة لـ Gemini لضمان استمرارية المحادثة الموسعة بلا انقطاع.
+const List<String> kGeminiLiteFallbackModels = <String>[
+  kGeminiModelName,
+  'models/gemini-2.0-flash-lite',
+  'models/gemini-1.5-flash-8b',
+  'models/gemini-2.0-flash',
+  'models/gemini-1.5-flash',
+  'models/gemini-2.5-flash',
+  'models/gemini-3.8-flash',
+];
+
+/// سعة سياق المحادثة الموسعة (100 رسالة بدلاً من 20 رسالة).
+const int kMaxConversationContextMessages = 100;
 
 /// موجه نظام Gemini المعتمد في ديوانية الرفيقين (Multi-Agent Chat: Gemini & Grok).
 const String kDiwaniyaGeminiSystemInstruction = '''
@@ -2056,14 +2070,14 @@ const List<String> _kInjectedGroqKeySegments = <String>[
 /// المفتاح المدمج والجاهز للتشغيل الفوري في ديوانية الرفيقين والدعم الفني.
 String get kDefaultInjectedDiwaniyaKey => _kInjectedGroqKeySegments.join();
 
-/// قائمة النماذج الفعالة المعتمدة على Groq API (مرتبة حسب الجودة والسرعة باللغة العربية).
+/// قائمة النماذج الفعالة المعتمدة على Groq API (تبدأ بالنموذج الأصغر والأسرع للمحادثات الموسعة).
 const List<String> kGroqActiveModels = <String>[
-  'openai/gpt-oss-120b',
-  'qwen/qwen3.8-27b',
   'openai/gpt-oss-20b',
+  'qwen/qwen3.8-27b',
+  'openai/gpt-oss-120b',
   'allam-2-7b',
-  'llama-3.3-70b-versatile',
   'llama-3.1-8b-instant',
+  'llama-3.3-70b-versatile',
 ];
 
 /// الحد الأقصى للردود التلقائية لكل رسالة من المطور (3 إلى 4 ردود).
@@ -2283,12 +2297,14 @@ class ChatSession {
       throw Exception(errMsg);
     }
 
-    // نرسل السجل مع استثناء أي رسائل سابقة متعثرة غير الرسالة الحالية قيد الإرسال
+    // نرسل السجل الموسع (حتى 100 رسالة) مع استثناء أي رسائل سابقة متعثرة غير الرسالة الحالية قيد الإرسال
     final validHistory = _history
         .where((m) => !m.hasError || m.id == userMsg.id)
         .toList();
     final recentHistory = validHistory
-        .skip(validHistory.length > 24 ? validHistory.length - 24 : 0)
+        .skip(validHistory.length > kMaxConversationContextMessages
+            ? validHistory.length - kMaxConversationContextMessages
+            : 0)
         .toList();
 
     final client = httpClient ?? http.Client();
@@ -2296,7 +2312,7 @@ class ChatSession {
     bool streamedAny = false;
     Object? lastErr;
 
-    // 1) إذا لم يكن المفتاح من نوع gsk_ (Groq)، نجرب واجهة Google Gemini أولاً
+    // 1) إذا لم يكن المفتاح من نوع gsk_ (Groq)، نجرب واجهة Google Gemini الخفيفة أولاً
     if (!cleanKey.startsWith('gsk_')) {
       final contents = recentHistory.map((m) => m.toContentPart()).toList();
       final requestBody = jsonEncode({
@@ -2311,12 +2327,7 @@ class ChatSession {
         },
       });
 
-      const modelsToTry = <String>[
-        kGeminiModelName,
-        'models/gemini-2.5-flash',
-        'models/gemini-2.0-flash',
-        'models/gemini-1.5-flash',
-      ];
+      const modelsToTry = kGeminiLiteFallbackModels;
 
       for (final model in modelsToTry) {
         final modelPath =
@@ -2757,15 +2768,18 @@ class DualPersonaAiEngine {
     final valid = currentMessages
         .where((m) => !m.hasError && !m.isSystem && m.text.trim().isNotEmpty)
         .toList();
-    final recentValid =
-        valid.skip(valid.length > 20 ? valid.length - 20 : 0).toList();
+    final recentValid = valid
+        .skip(valid.length > kMaxConversationContextMessages
+            ? valid.length - kMaxConversationContextMessages
+            : 0)
+        .toList();
 
     final client = httpClient ?? http.Client();
     final buffer = StringBuffer();
     bool streamedAny = false;
     Object? lastErr;
 
-    // 1) إذا كان المفتاح مفتاح Google Gemini صريحاً (لا يبدأ بـ gsk_)، نجرب Google Gemini أولاً
+    // 1) إذا كان المفتاح مفتاح Google Gemini صريحاً (لا يبدأ بـ gsk_)، نجرب Google Gemini الخفيف أولاً
     if (!cleanKey.startsWith('gsk_')) {
       final contents =
           recentValid.map((m) => m.toDiwaniyaGeminiContent()).toList();
@@ -2781,12 +2795,7 @@ class DualPersonaAiEngine {
         },
       });
 
-      const geminiModels = <String>[
-        kGeminiModelName,
-        'models/gemini-2.5-flash',
-        'models/gemini-2.0-flash',
-        'models/gemini-1.5-flash',
-      ];
+      const geminiModels = kGeminiLiteFallbackModels;
 
       for (final model in geminiModels) {
         final modelPath =
@@ -2919,7 +2928,9 @@ class DualPersonaAiEngine {
         'content': kDiwaniyaGrokSystemInstruction.trim(),
       },
       ...valid
-          .skip(valid.length > 20 ? valid.length - 20 : 0)
+          .skip(valid.length > kMaxConversationContextMessages
+              ? valid.length - kMaxConversationContextMessages
+              : 0)
           .map((m) => m.toDiwaniyaGrokMessage()),
     ];
 

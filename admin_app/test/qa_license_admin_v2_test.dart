@@ -377,8 +377,9 @@ void main() {
       expect(DualPersonaAiEngine.instance.apiKey, 'AIzaSyTestDynamicKey123');
       expect(DualPersonaAiEngine.instance.hasApiKey, isTrue);
 
-      // التحقق من اسم النموذج المعتمد models/gemini-3.8-flash
-      expect(kGeminiModelName, 'models/gemini-3.8-flash');
+      // التحقق من اسم النموذج الخفيف المعتمد للمحادثات الموسعة models/gemini-2.5-flash-lite
+      expect(kGeminiModelName, 'models/gemini-2.5-flash-lite');
+      expect(kMaxConversationContextMessages, 100);
 
       // التحقق من النمط الأول: رفيق المالك الشخصي (Owner Mode)
       final ownerSession = DualPersonaAiEngine.instance.ownerSession;
@@ -574,7 +575,7 @@ void main() {
       expect(find.text('رابط المزود الاختياري (Base URL - Grok/Groq)'), findsOneWidget);
     });
 
-    test('LIC-ADM13 اختبار البث الحي الفعلي للمفتاح المدمج ونماذج Groq الحديثة (openai/gpt-oss-120b) لكلا الرفيقين Gemini وGrok', () async {
+    test('LIC-ADM13 اختبار البث الحي الفعلي للمفتاح المدمج ونماذج المحادثة الموسعة الخفيفة (gemini-2.5-flash-lite & openai/gpt-oss-20b) لكلا الرفيقين Gemini وGrok', () async {
       SharedPreferences.setMockInitialValues({});
       await Rtdb.instance.load();
       final engine = DualPersonaAiEngine.instance;
@@ -582,14 +583,14 @@ void main() {
       engine.grokMuted = false;
 
       expect(kDefaultInjectedDiwaniyaKey.startsWith('gsk_'), isTrue);
-      expect(kGroqActiveModels.first, 'openai/gpt-oss-120b');
+      expect(kGroqActiveModels.first, 'openai/gpt-oss-20b');
       expect(engine.resolveGrokChatCompletionsUrl(), 'https://api.groq.com/openai/v1/chat/completions');
 
       final mockClient = MockClient((request) async {
         expect(request.url.toString(), 'https://api.groq.com/openai/v1/chat/completions');
         expect(request.headers['Authorization'], 'Bearer $kDefaultInjectedDiwaniyaKey');
         final body = jsonDecode(request.body) as Map<String, dynamic>;
-        expect(body['model'], 'openai/gpt-oss-120b');
+        expect(body['model'], 'openai/gpt-oss-20b');
         final msgs = body['messages'] as List<dynamic>;
         final sysContent = '${(msgs.first as Map)['content']}';
         final isGeminiPersona = sysContent.contains('أنت Gemini، مهندس أنظمة ساخر');
