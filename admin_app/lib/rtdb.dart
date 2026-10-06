@@ -1949,6 +1949,9 @@ const double kClientSupportTemperature = 0.2;
 const String kMandatoryEscalationText =
     'تم تسجيل المشكلة والبيانات بالكامل. يرجى الانتظار قليلاً حتى يدخل مدير المشروع بنفسه لمراجعة الحالة والرد عليك مباشرة.';
 
+/// اسم نموذج Gemini المعتمد للخدمة ثنائية النمط.
+const String kGeminiModelName = 'models/gemini-3.8-flash';
+
 /// رسالة واحدة داخل جلسة الذكاء الاصطناعي (`ChatSession`).
 class AiChatMessage {
   final String id;
@@ -2040,15 +2043,16 @@ class ChatSession {
     bool streamedAny = false;
 
     const modelsToTry = <String>[
-      'gemini-flash-latest',
-      'gemini-2.5-flash',
+      kGeminiModelName,
     ];
 
     Object? lastErr;
     for (final model in modelsToTry) {
+      final modelPath =
+          model.startsWith('models/') ? model : 'models/$model';
       try {
         final streamUri = Uri.parse(
-          'https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?alt=sse&key=${Uri.encodeQueryComponent(cleanKey)}',
+          'https://generativelanguage.googleapis.com/v1beta/$modelPath:streamGenerateContent?alt=sse&key=${Uri.encodeQueryComponent(cleanKey)}',
         );
         final req = http.Request('POST', streamUri);
         req.headers['Content-Type'] = 'application/json';
@@ -2080,7 +2084,7 @@ class ChatSession {
         } else {
           // محاولة استدعاء غير متدفق لنفس الموديل إن تعذر SSE
           final fallbackUri = Uri.parse(
-            'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${Uri.encodeQueryComponent(cleanKey)}',
+            'https://generativelanguage.googleapis.com/v1beta/$modelPath:generateContent?key=${Uri.encodeQueryComponent(cleanKey)}',
           );
           final res = await client
               .post(

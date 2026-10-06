@@ -365,6 +365,9 @@ void main() {
       expect(DualPersonaAiEngine.instance.apiKey, 'AIzaSyTestDynamicKey123');
       expect(DualPersonaAiEngine.instance.hasApiKey, isTrue);
 
+      // التحقق من اسم النموذج المعتمد models/gemini-3.8-flash
+      expect(kGeminiModelName, 'models/gemini-3.8-flash');
+
       // التحقق من النمط الأول: رفيق المالك الشخصي (Owner Mode)
       final ownerSession = DualPersonaAiEngine.instance.ownerSession;
       expect(ownerSession.temperature, 0.9);
