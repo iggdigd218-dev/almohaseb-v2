@@ -155,7 +155,7 @@ void main() {
     expect(AppColors.primary, const Color(0xFF0284C7));
     expect(AppColors.bg, const Color(0xFFF1F5F9));
     expect(AppColors.surface, const Color(0xFFFFFFFF));
-    expect(AppColors.green, const Color(0xFF16A34A));
+    expect(AppColors.green, const Color(0xFF059669));
     expect(AppRadius.card, 16);
     expect(AppRadius.field, 16);
     expect(AppRadius.sheet, 24);

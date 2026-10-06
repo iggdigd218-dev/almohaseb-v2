@@ -80,7 +80,7 @@ void main() {
     expect(AppColors.bg, const Color(0xFFF1F5F9));
     expect(AppColors.surface, const Color(0xFFFFFFFF));
     // الأخضر الزمردي للأسعار وحالة التوفر.
-    expect(AppColors.green, const Color(0xFF16A34A));
+    expect(AppColors.green, const Color(0xFF059669));
     // توحيد الانحناء.
     expect(AppRadius.card, 16);
     expect(AppRadius.field, 16);
