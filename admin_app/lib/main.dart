@@ -272,11 +272,18 @@ class _ConfigDialog extends StatefulWidget {
 
 class _ConfigDialogState extends State<_ConfigDialog> {
   late final _url = TextEditingController(text: Rtdb.instance.baseUrl);
+  late final _openRouterKey =
+      TextEditingController(text: Rtdb.instance.openRouterApiKey);
   late final _geminiKey =
       TextEditingController(text: Rtdb.instance.geminiApiKey);
   late final _grokKey = TextEditingController(text: Rtdb.instance.grokApiKey);
   late final _grokBaseUrl =
       TextEditingController(text: Rtdb.instance.grokBaseUrl);
+  late String _selectedOpenRouterModel =
+      kOpenRouterFreeModels.contains(Rtdb.instance.openRouterModel)
+          ? Rtdb.instance.openRouterModel
+          : kDefaultOpenRouterFreeModel;
+  bool _obscureOpenRouterKey = true;
   bool _obscureGeminiKey = true;
   bool _obscureGrokKey = true;
   bool _busy = false;
@@ -284,6 +291,7 @@ class _ConfigDialogState extends State<_ConfigDialog> {
   @override
   void dispose() {
     _url.dispose();
+    _openRouterKey.dispose();
     _geminiKey.dispose();
     _grokKey.dispose();
     _grokBaseUrl.dispose();
@@ -293,7 +301,8 @@ class _ConfigDialogState extends State<_ConfigDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('⚙️ إعدادات النظام ومفاتيح الديوانية (Gemini & Grok)'),
+      title: const Text(
+          '⚙️ إعدادات النظام ومفاتيح الديوانية (OpenRouter & Gemini & Grok)'),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -307,6 +316,82 @@ class _ConfigDialogState extends State<_ConfigDialog> {
                 hintText: kOfficialRtdbUrl,
                 prefixIcon: Icon(Icons.cloud_outlined),
               ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _openRouterKey,
+              obscureText: _obscureOpenRouterKey,
+              textDirection: TextDirection.ltr,
+              decoration: InputDecoration(
+                labelText: 'مفتاح OpenRouter المجاني (openrouter_api_key)',
+                hintText: 'sk-or-v1-...',
+                helperText:
+                    'يُحفظ محلياً في SharedPreferences للربط مع https://openrouter.ai/api/v1/chat/completions',
+                prefixIcon: const Icon(Icons.hub_rounded,
+                    color: Color(0xFF0D9488)),
+                suffixIcon: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: _obscureOpenRouterKey
+                          ? 'إظهار المفتاح'
+                          : 'إخفاء المفتاح',
+                      icon: Icon(_obscureOpenRouterKey
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined),
+                      onPressed: () => setState(
+                          () => _obscureOpenRouterKey = !_obscureOpenRouterKey),
+                    ),
+                    IconButton(
+                      tooltip: 'لصق من الحافظة',
+                      icon: const Icon(Icons.content_paste_rounded),
+                      onPressed: () async {
+                        final clip =
+                            await Clipboard.getData(Clipboard.kTextPlain);
+                        final txt = (clip?.text ?? '').trim();
+                        if (txt.isNotEmpty) {
+                          setState(() => _openRouterKey.text = txt);
+                        }
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              initialValue: _selectedOpenRouterModel,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: 'نموذج OpenRouter المجاني المعتمد',
+                helperText:
+                    'درجة الحرارة مضبوطة على 0.85 لردود تفاعلية وساخرة',
+                prefixIcon: Icon(Icons.psychology_alt_rounded,
+                    color: Color(0xFF0D9488)),
+              ),
+              items: const [
+                DropdownMenuItem(
+                  value: kDefaultOpenRouterFreeModel,
+                  child: Text(
+                    'meta-llama/llama-3.3-70b-instruct:free (الافتراضي)',
+                    style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                DropdownMenuItem(
+                  value: kAltOpenRouterFreeModel,
+                  child: Text(
+                    'deepseek/deepseek-chat:free (البديل المجاني)',
+                    style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+              onChanged: (val) {
+                if (val != null) {
+                  setState(() => _selectedOpenRouterModel = val);
+                }
+              },
             ),
             const SizedBox(height: 14),
             TextField(
@@ -430,6 +515,8 @@ class _ConfigDialogState extends State<_ConfigDialog> {
                       geminiKey: _geminiKey.text,
                       grokKey: _grokKey.text,
                       customGrokBaseUrl: _grokBaseUrl.text,
+                      openRouterKey: _openRouterKey.text,
+                      openRouterSelectedModel: _selectedOpenRouterModel,
                     );
                     adminRefreshTick.value++;
                     if (mounted) nav.pop();
@@ -3485,14 +3572,16 @@ class _AdminSupportChatDetailScreenState
                                         ),
                                       ],
                                     ),
-                                    const SizedBox(height: 4),
+                                    const SizedBox(height: 5),
                                     Text(
                                       m.text,
                                       style: TextStyle(
                                         color: isMe
                                             ? Colors.white
-                                            : Colors.black87,
-                                        fontSize: 13.5,
+                                            : const Color(0xFF0B141A),
+                                        fontSize: 16.5,
+                                        fontWeight: FontWeight.w700,
+                                        height: 1.5,
                                       ),
                                     ),
                                   ],
@@ -3590,12 +3679,12 @@ class _AdminSupportChatDetailScreenState
 // ==================== ديوانية الرفيقين (Multi-Agent Chat: Gemini & Grok) ====================
 
 class OwnerCompanionScreen extends StatefulWidget {
-  /// مدة التأخير الزمني بين رد كل طرف والآخر (1.2 ثانية افتراضياً لتبدو الدردشة طبيعية).
+  /// مدة التأخير الزمني بين كل رسالة والرد من الطرف الآخر (6 ثوانٍ على الأقل افتراضياً).
   final Duration turnDelay;
 
   const OwnerCompanionScreen({
     super.key,
-    this.turnDelay = const Duration(milliseconds: 1200),
+    this.turnDelay = kMinDiwaniyaTurnDelay,
   });
   @override
   State<OwnerCompanionScreen> createState() => _OwnerCompanionScreenState();
@@ -3750,6 +3839,10 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
     }
 
     int successfulTurns = 0;
+    final Map<String, int> agentReplyCounts = <String, int>{
+      'gemini': 0,
+      'grok': 0,
+    };
     Object? firstTurnError;
 
     try {
@@ -3757,12 +3850,17 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
         if (!mounted || _orchestratorToken != myToken) break;
         final agent = turnSchedule[i];
 
+        // عند السكوت، كل ذكاء اصطناعي لديه رسالتان فقط ويتم التوقف حتى يتكلم صاحب التطبيق
+        if ((agentReplyCounts[agent] ?? 0) >= kMaxRepliesPerAgentPerTurn) {
+          continue;
+        }
+
         // التحقق الفوري من عدم كتم الطرف أثناء الحوار
         if (agent == 'gemini' && !engine.isGeminiActiveInDiwaniya) continue;
         if (agent == 'grok' && !engine.isGrokActiveInDiwaniya) continue;
 
-        // تأخير زمني بسيط (1 إلى 2 ثانية) بين رد كل طرف والآخر ليبدو الحوار طبيعياً وواقعياً
-        if (successfulTurns > 0 && widget.turnDelay > Duration.zero) {
+        // فاصل زمني إلزامي (6 ثوانٍ على الأقل افتراضياً) بين كل رسالة والرد من الطرف الآخر
+        if (widget.turnDelay > Duration.zero) {
           if (mounted) {
             setState(() {
               _waitingNextTurn = true;
@@ -3816,6 +3914,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
               _liveChunkBuffer = '';
             });
             successfulTurns++;
+            agentReplyCounts[agent] = (agentReplyCounts[agent] ?? 0) + 1;
             _scrollToBottom();
           }
         } catch (turnErr) {
@@ -3890,8 +3989,8 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
   @override
   Widget build(BuildContext context) {
     final engine = DualPersonaAiEngine.instance;
-    final hasGeminiKey = engine.hasApiKey;
-    final hasGrokKey = engine.hasGrokApiKey;
+    final hasGeminiKey = engine.hasApiKey || engine.hasOpenRouterApiKey;
+    final hasGrokKey = engine.hasGrokApiKey || engine.hasOpenRouterApiKey;
     final history = _messages;
 
     return Column(
@@ -4102,287 +4201,378 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
             ),
           ),
 
-        // 4) قائمة الرسائل المميزة بصرياً (المطور / Gemini / Grok / رسالة التوقف التلقائي)
+        // 4) قائمة الرسائل الواضحة والبارزة بتصميم يحاكي محادثة واتساب (المطور / Gemini / Grok / التوقف التلقائي)
         Expanded(
-          child: (history.isEmpty && !_streaming)
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(28),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.nights_stay_rounded,
-                            size: 46, color: Colors.blueGrey.shade300),
-                        const SizedBox(height: 10),
-                        const Text(
-                          'ديوانية الرفيقين: سهرتك مع Gemini وGrok! ☕✨⚡',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                              fontWeight: FontWeight.w800, fontSize: 14.5),
+          child: Container(
+            decoration: const BoxDecoration(
+              color: Color(0xFFEFEAE2),
+            ),
+            child: (history.isEmpty && !_streaming)
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(28),
+                      child: Container(
+                        padding: const EdgeInsets.all(20),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.92),
+                          borderRadius: BorderRadius.circular(18),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Color(0x14000000),
+                              blurRadius: 8,
+                              offset: Offset(0, 2),
+                            ),
+                          ],
                         ),
-                        const SizedBox(height: 6),
-                        const Text(
-                          'أرسل رسالتك ليرد عليك Gemini بسخريته اللاذعة ويعقب عليه Grok بمرحه العفوي (حتى 4 ردود متبادلة ثم ينتظران مداخلتك).',
-                          textAlign: TextAlign.center,
-                          style:
-                              TextStyle(fontSize: 12, color: Colors.black54),
-                        ),
-                      ],
-                    ),
-                  ),
-                )
-              : ListView.builder(
-                  controller: _scrollCtrl,
-                  padding: const EdgeInsets.all(14),
-                  itemCount: history.length +
-                      (_streaming &&
-                              (_liveChunkBuffer.isNotEmpty || _waitingNextTurn)
-                          ? 1
-                          : 0),
-                  itemBuilder: (ctx, idx) {
-                    if (idx == history.length) {
-                      final isGrokTurn = _activeStreamingAgent == 'grok';
-                      final accentColor = isGrokTurn
-                          ? const Color(0xFF7E22CE)
-                          : const Color(0xFF4F46E5);
-                      final bgColor = isGrokTurn
-                          ? const Color(0xFFFAF5FF)
-                          : const Color(0xFFEEF2FF);
-                      final label = isGrokTurn
-                          ? (_waitingNextTurn
-                              ? '⚡ Grok يستعد للتعقيب...'
-                              : '⚡ Grok يكتب الآن...')
-                          : (_waitingNextTurn
-                              ? '✨ Gemini يستعد للرد...'
-                              : '✨ Gemini يكتب الآن...');
-                      return Align(
-                        alignment: Alignment.centerLeft,
-                        child: Container(
-                          margin: const EdgeInsets.symmetric(vertical: 5),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 14, vertical: 10),
-                          constraints: BoxConstraints(
-                            maxWidth:
-                                MediaQuery.of(context).size.width * 0.82,
-                          ),
-                          decoration: BoxDecoration(
-                            color: bgColor,
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(color: accentColor, width: 1.2),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                label,
-                                style: TextStyle(
-                                  fontSize: 10.5,
-                                  fontWeight: FontWeight.w900,
-                                  color: accentColor,
-                                ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.nights_stay_rounded,
+                                size: 46, color: Colors.teal.shade700),
+                            const SizedBox(height: 10),
+                            const Text(
+                              'ديوانية الرفيقين: سهرتك مع Gemini وGrok! ☕✨⚡',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w900,
+                                fontSize: 16,
+                                color: Color(0xFF0B141A),
                               ),
-                              if (_liveChunkBuffer.isNotEmpty) ...[
-                                const SizedBox(height: 4),
-                                Text(
-                                  _liveChunkBuffer,
-                                  style: const TextStyle(
-                                      fontSize: 13.5,
-                                      color: Color(0xFF0F172A)),
+                            ),
+                            const SizedBox(height: 6),
+                            const Text(
+                              'أرسل رسالتك ليرد عليك Gemini بسخريته اللاذعة ويعقب عليه Grok بمرحه العفوي (بفاصل 6 ثوانٍ ورسالتين لكل رفيق ثم ينتظران مداخلتك).',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF334155),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  )
+                : ListView.builder(
+                    controller: _scrollCtrl,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 12),
+                    itemCount: history.length +
+                        (_streaming &&
+                                (_liveChunkBuffer.isNotEmpty ||
+                                    _waitingNextTurn)
+                            ? 1
+                            : 0),
+                    itemBuilder: (ctx, idx) {
+                      if (idx == history.length) {
+                        final isGrokTurn = _activeStreamingAgent == 'grok';
+                        final accentColor = isGrokTurn
+                            ? const Color(0xFF7E22CE)
+                            : const Color(0xFF4F46E5);
+                        final bgColor = isGrokTurn
+                            ? const Color(0xFFFAF5FF)
+                            : Colors.white;
+                        final label = isGrokTurn
+                            ? (_waitingNextTurn
+                                ? '⏳ ⚡ Grok يستعد للتعقيب (فاصل 6 ثوانٍ)...'
+                                : '⚡ Grok يكتب الآن...')
+                            : (_waitingNextTurn
+                                ? '⏳ ✨ Gemini يستعد للرد (فاصل 6 ثوانٍ)...'
+                                : '✨ Gemini يكتب الآن...');
+                        return Align(
+                          alignment: Alignment.centerLeft,
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(vertical: 6),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 12),
+                            constraints: BoxConstraints(
+                              maxWidth:
+                                  MediaQuery.of(context).size.width * 0.85,
+                            ),
+                            decoration: BoxDecoration(
+                              color: bgColor,
+                              borderRadius: BorderRadius.circular(16),
+                              border:
+                                  Border.all(color: accentColor, width: 1.5),
+                              boxShadow: const [
+                                BoxShadow(
+                                  color: Color(0x18000000),
+                                  blurRadius: 5,
+                                  offset: Offset(0, 2),
                                 ),
                               ],
-                            ],
-                          ),
-                        ),
-                      );
-                    }
-
-                    final m = history[idx];
-
-                    // عبارة ختامية لطيفة بانتظار عودة المطور بعد 3-4 ردود
-                    if (m.isSystem) {
-                      return Center(
-                        child: Container(
-                          margin: const EdgeInsets.symmetric(vertical: 8),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 14, vertical: 7),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFEF3C7),
-                            borderRadius: BorderRadius.circular(20),
-                            border:
-                                Border.all(color: const Color(0xFFF59E0B)),
-                          ),
-                          child: Text(
-                            m.text,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w800,
-                              color: Color(0xFF92400E),
                             ),
-                          ),
-                        ),
-                      );
-                    }
-
-                    final isUser = m.isUser;
-                    final isGrok = m.isGrok;
-                    final Color bubbleBg = isUser
-                        ? const Color(0xFF0284C7)
-                        : (isGrok
-                            ? const Color(0xFFFAF5FF)
-                            : const Color(0xFFEEF2FF));
-                    final Color borderCol = isUser
-                        ? const Color(0xFF0284C7)
-                        : (isGrok
-                            ? const Color(0xFF9333EA)
-                            : const Color(0xFF6366F1));
-                    final Color headerColor = isUser
-                        ? Colors.white70
-                        : (isGrok
-                            ? const Color(0xFF6B21A8)
-                            : const Color(0xFF3730A3));
-                    final IconData senderIcon = isUser
-                        ? Icons.person_rounded
-                        : (isGrok
-                            ? Icons.bolt_rounded
-                            : Icons.auto_awesome_rounded);
-                    final String senderLabel = isUser
-                        ? '👨‍💻 أنت (المطور المالك)'
-                        : (isGrok
-                            ? '⚡ Grok • رفيق السهرة'
-                            : '✨ Gemini • مهندس الأنظمة');
-
-                    return Align(
-                      alignment:
-                          isUser ? Alignment.centerRight : Alignment.centerLeft,
-                      child: Column(
-                        crossAxisAlignment: isUser
-                            ? CrossAxisAlignment.end
-                            : CrossAxisAlignment.start,
-                        children: [
-                          GestureDetector(
-                            onLongPress: () =>
-                                copyText(context, 'نص الرسالة', m.text),
-                            child: Container(
-                              margin: const EdgeInsets.symmetric(vertical: 5),
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 14, vertical: 10),
-                              constraints: BoxConstraints(
-                                maxWidth:
-                                    MediaQuery.of(context).size.width * 0.82,
-                              ),
-                              decoration: BoxDecoration(
-                                color: bubbleBg,
-                                borderRadius: BorderRadius.circular(14),
-                                border: m.hasError
-                                    ? Border.all(
-                                        color: const Color(0xFFDC2626),
-                                        width: 1.6,
-                                      )
-                                    : (isUser
-                                        ? null
-                                        : Border.all(color: borderCol)),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(
-                                        senderIcon,
-                                        size: 13,
-                                        color: headerColor,
-                                      ),
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        senderLabel,
-                                        style: TextStyle(
-                                          fontSize: 10.5,
-                                          fontWeight: FontWeight.w900,
-                                          color: headerColor,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 6),
-                                      InkWell(
-                                        onTap: () => copyText(
-                                            context, 'نص الرسالة', m.text),
-                                        child: Icon(
-                                          Icons.copy_rounded,
-                                          size: 12,
-                                          color: isUser
-                                              ? Colors.white70
-                                              : Colors.black38,
-                                        ),
-                                      ),
-                                    ],
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  label,
+                                  style: TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w900,
+                                    color: accentColor,
                                   ),
-                                  const SizedBox(height: 4),
+                                ),
+                                if (_liveChunkBuffer.isNotEmpty) ...[
+                                  const SizedBox(height: 6),
                                   Text(
-                                    m.text,
-                                    style: TextStyle(
-                                      color: isUser
-                                          ? Colors.white
-                                          : const Color(0xFF0F172A),
-                                      fontSize: 13.5,
-                                      height: 1.45,
+                                    _liveChunkBuffer,
+                                    style: const TextStyle(
+                                      fontSize: 17.0,
+                                      fontWeight: FontWeight.w700,
+                                      height: 1.55,
+                                      color: Color(0xFF0B141A),
                                     ),
                                   ),
                                 ],
+                              ],
+                            ),
+                          ),
+                        );
+                      }
+
+                      final m = history[idx];
+
+                      // عبارة ختامية لطيفة بانتظار عودة المطور بعد اكتمال رسالتين لكل ذكاء اصطناعي
+                      if (m.isSystem) {
+                        return Center(
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(vertical: 10),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 9),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFEF3C7),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                  color: const Color(0xFFF59E0B), width: 1.3),
+                              boxShadow: const [
+                                BoxShadow(
+                                  color: Color(0x14000000),
+                                  blurRadius: 4,
+                                  offset: Offset(0, 1.5),
+                                ),
+                              ],
+                            ),
+                            child: Text(
+                              m.text,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                fontSize: 13.0,
+                                fontWeight: FontWeight.w900,
+                                color: Color(0xFF92400E),
                               ),
                             ),
                           ),
-                          if (m.hasError)
-                            Padding(
-                              padding: const EdgeInsets.only(
-                                  top: 2, bottom: 6, right: 4, left: 4),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(
-                                    Icons.error_outline_rounded,
-                                    color: Color(0xFFDC2626),
-                                    size: 15,
+                        );
+                      }
+
+                      final isUser = m.isUser;
+                      final isGrok = m.isGrok;
+                      // فقاعات واضحة وبارزة بأسلوب واتساب (أخضر فاتح للمطور مع نص داكن بارز، وأبيض ناصع للرفيقين)
+                      final Color bubbleBg = isUser
+                          ? const Color(0xFFD9FDD3)
+                          : (isGrok
+                              ? const Color(0xFFFAF5FF)
+                              : Colors.white);
+                      final Color borderCol = isUser
+                          ? const Color(0xFF4ADE80)
+                          : (isGrok
+                              ? const Color(0xFF9333EA)
+                              : const Color(0xFF6366F1));
+                      final Color headerColor = isUser
+                          ? const Color(0xFF005C4B)
+                          : (isGrok
+                              ? const Color(0xFF6B21A8)
+                              : const Color(0xFF3730A3));
+                      final IconData senderIcon = isUser
+                          ? Icons.person_rounded
+                          : (isGrok
+                              ? Icons.bolt_rounded
+                              : Icons.auto_awesome_rounded);
+                      final String senderLabel = isUser
+                          ? '👨‍💻 أنت (المطور المالك)'
+                          : (isGrok
+                              ? '⚡ Grok • رفيق السهرة'
+                              : '✨ Gemini • مهندس الأنظمة');
+                      final DateTime msgTime =
+                          DateTime.fromMillisecondsSinceEpoch(m.timestamp);
+                      final String timeStr =
+                          '${msgTime.hour.toString().padLeft(2, '0')}:${msgTime.minute.toString().padLeft(2, '0')}';
+
+                      return Align(
+                        alignment: isUser
+                            ? Alignment.centerRight
+                            : Alignment.centerLeft,
+                        child: Column(
+                          crossAxisAlignment: isUser
+                              ? CrossAxisAlignment.end
+                              : CrossAxisAlignment.start,
+                          children: [
+                            GestureDetector(
+                              onLongPress: () =>
+                                  copyText(context, 'نص الرسالة', m.text),
+                              child: Container(
+                                margin: const EdgeInsets.symmetric(vertical: 6),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 16, vertical: 12),
+                                constraints: BoxConstraints(
+                                  maxWidth:
+                                      MediaQuery.of(context).size.width * 0.85,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: bubbleBg,
+                                  borderRadius: BorderRadius.only(
+                                    topLeft: const Radius.circular(16),
+                                    topRight: const Radius.circular(16),
+                                    bottomLeft:
+                                        Radius.circular(isUser ? 16 : 4),
+                                    bottomRight:
+                                        Radius.circular(isUser ? 4 : 16),
                                   ),
-                                  const SizedBox(width: 4),
-                                  const Text(
-                                    'تعذر الإرسال',
-                                    style: TextStyle(
+                                  border: m.hasError
+                                      ? Border.all(
+                                          color: const Color(0xFFDC2626),
+                                          width: 1.8,
+                                        )
+                                      : Border.all(
+                                          color: borderCol,
+                                          width: 1.2,
+                                        ),
+                                  boxShadow: const [
+                                    BoxShadow(
+                                      color: Color(0x18000000),
+                                      blurRadius: 4,
+                                      offset: Offset(0, 1.5),
+                                    ),
+                                  ],
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          senderIcon,
+                                          size: 15,
+                                          color: headerColor,
+                                        ),
+                                        const SizedBox(width: 5),
+                                        Text(
+                                          senderLabel,
+                                          style: TextStyle(
+                                            fontSize: 12.0,
+                                            fontWeight: FontWeight.w900,
+                                            color: headerColor,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        InkWell(
+                                          onTap: () => copyText(
+                                              context, 'نص الرسالة', m.text),
+                                          child: const Icon(
+                                            Icons.copy_rounded,
+                                            size: 14,
+                                            color: Colors.black45,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      m.text,
+                                      style: const TextStyle(
+                                        color: Color(0xFF0B141A),
+                                        fontSize: 17.0,
+                                        fontWeight: FontWeight.w700,
+                                        height: 1.55,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          timeStr,
+                                          style: const TextStyle(
+                                            fontSize: 11.0,
+                                            fontWeight: FontWeight.w700,
+                                            color: Color(0xFF475569),
+                                          ),
+                                        ),
+                                        if (isUser) ...[
+                                          const SizedBox(width: 4),
+                                          Icon(
+                                            m.hasError
+                                                ? Icons.error_outline_rounded
+                                                : Icons.done_all_rounded,
+                                            size: 15,
+                                            color: m.hasError
+                                                ? const Color(0xFFDC2626)
+                                                : const Color(0xFF0284C7),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            if (m.hasError)
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                    top: 2, bottom: 6, right: 4, left: 4),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(
+                                      Icons.error_outline_rounded,
                                       color: Color(0xFFDC2626),
-                                      fontSize: 11.5,
-                                      fontWeight: FontWeight.w800,
+                                      size: 15,
                                     ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  TextButton.icon(
-                                    style: TextButton.styleFrom(
-                                      visualDensity: VisualDensity.compact,
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 8, vertical: 2),
-                                      foregroundColor: const Color(0xFFDC2626),
-                                      backgroundColor: const Color(0xFFFEE2E2),
-                                    ),
-                                    onPressed: _streaming
-                                        ? null
-                                        : () => _sendMessage(m),
-                                    icon: const Icon(Icons.refresh_rounded,
-                                        size: 14),
-                                    label: const Text(
-                                      'إعادة المحاولة',
+                                    const SizedBox(width: 4),
+                                    const Text(
+                                      'تعذر الإرسال',
                                       style: TextStyle(
-                                        fontSize: 11,
+                                        color: Color(0xFFDC2626),
+                                        fontSize: 11.5,
                                         fontWeight: FontWeight.w800,
                                       ),
                                     ),
-                                  ),
-                                ],
+                                    const SizedBox(width: 8),
+                                    TextButton.icon(
+                                      style: TextButton.styleFrom(
+                                        visualDensity: VisualDensity.compact,
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 8, vertical: 2),
+                                        foregroundColor:
+                                            const Color(0xFFDC2626),
+                                        backgroundColor:
+                                            const Color(0xFFFEE2E2),
+                                      ),
+                                      onPressed: _streaming
+                                          ? null
+                                          : () => _sendMessage(m),
+                                      icon: const Icon(Icons.refresh_rounded,
+                                          size: 14),
+                                      label: const Text(
+                                        'إعادة المحاولة',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w800,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+          ),
         ),
 
         // 5) مجال كتابة مرن متعدد الأسطر مع بث حي

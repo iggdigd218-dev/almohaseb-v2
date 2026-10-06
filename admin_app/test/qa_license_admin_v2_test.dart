@@ -383,7 +383,8 @@ void main() {
 
       // التحقق من النمط الأول: رفيق المالك الشخصي (Owner Mode)
       final ownerSession = DualPersonaAiEngine.instance.ownerSession;
-      expect(ownerSession.temperature, 0.9);
+      expect(ownerSession.temperature, 0.85);
+      expect(ownerSession.systemInstruction, contains('أنت رفيق شخصي ذكي وساخر لمالك ومدير نظام "تراخيص المحاسب"'));
       expect(ownerSession.systemInstruction, contains('أنت رفيق شخصي ومساعد مقرب لمالك ومدير نظام "تراخيص المحاسب"'));
       expect(ownerSession.systemInstruction, contains('ساخر جداً، متهكم، لاذع، واسع الحيلة، وخفيف الظل'));
 
@@ -567,9 +568,10 @@ void main() {
       expect(find.text('كتم Gemini (مكتوم)'), findsOneWidget);
       expect(find.text('كتم Grok (مكتوم)'), findsOneWidget);
 
-      // فتح نافذة الإعدادات عبر أيقونة الترس والتحقق من حقول gemini_api_key و grok_api_key و Base URL
+      // فتح نافذة الإعدادات عبر أيقونة الترس والتحقق من حقول openrouter_api_key و gemini_api_key و grok_api_key و Base URL
       await tester.tap(find.byIcon(Icons.settings_rounded));
       await tester.pumpAndSettle();
+      expect(find.text('مفتاح OpenRouter المجاني (openrouter_api_key)'), findsOneWidget);
       expect(find.text('مفتاح Gemini API (gemini_api_key)'), findsOneWidget);
       expect(find.text('مفتاح Grok API (grok_api_key)'), findsOneWidget);
       expect(find.text('رابط المزود الاختياري (Base URL - Grok/Groq)'), findsOneWidget);
@@ -636,6 +638,80 @@ void main() {
           .streamGrokDiwaniyaReply(history, httpClient: mockClient)
           .join();
       expect(grokReply, 'تعقيب مرح من Grok في السهرة!');
+    });
+
+    test('LIC-ADM14 ربط محرك OpenRouter المجاني والترويسات الإلزامية والموديلات المجانية وموجه النظام وفاصل الـ 6 ثوانٍ وحد الرسالتين لكل ذكاء اصطناعي', () async {
+      SharedPreferences.setMockInitialValues({});
+      await Rtdb.instance.load();
+      final engine = DualPersonaAiEngine.instance;
+
+      // 1. التحقق من ثوابت الفاصل الزمني (6 ثوانٍ على الأقل) وحد الرسالتين لكل ذكاء اصطناعي عند السكوت
+      expect(kMinDiwaniyaTurnDelay, const Duration(seconds: 6));
+      expect(kMaxRepliesPerAgentPerTurn, 2);
+      expect(kMaxDiwaniyaAutoReplies, 4);
+      expect(const OwnerCompanionScreen().turnDelay, const Duration(seconds: 6));
+
+      // 2. حفظ مفتاح openrouter_api_key في SharedPreferences واختيار النموذج المجاني
+      await Rtdb.instance.saveOpenRouterApiKey('sk-or-v1-test-openrouter-key-999');
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('openrouter_api_key'), 'sk-or-v1-test-openrouter-key-999');
+      expect(engine.openRouterApiKey, 'sk-or-v1-test-openrouter-key-999');
+      expect(engine.openRouterModel, 'meta-llama/llama-3.3-70b-instruct:free');
+      expect(kDefaultOpenRouterEndpoint, 'https://openrouter.ai/api/v1/chat/completions');
+      expect(kOwnerTemperature, 0.85);
+
+      // 3. التحقق من الترويسات الإلزامية وموجه النظام ودرجة الحرارة 0.85 عند الاستدعاء عبر البث التدريجي
+      final mockOrClient = MockClient((request) async {
+        expect(request.url.toString(), 'https://openrouter.ai/api/v1/chat/completions');
+        expect(request.headers['Authorization'], 'Bearer sk-or-v1-test-openrouter-key-999');
+        expect(request.headers['HTTP-Referer'], 'https://trakhees-almuhasib.app');
+        expect(request.headers['X-Title'], 'Trakhees Al-Muhasib Admin');
+        expect(request.headers['Content-Type'], contains('application/json'));
+
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        expect(body['model'], 'meta-llama/llama-3.3-70b-instruct:free');
+        expect(body['temperature'], 0.85);
+        expect(body['stream'], isTrue);
+
+        final messages = body['messages'] as List<dynamic>;
+        final firstMsg = messages.first as Map<String, dynamic>;
+        expect(firstMsg['role'], 'system');
+        expect(firstMsg['content'], contains('أنت رفيق شخصي ذكي وساخر لمالك ومدير نظام "تراخيص المحاسب".'));
+        expect(firstMsg['content'], contains('خفيف الظل، سريع البديهة، تفهم واقع البرمجة وتحديات السيرفرات وضغوط إدارة المشتركين.'));
+        expect(firstMsg['content'], contains('ردود حية وموجزة (من سطرين إلى 3 أسطر)'));
+
+        final ssePayload = 'data: ${jsonEncode({
+              'choices': [
+                {
+                  'delta': {'content': 'أهلاً يا مدير! السيرفرات صامدة والقهوة جاهزة ☕'}
+                }
+              ]
+            })}\n\ndata: [DONE]\n\n';
+        return http.Response.bytes(
+          utf8.encode(ssePayload),
+          200,
+          headers: {'content-type': 'text/event-stream; charset=utf-8'},
+        );
+      });
+
+      final companionReply = await engine.streamOpenRouterCompanionReply(
+        const [
+          AiChatMessage(
+            id: 'u_or_1',
+            role: 'user',
+            text: 'كيف حال السيرفرات الليلة؟',
+            timestamp: 1000,
+          ),
+        ],
+        httpClient: mockOrClient,
+      ).join();
+      expect(companionReply, 'أهلاً يا مدير! السيرفرات صامدة والقهوة جاهزة ☕');
+
+      // 4. التحقق من إمكانية التبديل إلى النموذج المجاني البديل deepseek/deepseek-chat:free
+      await Rtdb.instance.saveOpenRouterModel('deepseek/deepseek-chat:free');
+      expect(prefs.getString('openrouter_model'), 'deepseek/deepseek-chat:free');
+      expect(engine.openRouterModel, 'deepseek/deepseek-chat:free');
+      expect(engine.orderedOpenRouterModels.first, 'deepseek/deepseek-chat:free');
     });
   });
 }
