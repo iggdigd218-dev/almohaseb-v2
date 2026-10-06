@@ -443,6 +443,8 @@ class SupportMessage {
   final int timestamp;
   final bool isAutoSupport;
   final bool isEscalated;
+  final bool hasError;
+  final String? errorText;
 
   const SupportMessage({
     required this.id,
@@ -451,7 +453,31 @@ class SupportMessage {
     required this.timestamp,
     this.isAutoSupport = false,
     this.isEscalated = false,
+    this.hasError = false,
+    this.errorText,
   });
+
+  SupportMessage copyWith({
+    String? id,
+    String? sender,
+    String? text,
+    int? timestamp,
+    bool? isAutoSupport,
+    bool? isEscalated,
+    bool? hasError,
+    String? errorText,
+  }) {
+    return SupportMessage(
+      id: id ?? this.id,
+      sender: sender ?? this.sender,
+      text: text ?? this.text,
+      timestamp: timestamp ?? this.timestamp,
+      isAutoSupport: isAutoSupport ?? this.isAutoSupport,
+      isEscalated: isEscalated ?? this.isEscalated,
+      hasError: hasError ?? this.hasError,
+      errorText: errorText,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,

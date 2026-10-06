@@ -409,5 +409,55 @@ void main() {
       expect(find.text('إدخال المفتاح'), findsOneWidget);
       expect(find.textContaining('gemini_api_key'), findsWidgets);
     });
+
+    testWidgets('LIC-ADM10 العرض الفوري للرسالة (Optimistic Update) وتفريغ الحقل ومعالجة الفشل دون حذف الرسالة مع زر إعادة المحاولة والضغط المطول للنسخ', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await Rtdb.instance.load();
+      await Rtdb.instance.saveGeminiApiKey('');
+      DualPersonaAiEngine.instance.clearOwnerSession();
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: OwnerCompanionScreen(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // كتابة رسالة في حقل الإدخال
+      final textField = find.byType(TextField);
+      expect(textField, findsOneWidget);
+      await tester.enterText(textField, 'رسالة تجريبية لاختبار عدم الحذف عند الفشل');
+      await tester.pump();
+
+      // الضغط على زر الإرسال
+      final sendBtn = find.byIcon(Icons.send_rounded);
+      expect(sendBtn, findsOneWidget);
+      await tester.tap(sendBtn);
+      await tester.pumpAndSettle();
+
+      // 1. التحقق من تفريغ حقل الإدخال النصي فوراً
+      final tfWidget = tester.widget<TextField>(textField);
+      expect(tfWidget.controller?.text, isEmpty);
+
+      // 2. التحقق من بقاء رسالة المستخدم معروضة بشكل دائم وعدم حذفها عند فشل الاستدعاء
+      expect(find.text('رسالة تجريبية لاختبار عدم الحذف عند الفشل'), findsOneWidget);
+
+      // 3. التحقق من ظهور المؤشر الأحمر "تعذر الإرسال" وزر "إعادة المحاولة"
+      expect(find.text('تعذر الإرسال'), findsOneWidget);
+      expect(find.text('إعادة المحاولة'), findsOneWidget);
+
+      // 4. التحقق من بقاء الرسالة محفوظة داخل سجل الجلسة مع حالة الخطأ
+      final history = DualPersonaAiEngine.instance.ownerSession.history;
+      expect(history.length, 1);
+      expect(history.first.text, 'رسالة تجريبية لاختبار عدم الحذف عند الفشل');
+      expect(history.first.hasError, isTrue);
+
+      // 5. التحقق من إمكانية الضغط المطول على الرسالة لنسخ نصها
+      await tester.longPress(find.text('رسالة تجريبية لاختبار عدم الحذف عند الفشل'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('تم نسخ'), findsOneWidget);
+    });
   });
 }

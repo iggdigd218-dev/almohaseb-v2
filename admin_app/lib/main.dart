@@ -2913,8 +2913,11 @@ class _AdminSupportChatDetailScreenState
     final hasEscalatedMsg =
         list.isNotEmpty && list.last.isEscalated;
     if (mounted) {
+      final failedOptimistic = _messages
+          .where((m) => m.hasError && m.id.startsWith('opt_'))
+          .toList();
       setState(() {
-        _messages = list;
+        _messages = [...list, ...failedOptimistic];
         _loading = false;
         if (hasEscalatedMsg) {
           _awaitingOwner = true;
@@ -2987,6 +2990,10 @@ class _AdminSupportChatDetailScreenState
     }
 
     setState(() {
+      if (_messages.isNotEmpty && _messages.last.sender != 'admin') {
+        _messages[_messages.length - 1] =
+            _messages.last.copyWith(hasError: false, errorText: null);
+      }
       _aiStreaming = true;
       _streamingPreview = '';
     });
@@ -3023,6 +3030,12 @@ class _AdminSupportChatDetailScreenState
       }
     } catch (e) {
       if (mounted) {
+        setState(() {
+          if (_messages.isNotEmpty && _messages.last.sender != 'admin') {
+            _messages[_messages.length - 1] =
+                _messages.last.copyWith(hasError: true, errorText: '$e');
+          }
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('$e'), backgroundColor: Colors.red),
         );
@@ -3056,10 +3069,40 @@ class _AdminSupportChatDetailScreenState
     }
   }
 
-  Future<void> _send() async {
-    final t = _textCtrl.text.trim();
-    if (t.isEmpty || _sending || _aiStreaming) return;
-    setState(() => _sending = true);
+  Future<void> _send([SupportMessage? retryMsg]) async {
+    if (_sending || _aiStreaming) return;
+    final String t = retryMsg != null ? retryMsg.text.trim() : _textCtrl.text.trim();
+    if (t.isEmpty) return;
+
+    late final SupportMessage targetMsg;
+    if (retryMsg != null) {
+      targetMsg = retryMsg.copyWith(hasError: false, errorText: null);
+      setState(() {
+        final idx = _messages.indexWhere((m) => m.id == retryMsg.id);
+        if (idx >= 0) {
+          _messages[idx] = targetMsg;
+        }
+        _sending = true;
+      });
+    } else {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      targetMsg = SupportMessage(
+        id: 'opt_$now',
+        sender: 'admin',
+        text: t,
+        timestamp: now,
+        isAutoSupport: false,
+        isEscalated: false,
+      );
+      // 1. العرض الفوري للرسالة (Optimistic Update) وتفريغ حقل الإدخال فوراً
+      setState(() {
+        _messages.add(targetMsg);
+        _textCtrl.clear();
+        _sending = true;
+      });
+      _scrollToBottom();
+    }
+
     try {
       await Rtdb.instance.sendSupportReply(
         widget.workspaceId,
@@ -3067,11 +3110,28 @@ class _AdminSupportChatDetailScreenState
         isAutoSupport: false,
         escalatedOverride: false,
       );
-      _textCtrl.clear();
       if (mounted) {
         setState(() => _awaitingOwner = false);
       }
       await _fetch();
+    } catch (e) {
+      // 2. معالجة الفشل دون فقدان البيانات: الاحتفاظ بالرسالة مع مؤشر أحمر وزر إعادة المحاولة
+      if (mounted) {
+        setState(() {
+          final idx = _messages.indexWhere((m) => m.id == targetMsg.id);
+          if (idx >= 0) {
+            _messages[idx] = targetMsg.copyWith(
+              hasError: true,
+              errorText: '$e',
+            );
+          } else {
+            _messages.add(
+              targetMsg.copyWith(hasError: true, errorText: '$e'),
+            );
+          }
+        });
+        _scrollToBottom();
+      }
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -3242,92 +3302,176 @@ class _AdminSupportChatDetailScreenState
                       return Align(
                         alignment:
                             isMe ? Alignment.centerRight : Alignment.centerLeft,
-                        child: Container(
-                          margin: const EdgeInsets.symmetric(vertical: 4),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 14, vertical: 10),
-                          constraints: BoxConstraints(
-                            maxWidth: MediaQuery.of(context).size.width * 0.80,
-                          ),
-                          decoration: BoxDecoration(
-                            color: isMe
-                                ? (m.isAutoSupport
-                                    ? const Color(0xFF0F766E)
-                                    : const Color(0xFF0284C7))
-                                : Colors.white,
-                            borderRadius: BorderRadius.circular(14),
-                            border: isMe
-                                ? null
-                                : Border.all(color: const Color(0xFFE2E8F0)),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    isMe
-                                        ? (m.isAutoSupport
-                                            ? 'موظف الدعم الفني'
-                                            : 'مدير المشروع')
-                                        : (widget.clientName.isNotEmpty
-                                            ? widget.clientName
-                                            : 'العميل'),
-                                    style: TextStyle(
-                                      fontSize: 10.5,
-                                      fontWeight: FontWeight.w800,
-                                      color: isMe
-                                          ? Colors.white70
-                                          : const Color(0xFF64748B),
+                        child: Column(
+                          crossAxisAlignment: isMe
+                              ? CrossAxisAlignment.end
+                              : CrossAxisAlignment.start,
+                          children: [
+                            GestureDetector(
+                              onLongPress: () =>
+                                  copyText(context, 'نص الرسالة', m.text),
+                              child: Container(
+                                margin: const EdgeInsets.symmetric(vertical: 4),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 14, vertical: 10),
+                                constraints: BoxConstraints(
+                                  maxWidth:
+                                      MediaQuery.of(context).size.width * 0.80,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: isMe
+                                      ? (m.isAutoSupport
+                                          ? const Color(0xFF0F766E)
+                                          : const Color(0xFF0284C7))
+                                      : Colors.white,
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: m.hasError
+                                      ? Border.all(
+                                          color: const Color(0xFFDC2626),
+                                          width: 1.5,
+                                        )
+                                      : (isMe
+                                          ? null
+                                          : Border.all(
+                                              color: const Color(0xFFE2E8F0))),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          isMe
+                                              ? (m.isAutoSupport
+                                                  ? 'موظف الدعم الفني'
+                                                  : 'مدير المشروع')
+                                              : (widget.clientName.isNotEmpty
+                                                  ? widget.clientName
+                                                  : 'العميل'),
+                                          style: TextStyle(
+                                            fontSize: 10.5,
+                                            fontWeight: FontWeight.w800,
+                                            color: isMe
+                                                ? Colors.white70
+                                                : const Color(0xFF64748B),
+                                          ),
+                                        ),
+                                        if (isEscalated) ...[
+                                          const SizedBox(width: 6),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 6, vertical: 1.5),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFFFEF3C7),
+                                              borderRadius:
+                                                  BorderRadius.circular(6),
+                                            ),
+                                            child: const Text(
+                                              'بانتظار رد مدير المشروع',
+                                              style: TextStyle(
+                                                fontSize: 9.5,
+                                                fontWeight: FontWeight.w900,
+                                                color: Color(0xFF92400E),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                        const SizedBox(width: 6),
+                                        InkWell(
+                                          onTap: () => copyText(
+                                              context, 'نص الرسالة', m.text),
+                                          child: Icon(
+                                            Icons.copy_rounded,
+                                            size: 12,
+                                            color: isMe
+                                                ? Colors.white60
+                                                : Colors.black38,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        InkWell(
+                                          onTap: () async {
+                                            await Rtdb.instance
+                                                .deleteSupportMessage(
+                                                    widget.workspaceId, m.id);
+                                            await _fetch();
+                                          },
+                                          child: Icon(
+                                            Icons.close_rounded,
+                                            size: 13,
+                                            color: isMe
+                                                ? Colors.white60
+                                                : Colors.black38,
+                                          ),
+                                        ),
+                                      ],
                                     ),
-                                  ),
-                                  if (isEscalated) ...[
-                                    const SizedBox(width: 6),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 6, vertical: 1.5),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFFEF3C7),
-                                        borderRadius: BorderRadius.circular(6),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      m.text,
+                                      style: TextStyle(
+                                        color: isMe
+                                            ? Colors.white
+                                            : Colors.black87,
+                                        fontSize: 13.5,
                                       ),
-                                      child: const Text(
-                                        'بانتظار رد مدير المشروع',
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            if (m.hasError)
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                    top: 2, bottom: 6, right: 4, left: 4),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(
+                                      Icons.error_outline_rounded,
+                                      color: Color(0xFFDC2626),
+                                      size: 15,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    const Text(
+                                      'تعذر الإرسال',
+                                      style: TextStyle(
+                                        color: Color(0xFFDC2626),
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    TextButton.icon(
+                                      style: TextButton.styleFrom(
+                                        visualDensity: VisualDensity.compact,
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 8, vertical: 2),
+                                        foregroundColor:
+                                            const Color(0xFFDC2626),
+                                        backgroundColor:
+                                            const Color(0xFFFEE2E2),
+                                      ),
+                                      onPressed: (_sending || _aiStreaming)
+                                          ? null
+                                          : () => isMe
+                                              ? _send(m)
+                                              : _generateAiSupportReply(m.text),
+                                      icon: const Icon(Icons.refresh_rounded,
+                                          size: 14),
+                                      label: const Text(
+                                        'إعادة المحاولة',
                                         style: TextStyle(
-                                          fontSize: 9.5,
-                                          fontWeight: FontWeight.w900,
-                                          color: Color(0xFF92400E),
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w800,
                                         ),
                                       ),
                                     ),
                                   ],
-                                  const SizedBox(width: 6),
-                                  InkWell(
-                                    onTap: () async {
-                                      await Rtdb.instance.deleteSupportMessage(
-                                          widget.workspaceId, m.id);
-                                      await _fetch();
-                                    },
-                                    child: Icon(
-                                      Icons.close_rounded,
-                                      size: 13,
-                                      color: isMe
-                                          ? Colors.white60
-                                          : Colors.black38,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                m.text,
-                                style: TextStyle(
-                                  color: isMe ? Colors.white : Colors.black87,
-                                  fontSize: 13.5,
                                 ),
                               ),
-                            ],
-                          ),
+                          ],
                         ),
                       );
                     },
@@ -3352,7 +3496,7 @@ class _AdminSupportChatDetailScreenState
                   ),
                   const SizedBox(width: 8),
                   IconButton.filled(
-                    onPressed: (_sending || _aiStreaming) ? null : _send,
+                    onPressed: (_sending || _aiStreaming) ? null : () => _send(),
                     icon: const Icon(Icons.send),
                   ),
                 ],
@@ -3376,12 +3520,14 @@ class OwnerCompanionScreen extends StatefulWidget {
 class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
   final TextEditingController _inputCtrl = TextEditingController();
   final ScrollController _scrollCtrl = ScrollController();
+  final List<AiChatMessage> _messages = [];
   bool _streaming = false;
   String _liveChunkBuffer = '';
 
   @override
   void initState() {
     super.initState();
+    _messages.addAll(DualPersonaAiEngine.instance.ownerSession.history);
     adminRefreshTick.addListener(_onRefreshTick);
   }
 
@@ -3409,33 +3555,80 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
     });
   }
 
-  Future<void> _sendMessage() async {
-    final text = _inputCtrl.text.trim();
-    if (text.isEmpty || _streaming) return;
+  Future<void> _sendMessage([AiChatMessage? retryMessage]) async {
+    if (_streaming) return;
+    final String text =
+        retryMessage != null ? retryMessage.text.trim() : _inputCtrl.text.trim();
+    if (text.isEmpty) return;
+
+    final session = DualPersonaAiEngine.instance.ownerSession;
+    late final AiChatMessage activeUserMsg;
+
+    if (retryMessage != null) {
+      // إعادة المحاولة لرسالة موجودة مسبقاً دون الحاجة لكتابتها مجدداً
+      activeUserMsg = retryMessage.copyWith(hasError: false, errorText: null);
+      session.updateMessageState(activeUserMsg.id,
+          hasError: false, errorText: null);
+      setState(() {
+        final idx = _messages.indexWhere((m) => m.id == activeUserMsg.id);
+        if (idx >= 0) {
+          _messages[idx] = activeUserMsg;
+        } else {
+          _messages.add(activeUserMsg);
+        }
+        _streaming = true;
+        _liveChunkBuffer = '';
+      });
+    } else {
+      // 1. العرض الفوري للرسالة (Optimistic Update) قبل انتظار رد الـ API
+      final now = DateTime.now().millisecondsSinceEpoch;
+      activeUserMsg = AiChatMessage(
+        id: 'u_$now',
+        role: 'user',
+        text: text,
+        timestamp: now,
+      );
+      session.addOptimisticMessage(activeUserMsg);
+      setState(() {
+        _messages.add(activeUserMsg);
+        // تفريغ حقل الإدخال النصي فوراً بعد إدراج الرسالة في القائمة
+        _inputCtrl.clear();
+        _streaming = true;
+        _liveChunkBuffer = '';
+      });
+    }
+    _scrollToBottom();
 
     final apiKey = DualPersonaAiEngine.instance.apiKey;
     if (apiKey.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-              'يرجى إدخال مفتاح Gemini API (gemini_api_key) في شاشة الضبط لتفعيل رفيق المالك.'),
-        ),
-      );
+      const errMsg =
+          'يرجى إدخال مفتاح Gemini API (gemini_api_key) في شاشة الضبط لتفعيل رفيق المالك.';
+      session.updateMessageState(activeUserMsg.id,
+          hasError: true, errorText: errMsg);
+      if (mounted) {
+        setState(() {
+          final idx = _messages.indexWhere((m) => m.id == activeUserMsg.id);
+          if (idx >= 0) {
+            _messages[idx] =
+                activeUserMsg.copyWith(hasError: true, errorText: errMsg);
+          }
+          _streaming = false;
+          _liveChunkBuffer = '';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text(errMsg)),
+        );
+      }
       return;
     }
 
-    _inputCtrl.clear();
-    setState(() {
-      _streaming = true;
-      _liveChunkBuffer = '';
-    });
-    _scrollToBottom();
-
-    final session = DualPersonaAiEngine.instance.ownerSession;
     final buf = StringBuffer();
     try {
-      await for (final chunk
-          in session.sendMessageStream(text, apiKey: apiKey)) {
+      await for (final chunk in session.sendMessageStream(
+        text,
+        apiKey: apiKey,
+        existingMessageId: activeUserMsg.id,
+      )) {
         buf.write(chunk);
         if (mounted) {
           setState(() {
@@ -3444,8 +3637,31 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
           _scrollToBottom();
         }
       }
-    } catch (e) {
+
+      // بعد اكتمال البث بنجاح، نزامن رد النموذج المضاف في الجلسة إلى القائمة المعروضة
       if (mounted) {
+        setState(() {
+          _messages
+            ..clear()
+            ..addAll(session.history);
+        });
+      }
+    } catch (e) {
+      // 2. معالجة الفشل دون فقدان البيانات: إبقاء رسالة المستخدم مع مؤشر "تعذر الإرسال" وزر "إعادة المحاولة"
+      session.updateMessageState(activeUserMsg.id,
+          hasError: true, errorText: '$e');
+      if (mounted) {
+        setState(() {
+          final idx = _messages.indexWhere((m) => m.id == activeUserMsg.id);
+          if (idx >= 0) {
+            _messages[idx] =
+                activeUserMsg.copyWith(hasError: true, errorText: '$e');
+          } else {
+            _messages.add(
+              activeUserMsg.copyWith(hasError: true, errorText: '$e'),
+            );
+          }
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('$e'), backgroundColor: Colors.red),
         );
@@ -3464,6 +3680,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
   void _clearSession() {
     DualPersonaAiEngine.instance.clearOwnerSession();
     setState(() {
+      _messages.clear();
       _liveChunkBuffer = '';
     });
     ScaffoldMessenger.of(context).showSnackBar(
@@ -3474,7 +3691,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
   @override
   Widget build(BuildContext context) {
     final hasKey = DualPersonaAiEngine.instance.hasApiKey;
-    final history = DualPersonaAiEngine.instance.ownerSession.history;
+    final history = _messages;
 
     return Column(
       children: [
@@ -3630,35 +3847,132 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
 
                     final m = history[idx];
                     final isUser = m.role == 'user';
-                    // أثناء البث المباشر، الرسالة الأخيرة في history هي رسالة المستخدم
                     return Align(
                       alignment:
                           isUser ? Alignment.centerRight : Alignment.centerLeft,
-                      child: Container(
-                        margin: const EdgeInsets.symmetric(vertical: 5),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 10),
-                        constraints: BoxConstraints(
-                          maxWidth: MediaQuery.of(context).size.width * 0.82,
-                        ),
-                        decoration: BoxDecoration(
-                          color: isUser
-                              ? const Color(0xFF0284C7)
-                              : Colors.white,
-                          borderRadius: BorderRadius.circular(14),
-                          border: isUser
-                              ? null
-                              : Border.all(color: const Color(0xFFE2E8F0)),
-                        ),
-                        child: SelectableText(
-                          m.text,
-                          style: TextStyle(
-                            color:
-                                isUser ? Colors.white : const Color(0xFF0F172A),
-                            fontSize: 13.5,
-                            height: 1.45,
+                      child: Column(
+                        crossAxisAlignment: isUser
+                            ? CrossAxisAlignment.end
+                            : CrossAxisAlignment.start,
+                        children: [
+                          GestureDetector(
+                            onLongPress: () =>
+                                copyText(context, 'نص الرسالة', m.text),
+                            child: Container(
+                              margin: const EdgeInsets.symmetric(vertical: 5),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 14, vertical: 10),
+                              constraints: BoxConstraints(
+                                maxWidth:
+                                    MediaQuery.of(context).size.width * 0.82,
+                              ),
+                              decoration: BoxDecoration(
+                                color: isUser
+                                    ? const Color(0xFF0284C7)
+                                    : Colors.white,
+                                borderRadius: BorderRadius.circular(14),
+                                border: m.hasError
+                                    ? Border.all(
+                                        color: const Color(0xFFDC2626),
+                                        width: 1.5,
+                                      )
+                                    : (isUser
+                                        ? null
+                                        : Border.all(
+                                            color: const Color(0xFFE2E8F0))),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        isUser ? 'أنت (المدير)' : 'رفيق المالك',
+                                        style: TextStyle(
+                                          fontSize: 10.5,
+                                          fontWeight: FontWeight.w800,
+                                          color: isUser
+                                              ? Colors.white70
+                                              : const Color(0xFF64748B),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      InkWell(
+                                        onTap: () => copyText(
+                                            context, 'نص الرسالة', m.text),
+                                        child: Icon(
+                                          Icons.copy_rounded,
+                                          size: 12,
+                                          color: isUser
+                                              ? Colors.white70
+                                              : Colors.black38,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    m.text,
+                                    style: TextStyle(
+                                      color: isUser
+                                          ? Colors.white
+                                          : const Color(0xFF0F172A),
+                                      fontSize: 13.5,
+                                      height: 1.45,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
                           ),
-                        ),
+                          if (m.hasError)
+                            Padding(
+                              padding: const EdgeInsets.only(
+                                  top: 2, bottom: 6, right: 4, left: 4),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.error_outline_rounded,
+                                    color: Color(0xFFDC2626),
+                                    size: 15,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  const Text(
+                                    'تعذر الإرسال',
+                                    style: TextStyle(
+                                      color: Color(0xFFDC2626),
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  TextButton.icon(
+                                    style: TextButton.styleFrom(
+                                      visualDensity: VisualDensity.compact,
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 8, vertical: 2),
+                                      foregroundColor: const Color(0xFFDC2626),
+                                      backgroundColor: const Color(0xFFFEE2E2),
+                                    ),
+                                    onPressed: _streaming
+                                        ? null
+                                        : () => _sendMessage(m),
+                                    icon: const Icon(Icons.refresh_rounded,
+                                        size: 14),
+                                    label: const Text(
+                                      'إعادة المحاولة',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
                       ),
                     );
                   },
@@ -3695,7 +4009,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                   style: IconButton.styleFrom(
                     backgroundColor: const Color(0xFF0284C7),
                   ),
-                  onPressed: _streaming ? null : _sendMessage,
+                  onPressed: _streaming ? null : () => _sendMessage(),
                   icon: _streaming
                       ? const SizedBox(
                           width: 18,

@@ -1,7 +1,7 @@
 name: license_admin
 description: "تطبيق المدير المستقل لتفعيل تراخيص Nexora — يثبت على هاتف مالك النظام فقط."
 publish_to: 'none'
-version: 1.5.7+30
+version: 1.5.8+31
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

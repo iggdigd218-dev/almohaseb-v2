@@ -1958,13 +1958,35 @@ class AiChatMessage {
   final String role; // 'user' | 'model'
   final String text;
   final int timestamp;
+  final bool hasError;
+  final String? errorText;
 
   const AiChatMessage({
     required this.id,
     required this.role,
     required this.text,
     required this.timestamp,
+    this.hasError = false,
+    this.errorText,
   });
+
+  AiChatMessage copyWith({
+    String? id,
+    String? role,
+    String? text,
+    int? timestamp,
+    bool? hasError,
+    String? errorText,
+  }) {
+    return AiChatMessage(
+      id: id ?? this.id,
+      role: role ?? this.role,
+      text: text ?? this.text,
+      timestamp: timestamp ?? this.timestamp,
+      hasError: hasError ?? this.hasError,
+      errorText: errorText,
+    );
+  }
 
   Map<String, dynamic> toContentPart() => {
         'role': role == 'user' ? 'user' : 'model',
@@ -1999,30 +2021,86 @@ class ChatSession {
       ..addAll(initial);
   }
 
+  /// إضافة رسالة المستخدم فوراً بشكل متفائل (Optimistic Update) قبل انتظار الـ API.
+  void addOptimisticMessage(AiChatMessage msg) {
+    final idx = _history.indexWhere((m) => m.id == msg.id);
+    if (idx >= 0) {
+      _history[idx] = msg;
+    } else {
+      _history.add(msg);
+    }
+  }
+
+  /// تحديث حالة الفشل للرسالة داخل السجل دون حذفها نهائياً.
+  void updateMessageState(
+    String messageId, {
+    required bool hasError,
+    String? errorText,
+  }) {
+    final idx = _history.indexWhere((m) => m.id == messageId);
+    if (idx >= 0) {
+      _history[idx] = _history[idx].copyWith(
+        hasError: hasError,
+        errorText: errorText,
+      );
+    }
+  }
+
   /// إرسال رسالة مع بث حي مباشر (Streaming) للرد حرفاً بحرف/دفعة بدفعة.
+  /// يحافظ على رسالة المستخدم في السجل حتى عند حدوث خطأ (503 أو انتهاء المهلة).
   Stream<String> sendMessageStream(
     String userText, {
     required String apiKey,
+    String? existingMessageId,
     http.Client? httpClient,
   }) async* {
-    final cleanKey = apiKey.trim();
-    if (cleanKey.isEmpty) {
-      throw Exception('يرجى إدخال مفتاح Gemini API في شاشة الضبط لتفعيل الخدمة.');
-    }
     final cleanPrompt = userText.trim();
     if (cleanPrompt.isEmpty) return;
 
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final userMsg = AiChatMessage(
-      id: 'u_$now',
-      role: 'user',
-      text: cleanPrompt,
-      timestamp: now,
-    );
-    _history.add(userMsg);
+    AiChatMessage userMsg;
+    if (existingMessageId != null) {
+      final existingIdx =
+          _history.indexWhere((m) => m.id == existingMessageId);
+      if (existingIdx >= 0) {
+        userMsg = _history[existingIdx].copyWith(
+          hasError: false,
+          errorText: null,
+        );
+        _history[existingIdx] = userMsg;
+      } else {
+        final now = DateTime.now().millisecondsSinceEpoch;
+        userMsg = AiChatMessage(
+          id: existingMessageId,
+          role: 'user',
+          text: cleanPrompt,
+          timestamp: now,
+        );
+        _history.add(userMsg);
+      }
+    } else {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      userMsg = AiChatMessage(
+        id: 'u_$now',
+        role: 'user',
+        text: cleanPrompt,
+        timestamp: now,
+      );
+      _history.add(userMsg);
+    }
 
-    final contents = _history
-        .skip(_history.length > 24 ? _history.length - 24 : 0)
+    final cleanKey = apiKey.trim();
+    if (cleanKey.isEmpty) {
+      const errMsg = 'يرجى إدخال مفتاح Gemini API في شاشة الضبط لتفعيل الخدمة.';
+      updateMessageState(userMsg.id, hasError: true, errorText: errMsg);
+      throw Exception(errMsg);
+    }
+
+    // نرسل السجل مع استثناء أي رسائل سابقة متعثرة غير الرسالة الحالية قيد الإرسال
+    final validHistory = _history
+        .where((m) => !m.hasError || m.id == userMsg.id)
+        .toList();
+    final contents = validHistory
+        .skip(validHistory.length > 24 ? validHistory.length - 24 : 0)
         .map((m) => m.toContentPart())
         .toList();
 
@@ -2113,12 +2191,14 @@ class ChatSession {
 
     final finalReply = buffer.toString().trim();
     if (finalReply.isEmpty) {
-      // إزالة الرسالة المعلقة من السجل عند فشل الاتصال حتى لا تتلوث الجلسة
-      if (_history.isNotEmpty && _history.last.id == userMsg.id) {
-        _history.removeLast();
-      }
-      throw Exception(lastErr?.toString() ?? 'تعذر الحصول على رد من خدمة الذكاء الاصطناعي.');
+      // يُمنع منعاً باتاً حذف رسالة المستخدم من السجل عند فشل الاستدعاء (مثل 503 أو انتهاء المهلة)
+      final errText =
+          lastErr?.toString() ?? 'تعذر الحصول على رد من خدمة الذكاء الاصطناعي.';
+      updateMessageState(userMsg.id, hasError: true, errorText: errText);
+      throw Exception(errText);
     }
+
+    updateMessageState(userMsg.id, hasError: false, errorText: null);
 
     final replyNow = DateTime.now().millisecondsSinceEpoch;
     _history.add(
