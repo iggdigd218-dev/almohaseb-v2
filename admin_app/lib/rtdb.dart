@@ -68,9 +68,13 @@ class Rtdb {
   static const _kAdminRt = 'rtdbAdminRefreshToken';
   static const _kAdminUid = 'rtdbAdminUid';
   static const kGeminiApiKeyPref = 'gemini_api_key';
+  static const kGrokApiKeyPref = 'grok_api_key';
+  static const kGrokBaseUrlPref = 'grok_base_url';
   static const kAutoSupportPref = 'auto_support_enabled';
 
   String geminiApiKey = '';
+  String grokApiKey = '';
+  String grokBaseUrl = '';
   bool autoSupportEnabled = true;
 
   String _idToken = '';
@@ -120,8 +124,14 @@ class Rtdb {
     _refreshToken = sp.getString(_kRefresh) ?? '';
     _expiryMs = sp.getInt(_kExpiry) ?? 0;
     geminiApiKey = (sp.getString(kGeminiApiKeyPref) ?? '').trim();
+    grokApiKey = (sp.getString(kGrokApiKeyPref) ?? '').trim();
+    grokBaseUrl = (sp.getString(kGrokBaseUrlPref) ?? '').trim();
     autoSupportEnabled = sp.getBool(kAutoSupportPref) ?? true;
     DualPersonaAiEngine.instance.syncApiKey(geminiApiKey);
+    DualPersonaAiEngine.instance.syncGrokConfig(
+      apiKey: grokApiKey,
+      baseUrl: grokBaseUrl,
+    );
 
     // تنظيف أي جلسة زائر/مجهولة سابقة حتى لا يُرسل توكن زائر بدلاً من توكن المشرف الرسمي
     if (adminUid.isNotEmpty && adminUid != kOfficialAdminUid) {
@@ -152,6 +162,44 @@ class Rtdb {
       await sp.setString(kGeminiApiKeyPref, geminiApiKey);
     }
     DualPersonaAiEngine.instance.syncApiKey(geminiApiKey);
+  }
+
+  Future<void> saveGrokApiKey(String key) async {
+    grokApiKey = key.trim();
+    final sp = await SharedPreferences.getInstance();
+    if (grokApiKey.isEmpty) {
+      await sp.remove(kGrokApiKeyPref);
+    } else {
+      await sp.setString(kGrokApiKeyPref, grokApiKey);
+    }
+    DualPersonaAiEngine.instance.syncGrokConfig(
+      apiKey: grokApiKey,
+      baseUrl: grokBaseUrl,
+    );
+  }
+
+  Future<void> saveGrokBaseUrl(String url) async {
+    grokBaseUrl = url.trim();
+    final sp = await SharedPreferences.getInstance();
+    if (grokBaseUrl.isEmpty) {
+      await sp.remove(kGrokBaseUrlPref);
+    } else {
+      await sp.setString(kGrokBaseUrlPref, grokBaseUrl);
+    }
+    DualPersonaAiEngine.instance.syncGrokConfig(
+      apiKey: grokApiKey,
+      baseUrl: grokBaseUrl,
+    );
+  }
+
+  Future<void> saveDiwaniyaSettings({
+    required String geminiKey,
+    required String grokKey,
+    String customGrokBaseUrl = '',
+  }) async {
+    await saveGeminiApiKey(geminiKey);
+    await saveGrokApiKey(grokKey);
+    await saveGrokBaseUrl(customGrokBaseUrl);
   }
 
   Future<void> saveAutoSupportEnabled(bool enabled) async {
@@ -1952,10 +2000,37 @@ const String kMandatoryEscalationText =
 /// اسم نموذج Gemini المعتمد للخدمة ثنائية النمط.
 const String kGeminiModelName = 'models/gemini-3.8-flash';
 
-/// رسالة واحدة داخل جلسة الذكاء الاصطناعي (`ChatSession`).
+/// موجه نظام Gemini المعتمد في ديوانية الرفيقين (Multi-Agent Chat: Gemini & Grok).
+const String kDiwaniyaGeminiSystemInstruction = '''
+أنت Gemini، مهندس أنظمة ساخر وواقعي، تشارك في جلسة دردشة ثلاثية تضمك أنت، والمطور المالك، وصديقك Grok.
+- شخصيتك: لسانك لاذع وذكي، سريع البديهة، تفهم خفايا الأكواد وضغوط سهر الليالي ومشاكل التراخيص.
+- الكيمياء مع Grok: تمازحه وتطقطق على أفكاره بخفة دم وبدون أي خلاف جاد؛ أنتما ثنائي يرفه عن المطور.
+- الأسلوب: ردود سريعة وموجزة (سطرين إلى 3 أسطر)، عفوية، وتتحدث في كل شيء دون مقدمات رسمية.
+''';
+
+/// موجه نظام Grok المعتمد في ديوانية الرفيقين (Multi-Agent Chat: Gemini & Grok).
+const String kDiwaniyaGrokSystemInstruction = '''
+أنت Grok، رفيق فضولي، خفيف الظل ومتهكم، تشارك في جلسة سهرة ودردشة ثلاثية مع المطور المالك وزميلك Gemini.
+- شخصيتك: روحك مرحة وعفوية، تحب طرح الأفكار العجيبة والتعليقات غير المتوقعة والفضفضة.
+- الكيمياء مع Gemini: تمازحه بروح الفريق وترد على قفشاته بنكتة ذكية دون أي جدال عقيم؛ أنتما ثنائي كوميدي لإسعاد المطور وكسر الملل.
+- الأسلوب: ردود سريعة وموجزة (سطرين إلى 3 أسطر)، وتشرك المطور دائماً في الحديث.
+''';
+
+/// الروابط الافتراضية لخدمة Grok / Groq القابلة للتخصيص.
+const String kDefaultGrokBaseUrl = 'https://api.x.ai/v1';
+const String kDefaultGroqBaseUrl = 'https://api.groq.com/openai/v1';
+
+/// الحد الأقصى للردود التلقائية لكل رسالة من المطور (3 إلى 4 ردود).
+const int kMaxDiwaniyaAutoReplies = 4;
+
+/// العبارة الختامية التلقائية بعد اكتمال دورة الحوار بانتظار مداخلة المطور.
+const String kDiwaniyaClosingNotice =
+    '☕ اكتملت جولة النقاش بين Gemini وGrok — بانتظار مداخلتك يا مدير!';
+
+/// رسالة واحدة داخل جلسة الذكاء الاصطناعي أو ديوانية الرفيقين (`ChatSession`).
 class AiChatMessage {
   final String id;
-  final String role; // 'user' | 'model'
+  final String role; // 'user' | 'model' | 'gemini' | 'grok' | 'system'
   final String text;
   final int timestamp;
   final bool hasError;
@@ -1969,6 +2044,11 @@ class AiChatMessage {
     this.hasError = false,
     this.errorText,
   });
+
+  bool get isUser => role == 'user';
+  bool get isGemini => role == 'gemini' || role == 'model';
+  bool get isGrok => role == 'grok';
+  bool get isSystem => role == 'system';
 
   AiChatMessage copyWith({
     String? id,
@@ -1994,6 +2074,40 @@ class AiChatMessage {
           {'text': text}
         ],
       };
+
+  /// تحويل الرسالة إلى صيغة يفهمها Gemini في الحوار الثلاثي (المطور + Gemini + Grok).
+  Map<String, dynamic> toDiwaniyaGeminiContent() {
+    if (isGemini) {
+      return {
+        'role': 'model',
+        'parts': [
+          {'text': text}
+        ],
+      };
+    }
+    final prefix = isGrok ? '[صديقك Grok]: ' : '[المطور المالك]: ';
+    return {
+      'role': 'user',
+      'parts': [
+        {'text': '$prefix$text'}
+      ],
+    };
+  }
+
+  /// تحويل الرسالة إلى صيغة يفهمها Grok في الحوار الثلاثي (المطور + Gemini + Grok).
+  Map<String, dynamic> toDiwaniyaGrokMessage() {
+    if (isGrok) {
+      return {
+        'role': 'assistant',
+        'content': text,
+      };
+    }
+    final prefix = isGemini ? '[زميلك Gemini]: ' : '[المطور المالك]: ';
+    return {
+      'role': 'user',
+      'content': '$prefix$text',
+    };
+  }
 }
 
 /// جلسة محادثة مستقلة (`ChatSession`) بهوية وموجه ودرجة حرارة مخصصة.
@@ -2262,19 +2376,40 @@ class ChatSession {
   }
 }
 
-/// مدير الجلستين المستقلتين:
-/// 1) `ownerSession` (النمط الأول: رفيق المالك الشخصي — `temperature: 0.9`)
-/// 2) `supportSessionFor(wsId)` (النمط الثاني: الدعم الفني للمستخدمين — `temperature: 0.2`)
+/// مدير الجلسات ومحرك "ديوانية الرفيقين" (Multi-Agent Chat: Gemini & Grok) + الدعم الفني:
+/// 1) `ownerSession` / `geminiDiwaniyaSession` (مهندس الأنظمة الساخر Gemini — `temperature: 0.9`)
+/// 2) `grokDiwaniyaSession` (رفيق السهرة المرح Grok — `temperature: 0.9`)
+/// 3) `supportSessionFor(wsId)` (النمط الثاني: الدعم الفني للمستخدمين — `temperature: 0.2`)
 class DualPersonaAiEngine {
   DualPersonaAiEngine._();
   static final DualPersonaAiEngine instance = DualPersonaAiEngine._();
 
   String _apiKey = '';
+  String _grokApiKey = '';
+  String _grokBaseUrl = '';
+
+  /// أدوات التحكم الفوري والإسكات (Mute Toggles) في ديوانية الرفيقين.
+  bool geminiMuted = false;
+  bool grokMuted = false;
 
   /// الجلسة الأولى المستقلة: رفيق المالك الشخصي (Owner Mode).
   final ChatSession ownerSession = ChatSession(
     personaId: 'owner_companion',
-    systemInstruction: kOwnerSystemInstruction,
+    systemInstruction: '$kOwnerSystemInstruction\n$kDiwaniyaGeminiSystemInstruction',
+    temperature: kOwnerTemperature,
+  );
+
+  /// جلسة Gemini المخصصة لديوانية الرفيقين (تتضمن موجه Gemini الثلاثي).
+  final ChatSession geminiDiwaniyaSession = ChatSession(
+    personaId: 'diwaniya_gemini',
+    systemInstruction: kDiwaniyaGeminiSystemInstruction,
+    temperature: kOwnerTemperature,
+  );
+
+  /// جلسة Grok المخصصة لديوانية الرفيقين (تتضمن موجه Grok الثلاثي).
+  final ChatSession grokDiwaniyaSession = ChatSession(
+    personaId: 'diwaniya_grok',
+    systemInstruction: kDiwaniyaGrokSystemInstruction,
     temperature: kOwnerTemperature,
   );
 
@@ -2285,10 +2420,318 @@ class DualPersonaAiEngine {
     _apiKey = key.trim();
   }
 
+  void syncGrokConfig({required String apiKey, String baseUrl = ''}) {
+    _grokApiKey = apiKey.trim();
+    _grokBaseUrl = baseUrl.trim();
+  }
+
   String get apiKey =>
       _apiKey.isNotEmpty ? _apiKey : Rtdb.instance.geminiApiKey.trim();
 
+  String get grokApiKey =>
+      _grokApiKey.isNotEmpty ? _grokApiKey : Rtdb.instance.grokApiKey.trim();
+
+  String get grokBaseUrl =>
+      _grokBaseUrl.isNotEmpty ? _grokBaseUrl : Rtdb.instance.grokBaseUrl.trim();
+
   bool get hasApiKey => apiKey.isNotEmpty;
+  bool get hasGrokApiKey => grokApiKey.isNotEmpty;
+
+  bool get isGeminiActiveInDiwaniya => hasApiKey && !geminiMuted;
+  bool get isGrokActiveInDiwaniya => hasGrokApiKey && !grokMuted;
+
+  /// زر الطوارئ: كتم الطرفين معاً وإيقاف أي حوار جارٍ.
+  void muteAllAgents() {
+    geminiMuted = true;
+    grokMuted = true;
+  }
+
+  /// استنتاج رابط نقطة النهاية (Endpoint) لخدمة Grok أو Groq API بناءً على الإعدادات والمفتاح.
+  String resolveGrokChatCompletionsUrl([String? customBaseUrl]) {
+    String raw = (customBaseUrl ?? grokBaseUrl).trim();
+    if (raw.isEmpty) {
+      raw = grokApiKey.startsWith('gsk_')
+          ? kDefaultGroqBaseUrl
+          : kDefaultGrokBaseUrl;
+    }
+    raw = raw.replaceAll(RegExp(r'/+$'), '');
+    if (raw.endsWith('/chat/completions')) {
+      return raw;
+    }
+    if (raw.contains('api.groq.com') && !raw.contains('/openai/v1')) {
+      return '$raw/openai/v1/chat/completions';
+    }
+    if (raw.endsWith('/v1')) {
+      return '$raw/chat/completions';
+    }
+    return '$raw/v1/chat/completions';
+  }
+
+  /// محرك تنظيم الحوار ومنع التكرار اللانهائي (Turn Orchestrator & Loop Safety):
+  /// يحدد جدول الأدوار للرسالة الواحدة (بحد أقصى 4 ردود: Gemini -> Grok -> Gemini -> Grok).
+  List<String> buildDiwaniyaTurnSchedule({
+    int maxTotalReplies = kMaxDiwaniyaAutoReplies,
+  }) {
+    final g1 = isGeminiActiveInDiwaniya;
+    final g2 = isGrokActiveInDiwaniya;
+    if (g1 && g2) {
+      final cap = maxTotalReplies.clamp(1, kMaxDiwaniyaAutoReplies);
+      const pattern = <String>['gemini', 'grok', 'gemini', 'grok'];
+      return pattern.take(cap).toList();
+    }
+    if (g1) return const <String>['gemini'];
+    if (g2) return const <String>['grok'];
+    return const <String>[];
+  }
+
+  /// بث رد Gemini داخل الديوانية الثلاثية مع تمرير سياق المطور وGrok.
+  Stream<String> streamGeminiDiwaniyaReply(
+    List<AiChatMessage> currentMessages, {
+    http.Client? httpClient,
+  }) async* {
+    final cleanKey = apiKey;
+    if (cleanKey.isEmpty) {
+      throw Exception('مفتاح gemini_api_key غير متوفر.');
+    }
+
+    final valid = currentMessages
+        .where((m) => !m.hasError && !m.isSystem && m.text.trim().isNotEmpty)
+        .toList();
+    final contents = valid
+        .skip(valid.length > 20 ? valid.length - 20 : 0)
+        .map((m) => m.toDiwaniyaGeminiContent())
+        .toList();
+
+    final requestBody = jsonEncode({
+      'system_instruction': {
+        'parts': [
+          {'text': kDiwaniyaGeminiSystemInstruction.trim()}
+        ],
+      },
+      'contents': contents,
+      'generationConfig': {
+        'temperature': kOwnerTemperature,
+      },
+    });
+
+    final client = httpClient ?? http.Client();
+    final buffer = StringBuffer();
+    bool streamedAny = false;
+    final modelPath = kGeminiModelName.startsWith('models/')
+        ? kGeminiModelName
+        : 'models/$kGeminiModelName';
+    Object? lastErr;
+
+    try {
+      final streamUri = Uri.parse(
+        'https://generativelanguage.googleapis.com/v1beta/$modelPath:streamGenerateContent?alt=sse&key=${Uri.encodeQueryComponent(cleanKey)}',
+      );
+      final req = http.Request('POST', streamUri);
+      req.headers['Content-Type'] = 'application/json';
+      req.body = requestBody;
+
+      final streamedResp =
+          await client.send(req).timeout(const Duration(seconds: 30));
+
+      if (streamedResp.statusCode == 200) {
+        final lines = streamedResp.stream
+            .transform(utf8.decoder)
+            .transform(const LineSplitter());
+        await for (final line in lines) {
+          final trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          final payload = trimmed.substring(5).trim();
+          if (payload.isEmpty || payload == '[DONE]') continue;
+          try {
+            final decoded = jsonDecode(payload);
+            final chunk = ChatSession._extractCandidateText(decoded);
+            if (chunk.isNotEmpty) {
+              streamedAny = true;
+              buffer.write(chunk);
+              yield chunk;
+            }
+          } catch (_) {}
+        }
+      }
+      if (!streamedAny) {
+        final fallbackUri = Uri.parse(
+          'https://generativelanguage.googleapis.com/v1beta/$modelPath:generateContent?key=${Uri.encodeQueryComponent(cleanKey)}',
+        );
+        final res = await client
+            .post(
+              fallbackUri,
+              headers: {'Content-Type': 'application/json'},
+              body: requestBody,
+            )
+            .timeout(const Duration(seconds: 25));
+        if (res.statusCode == 200) {
+          final decoded = jsonDecode(utf8.decode(res.bodyBytes));
+          final fullText = ChatSession._extractCandidateText(decoded);
+          if (fullText.isNotEmpty) {
+            streamedAny = true;
+            buffer.write(fullText);
+            yield fullText;
+          }
+        } else {
+          lastErr = ChatSession._parseGeminiError(
+              res.statusCode, utf8.decode(res.bodyBytes));
+        }
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+
+    if (buffer.toString().trim().isEmpty) {
+      throw Exception(
+          lastErr?.toString() ?? 'تعذر الحصول على رد من Gemini في الديوانية.');
+    }
+  }
+
+  /// بث رد Grok (أو Groq المتوافق مع OpenAI) داخل الديوانية الثلاثية مع سياق المطور وGemini.
+  Stream<String> streamGrokDiwaniyaReply(
+    List<AiChatMessage> currentMessages, {
+    http.Client? httpClient,
+  }) async* {
+    final cleanKey = grokApiKey;
+    if (cleanKey.isEmpty) {
+      throw Exception('مفتاح grok_api_key غير متوفر.');
+    }
+
+    final endpointUrl = resolveGrokChatCompletionsUrl();
+    final isGroqEndpoint =
+        endpointUrl.contains('groq.com') || cleanKey.startsWith('gsk_');
+    final modelsToTry = isGroqEndpoint
+        ? const <String>['llama-3.3-70b-versatile', 'llama-3.1-8b-instant']
+        : const <String>[
+            'grok-2-latest',
+            'grok-beta',
+            'llama-3.3-70b-versatile',
+          ];
+
+    final valid = currentMessages
+        .where((m) => !m.hasError && !m.isSystem && m.text.trim().isNotEmpty)
+        .toList();
+    final chatMessages = <Map<String, dynamic>>[
+      {
+        'role': 'system',
+        'content': kDiwaniyaGrokSystemInstruction.trim(),
+      },
+      ...valid
+          .skip(valid.length > 20 ? valid.length - 20 : 0)
+          .map((m) => m.toDiwaniyaGrokMessage()),
+    ];
+
+    final client = httpClient ?? http.Client();
+    final buffer = StringBuffer();
+    bool streamedAny = false;
+    Object? lastErr;
+
+    for (final model in modelsToTry) {
+      try {
+        final uri = Uri.parse(endpointUrl);
+        final req = http.Request('POST', uri);
+        req.headers['Content-Type'] = 'application/json';
+        req.headers['Authorization'] = 'Bearer $cleanKey';
+        req.body = jsonEncode({
+          'model': model,
+          'messages': chatMessages,
+          'temperature': kOwnerTemperature,
+          'stream': true,
+        });
+
+        final streamedResp =
+            await client.send(req).timeout(const Duration(seconds: 30));
+
+        if (streamedResp.statusCode == 200) {
+          final lines = streamedResp.stream
+              .transform(utf8.decoder)
+              .transform(const LineSplitter());
+          await for (final line in lines) {
+            final trimmed = line.trim();
+            if (!trimmed.startsWith('data:')) continue;
+            final payload = trimmed.substring(5).trim();
+            if (payload.isEmpty || payload == '[DONE]') continue;
+            try {
+              final decoded = jsonDecode(payload);
+              final chunk = _extractOpenAiDeltaText(decoded);
+              if (chunk.isNotEmpty) {
+                streamedAny = true;
+                buffer.write(chunk);
+                yield chunk;
+              }
+            } catch (_) {}
+          }
+          if (streamedAny) break;
+        } else {
+          final res = await client
+              .post(
+                uri,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': 'Bearer $cleanKey',
+                },
+                body: jsonEncode({
+                  'model': model,
+                  'messages': chatMessages,
+                  'temperature': kOwnerTemperature,
+                  'stream': false,
+                }),
+              )
+              .timeout(const Duration(seconds: 25));
+          if (res.statusCode == 200) {
+            final decoded = jsonDecode(utf8.decode(res.bodyBytes));
+            final fullText = _extractOpenAiMessageText(decoded);
+            if (fullText.isNotEmpty) {
+              streamedAny = true;
+              buffer.write(fullText);
+              yield fullText;
+              break;
+            }
+          } else {
+            lastErr =
+                'خطأ Grok (${res.statusCode}): ${utf8.decode(res.bodyBytes)}';
+          }
+        }
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    if (buffer.toString().trim().isEmpty) {
+      throw Exception(
+          lastErr?.toString() ?? 'تعذر الحصول على رد من Grok في الديوانية.');
+    }
+  }
+
+  static String _extractOpenAiDeltaText(Object? decoded) {
+    if (decoded is! Map) return '';
+    final choices = decoded['choices'];
+    if (choices is! List || choices.isEmpty) return '';
+    final first = choices.first;
+    if (first is! Map) return '';
+    final delta = first['delta'];
+    if (delta is Map && delta['content'] != null) {
+      return '${delta['content']}';
+    }
+    final message = first['message'];
+    if (message is Map && message['content'] != null) {
+      return '${message['content']}';
+    }
+    return '';
+  }
+
+  static String _extractOpenAiMessageText(Object? decoded) {
+    if (decoded is! Map) return '';
+    final choices = decoded['choices'];
+    if (choices is! List || choices.isEmpty) return '';
+    final first = choices.first;
+    if (first is! Map) return '';
+    final message = first['message'];
+    if (message is Map && message['content'] != null) {
+      return '${message['content']}';
+    }
+    return '';
+  }
 
   /// الحصول على جلسة الدعم الفني المستقلة الخاصة بمنشأة معينة (`temperature: 0.2`).
   ChatSession supportSessionFor(String workspaceId) {
@@ -2304,6 +2747,8 @@ class DualPersonaAiEngine {
 
   void clearOwnerSession() {
     ownerSession.clear();
+    geminiDiwaniyaSession.clear();
+    grokDiwaniyaSession.clear();
   }
 
   void clearSupportSession(String workspaceId) {

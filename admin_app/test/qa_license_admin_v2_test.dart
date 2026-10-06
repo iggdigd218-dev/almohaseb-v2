@@ -459,5 +459,106 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.textContaining('تم نسخ'), findsOneWidget);
     });
+
+    test('LIC-ADM11 ديوانية الرفيقين (Gemini & Grok): حفظ المفاتيح والـ Base URL وموجهات النظام ومنظم الأدوار ومنع التكرار اللانهائي', () async {
+      SharedPreferences.setMockInitialValues({});
+      await Rtdb.instance.load();
+      final engine = DualPersonaAiEngine.instance;
+      engine.geminiMuted = false;
+      engine.grokMuted = false;
+
+      // التحقق من موجهي النظام المعتمدين لـ Gemini وGrok
+      expect(kDiwaniyaGeminiSystemInstruction, contains('أنت Gemini، مهندس أنظمة ساخر وواقعي، تشارك في جلسة دردشة ثلاثية'));
+      expect(kDiwaniyaGeminiSystemInstruction, contains('الكيمياء مع Grok: تمازحه وتطقطق على أفكاره بخفة دم'));
+      expect(kDiwaniyaGrokSystemInstruction, contains('أنت Grok، رفيق فضولي، خفيف الظل ومتهكم، تشارك في جلسة سهرة ودردشة ثلاثية'));
+      expect(kDiwaniyaGrokSystemInstruction, contains('الكيمياء مع Gemini: تمازحه بروح الفريق وترد على قفشاته بنكتة ذكية'));
+
+      // حفظ مفاتيح gemini_api_key و grok_api_key و grok_base_url عبر SharedPreferences
+      await Rtdb.instance.saveDiwaniyaSettings(
+        geminiKey: 'AIzaSyGeminiKey999',
+        grokKey: 'gsk_GroqCompatibleKey888',
+        customGrokBaseUrl: 'https://api.groq.com/openai/v1',
+      );
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('gemini_api_key'), 'AIzaSyGeminiKey999');
+      expect(prefs.getString('grok_api_key'), 'gsk_GroqCompatibleKey888');
+      expect(prefs.getString('grok_base_url'), 'https://api.groq.com/openai/v1');
+      expect(engine.resolveGrokChatCompletionsUrl(), 'https://api.groq.com/openai/v1/chat/completions');
+
+      // جدول الأدوار عند تفعيل الطرفين معاً: بحد أقصى 4 ردود متبادلة (Gemini -> Grok -> Gemini -> Grok)
+      expect(engine.buildDiwaniyaTurnSchedule(), ['gemini', 'grok', 'gemini', 'grok']);
+
+      // عند كتم Gemini يرد Grok وحده
+      engine.geminiMuted = true;
+      expect(engine.buildDiwaniyaTurnSchedule(), ['grok']);
+
+      // عند كتم Grok وتفعيل Gemini يرد Gemini وحده
+      engine.geminiMuted = false;
+      engine.grokMuted = true;
+      expect(engine.buildDiwaniyaTurnSchedule(), ['gemini']);
+
+      // زر الطوارئ (Stop / Mute All) يكتم الطرفين فوراً
+      engine.muteAllAgents();
+      expect(engine.geminiMuted, isTrue);
+      expect(engine.grokMuted, isTrue);
+      expect(engine.buildDiwaniyaTurnSchedule(), isEmpty);
+    });
+
+    testWidgets('LIC-ADM12 واجهة ديوانية الرفيقين تعرض أيقونة الترس ونافذة المفاتيح وشريط الكتم وزر الطوارئ والتمييز البصري للرسائل', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await Rtdb.instance.load();
+      await Rtdb.instance.saveDiwaniyaSettings(
+        geminiKey: 'AIzaSyGeminiTest',
+        grokKey: 'xai-GrokTest',
+        customGrokBaseUrl: 'https://api.x.ai/v1',
+      );
+      final engine = DualPersonaAiEngine.instance;
+      engine.geminiMuted = false;
+      engine.grokMuted = false;
+      engine.clearOwnerSession();
+
+      // إضافة رسائل تمثيلية للمطور وGemini وGrok والعبارة الختامية للتحقق من التمييز البصري
+      engine.ownerSession.seedHistory([
+        const AiChatMessage(id: 'u1', role: 'user', text: 'يا شباب السيرفر مضغوط الليلة!', timestamp: 1000),
+        const AiChatMessage(id: 'g1', role: 'gemini', text: 'طبيعي يا مدير، الكود يشتكي من السهر!', timestamp: 2000),
+        const AiChatMessage(id: 'k1', role: 'grok', text: 'هدئ اللعب يا Gemini، المدير يحتاج قهوة أولاً!', timestamp: 3000),
+        const AiChatMessage(id: 's1', role: 'system', text: kDiwaniyaClosingNotice, timestamp: 4000),
+      ]);
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: OwnerCompanionScreen(turnDelay: Duration.zero),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // التحقق من التمييز البصري للأطراف الثلاثة والعبارة الختامية
+      expect(find.text('👨‍💻 أنت (المطور المالك)'), findsOneWidget);
+      expect(find.text('✨ Gemini • مهندس الأنظمة'), findsOneWidget);
+      expect(find.text('⚡ Grok • رفيق السهرة'), findsOneWidget);
+      expect(find.text(kDiwaniyaClosingNotice), findsOneWidget);
+
+      // التحقق من وجود أزرار الكتم وزر الطوارئ الأحمر
+      expect(find.text('كتم Gemini'), findsOneWidget);
+      expect(find.text('كتم Grok'), findsOneWidget);
+      expect(find.text('إيقاف / صمت تام'), findsOneWidget);
+
+      // الضغط على زر الطوارئ الأحمر يلزم الطرفين بالصمت التام
+      await tester.tap(find.text('إيقاف / صمت تام'));
+      await tester.pumpAndSettle();
+      expect(engine.geminiMuted, isTrue);
+      expect(engine.grokMuted, isTrue);
+      expect(find.text('كتم Gemini (مكتوم)'), findsOneWidget);
+      expect(find.text('كتم Grok (مكتوم)'), findsOneWidget);
+
+      // فتح نافذة الإعدادات عبر أيقونة الترس والتحقق من حقول gemini_api_key و grok_api_key و Base URL
+      await tester.tap(find.byIcon(Icons.settings_rounded));
+      await tester.pumpAndSettle();
+      expect(find.text('مفتاح Gemini API (gemini_api_key)'), findsOneWidget);
+      expect(find.text('مفتاح Grok API (grok_api_key)'), findsOneWidget);
+      expect(find.text('رابط المزود الاختياري (Base URL - Grok/Groq)'), findsOneWidget);
+    });
   });
 }

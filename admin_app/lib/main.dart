@@ -274,20 +274,26 @@ class _ConfigDialogState extends State<_ConfigDialog> {
   late final _url = TextEditingController(text: Rtdb.instance.baseUrl);
   late final _geminiKey =
       TextEditingController(text: Rtdb.instance.geminiApiKey);
-  bool _obscureKey = true;
+  late final _grokKey = TextEditingController(text: Rtdb.instance.grokApiKey);
+  late final _grokBaseUrl =
+      TextEditingController(text: Rtdb.instance.grokBaseUrl);
+  bool _obscureGeminiKey = true;
+  bool _obscureGrokKey = true;
   bool _busy = false;
 
   @override
   void dispose() {
     _url.dispose();
     _geminiKey.dispose();
+    _grokKey.dispose();
+    _grokBaseUrl.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('⚙️ إعدادات النظام والذكاء الاصطناعي'),
+      title: const Text('⚙️ إعدادات النظام ومفاتيح الديوانية (Gemini & Grok)'),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -305,23 +311,26 @@ class _ConfigDialogState extends State<_ConfigDialog> {
             const SizedBox(height: 14),
             TextField(
               controller: _geminiKey,
-              obscureText: _obscureKey,
+              obscureText: _obscureGeminiKey,
               textDirection: TextDirection.ltr,
               decoration: InputDecoration(
                 labelText: 'مفتاح Gemini API (gemini_api_key)',
                 hintText: 'AIzaSy...',
-                helperText: 'يُحفظ محلياً في SharedPreferences لتشغيل النمطين',
-                prefixIcon: const Icon(Icons.vpn_key_outlined),
+                helperText: 'يُحفظ محلياً في SharedPreferences لتفعيل Gemini',
+                prefixIcon: const Icon(Icons.auto_awesome_rounded,
+                    color: Color(0xFF4F46E5)),
                 suffixIcon: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     IconButton(
-                      tooltip: _obscureKey ? 'إظهار المفتاح' : 'إخفاء المفتاح',
-                      icon: Icon(_obscureKey
+                      tooltip: _obscureGeminiKey
+                          ? 'إظهار المفتاح'
+                          : 'إخفاء المفتاح',
+                      icon: Icon(_obscureGeminiKey
                           ? Icons.visibility_outlined
                           : Icons.visibility_off_outlined),
-                      onPressed: () =>
-                          setState(() => _obscureKey = !_obscureKey),
+                      onPressed: () => setState(
+                          () => _obscureGeminiKey = !_obscureGeminiKey),
                     ),
                     IconButton(
                       tooltip: 'لصق من الحافظة',
@@ -339,6 +348,57 @@ class _ConfigDialogState extends State<_ConfigDialog> {
                 ),
               ),
             ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _grokKey,
+              obscureText: _obscureGrokKey,
+              textDirection: TextDirection.ltr,
+              decoration: InputDecoration(
+                labelText: 'مفتاح Grok API (grok_api_key)',
+                hintText: 'xai-... أو gsk_...',
+                helperText: 'يُحفظ محلياً في SharedPreferences لتفعيل Grok',
+                prefixIcon:
+                    const Icon(Icons.bolt_rounded, color: Color(0xFF7E22CE)),
+                suffixIcon: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip:
+                          _obscureGrokKey ? 'إظهار المفتاح' : 'إخفاء المفتاح',
+                      icon: Icon(_obscureGrokKey
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined),
+                      onPressed: () =>
+                          setState(() => _obscureGrokKey = !_obscureGrokKey),
+                    ),
+                    IconButton(
+                      tooltip: 'لصق من الحافظة',
+                      icon: const Icon(Icons.content_paste_rounded),
+                      onPressed: () async {
+                        final clip =
+                            await Clipboard.getData(Clipboard.kTextPlain);
+                        final txt = (clip?.text ?? '').trim();
+                        if (txt.isNotEmpty) {
+                          setState(() => _grokKey.text = txt);
+                        }
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _grokBaseUrl,
+              textDirection: TextDirection.ltr,
+              decoration: const InputDecoration(
+                labelText: 'رابط المزود الاختياري (Base URL - Grok/Groq)',
+                hintText: 'https://api.x.ai/v1 أو https://api.groq.com/openai/v1',
+                helperText:
+                    'اختياري: اتركه فارغاً للاستنتاج التلقائي (يدعم xAI وGroq API)',
+                prefixIcon: Icon(Icons.link_rounded),
+              ),
+            ),
           ],
         ),
       ),
@@ -354,7 +414,11 @@ class _ConfigDialogState extends State<_ConfigDialog> {
                   setState(() => _busy = true);
                   try {
                     await Rtdb.instance.save(_url.text);
-                    await Rtdb.instance.saveGeminiApiKey(_geminiKey.text);
+                    await Rtdb.instance.saveDiwaniyaSettings(
+                      geminiKey: _geminiKey.text,
+                      grokKey: _grokKey.text,
+                      customGrokBaseUrl: _grokBaseUrl.text,
+                    );
                     adminRefreshTick.value++;
                     if (mounted) nav.pop();
                   } finally {
@@ -3511,10 +3575,16 @@ class _AdminSupportChatDetailScreenState
   }
 }
 
-// ==================== النمط الأول: رفيق المالك الشخصي (Owner Mode) ====================
+// ==================== ديوانية الرفيقين (Multi-Agent Chat: Gemini & Grok) ====================
 
 class OwnerCompanionScreen extends StatefulWidget {
-  const OwnerCompanionScreen({super.key});
+  /// مدة التأخير الزمني بين رد كل طرف والآخر (1.2 ثانية افتراضياً لتبدو الدردشة طبيعية).
+  final Duration turnDelay;
+
+  const OwnerCompanionScreen({
+    super.key,
+    this.turnDelay = const Duration(milliseconds: 1200),
+  });
   @override
   State<OwnerCompanionScreen> createState() => _OwnerCompanionScreenState();
 }
@@ -3524,7 +3594,10 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
   final ScrollController _scrollCtrl = ScrollController();
   final List<AiChatMessage> _messages = [];
   bool _streaming = false;
+  bool _waitingNextTurn = false;
+  String _activeStreamingAgent = 'gemini'; // 'gemini' | 'grok'
   String _liveChunkBuffer = '';
+  int _orchestratorToken = 0;
 
   @override
   void initState() {
@@ -3535,6 +3608,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
 
   @override
   void dispose() {
+    _orchestratorToken++;
     adminRefreshTick.removeListener(_onRefreshTick);
     _inputCtrl.dispose();
     _scrollCtrl.dispose();
@@ -3557,13 +3631,45 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
     });
   }
 
+  Future<void> _openSettingsDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => const _ConfigDialog(),
+    );
+    if (mounted) setState(() {});
+  }
+
+  /// زر الطوارئ الأحمر (Stop / Mute All): يقطع فوراً البث الجاري وينهي دورة الحوار ويلزم الصمت التام.
+  void _emergencyStopAndMuteAll() {
+    _orchestratorToken++;
+    DualPersonaAiEngine.instance.muteAllAgents();
+    if (mounted) {
+      setState(() {
+        _streaming = false;
+        _waitingNextTurn = false;
+        _liveChunkBuffer = '';
+      });
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text(
+                '🛑 تم إيقاف البث فوراً وإلزام Gemini وGrok بالصمت التام.'),
+            backgroundColor: Color(0xFFDC2626),
+          ),
+        );
+    }
+  }
+
   Future<void> _sendMessage([AiChatMessage? retryMessage]) async {
-    if (_streaming) return;
     final String text =
         retryMessage != null ? retryMessage.text.trim() : _inputCtrl.text.trim();
     if (text.isEmpty) return;
 
-    final session = DualPersonaAiEngine.instance.ownerSession;
+    // أي رسالة جديدة من المطور تقطع فوراً أي دورة سابقة جارية وتبدأ دورة جديدة
+    final int myToken = ++_orchestratorToken;
+    final engine = DualPersonaAiEngine.instance;
+    final session = engine.ownerSession;
     late final AiChatMessage activeUserMsg;
 
     if (retryMessage != null) {
@@ -3579,6 +3685,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
           _messages.add(activeUserMsg);
         }
         _streaming = true;
+        _waitingNextTurn = false;
         _liveChunkBuffer = '';
       });
     } else {
@@ -3596,15 +3703,20 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
         // تفريغ حقل الإدخال النصي فوراً بعد إدراج الرسالة في القائمة
         _inputCtrl.clear();
         _streaming = true;
+        _waitingNextTurn = false;
         _liveChunkBuffer = '';
       });
     }
     _scrollToBottom();
 
-    final apiKey = DualPersonaAiEngine.instance.apiKey;
-    if (apiKey.isEmpty) {
-      const errMsg =
-          'يرجى إدخال مفتاح Gemini API (gemini_api_key) في شاشة الضبط لتفعيل رفيق المالك.';
+    final turnSchedule = engine.buildDiwaniyaTurnSchedule(
+      maxTotalReplies: kMaxDiwaniyaAutoReplies,
+    );
+
+    if (turnSchedule.isEmpty) {
+      final String errMsg = (!engine.hasApiKey && !engine.hasGrokApiKey)
+          ? 'يرجى إدخال مفتاح gemini_api_key أو grok_api_key عبر أيقونة الإعدادات (⚙️) لتفعيل الديوانية.'
+          : 'الرفيقان في وضع الكتم حالياً. قم بإلغاء كتم Gemini أو Grok من شريط التحكم أعلى المحادثة.';
       session.updateMessageState(activeUserMsg.id,
           hasError: true, errorText: errMsg);
       if (mounted) {
@@ -3615,63 +3727,136 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                 activeUserMsg.copyWith(hasError: true, errorText: errMsg);
           }
           _streaming = false;
+          _waitingNextTurn = false;
           _liveChunkBuffer = '';
         });
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text(errMsg)),
+          SnackBar(content: Text(errMsg)),
         );
       }
       return;
     }
 
-    final buf = StringBuffer();
+    int successfulTurns = 0;
+    Object? firstTurnError;
+
     try {
-      await for (final chunk in session.sendMessageStream(
-        text,
-        apiKey: apiKey,
-        existingMessageId: activeUserMsg.id,
-      )) {
-        buf.write(chunk);
+      for (int i = 0; i < turnSchedule.length; i++) {
+        if (!mounted || _orchestratorToken != myToken) break;
+        final agent = turnSchedule[i];
+
+        // التحقق الفوري من عدم كتم الطرف أثناء الحوار
+        if (agent == 'gemini' && !engine.isGeminiActiveInDiwaniya) continue;
+        if (agent == 'grok' && !engine.isGrokActiveInDiwaniya) continue;
+
+        // تأخير زمني بسيط (1 إلى 2 ثانية) بين رد كل طرف والآخر ليبدو الحوار طبيعياً وواقعياً
+        if (successfulTurns > 0 && widget.turnDelay > Duration.zero) {
+          if (mounted) {
+            setState(() {
+              _waitingNextTurn = true;
+              _activeStreamingAgent = agent;
+              _liveChunkBuffer = '';
+            });
+          }
+          await Future<void>.delayed(widget.turnDelay);
+          if (!mounted || _orchestratorToken != myToken) break;
+          if (agent == 'gemini' && !engine.isGeminiActiveInDiwaniya) continue;
+          if (agent == 'grok' && !engine.isGrokActiveInDiwaniya) continue;
+        }
+
         if (mounted) {
           setState(() {
-            _liveChunkBuffer = buf.toString();
+            _waitingNextTurn = false;
+            _activeStreamingAgent = agent;
+            _liveChunkBuffer = '';
           });
-          _scrollToBottom();
+        }
+
+        final buf = StringBuffer();
+        try {
+          final stream = agent == 'gemini'
+              ? engine.streamGeminiDiwaniyaReply(_messages)
+              : engine.streamGrokDiwaniyaReply(_messages);
+
+          await for (final chunk in stream) {
+            if (!mounted || _orchestratorToken != myToken) break;
+            buf.write(chunk);
+            setState(() {
+              _liveChunkBuffer = buf.toString();
+            });
+            _scrollToBottom();
+          }
+
+          if (!mounted || _orchestratorToken != myToken) break;
+
+          final finalReply = buf.toString().trim();
+          if (finalReply.isNotEmpty) {
+            final replyNow = DateTime.now().millisecondsSinceEpoch;
+            final replyMsg = AiChatMessage(
+              id: '${agent}_${replyNow}_$i',
+              role: agent,
+              text: finalReply,
+              timestamp: replyNow,
+            );
+            session.addOptimisticMessage(replyMsg);
+            setState(() {
+              _messages.add(replyMsg);
+              _liveChunkBuffer = '';
+            });
+            successfulTurns++;
+            _scrollToBottom();
+          }
+        } catch (turnErr) {
+          if (successfulTurns == 0) {
+            firstTurnError = turnErr;
+            break;
+          }
         }
       }
 
-      // بعد اكتمال البث بنجاح، نزامن رد النموذج المضاف في الجلسة إلى القائمة المعروضة
-      if (mounted) {
-        setState(() {
-          _messages
-            ..clear()
-            ..addAll(session.history);
-        });
-      }
-    } catch (e) {
-      // 2. معالجة الفشل دون فقدان البيانات: إبقاء رسالة المستخدم مع مؤشر "تعذر الإرسال" وزر "إعادة المحاولة"
-      session.updateMessageState(activeUserMsg.id,
-          hasError: true, errorText: '$e');
-      if (mounted) {
+      if (!mounted || _orchestratorToken != myToken) return;
+
+      if (successfulTurns == 0) {
+        final errStr =
+            '${firstTurnError ?? 'تعذر الحصول على رد من خدمة الذكاء الاصطناعي.'}';
+        session.updateMessageState(activeUserMsg.id,
+            hasError: true, errorText: errStr);
         setState(() {
           final idx = _messages.indexWhere((m) => m.id == activeUserMsg.id);
           if (idx >= 0) {
             _messages[idx] =
-                activeUserMsg.copyWith(hasError: true, errorText: '$e');
+                activeUserMsg.copyWith(hasError: true, errorText: errStr);
           } else {
             _messages.add(
-              activeUserMsg.copyWith(hasError: true, errorText: '$e'),
+              activeUserMsg.copyWith(hasError: true, errorText: errStr),
             );
           }
         });
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$e'), backgroundColor: Colors.red),
+          SnackBar(content: Text(errStr), backgroundColor: Colors.red),
         );
+        return;
+      }
+
+      // إذا اكتملت دورة النقاش الثنائية (3 إلى 4 ردود)، يتوقفان تلقائياً وتوضع عبارة ختامية لطيفة
+      if (successfulTurns >= 3) {
+        final sysNow = DateTime.now().millisecondsSinceEpoch;
+        final closingMsg = AiChatMessage(
+          id: 'sys_$sysNow',
+          role: 'system',
+          text: kDiwaniyaClosingNotice,
+          timestamp: sysNow,
+        );
+        session.addOptimisticMessage(closingMsg);
+        setState(() {
+          _messages.add(closingMsg);
+        });
       }
     } finally {
-      if (mounted) {
+      if (mounted && _orchestratorToken == myToken) {
         setState(() {
           _streaming = false;
+          _waitingNextTurn = false;
           _liveChunkBuffer = '';
         });
         _scrollToBottom();
@@ -3680,27 +3865,32 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
   }
 
   void _clearSession() {
+    _orchestratorToken++;
     DualPersonaAiEngine.instance.clearOwnerSession();
     setState(() {
       _messages.clear();
+      _streaming = false;
+      _waitingNextTurn = false;
       _liveChunkBuffer = '';
     });
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('تم تفريغ جلسة رفيق المالك بالكامل ✓')),
+      const SnackBar(content: Text('تم تفريغ جلسة ديوانية الرفيقين بالكامل ✓')),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final hasKey = DualPersonaAiEngine.instance.hasApiKey;
+    final engine = DualPersonaAiEngine.instance;
+    final hasGeminiKey = engine.hasApiKey;
+    final hasGrokKey = engine.hasGrokApiKey;
     final history = _messages;
 
     return Column(
       children: [
-        // شريط علوي خاص بـ: رفيق المالك الشخصي (temperature: 0.9) + زر تفريغ الجلسة
+        // 1) الشريط العلوي: عنوان الديوانية + أيقونة الترس (Dialog المفاتيح) + تفريغ الجلسة
         Container(
-          margin: const EdgeInsets.fromLTRB(12, 12, 12, 6),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          margin: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(14),
@@ -3714,7 +3904,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                   color: const Color(0xFF0284C7).withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: const Icon(Icons.psychology_alt_rounded,
+                child: const Icon(Icons.groups_3_rounded,
                     color: Color(0xFF0284C7), size: 22),
               ),
               const SizedBox(width: 10),
@@ -3725,14 +3915,20 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                     Text(
                       'رفيق المالك الشخصي (Owner Mode)',
                       style:
-                          TextStyle(fontWeight: FontWeight.w900, fontSize: 13.5),
+                          TextStyle(fontWeight: FontWeight.w900, fontSize: 13),
                     ),
                     Text(
-                      'محادثة خاصة مفتوحة بلا قيود • ساخر وذكي (temperature: 0.9)',
+                      'ديوانية الرفيقين الثلاثية: المطور • ✨ Gemini • ⚡ Grok',
                       style: TextStyle(fontSize: 11, color: Colors.black54),
                     ),
                   ],
                 ),
+              ),
+              IconButton(
+                tooltip: 'إعدادات مفاتيح الديوانية (gemini_api_key & grok_api_key)',
+                icon: const Icon(Icons.settings_rounded,
+                    color: Color(0xFF334155)),
+                onPressed: _openSettingsDialog,
               ),
               OutlinedButton.icon(
                 style: OutlinedButton.styleFrom(
@@ -3744,51 +3940,160 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                 icon: const Icon(Icons.delete_sweep_outlined, size: 16),
                 label: const Text('تفريغ الجلسة',
                     style:
-                        TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
+                        TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
               ),
             ],
           ),
         ),
 
-        if (!hasKey)
+        // 2) شريط أدوات التحكم الفوري والإسكات (Agent Controls: Mute Gemini, Mute Grok, Emergency Stop)
+        Container(
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF8FAFC),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+          ),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              // مفتاح كتم/تفعيل Gemini
+              FilterChip(
+                selected: !engine.geminiMuted && hasGeminiKey,
+                onSelected: hasGeminiKey
+                    ? (_) {
+                        setState(() {
+                          engine.geminiMuted = !engine.geminiMuted;
+                        });
+                      }
+                    : null,
+                avatar: Icon(
+                  engine.geminiMuted || !hasGeminiKey
+                      ? Icons.volume_off_rounded
+                      : Icons.auto_awesome_rounded,
+                  size: 16,
+                  color: engine.geminiMuted || !hasGeminiKey
+                      ? Colors.grey
+                      : const Color(0xFF4F46E5),
+                ),
+                label: Text(
+                  !hasGeminiKey
+                      ? 'Gemini (بدون مفتاح)'
+                      : (engine.geminiMuted ? 'كتم Gemini (مكتوم)' : 'كتم Gemini'),
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: engine.geminiMuted || !hasGeminiKey
+                        ? Colors.black54
+                        : const Color(0xFF312E81),
+                  ),
+                ),
+                selectedColor: const Color(0xFFEEF2FF),
+                checkmarkColor: const Color(0xFF4F46E5),
+              ),
+
+              // مفتاح كتم/تفعيل Grok
+              FilterChip(
+                selected: !engine.grokMuted && hasGrokKey,
+                onSelected: hasGrokKey
+                    ? (_) {
+                        setState(() {
+                          engine.grokMuted = !engine.grokMuted;
+                        });
+                      }
+                    : null,
+                avatar: Icon(
+                  engine.grokMuted || !hasGrokKey
+                      ? Icons.volume_off_rounded
+                      : Icons.bolt_rounded,
+                  size: 16,
+                  color: engine.grokMuted || !hasGrokKey
+                      ? Colors.grey
+                      : const Color(0xFF7E22CE),
+                ),
+                label: Text(
+                  !hasGrokKey
+                      ? 'Grok (بدون مفتاح)'
+                      : (engine.grokMuted ? 'كتم Grok (مكتوم)' : 'كتم Grok'),
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: engine.grokMuted || !hasGrokKey
+                        ? Colors.black54
+                        : const Color(0xFF581C87),
+                  ),
+                ),
+                selectedColor: const Color(0xFFFAF5FF),
+                checkmarkColor: const Color(0xFF7E22CE),
+              ),
+
+              // زر طوارئ أحمر واضح (Stop / Mute All)
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFFDC2626),
+                  foregroundColor: Colors.white,
+                  visualDensity: VisualDensity.compact,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                ),
+                onPressed: _emergencyStopAndMuteAll,
+                icon: const Icon(Icons.stop_circle_outlined, size: 16),
+                label: const Text(
+                  'إيقاف / صمت تام',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900),
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // 3) تنبيه لطيف غير معطل للتطبيق عند غياب أحد المفتاحين أو كليهما
+        if (!hasGeminiKey || !hasGrokKey)
           Container(
             margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            padding: const EdgeInsets.all(14),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
             decoration: BoxDecoration(
               color: const Color(0xFFFEF3C7),
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(12),
               border: Border.all(color: const Color(0xFFF59E0B)),
             ),
             child: Row(
               children: [
-                const Icon(Icons.vpn_key_off_rounded, color: Color(0xFFD97706)),
-                const SizedBox(width: 10),
-                const Expanded(
+                const Icon(Icons.vpn_key_off_rounded,
+                    color: Color(0xFFD97706), size: 20),
+                const SizedBox(width: 8),
+                Expanded(
                   child: Text(
-                    'مفتاح Gemini API (gemini_api_key) غير موجود. أدخل المفتاح في شاشة الضبط لتفعيل رفيق المالك الشخصي.',
-                    style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        color: Color(0xFF92400E)),
+                    (!hasGeminiKey && !hasGrokKey)
+                        ? 'مفاتيح (gemini_api_key و grok_api_key) غير مضافة بعد — تم تعطيل الطرفين مؤقتاً لحين إدخال المفاتيح.'
+                        : (!hasGeminiKey
+                            ? 'مفتاح gemini_api_key غير مضاف (تم تعطيل Gemini تلقائياً، وGrok جاهز للرد).'
+                            : 'مفتاح grok_api_key غير مضاف (تم تعطيل Grok تلقائياً، وGemini جاهز للرد).'),
+                    style: const TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF92400E),
+                    ),
                   ),
                 ),
+                const SizedBox(width: 6),
                 FilledButton(
                   style: FilledButton.styleFrom(
                     backgroundColor: const Color(0xFFD97706),
+                    visualDensity: VisualDensity.compact,
                   ),
-                  onPressed: () async {
-                    await showDialog<void>(
-                      context: context,
-                      builder: (_) => const _ConfigDialog(),
-                    );
-                    if (mounted) setState(() {});
-                  },
-                  child: const Text('إدخال المفتاح'),
+                  onPressed: _openSettingsDialog,
+                  child: const Text('إدخال المفتاح',
+                      style: TextStyle(fontSize: 11.5)),
                 ),
               ],
             ),
           ),
 
+        // 4) قائمة الرسائل المميزة بصرياً (المطور / Gemini / Grok / رسالة التوقف التلقائي)
         Expanded(
           child: (history.isEmpty && !_streaming)
               ? Center(
@@ -3798,18 +4103,20 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(Icons.nights_stay_rounded,
-                            size: 48, color: Colors.blueGrey.shade300),
+                            size: 46, color: Colors.blueGrey.shade300),
                         const SizedBox(height: 10),
                         const Text(
-                          'مساحتك الخاصة يا مدير! ☕🎬🌌',
+                          'ديوانية الرفيقين: سهرتك مع Gemini وGrok! ☕✨⚡',
+                          textAlign: TextAlign.center,
                           style: TextStyle(
-                              fontWeight: FontWeight.w800, fontSize: 15),
+                              fontWeight: FontWeight.w800, fontSize: 14.5),
                         ),
                         const SizedBox(height: 6),
                         const Text(
-                          'تحدث في أي موضوع يخطر ببالك: أفلام، مسلسلات، ألعاب، فلسفة، فضاء، أو حتى فضفضة عن ضغوط العمل والمشتركين.',
+                          'أرسل رسالتك ليرد عليك Gemini بسخريته اللاذعة ويعقب عليه Grok بمرحه العفوي (حتى 4 ردود متبادلة ثم ينتظران مداخلتك).',
                           textAlign: TextAlign.center,
-                          style: TextStyle(fontSize: 12.5, color: Colors.black54),
+                          style:
+                              TextStyle(fontSize: 12, color: Colors.black54),
                         ),
                       ],
                     ),
@@ -3819,9 +4126,26 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                   controller: _scrollCtrl,
                   padding: const EdgeInsets.all(14),
                   itemCount: history.length +
-                      (_streaming && _liveChunkBuffer.isNotEmpty ? 1 : 0),
+                      (_streaming &&
+                              (_liveChunkBuffer.isNotEmpty || _waitingNextTurn)
+                          ? 1
+                          : 0),
                   itemBuilder: (ctx, idx) {
                     if (idx == history.length) {
+                      final isGrokTurn = _activeStreamingAgent == 'grok';
+                      final accentColor = isGrokTurn
+                          ? const Color(0xFF7E22CE)
+                          : const Color(0xFF4F46E5);
+                      final bgColor = isGrokTurn
+                          ? const Color(0xFFFAF5FF)
+                          : const Color(0xFFEEF2FF);
+                      final label = isGrokTurn
+                          ? (_waitingNextTurn
+                              ? '⚡ Grok يستعد للتعقيب...'
+                              : '⚡ Grok يكتب الآن...')
+                          : (_waitingNextTurn
+                              ? '✨ Gemini يستعد للرد...'
+                              : '✨ Gemini يكتب الآن...');
                       return Align(
                         alignment: Alignment.centerLeft,
                         child: Container(
@@ -3833,22 +4157,92 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                                 MediaQuery.of(context).size.width * 0.82,
                           ),
                           decoration: BoxDecoration(
-                            color: Colors.white,
+                            color: bgColor,
                             borderRadius: BorderRadius.circular(14),
-                            border:
-                                Border.all(color: const Color(0xFF0284C7)),
+                            border: Border.all(color: accentColor, width: 1.2),
                           ),
-                          child: Text(
-                            _liveChunkBuffer,
-                            style: const TextStyle(
-                                fontSize: 13.5, color: Color(0xFF0F172A)),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                label,
+                                style: TextStyle(
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w900,
+                                  color: accentColor,
+                                ),
+                              ),
+                              if (_liveChunkBuffer.isNotEmpty) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  _liveChunkBuffer,
+                                  style: const TextStyle(
+                                      fontSize: 13.5,
+                                      color: Color(0xFF0F172A)),
+                                ),
+                              ],
+                            ],
                           ),
                         ),
                       );
                     }
 
                     final m = history[idx];
-                    final isUser = m.role == 'user';
+
+                    // عبارة ختامية لطيفة بانتظار عودة المطور بعد 3-4 ردود
+                    if (m.isSystem) {
+                      return Center(
+                        child: Container(
+                          margin: const EdgeInsets.symmetric(vertical: 8),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 7),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFEF3C7),
+                            borderRadius: BorderRadius.circular(20),
+                            border:
+                                Border.all(color: const Color(0xFFF59E0B)),
+                          ),
+                          child: Text(
+                            m.text,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w800,
+                              color: Color(0xFF92400E),
+                            ),
+                          ),
+                        ),
+                      );
+                    }
+
+                    final isUser = m.isUser;
+                    final isGrok = m.isGrok;
+                    final Color bubbleBg = isUser
+                        ? const Color(0xFF0284C7)
+                        : (isGrok
+                            ? const Color(0xFFFAF5FF)
+                            : const Color(0xFFEEF2FF));
+                    final Color borderCol = isUser
+                        ? const Color(0xFF0284C7)
+                        : (isGrok
+                            ? const Color(0xFF9333EA)
+                            : const Color(0xFF6366F1));
+                    final Color headerColor = isUser
+                        ? Colors.white70
+                        : (isGrok
+                            ? const Color(0xFF6B21A8)
+                            : const Color(0xFF3730A3));
+                    final IconData senderIcon = isUser
+                        ? Icons.person_rounded
+                        : (isGrok
+                            ? Icons.bolt_rounded
+                            : Icons.auto_awesome_rounded);
+                    final String senderLabel = isUser
+                        ? '👨‍💻 أنت (المطور المالك)'
+                        : (isGrok
+                            ? '⚡ Grok • رفيق السهرة'
+                            : '✨ Gemini • مهندس الأنظمة');
+
                     return Align(
                       alignment:
                           isUser ? Alignment.centerRight : Alignment.centerLeft,
@@ -3869,19 +4263,16 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                                     MediaQuery.of(context).size.width * 0.82,
                               ),
                               decoration: BoxDecoration(
-                                color: isUser
-                                    ? const Color(0xFF0284C7)
-                                    : Colors.white,
+                                color: bubbleBg,
                                 borderRadius: BorderRadius.circular(14),
                                 border: m.hasError
                                     ? Border.all(
                                         color: const Color(0xFFDC2626),
-                                        width: 1.5,
+                                        width: 1.6,
                                       )
                                     : (isUser
                                         ? null
-                                        : Border.all(
-                                            color: const Color(0xFFE2E8F0))),
+                                        : Border.all(color: borderCol)),
                               ),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -3889,14 +4280,18 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                                   Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
+                                      Icon(
+                                        senderIcon,
+                                        size: 13,
+                                        color: headerColor,
+                                      ),
+                                      const SizedBox(width: 4),
                                       Text(
-                                        isUser ? 'أنت (المدير)' : 'رفيق المالك',
+                                        senderLabel,
                                         style: TextStyle(
                                           fontSize: 10.5,
-                                          fontWeight: FontWeight.w800,
-                                          color: isUser
-                                              ? Colors.white70
-                                              : const Color(0xFF64748B),
+                                          fontWeight: FontWeight.w900,
+                                          color: headerColor,
                                         ),
                                       ),
                                       const SizedBox(width: 6),
@@ -3981,7 +4376,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                 ),
         ),
 
-        // مجال كتابة مرن متعدد الأسطر مع بث حي
+        // 5) مجال كتابة مرن متعدد الأسطر مع بث حي
         SafeArea(
           top: false,
           child: Container(
@@ -4001,7 +4396,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                     textInputAction: TextInputAction.newline,
                     decoration: const InputDecoration(
                       hintText:
-                          'اكتب ما يخطر ببالك لرفيقك الساخر (أفلام، فلسفة، فضفضة...)...',
+                          'اكتب رسالتك لـ Gemini وGrok في الديوانية...',
                       isDense: true,
                     ),
                   ),
@@ -4011,7 +4406,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                   style: IconButton.styleFrom(
                     backgroundColor: const Color(0xFF0284C7),
                   ),
-                  onPressed: _streaming ? null : () => _sendMessage(),
+                  onPressed: () => _sendMessage(),
                   icon: _streaming
                       ? const SizedBox(
                           width: 18,
