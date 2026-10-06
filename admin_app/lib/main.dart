@@ -86,15 +86,17 @@ String fmtDate(int ms, {bool lifetime = false}) {
 
 Future<void> copyText(BuildContext context, String label, String value) async {
   if (value.isEmpty) return;
-  await Clipboard.setData(ClipboardData(text: value));
+  unawaited(Clipboard.setData(ClipboardData(text: value)));
   if (!context.mounted) return;
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(
-      content: Text('تم نسخ $label ✓ ($value)'),
-      duration: const Duration(milliseconds: 1400),
-      behavior: SnackBarBehavior.floating,
-    ),
-  );
+  ScaffoldMessenger.of(context)
+    ..hideCurrentSnackBar()
+    ..showSnackBar(
+      SnackBar(
+        content: Text('تم نسخ $label ✓ ($value)'),
+        duration: const Duration(milliseconds: 1400),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
 }
 
 Future<void> callPhone(BuildContext context, String rawPhone) async {
