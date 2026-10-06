@@ -75,9 +75,9 @@ void main() {
 
   // ===================== الثيم =====================
   test('BRD-01 الثيم: أزرق ملكي + رمادي ثلجي + زوايا 16px', () {
-    expect(AppColors.primary, const Color(0xFF0D6EFD));
-    expect(AppColors.primary2, const Color(0xFF0066FF));
-    expect(AppColors.bg, const Color(0xFFF4F6F9));
+    expect(AppColors.primary, const Color(0xFF0284C7));
+    expect(AppColors.primary2, const Color(0xFF0F766E));
+    expect(AppColors.bg, const Color(0xFFF1F5F9));
     expect(AppColors.surface, const Color(0xFFFFFFFF));
     // الأخضر الزمردي للأسعار وحالة التوفر.
     expect(AppColors.green, const Color(0xFF16A34A));
@@ -94,9 +94,9 @@ void main() {
     final card = theme.cardTheme;
     final shape = card.shape! as RoundedRectangleBorder;
     expect(shape.borderRadius.resolve(TextDirection.rtl).topLeft.x, 16);
-    expect(card.elevation, greaterThan(0));
-    // لا حدّ سميك: الحواف شفافة (الظل هو الفاصل البصري).
-    expect(shape.side, BorderSide.none);
+    expect(card.elevation, 0);
+    // إطار شبكي نحيف 1px بهوية ERP العالمية.
+    expect(shape.side.width, 1);
     // الحقول والبطاقات بنفس الانحناء.
     final input = theme.inputDecorationTheme.border! as OutlineInputBorder;
     expect(input.borderRadius.resolve(TextDirection.rtl).topLeft.x, 16);

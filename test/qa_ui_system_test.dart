@@ -152,8 +152,8 @@ void main() {
 
   // ============ الثيم ============
   test('THM-01 رموز التصميم: الألوان والزوايا والظلال', () {
-    expect(AppColors.primary, const Color(0xFF0D6EFD));
-    expect(AppColors.bg, const Color(0xFFF4F6F9));
+    expect(AppColors.primary, const Color(0xFF0284C7));
+    expect(AppColors.bg, const Color(0xFFF1F5F9));
     expect(AppColors.surface, const Color(0xFFFFFFFF));
     expect(AppColors.green, const Color(0xFF16A34A));
     expect(AppRadius.card, 16);
@@ -164,8 +164,8 @@ void main() {
     final card = theme.cardTheme;
     final shape = card.shape! as RoundedRectangleBorder;
     expect(shape.borderRadius.resolve(TextDirection.rtl).topLeft.x, 16);
-    expect(shape.side, BorderSide.none); // لا حدود سميكة
-    expect(card.elevation, greaterThan(0)); // ظل ناعم بدلاً منها
+    expect(shape.side.width, 1); // إطار شبكي نحيف 1px ERP
+    expect(card.elevation, 0);
 
     // التبويب النشط: كبسولة لونية هادئة.
     final nav = theme.navigationBarTheme;
