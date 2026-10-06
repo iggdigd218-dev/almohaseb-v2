@@ -1,7 +1,7 @@
 name: license_admin
 description: "تطبيق المدير المستقل لتفعيل تراخيص Nexora — يثبت على هاتف مالك النظام فقط."
 publish_to: 'none'
-version: 1.6.2+35
+version: 1.6.3+36
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -25,5 +25,5 @@ flutter:
 flutter_launcher_icons:
   android: true
   ios: false
-  adaptive_icon_background: "#0F172A"
+  adaptive_icon_background: "#4C1D95"
   adaptive_icon_foreground: "assets/icons/admin_foreground.png"
