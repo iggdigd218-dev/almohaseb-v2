@@ -223,6 +223,7 @@ class _HomeScreenState extends State<HomeScreen> {
           SubscribersScreen(),
           VouchersScreen(),
           SupportInboxScreen(),
+          OwnerCompanionScreen(),
           SystemControlScreen(),
         ],
       ),
@@ -247,6 +248,10 @@ class _HomeScreenState extends State<HomeScreen> {
               selectedIcon: Icon(Icons.headset_mic),
               label: 'الدعم الفني'),
           NavigationDestination(
+              icon: Icon(Icons.psychology_alt_outlined),
+              selectedIcon: Icon(Icons.psychology_alt),
+              label: 'رفيق المالك'),
+          NavigationDestination(
               icon: Icon(Icons.tune_outlined),
               selectedIcon: Icon(Icons.tune),
               label: 'مركز التحكم'),
@@ -256,7 +261,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-// ==================== إعدادات الاتصال ====================
+// ==================== إعدادات الاتصال ومفتاح الذكاء الاصطناعي ====================
 
 class _ConfigDialog extends StatefulWidget {
   const _ConfigDialog();
@@ -266,21 +271,26 @@ class _ConfigDialog extends StatefulWidget {
 
 class _ConfigDialogState extends State<_ConfigDialog> {
   late final _url = TextEditingController(text: Rtdb.instance.baseUrl);
+  late final _geminiKey =
+      TextEditingController(text: Rtdb.instance.geminiApiKey);
+  bool _obscureKey = true;
   bool _busy = false;
 
   @override
   void dispose() {
     _url.dispose();
+    _geminiKey.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('⚙️ رابط قاعدة البيانات'),
+      title: const Text('⚙️ إعدادات النظام والذكاء الاصطناعي'),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             TextField(
               controller: _url,
@@ -288,6 +298,44 @@ class _ConfigDialogState extends State<_ConfigDialog> {
               decoration: const InputDecoration(
                 labelText: 'رابط Firebase RTDB',
                 hintText: kOfficialRtdbUrl,
+                prefixIcon: Icon(Icons.cloud_outlined),
+              ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _geminiKey,
+              obscureText: _obscureKey,
+              textDirection: TextDirection.ltr,
+              decoration: InputDecoration(
+                labelText: 'مفتاح Gemini API (gemini_api_key)',
+                hintText: 'AIzaSy...',
+                helperText: 'يُحفظ محلياً في SharedPreferences لتشغيل النمطين',
+                prefixIcon: const Icon(Icons.vpn_key_outlined),
+                suffixIcon: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: _obscureKey ? 'إظهار المفتاح' : 'إخفاء المفتاح',
+                      icon: Icon(_obscureKey
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined),
+                      onPressed: () =>
+                          setState(() => _obscureKey = !_obscureKey),
+                    ),
+                    IconButton(
+                      tooltip: 'لصق من الحافظة',
+                      icon: const Icon(Icons.content_paste_rounded),
+                      onPressed: () async {
+                        final clip =
+                            await Clipboard.getData(Clipboard.kTextPlain);
+                        final txt = (clip?.text ?? '').trim();
+                        if (txt.isNotEmpty) {
+                          setState(() => _geminiKey.text = txt);
+                        }
+                      },
+                    ),
+                  ],
+                ),
               ),
             ),
           ],
@@ -305,12 +353,14 @@ class _ConfigDialogState extends State<_ConfigDialog> {
                   setState(() => _busy = true);
                   try {
                     await Rtdb.instance.save(_url.text);
+                    await Rtdb.instance.saveGeminiApiKey(_geminiKey.text);
+                    adminRefreshTick.value++;
                     if (mounted) nav.pop();
                   } finally {
                     if (mounted) setState(() => _busy = false);
                   }
                 },
-          child: const Text('حفظ'),
+          child: const Text('حفظ الإعدادات'),
         ),
       ],
     );
@@ -1869,6 +1919,30 @@ class SubscriberCard extends StatelessWidget {
                   _showBillingHistoryDialog(context);
                 },
               ),
+              ListTile(
+                leading: const Icon(Icons.delete_forever_rounded, color: Colors.red),
+                title: const Text('حذف المشترك والترخيص فوراً وبشكل نهائي',
+                    style: TextStyle(color: Colors.red, fontWeight: FontWeight.w800)),
+                subtitle: const Text('حذف فوري ومباشر من السحابة بدون سلة محذوفات'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  try {
+                    await Rtdb.instance.deleteSubscriberImmediately(entry.workspaceId);
+                    onRefresh?.call();
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('تم حذف المشترك نهائياً وبشكل مباشر ✓')),
+                      );
+                    }
+                  } catch (e) {
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('$e'), backgroundColor: Colors.red),
+                      );
+                    }
+                  }
+                },
+              ),
             ],
           ),
         ),
@@ -2368,7 +2442,7 @@ class _VouchersScreenState extends State<VouchersScreen> {
   }
 }
 
-// ==================== صندوق وارد الدعم الفني (Support Inbox) ====================
+// ==================== صندوق وارد الدعم الفني (Support Inbox — Client Support Mode) ====================
 
 class SupportInboxScreen extends StatefulWidget {
   const SupportInboxScreen({super.key});
@@ -2379,107 +2453,396 @@ class SupportInboxScreen extends StatefulWidget {
 class _SupportInboxScreenState extends State<SupportInboxScreen> {
   late Future<List<Map<String, dynamic>>> _future =
       Rtdb.instance.getSupportConversations();
+  bool _autoReplyingBatch = false;
+
+  @override
+  void initState() {
+    super.initState();
+    adminRefreshTick.addListener(_onTick);
+  }
+
+  @override
+  void dispose() {
+    adminRefreshTick.removeListener(_onTick);
+    super.dispose();
+  }
+
+  void _onTick() {
+    if (mounted) _refresh();
+  }
 
   Future<void> _refresh() async {
     setState(() => _future = Rtdb.instance.getSupportConversations());
   }
 
+  Future<void> _runAutoSupportForPending(
+      List<Map<String, dynamic>> list) async {
+    if (_autoReplyingBatch) return;
+    final apiKey = DualPersonaAiEngine.instance.apiKey;
+    if (apiKey.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'يرجى إدخال مفتاح Gemini API (gemini_api_key) في الضبط لتفعيل الرد التلقائي.'),
+          ),
+        );
+      }
+      return;
+    }
+
+    final pending = list
+        .where((c) =>
+            c['lastSender'] == 'client' &&
+            c['awaitingOwnerReply'] != true &&
+            '${c['lastMessage'] ?? ''}'.trim().isNotEmpty)
+        .toList();
+    if (pending.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('لا توجد رسائل عملاء معلقة تحتاج إلى رد تلقائي حالياً.')),
+        );
+      }
+      return;
+    }
+
+    setState(() => _autoReplyingBatch = true);
+    int repliedCount = 0;
+    try {
+      for (final c in pending) {
+        final wsId = '${c['workspaceId']}';
+        final lastMsg = '${c['lastMessage']}';
+        final session = DualPersonaAiEngine.instance.supportSessionFor(wsId);
+        final reply = await session.sendMessage(lastMsg, apiKey: apiKey);
+        if (reply.isNotEmpty) {
+          await Rtdb.instance.sendSupportReply(
+            wsId,
+            reply,
+            isAutoSupport: true,
+          );
+          repliedCount++;
+        }
+      }
+      await _refresh();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content:
+                  Text('تم الرد البشري التلقائي على $repliedCount محادثة ✓')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _autoReplyingBatch = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final hasKey = DualPersonaAiEngine.instance.hasApiKey;
+    final autoEnabled = Rtdb.instance.autoSupportEnabled;
+
     return Scaffold(
       body: RefreshIndicator(
         onRefresh: _refresh,
         child: FutureBuilder<List<Map<String, dynamic>>>(
           future: _future,
           builder: (context, snap) {
-            if (snap.connectionState == ConnectionState.waiting) {
-              return const Center(child: CircularProgressIndicator());
-            }
             final list = snap.data ?? [];
-            if (list.isEmpty) {
-              return const Center(
-                child: Text('لا توجد محادثات دعم فني واردة بعد'),
-              );
-            }
-            return ListView.separated(
-              padding: const EdgeInsets.all(12),
-              itemCount: list.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 8),
-              itemBuilder: (ctx, i) {
-                final c = list[i];
-                final unread = c['unreadByAdmin'] == true;
-                return Card(
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
+            return Column(
+              children: [
+                // شريط حالة النمط الثاني: الدعم الفني للمستخدمين (temperature: 0.2)
+                Container(
+                  margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
                     borderRadius: BorderRadius.circular(14),
-                    side: BorderSide(
-                      color: unread
-                          ? const Color(0xFF7C3AED)
-                          : Colors.grey.shade300,
-                      width: unread ? 1.5 : 1,
-                    ),
+                    border: Border.all(color: const Color(0xFFE2E8F0)),
                   ),
-                  child: ListTile(
-                    leading: CircleAvatar(
-                      backgroundColor: unread
-                          ? const Color(0xFF7C3AED)
-                          : const Color(0xFFE2E8F0),
-                      child: Icon(
-                        Icons.storefront_outlined,
-                        color: unread ? Colors.white : Colors.black54,
-                      ),
-                    ),
-                    title: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            '${c['storeName']}',
-                            style: TextStyle(
-                              fontWeight:
-                                  unread ? FontWeight.w900 : FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                        if (unread)
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
                           Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 2),
+                            padding: const EdgeInsets.all(8),
                             decoration: BoxDecoration(
-                              color: const Color(0xFFDC2626),
+                              color: const Color(0xFF0284C7)
+                                  .withValues(alpha: 0.12),
                               borderRadius: BorderRadius.circular(10),
                             ),
-                            child: const Text('جديد',
-                                style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w800)),
+                            child: const Icon(Icons.support_agent_rounded,
+                                color: Color(0xFF0284C7), size: 20),
                           ),
-                      ],
-                    ),
-                    subtitle: Text(
-                      '${c['clientName'].toString().isNotEmpty ? c['clientName'] : 'عميل'} • ${c['phone'].toString().isNotEmpty ? c['phone'] : 'بلا هاتف'}\n${c['lastMessage']}',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                    trailing: const Icon(Icons.chevron_left),
-                    onTap: () async {
-                      await Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => AdminSupportChatDetailScreen(
-                            workspaceId: c['workspaceId'] as String,
-                            storeName: c['storeName'] as String,
-                            clientName: (c['clientName'] ?? '') as String,
-                            phone: c['phone'] as String,
+                          const SizedBox(width: 10),
+                          const Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'نمط الدعم الفني للمستخدمين (Client Support Mode)',
+                                  style: TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      fontSize: 13),
+                                ),
+                                Text(
+                                  'موظف دعم بشري هادئ ومتفهم (temperature: 0.2) مع قاعدة التصعيد الإلزامية',
+                                  style: TextStyle(
+                                      fontSize: 11, color: Colors.black54),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Switch(
+                            value: autoEnabled,
+                            onChanged: (v) async {
+                              await Rtdb.instance.saveAutoSupportEnabled(v);
+                              if (mounted) setState(() {});
+                            },
+                          ),
+                        ],
+                      ),
+                      if (!hasKey) ...[
+                        const SizedBox(height: 8),
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFEF3C7),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: const Color(0xFFF59E0B)),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.key_off_rounded,
+                                  color: Color(0xFFD97706), size: 18),
+                              const SizedBox(width: 8),
+                              const Expanded(
+                                child: Text(
+                                  'مفتاح Gemini API غير مُدخل. يرجى إدخال المفتاح في شاشة الضبط لتفعيل ردود الدعم الذكية.',
+                                  style: TextStyle(
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF92400E)),
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: () async {
+                                  await showDialog<void>(
+                                    context: context,
+                                    builder: (_) => const _ConfigDialog(),
+                                  );
+                                  if (mounted) setState(() {});
+                                },
+                                child: const Text('إدخال المفتاح'),
+                              ),
+                            ],
                           ),
                         ),
-                      );
-                      _refresh();
-                    },
+                      ] else ...[
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: FilledButton.tonalIcon(
+                                onPressed: _autoReplyingBatch
+                                    ? null
+                                    : () => _runAutoSupportForPending(list),
+                                icon: _autoReplyingBatch
+                                    ? const SizedBox(
+                                        width: 14,
+                                        height: 14,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2),
+                                      )
+                                    : const Icon(Icons.auto_fix_high_rounded,
+                                        size: 16),
+                                label: const Text(
+                                  'الرد التلقائي على التذاكر الجديدة',
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            IconButton(
+                              tooltip: 'تحديث القائمة',
+                              onPressed: _refresh,
+                              icon: const Icon(Icons.refresh_rounded, size: 20),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
                   ),
-                );
-              },
+                ),
+                Expanded(
+                  child: snap.connectionState == ConnectionState.waiting
+                      ? const Center(child: CircularProgressIndicator())
+                      : list.isEmpty
+                          ? const Center(
+                              child:
+                                  Text('لا توجد محادثات دعم فني واردة بعد'),
+                            )
+                          : ListView.separated(
+                              padding: const EdgeInsets.all(12),
+                              itemCount: list.length,
+                              separatorBuilder: (_, __) =>
+                                  const SizedBox(height: 8),
+                              itemBuilder: (ctx, i) {
+                                final c = list[i];
+                                final unread = c['unreadByAdmin'] == true;
+                                final awaitingOwner =
+                                    c['awaitingOwnerReply'] == true;
+                                final wsId = '${c['workspaceId']}';
+                                return Card(
+                                  elevation: 0,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(14),
+                                    side: BorderSide(
+                                      color: awaitingOwner
+                                          ? const Color(0xFFD97706)
+                                          : unread
+                                              ? const Color(0xFF0284C7)
+                                              : const Color(0xFFE2E8F0),
+                                      width:
+                                          (awaitingOwner || unread) ? 1.5 : 1,
+                                    ),
+                                  ),
+                                  child: ListTile(
+                                    leading: CircleAvatar(
+                                      backgroundColor: awaitingOwner
+                                          ? const Color(0xFFFEF3C7)
+                                          : unread
+                                              ? const Color(0xFF0284C7)
+                                              : const Color(0xFFE2E8F0),
+                                      child: Icon(
+                                        awaitingOwner
+                                            ? Icons.priority_high_rounded
+                                            : Icons.storefront_outlined,
+                                        color: awaitingOwner
+                                            ? const Color(0xFFD97706)
+                                            : unread
+                                                ? Colors.white
+                                                : Colors.black54,
+                                      ),
+                                    ),
+                                    title: Wrap(
+                                      spacing: 6,
+                                      runSpacing: 4,
+                                      crossAxisAlignment:
+                                          WrapCrossAlignment.center,
+                                      children: [
+                                        Text(
+                                          '${c['storeName']}',
+                                          style: TextStyle(
+                                            fontWeight: (unread || awaitingOwner)
+                                                ? FontWeight.w900
+                                                : FontWeight.w700,
+                                          ),
+                                        ),
+                                        if (awaitingOwner)
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 8, vertical: 2),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFFFEF3C7),
+                                              borderRadius:
+                                                  BorderRadius.circular(10),
+                                              border: Border.all(
+                                                  color:
+                                                      const Color(0xFFF59E0B)),
+                                            ),
+                                            child: const Text(
+                                              'بانتظار رد مدير المشروع',
+                                              style: TextStyle(
+                                                color: Color(0xFF92400E),
+                                                fontSize: 10.5,
+                                                fontWeight: FontWeight.w800,
+                                              ),
+                                            ),
+                                          ),
+                                        if (unread && !awaitingOwner)
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 6, vertical: 2),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFFDC2626),
+                                              borderRadius:
+                                                  BorderRadius.circular(10),
+                                            ),
+                                            child: const Text(
+                                              'جديد',
+                                              style: TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.w800,
+                                              ),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                    subtitle: Text(
+                                      '${c['clientName'].toString().isNotEmpty ? c['clientName'] : 'عميل'} • ${c['phone'].toString().isNotEmpty ? c['phone'] : 'بلا هاتف'}\n${c['lastMessage']}',
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                    trailing: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        IconButton(
+                                          tooltip: 'حذف التذكرة فوراً',
+                                          icon: const Icon(
+                                            Icons.delete_outline_rounded,
+                                            color: Colors.redAccent,
+                                            size: 20,
+                                          ),
+                                          onPressed: () async {
+                                            await Rtdb.instance
+                                                .deleteSupportConversation(
+                                                    wsId);
+                                            DualPersonaAiEngine.instance
+                                                .clearSupportSession(wsId);
+                                            await _refresh();
+                                          },
+                                        ),
+                                        const Icon(Icons.chevron_left),
+                                      ],
+                                    ),
+                                    onTap: () async {
+                                      await Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                          builder: (_) =>
+                                              AdminSupportChatDetailScreen(
+                                            workspaceId: wsId,
+                                            storeName:
+                                                c['storeName'] as String,
+                                            clientName:
+                                                (c['clientName'] ?? '')
+                                                    as String,
+                                            phone: c['phone'] as String,
+                                            initialAwaitingOwner: awaitingOwner,
+                                          ),
+                                        ),
+                                      );
+                                      _refresh();
+                                    },
+                                  ),
+                                );
+                              },
+                            ),
+                ),
+              ],
             );
           },
         ),
@@ -2493,6 +2856,7 @@ class AdminSupportChatDetailScreen extends StatefulWidget {
   final String storeName;
   final String clientName;
   final String phone;
+  final bool initialAwaitingOwner;
 
   const AdminSupportChatDetailScreen({
     super.key,
@@ -2500,6 +2864,7 @@ class AdminSupportChatDetailScreen extends StatefulWidget {
     required this.storeName,
     this.clientName = '',
     required this.phone,
+    this.initialAwaitingOwner = false,
   });
 
   @override
@@ -2514,12 +2879,15 @@ class _AdminSupportChatDetailScreenState
   List<SupportMessage> _messages = [];
   bool _loading = true;
   bool _sending = false;
+  bool _aiStreaming = false;
+  String _streamingPreview = '';
+  late bool _awaitingOwner = widget.initialAwaitingOwner;
 
   @override
   void initState() {
     super.initState();
     Rtdb.instance.markSupportChatRead(widget.workspaceId);
-    _fetch();
+    _fetch(triggerAutoIfNeeded: true);
   }
 
   @override
@@ -2529,32 +2897,182 @@ class _AdminSupportChatDetailScreenState
     super.dispose();
   }
 
-  Future<void> _fetch() async {
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollCtrl.hasClients) {
+        _scrollCtrl.animateTo(
+          _scrollCtrl.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  Future<void> _fetch({bool triggerAutoIfNeeded = false}) async {
     final list = await Rtdb.instance.getSupportMessages(widget.workspaceId);
+    final hasEscalatedMsg =
+        list.isNotEmpty && list.last.isEscalated;
     if (mounted) {
       setState(() {
         _messages = list;
         _loading = false;
+        if (hasEscalatedMsg) {
+          _awaitingOwner = true;
+        }
       });
+      _scrollToBottom();
+    }
+
+    // إذا كان الرد التلقائي مفعلاً وآخر رسالة من العميل ولم تُصعَّد بعد، يرد موظف الدعم الذكي تلقائياً
+    if (triggerAutoIfNeeded &&
+        Rtdb.instance.autoSupportEnabled &&
+        DualPersonaAiEngine.instance.hasApiKey &&
+        !_awaitingOwner &&
+        list.isNotEmpty &&
+        list.last.sender != 'admin') {
+      await _generateAiSupportReply(list.last.text);
+    }
+  }
+
+  Future<void> _generateAiSupportReply([String? customClientPrompt]) async {
+    if (_aiStreaming || _sending) return;
+    final apiKey = DualPersonaAiEngine.instance.apiKey;
+    if (apiKey.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'يرجى إدخال مفتاح Gemini API (gemini_api_key) في شاشة الضبط لتفعيل خدمة الدعم الذكي.'),
+          ),
+        );
+      }
+      return;
+    }
+
+    // نحدد آخر رسالة للعميل للرد عليها
+    String promptText = (customClientPrompt ?? '').trim();
+    if (promptText.isEmpty) {
+      for (final m in _messages.reversed) {
+        if (m.sender != 'admin' && m.text.trim().isNotEmpty) {
+          promptText = m.text.trim();
+          break;
+        }
+      }
+    }
+    if (promptText.isEmpty) {
+      promptText = _textCtrl.text.trim();
+    }
+    if (promptText.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('لا توجد رسالة عميل للرد عليها حالياً.')),
+        );
+      }
+      return;
+    }
+
+    final session =
+        DualPersonaAiEngine.instance.supportSessionFor(widget.workspaceId);
+    // تغذية الجلسة بسياق المحادثة السابقة إن كانت فارغة
+    if (session.history.isEmpty && _messages.length > 1) {
+      final prior = _messages.take(_messages.length - 1).map((m) {
+        return AiChatMessage(
+          id: m.id,
+          role: m.sender == 'admin' ? 'model' : 'user',
+          text: m.text,
+          timestamp: m.timestamp,
+        );
+      }).toList();
+      session.seedHistory(prior);
+    }
+
+    setState(() {
+      _aiStreaming = true;
+      _streamingPreview = '';
+    });
+
+    final buf = StringBuffer();
+    try {
+      await for (final chunk
+          in session.sendMessageStream(promptText, apiKey: apiKey)) {
+        buf.write(chunk);
+        if (mounted) {
+          setState(() {
+            _streamingPreview = buf.toString();
+          });
+          _scrollToBottom();
+        }
+      }
+
+      final finalReply = buf.toString().trim();
+      if (finalReply.isNotEmpty) {
+        final escalated = finalReply.contains('يدخل مدير المشروع بنفسه');
+        await Rtdb.instance.sendSupportReply(
+          widget.workspaceId,
+          finalReply,
+          isAutoSupport: true,
+          escalatedOverride: escalated,
+        );
+        if (mounted) {
+          setState(() {
+            _awaitingOwner = escalated;
+            _streamingPreview = '';
+          });
+        }
+        await _fetch();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _aiStreaming = false;
+          _streamingPreview = '';
+        });
+      }
+    }
+  }
+
+  Future<void> _escalateManually() async {
+    if (_sending || _aiStreaming) return;
+    setState(() => _sending = true);
+    try {
+      await Rtdb.instance.sendSupportReply(
+        widget.workspaceId,
+        kMandatoryEscalationText,
+        isAutoSupport: true,
+        escalatedOverride: true,
+      );
+      if (mounted) {
+        setState(() => _awaitingOwner = true);
+      }
+      await _fetch();
+    } finally {
+      if (mounted) setState(() => _sending = false);
     }
   }
 
   Future<void> _send() async {
     final t = _textCtrl.text.trim();
-    if (t.isEmpty || _sending) return;
+    if (t.isEmpty || _sending || _aiStreaming) return;
     setState(() => _sending = true);
     try {
-      await Rtdb.instance.sendSupportReply(widget.workspaceId, t);
+      await Rtdb.instance.sendSupportReply(
+        widget.workspaceId,
+        t,
+        isAutoSupport: false,
+        escalatedOverride: false,
+      );
       _textCtrl.clear();
-      await _fetch();
-      await Future<void>.delayed(const Duration(milliseconds: 150));
-      if (_scrollCtrl.hasClients) {
-        _scrollCtrl.animateTo(
-          _scrollCtrl.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOut,
-        );
+      if (mounted) {
+        setState(() => _awaitingOwner = false);
       }
+      await _fetch();
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -2567,12 +3085,39 @@ class _AdminSupportChatDetailScreenState
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              widget.storeName.isNotEmpty
-                  ? widget.storeName
-                  : widget.workspaceId,
-              style:
-                  const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+            Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    widget.storeName.isNotEmpty
+                        ? widget.storeName
+                        : widget.workspaceId,
+                    style: const TextStyle(
+                        fontSize: 15, fontWeight: FontWeight.w800),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (_awaitingOwner) ...[
+                  const SizedBox(width: 6),
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFEF3C7),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFFF59E0B)),
+                    ),
+                    child: const Text(
+                      'بانتظار رد مدير المشروع',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF92400E),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ),
             Text(
               [
@@ -2584,8 +3129,22 @@ class _AdminSupportChatDetailScreenState
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'توليد رد الدعم الذكي (temperature: 0.2)',
+            icon: const Icon(Icons.smart_toy_outlined, color: Color(0xFF0284C7)),
+            onPressed: (_aiStreaming || _sending)
+                ? null
+                : () => _generateAiSupportReply(),
+          ),
+          IconButton(
+            tooltip: 'تحويل وتصعيد لمدير المشروع',
+            icon: const Icon(Icons.assignment_ind_outlined,
+                color: Color(0xFFD97706)),
+            onPressed: (_aiStreaming || _sending) ? null : _escalateManually,
+          ),
           if (widget.phone.isNotEmpty)
             IconButton(
+              tooltip: 'مراسلة عبر واتساب',
               icon: const Icon(Icons.chat_bubble_outline),
               onPressed: () => openWhatsApp(context, widget.phone),
             ),
@@ -2593,16 +3152,94 @@ class _AdminSupportChatDetailScreenState
       ),
       body: Column(
         children: [
+          if (_awaitingOwner)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: const BoxDecoration(
+                color: Color(0xFFFEF3C7),
+                border: Border(
+                  bottom: BorderSide(color: Color(0xFFF59E0B)),
+                ),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.warning_amber_rounded,
+                      color: Color(0xFFD97706), size: 20),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'بانتظار رد مدير المشروع — تم تحويل هذه الحالة للمراجعة المباشرة',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF92400E),
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () async {
+                      await Rtdb.instance
+                          .setSupportEscalation(widget.workspaceId, false);
+                      if (mounted) setState(() => _awaitingOwner = false);
+                    },
+                    child: const Text('إنهاء التصعيد'),
+                  ),
+                ],
+              ),
+            ),
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
                 : ListView.builder(
                     controller: _scrollCtrl,
                     padding: const EdgeInsets.all(14),
-                    itemCount: _messages.length,
+                    itemCount:
+                        _messages.length + (_streamingPreview.isNotEmpty ? 1 : 0),
                     itemBuilder: (ctx, idx) {
+                      if (idx == _messages.length) {
+                        return Align(
+                          alignment: Alignment.centerRight,
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 10),
+                            constraints: BoxConstraints(
+                              maxWidth:
+                                  MediaQuery.of(context).size.width * 0.78,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF0F766E),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'يكتب موظف الدعم الفني الآن...',
+                                  style: TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 10.5,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  _streamingPreview,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 13.5,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      }
+
                       final m = _messages[idx];
                       final isMe = m.sender == 'admin';
+                      final isEscalated = m.isEscalated;
                       return Align(
                         alignment:
                             isMe ? Alignment.centerRight : Alignment.centerLeft,
@@ -2611,20 +3248,86 @@ class _AdminSupportChatDetailScreenState
                           padding: const EdgeInsets.symmetric(
                               horizontal: 14, vertical: 10),
                           constraints: BoxConstraints(
-                            maxWidth: MediaQuery.of(context).size.width * 0.78,
+                            maxWidth: MediaQuery.of(context).size.width * 0.80,
                           ),
                           decoration: BoxDecoration(
                             color: isMe
-                                ? const Color(0xFF7C3AED)
-                                : Colors.grey.shade200,
+                                ? (m.isAutoSupport
+                                    ? const Color(0xFF0F766E)
+                                    : const Color(0xFF0284C7))
+                                : Colors.white,
                             borderRadius: BorderRadius.circular(14),
+                            border: isMe
+                                ? null
+                                : Border.all(color: const Color(0xFFE2E8F0)),
                           ),
-                          child: Text(
-                            m.text,
-                            style: TextStyle(
-                              color: isMe ? Colors.white : Colors.black87,
-                              fontSize: 13.5,
-                            ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    isMe
+                                        ? (m.isAutoSupport
+                                            ? 'موظف الدعم الفني'
+                                            : 'مدير المشروع')
+                                        : (widget.clientName.isNotEmpty
+                                            ? widget.clientName
+                                            : 'العميل'),
+                                    style: TextStyle(
+                                      fontSize: 10.5,
+                                      fontWeight: FontWeight.w800,
+                                      color: isMe
+                                          ? Colors.white70
+                                          : const Color(0xFF64748B),
+                                    ),
+                                  ),
+                                  if (isEscalated) ...[
+                                    const SizedBox(width: 6),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 6, vertical: 1.5),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFFEF3C7),
+                                        borderRadius: BorderRadius.circular(6),
+                                      ),
+                                      child: const Text(
+                                        'بانتظار رد مدير المشروع',
+                                        style: TextStyle(
+                                          fontSize: 9.5,
+                                          fontWeight: FontWeight.w900,
+                                          color: Color(0xFF92400E),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                  const SizedBox(width: 6),
+                                  InkWell(
+                                    onTap: () async {
+                                      await Rtdb.instance.deleteSupportMessage(
+                                          widget.workspaceId, m.id);
+                                      await _fetch();
+                                    },
+                                    child: Icon(
+                                      Icons.close_rounded,
+                                      size: 13,
+                                      color: isMe
+                                          ? Colors.white60
+                                          : Colors.black38,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                m.text,
+                                style: TextStyle(
+                                  color: isMe ? Colors.white : Colors.black87,
+                                  fontSize: 13.5,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       );
@@ -2639,8 +3342,10 @@ class _AdminSupportChatDetailScreenState
                   Expanded(
                     child: TextField(
                       controller: _textCtrl,
+                      minLines: 1,
+                      maxLines: 4,
                       decoration: const InputDecoration(
-                        hintText: 'اكتب رد الدعم الفني (نص فقط)...',
+                        hintText: 'اكتب رد مدير المشروع مباشرةً...',
                         isDense: true,
                       ),
                       onSubmitted: (_) => _send(),
@@ -2648,7 +3353,7 @@ class _AdminSupportChatDetailScreenState
                   ),
                   const SizedBox(width: 8),
                   IconButton.filled(
-                    onPressed: _sending ? null : _send,
+                    onPressed: (_sending || _aiStreaming) ? null : _send,
                     icon: const Icon(Icons.send),
                   ),
                 ],
@@ -2657,6 +3362,357 @@ class _AdminSupportChatDetailScreenState
           ),
         ],
       ),
+    );
+  }
+}
+
+// ==================== النمط الأول: رفيق المالك الشخصي (Owner Mode) ====================
+
+class OwnerCompanionScreen extends StatefulWidget {
+  const OwnerCompanionScreen({super.key});
+  @override
+  State<OwnerCompanionScreen> createState() => _OwnerCompanionScreenState();
+}
+
+class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
+  final TextEditingController _inputCtrl = TextEditingController();
+  final ScrollController _scrollCtrl = ScrollController();
+  bool _streaming = false;
+  String _liveChunkBuffer = '';
+
+  @override
+  void initState() {
+    super.initState();
+    adminRefreshTick.addListener(_onRefreshTick);
+  }
+
+  @override
+  void dispose() {
+    adminRefreshTick.removeListener(_onRefreshTick);
+    _inputCtrl.dispose();
+    _scrollCtrl.dispose();
+    super.dispose();
+  }
+
+  void _onRefreshTick() {
+    if (mounted) setState(() {});
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollCtrl.hasClients) {
+        _scrollCtrl.animateTo(
+          _scrollCtrl.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  Future<void> _sendMessage() async {
+    final text = _inputCtrl.text.trim();
+    if (text.isEmpty || _streaming) return;
+
+    final apiKey = DualPersonaAiEngine.instance.apiKey;
+    if (apiKey.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              'يرجى إدخال مفتاح Gemini API (gemini_api_key) في شاشة الضبط لتفعيل رفيق المالك.'),
+        ),
+      );
+      return;
+    }
+
+    _inputCtrl.clear();
+    setState(() {
+      _streaming = true;
+      _liveChunkBuffer = '';
+    });
+    _scrollToBottom();
+
+    final session = DualPersonaAiEngine.instance.ownerSession;
+    final buf = StringBuffer();
+    try {
+      await for (final chunk
+          in session.sendMessageStream(text, apiKey: apiKey)) {
+        buf.write(chunk);
+        if (mounted) {
+          setState(() {
+            _liveChunkBuffer = buf.toString();
+          });
+          _scrollToBottom();
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _streaming = false;
+          _liveChunkBuffer = '';
+        });
+        _scrollToBottom();
+      }
+    }
+  }
+
+  void _clearSession() {
+    DualPersonaAiEngine.instance.clearOwnerSession();
+    setState(() {
+      _liveChunkBuffer = '';
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('تم تفريغ جلسة رفيق المالك بالكامل ✓')),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasKey = DualPersonaAiEngine.instance.hasApiKey;
+    final history = DualPersonaAiEngine.instance.ownerSession.history;
+
+    return Column(
+      children: [
+        // شريط علوي خاص بـ: رفيق المالك الشخصي (temperature: 0.9) + زر تفريغ الجلسة
+        Container(
+          margin: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0284C7).withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.psychology_alt_rounded,
+                    color: Color(0xFF0284C7), size: 22),
+              ),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'رفيق المالك الشخصي (Owner Mode)',
+                      style:
+                          TextStyle(fontWeight: FontWeight.w900, fontSize: 13.5),
+                    ),
+                    Text(
+                      'محادثة خاصة مفتوحة بلا قيود • ساخر وذكي (temperature: 0.9)',
+                      style: TextStyle(fontSize: 11, color: Colors.black54),
+                    ),
+                  ],
+                ),
+              ),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  foregroundColor: const Color(0xFFDC2626),
+                  side: const BorderSide(color: Color(0xFFFCA5A5)),
+                ),
+                onPressed: _streaming ? null : _clearSession,
+                icon: const Icon(Icons.delete_sweep_outlined, size: 16),
+                label: const Text('تفريغ الجلسة',
+                    style:
+                        TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
+              ),
+            ],
+          ),
+        ),
+
+        if (!hasKey)
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFEF3C7),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFFF59E0B)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.vpn_key_off_rounded, color: Color(0xFFD97706)),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'مفتاح Gemini API (gemini_api_key) غير موجود. أدخل المفتاح في شاشة الضبط لتفعيل رفيق المالك الشخصي.',
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF92400E)),
+                  ),
+                ),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFFD97706),
+                  ),
+                  onPressed: () async {
+                    await showDialog<void>(
+                      context: context,
+                      builder: (_) => const _ConfigDialog(),
+                    );
+                    if (mounted) setState(() {});
+                  },
+                  child: const Text('إدخال المفتاح'),
+                ),
+              ],
+            ),
+          ),
+
+        Expanded(
+          child: (history.isEmpty && !_streaming)
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(28),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.nights_stay_rounded,
+                            size: 48, color: Colors.blueGrey.shade300),
+                        const SizedBox(height: 10),
+                        const Text(
+                          'مساحتك الخاصة يا مدير! ☕🎬🌌',
+                          style: TextStyle(
+                              fontWeight: FontWeight.w800, fontSize: 15),
+                        ),
+                        const SizedBox(height: 6),
+                        const Text(
+                          'تحدث في أي موضوع يخطر ببالك: أفلام، مسلسلات، ألعاب، فلسفة، فضاء، أو حتى فضفضة عن ضغوط العمل والمشتركين.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: 12.5, color: Colors.black54),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : ListView.builder(
+                  controller: _scrollCtrl,
+                  padding: const EdgeInsets.all(14),
+                  itemCount: history.length +
+                      (_streaming && _liveChunkBuffer.isNotEmpty ? 1 : 0),
+                  itemBuilder: (ctx, idx) {
+                    if (idx == history.length) {
+                      return Align(
+                        alignment: Alignment.centerLeft,
+                        child: Container(
+                          margin: const EdgeInsets.symmetric(vertical: 5),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 10),
+                          constraints: BoxConstraints(
+                            maxWidth:
+                                MediaQuery.of(context).size.width * 0.82,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(14),
+                            border:
+                                Border.all(color: const Color(0xFF0284C7)),
+                          ),
+                          child: Text(
+                            _liveChunkBuffer,
+                            style: const TextStyle(
+                                fontSize: 13.5, color: Color(0xFF0F172A)),
+                          ),
+                        ),
+                      );
+                    }
+
+                    final m = history[idx];
+                    final isUser = m.role == 'user';
+                    // أثناء البث المباشر، الرسالة الأخيرة في history هي رسالة المستخدم
+                    return Align(
+                      alignment:
+                          isUser ? Alignment.centerRight : Alignment.centerLeft,
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(vertical: 5),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 10),
+                        constraints: BoxConstraints(
+                          maxWidth: MediaQuery.of(context).size.width * 0.82,
+                        ),
+                        decoration: BoxDecoration(
+                          color: isUser
+                              ? const Color(0xFF0284C7)
+                              : Colors.white,
+                          borderRadius: BorderRadius.circular(14),
+                          border: isUser
+                              ? null
+                              : Border.all(color: const Color(0xFFE2E8F0)),
+                        ),
+                        child: SelectableText(
+                          m.text,
+                          style: TextStyle(
+                            color:
+                                isUser ? Colors.white : const Color(0xFF0F172A),
+                            fontSize: 13.5,
+                            height: 1.45,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+
+        // مجال كتابة مرن متعدد الأسطر مع بث حي
+        SafeArea(
+          top: false,
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              border: Border(top: BorderSide(color: Color(0xFFE2E8F0))),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _inputCtrl,
+                    minLines: 1,
+                    maxLines: 5,
+                    textInputAction: TextInputAction.newline,
+                    decoration: const InputDecoration(
+                      hintText:
+                          'اكتب ما يخطر ببالك لرفيقك الساخر (أفلام، فلسفة، فضفضة...)...',
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filled(
+                  style: IconButton.styleFrom(
+                    backgroundColor: const Color(0xFF0284C7),
+                  ),
+                  onPressed: _streaming ? null : _sendMessage,
+                  icon: _streaming
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.send_rounded),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -2675,6 +3731,9 @@ class _SystemControlScreenState extends State<SystemControlScreen> {
   final _maintMsg = TextEditingController();
   final _minBuildCtrl = TextEditingController(text: '162');
   final _minVerCtrl = TextEditingController(text: '3.81.0');
+  late final _geminiKeyCtrl =
+      TextEditingController(text: Rtdb.instance.geminiApiKey);
+  bool _obscureGeminiKey = true;
 
   bool _maintActive = false;
   int _retentionDays = 7;
@@ -2684,16 +3743,27 @@ class _SystemControlScreenState extends State<SystemControlScreen> {
   void initState() {
     super.initState();
     _loadSystemSettings();
+    adminRefreshTick.addListener(_onTick);
   }
 
   @override
   void dispose() {
+    adminRefreshTick.removeListener(_onTick);
     _bcastTitle.dispose();
     _bcastBody.dispose();
     _maintMsg.dispose();
     _minBuildCtrl.dispose();
     _minVerCtrl.dispose();
+    _geminiKeyCtrl.dispose();
     super.dispose();
+  }
+
+  void _onTick() {
+    if (mounted) {
+      setState(() {
+        _geminiKeyCtrl.text = Rtdb.instance.geminiApiKey;
+      });
+    }
   }
 
   Future<void> _loadSystemSettings() async {
@@ -2729,6 +3799,70 @@ class _SystemControlScreenState extends State<SystemControlScreen> {
       padding: const EdgeInsets.all(14),
       children: [
         const AdminSelfUpdateCard(),
+        const SizedBox(height: 10),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Row(
+                  children: [
+                    Icon(Icons.psychology_alt_rounded, color: Color(0xFF0284C7)),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '🤖 إعدادات الذكاء الاصطناعي ثنائي النمط (gemini_api_key)',
+                        style: TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'يُحفظ المفتاح محلياً في SharedPreferences تحت الاسم gemini_api_key لتهيئة نمط رفيق المالك (0.9) ونمط الدعم الفني (0.2).',
+                  style: TextStyle(fontSize: 11.5, color: Colors.black54),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _geminiKeyCtrl,
+                  obscureText: _obscureGeminiKey,
+                  textDirection: TextDirection.ltr,
+                  decoration: InputDecoration(
+                    labelText: 'مفتاح Gemini API (gemini_api_key)',
+                    hintText: 'AIzaSy...',
+                    prefixIcon: const Icon(Icons.vpn_key_outlined),
+                    suffixIcon: IconButton(
+                      icon: Icon(_obscureGeminiKey
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined),
+                      onPressed: () => setState(
+                          () => _obscureGeminiKey = !_obscureGeminiKey),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                FilledButton.icon(
+                  onPressed: () async {
+                    await Rtdb.instance
+                        .saveGeminiApiKey(_geminiKeyCtrl.text.trim());
+                    adminRefreshTick.value++;
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                              'تم حفظ مفتاح gemini_api_key محلياً وتفعيل النمطين بنجاح ✓'),
+                        ),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.save_outlined, size: 16),
+                  label: const Text('حفظ مفتاح الذكاء الاصطناعي'),
+                ),
+              ],
+            ),
+          ),
+        ),
         const SizedBox(height: 10),
         Card(
           child: Padding(

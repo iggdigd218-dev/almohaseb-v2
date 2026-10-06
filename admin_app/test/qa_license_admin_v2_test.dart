@@ -350,5 +350,61 @@ void main() {
       expect(find.text('YER'), findsOneWidget);
       expect(find.text('نقداً'), findsOneWidget);
     });
+
+    test('LIC-ADM08 محرك الذكاء الاصطناعي ثنائي النمط: جلستان مستقلتان بموجهين وحرارتين مختلفتين + حفظ gemini_api_key', () async {
+      SharedPreferences.setMockInitialValues({});
+      await Rtdb.instance.load();
+      expect(Rtdb.instance.geminiApiKey, isEmpty);
+      expect(DualPersonaAiEngine.instance.hasApiKey, isFalse);
+
+      // حفظ المفتاح تحت الاسم gemini_api_key في SharedPreferences
+      await Rtdb.instance.saveGeminiApiKey('AIzaSyTestDynamicKey123');
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('gemini_api_key'), 'AIzaSyTestDynamicKey123');
+      expect(Rtdb.instance.geminiApiKey, 'AIzaSyTestDynamicKey123');
+      expect(DualPersonaAiEngine.instance.apiKey, 'AIzaSyTestDynamicKey123');
+      expect(DualPersonaAiEngine.instance.hasApiKey, isTrue);
+
+      // التحقق من النمط الأول: رفيق المالك الشخصي (Owner Mode)
+      final ownerSession = DualPersonaAiEngine.instance.ownerSession;
+      expect(ownerSession.temperature, 0.9);
+      expect(ownerSession.systemInstruction, contains('أنت رفيق شخصي ومساعد مقرب لمالك ومدير نظام "تراخيص المحاسب"'));
+      expect(ownerSession.systemInstruction, contains('ساخر جداً، متهكم، لاذع، واسع الحيلة، وخفيف الظل'));
+
+      // التحقق من النمط الثاني: الدعم الفني للمستخدمين (Client Support Mode)
+      final supportSession = DualPersonaAiEngine.instance.supportSessionFor('WS-CLIENT-01');
+      expect(supportSession.temperature, 0.2);
+      expect(supportSession.systemInstruction, contains('أنت موظف دعم فني بشري محترف لمنظومة "المحاسب" وتطبيق التراخيص'));
+      expect(supportSession.systemInstruction, contains(kMandatoryEscalationText));
+
+      // استقلال الجلستين وتفريغهما المباشر
+      ownerSession.seedHistory([
+        const AiChatMessage(id: '1', role: 'user', text: 'سهرة سعيدة', timestamp: 100),
+      ]);
+      expect(ownerSession.history.length, 1);
+      expect(supportSession.history, isEmpty);
+      DualPersonaAiEngine.instance.clearOwnerSession();
+      expect(ownerSession.history, isEmpty);
+    });
+
+    testWidgets('LIC-ADM09 واجهة رفيق المالك تعرض تنبيه إدخال المفتاح عند غيابه وزر تفريغ الجلسة ومجال الكتابة المرن', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await Rtdb.instance.load();
+      await Rtdb.instance.saveGeminiApiKey('');
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: OwnerCompanionScreen(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('رفيق المالك الشخصي (Owner Mode)'), findsOneWidget);
+      expect(find.text('تفريغ الجلسة'), findsOneWidget);
+      expect(find.text('إدخال المفتاح'), findsOneWidget);
+      expect(find.textContaining('gemini_api_key'), findsWidgets);
+    });
   });
 }

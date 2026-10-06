@@ -441,12 +441,16 @@ class SupportMessage {
   final String sender;
   final String text;
   final int timestamp;
+  final bool isAutoSupport;
+  final bool isEscalated;
 
   const SupportMessage({
     required this.id,
     required this.sender,
     required this.text,
     required this.timestamp,
+    this.isAutoSupport = false,
+    this.isEscalated = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -454,14 +458,23 @@ class SupportMessage {
         'sender': sender,
         'text': text,
         'timestamp': timestamp,
+        'isAutoSupport': isAutoSupport,
+        'isEscalated': isEscalated,
       };
 
   factory SupportMessage.fromJson(String id, Map<dynamic, dynamic> map) {
+    final txt = asStr(map['text']);
+    final esc = map['isEscalated'] == true ||
+        map['is_escalated'] == true ||
+        txt.contains('يدخل مدير المشروع بنفسه');
     return SupportMessage(
       id: id,
       sender: asStr(map['sender'] ?? 'client'),
-      text: asStr(map['text']),
-      timestamp: asMs(map['timestamp']),
+      text: txt,
+      timestamp: asMs(map['timestamp'] ?? map['created_at'] ?? map['createdAt']),
+      isAutoSupport:
+          map['isAutoSupport'] == true || map['is_auto_support'] == true,
+      isEscalated: esc,
     );
   }
 }

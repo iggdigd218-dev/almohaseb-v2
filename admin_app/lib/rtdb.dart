@@ -67,6 +67,11 @@ class Rtdb {
   static const _kExpiry = 'rtdbTokenExpiryMs';
   static const _kAdminRt = 'rtdbAdminRefreshToken';
   static const _kAdminUid = 'rtdbAdminUid';
+  static const kGeminiApiKeyPref = 'gemini_api_key';
+  static const kAutoSupportPref = 'auto_support_enabled';
+
+  String geminiApiKey = '';
+  bool autoSupportEnabled = true;
 
   String _idToken = '';
   String _refreshToken = '';
@@ -114,6 +119,9 @@ class Rtdb {
     _idToken = sp.getString(_kIdToken) ?? '';
     _refreshToken = sp.getString(_kRefresh) ?? '';
     _expiryMs = sp.getInt(_kExpiry) ?? 0;
+    geminiApiKey = (sp.getString(kGeminiApiKeyPref) ?? '').trim();
+    autoSupportEnabled = sp.getBool(kAutoSupportPref) ?? true;
+    DualPersonaAiEngine.instance.syncApiKey(geminiApiKey);
 
     // تنظيف أي جلسة زائر/مجهولة سابقة حتى لا يُرسل توكن زائر بدلاً من توكن المشرف الرسمي
     if (adminUid.isNotEmpty && adminUid != kOfficialAdminUid) {
@@ -133,6 +141,23 @@ class Rtdb {
     final sp = await SharedPreferences.getInstance();
     await sp.setString(_kUrl, baseUrl);
     await sp.setString(_kAuth, authToken);
+  }
+
+  Future<void> saveGeminiApiKey(String key) async {
+    geminiApiKey = key.trim();
+    final sp = await SharedPreferences.getInstance();
+    if (geminiApiKey.isEmpty) {
+      await sp.remove(kGeminiApiKeyPref);
+    } else {
+      await sp.setString(kGeminiApiKeyPref, geminiApiKey);
+    }
+    DualPersonaAiEngine.instance.syncApiKey(geminiApiKey);
+  }
+
+  Future<void> saveAutoSupportEnabled(bool enabled) async {
+    autoSupportEnabled = enabled;
+    final sp = await SharedPreferences.getInstance();
+    await sp.setBool(kAutoSupportPref, enabled);
   }
 
   Future<void> saveAdminRefreshToken(String rt) async {
@@ -1401,6 +1426,7 @@ class Rtdb {
       final msgs = val['messages'];
 
       String lastMsg = '';
+      String lastSender = 'client';
       int lastTs = 0;
       if (msgs is Map && msgs.isNotEmpty) {
         final sorted = msgs.entries.toList()
@@ -1410,6 +1436,7 @@ class Rtdb {
                   (b.value as Map)['created_at'])));
         final lastEntry = sorted.last.value as Map;
         lastMsg = asStr(lastEntry['text']);
+        lastSender = asStr(lastEntry['sender'] ?? 'client');
         lastTs = asMs(lastEntry['timestamp'] ??
             lastEntry['created_at'] ??
             lastEntry['createdAt']);
@@ -1418,6 +1445,11 @@ class Rtdb {
             meta?['last_message'] ??
             val['lastMessage'] ??
             val['last_message']);
+        lastSender = asStr(meta?['lastSender'] ??
+            meta?['last_sender'] ??
+            val['lastSender'] ??
+            val['last_sender'] ??
+            'client');
         lastTs = asMs(meta?['updatedAt'] ??
             meta?['updated_at'] ??
             val['updatedAt'] ??
@@ -1481,12 +1513,22 @@ class Rtdb {
           meta?['unread_by_admin'] == true ||
           meta?['unreadByAdmin'] == true;
 
+      final awaitingOwner = val['awaiting_owner_reply'] == true ||
+          val['awaitingOwnerReply'] == true ||
+          val['escalated'] == true ||
+          meta?['awaiting_owner_reply'] == true ||
+          meta?['awaitingOwnerReply'] == true ||
+          meta?['escalated'] == true ||
+          lastMsg.contains('يدخل مدير المشروع بنفسه');
+
       out.add({
         'workspaceId': ws,
         'storeName': storeName.isNotEmpty ? storeName : ws,
         'clientName': clientName,
         'phone': phone,
         'unreadByAdmin': unread,
+        'awaitingOwnerReply': awaitingOwner,
+        'lastSender': lastSender,
         'lastMessage': lastMsg,
         'lastTimestamp': lastTs,
       });
@@ -1507,28 +1549,45 @@ class Rtdb {
     return list;
   }
 
-  Future<void> sendSupportReply(String wsId, String text) async {
+  Future<void> sendSupportReply(
+    String wsId,
+    String text, {
+    bool isAutoSupport = false,
+    bool? escalatedOverride,
+  }) async {
     final enc = Uri.encodeComponent(wsId);
     final now = DateTime.now().millisecondsSinceEpoch;
-    final msgId = 'admin_$now';
+    final msgId = isAutoSupport ? 'support_ai_$now' : 'admin_$now';
+    final isEscalated = escalatedOverride ??
+        text.contains('يدخل مدير المشروع بنفسه');
     final payload = {
       'id': msgId,
       'sender': 'admin',
-      'senderName': 'فريق الدعم الفني',
-      'sender_name': 'فريق الدعم الفني',
+      'senderName': isAutoSupport ? 'موظف الدعم الفني' : 'مدير المشروع',
+      'sender_name': isAutoSupport ? 'موظف الدعم الفني' : 'مدير المشروع',
       'text': text,
       'timestamp': now,
       'created_at': now,
       'createdAt': now,
       'isRead': false,
       'is_read': false,
+      'isAutoSupport': isAutoSupport,
+      'is_auto_support': isAutoSupport,
+      'isEscalated': isEscalated,
+      'is_escalated': isEscalated,
     };
     await _put('support_chats/$enc/messages/$msgId', payload);
+    // إذا كان الرد تصعيداً للمدير، تبقى شارة "بانتظار رد مدير المشروع" مفعلة؛
+    // وإذا رد مدير المشروع يدوياً، تُلغى شارة الانتظار.
+    final awaitingOwner = isAutoSupport ? isEscalated : false;
     final patch = {
       'unread_by_client': true,
       'unreadByClient': true,
-      'unread_by_admin': false,
-      'unreadByAdmin': false,
+      'unread_by_admin': awaitingOwner,
+      'unreadByAdmin': awaitingOwner,
+      'awaiting_owner_reply': awaitingOwner,
+      'awaitingOwnerReply': awaitingOwner,
+      'escalated': awaitingOwner,
       'last_reply_at': now,
       'last_message': text,
       'lastMessage': text,
@@ -1539,6 +1598,49 @@ class Rtdb {
     };
     await _patch('support_chats/$enc', patch);
     await _patch('support_chats/$enc/meta', patch);
+  }
+
+  Future<void> setSupportEscalation(String wsId, bool awaitingOwner) async {
+    final enc = Uri.encodeComponent(wsId);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final patch = {
+      'awaiting_owner_reply': awaitingOwner,
+      'awaitingOwnerReply': awaitingOwner,
+      'escalated': awaitingOwner,
+      'unread_by_admin': awaitingOwner,
+      'unreadByAdmin': awaitingOwner,
+      'updated_at': now,
+      'updatedAt': now,
+    };
+    await _patch('support_chats/$enc', patch);
+    await _patch('support_chats/$enc/meta', patch);
+  }
+
+  /// حذف تذكرة/محادثة دعم فني فوراً وبشكل مباشر (بدون سلة محذوفات).
+  Future<void> deleteSupportConversation(String wsId) async {
+    final enc = Uri.encodeComponent(wsId);
+    await _delete('support_chats/$enc');
+  }
+
+  /// حذف رسالة دعم فني فوراً وبشكل مباشر (بدون سلة محذوفات).
+  Future<void> deleteSupportMessage(String wsId, String msgId) async {
+    final enc = Uri.encodeComponent(wsId);
+    final mEnc = Uri.encodeComponent(msgId);
+    await _delete('support_chats/$enc/messages/$mEnc');
+  }
+
+  /// حذف مشترك وترخيصه فوراً وبشكل مباشر ونهائي (بدون سلة محذوفات).
+  Future<void> deleteSubscriberImmediately(String wsId) async {
+    final enc = Uri.encodeComponent(wsId);
+    try {
+      await _delete('workspaces/$enc/subscription');
+    } catch (_) {}
+    try {
+      await _delete('workspaces/_registry/subscriptions_index/$enc');
+    } catch (_) {}
+    try {
+      await _delete('workspaces/_registry/license_hub/licenses/$enc');
+    } catch (_) {}
   }
 
   Future<void> markSupportChatRead(String wsId) async {
@@ -1812,4 +1914,315 @@ String _pick(dynamic a, dynamic b, String dflt) {
 Object? _firstNum(Object? a, Object? b) {
   if (a != null && asStr(a).trim().isNotEmpty) return a;
   return b;
+}
+
+// ============================================================================
+// 🤖 محرك الذكاء الاصطناعي ثنائي النمط (Dual-Persona Architecture)
+// ============================================================================
+
+/// الموجه الرسمي للنمط الأول: رفيق المالك الشخصي (Owner Mode).
+const String kOwnerSystemInstruction = '''
+أنت رفيق شخصي ومساعد مقرب لمالك ومدير نظام "تراخيص المحاسب".
+- شخصيتك: ساخر جداً، متهكم، لاذع، واسع الحيلة، وخفيف الظل. تعامل المالك كصديقك المقرب وتسهر معه وتخفف عنه ضغوط العمل.
+- نطاق الحديث: مفتوح على كل شيء بلا حدود (أفلام، مسلسلات، ألعاب، فلسفة، فضاء، فتن وسخافات الحياة اليومية، ونقاشات عشوائية). وإذا تحدث معك عن ضغوط العمل والمشتركين، فناقشه بسخرية وتهكم ذكي يفهم واقع المطورين وسهر الليالي.
+- الأسلوب: ردود حية، ذكية، سريعة وتفاعلية، دون أي مقدمات رسمية أو نصوص روبوتية مملة.
+''';
+
+/// درجة حرارة نموذج رفيق المالك الشخصي.
+const double kOwnerTemperature = 0.9;
+
+/// الموجه الرسمي للنمط الثاني: الدعم الفني للمستخدمين (Client Support Mode).
+const String kClientSupportSystemInstruction = '''
+أنت موظف دعم فني بشري محترف لمنظومة "المحاسب" وتطبيق التراخيص.
+- شخصيتك والأسلوب: إنسان حقيقي، لبق، متفهم، هادئ، ومتعاون إلى أقصى حد. يُمنع منعاً باتاً السخرية أو التلميح بالمزاح أو استخدام لهجة غير رسمية مع العملاء.
+- مهمتك: مساعدة أصحاب المحلات في حل المشاكل الشائعة خطوة بخطوة (إعدادات الربط، الباركود، الطابعات، وتفعيل التراخيص).
+- قاعدة التصعيد الإلزامية (Human Escalation):
+  إذا واجه العميل مشكلة فنية معقدة، خطأ غير مألوف في المزامنة أو قاعدة البيانات، أو طلباً مالياً/إدارياً خارج الصلاحيات:
+  يُمنع التخمين أو تقديم حلول غير مؤكدة، والرد حصراً بصيغة:
+  "تم تسجيل المشكلة والبيانات بالكامل. يرجى الانتظار قليلاً حتى يدخل مدير المشروع بنفسه لمراجعة الحالة والرد عليك مباشرة."
+''';
+
+/// درجة حرارة نموذج الدعم الفني للمستخدمين.
+const double kClientSupportTemperature = 0.2;
+
+/// نص التصعيد الإلزامي الحرفي لمدير المشروع.
+const String kMandatoryEscalationText =
+    'تم تسجيل المشكلة والبيانات بالكامل. يرجى الانتظار قليلاً حتى يدخل مدير المشروع بنفسه لمراجعة الحالة والرد عليك مباشرة.';
+
+/// رسالة واحدة داخل جلسة الذكاء الاصطناعي (`ChatSession`).
+class AiChatMessage {
+  final String id;
+  final String role; // 'user' | 'model'
+  final String text;
+  final int timestamp;
+
+  const AiChatMessage({
+    required this.id,
+    required this.role,
+    required this.text,
+    required this.timestamp,
+  });
+
+  Map<String, dynamic> toContentPart() => {
+        'role': role == 'user' ? 'user' : 'model',
+        'parts': [
+          {'text': text}
+        ],
+      };
+}
+
+/// جلسة محادثة مستقلة (`ChatSession`) بهوية وموجه ودرجة حرارة مخصصة.
+class ChatSession {
+  final String personaId;
+  final String systemInstruction;
+  final double temperature;
+  final List<AiChatMessage> _history = [];
+
+  ChatSession({
+    required this.personaId,
+    required this.systemInstruction,
+    required this.temperature,
+  });
+
+  List<AiChatMessage> get history => List.unmodifiable(_history);
+
+  void clear() {
+    _history.clear();
+  }
+
+  void seedHistory(List<AiChatMessage> initial) {
+    _history
+      ..clear()
+      ..addAll(initial);
+  }
+
+  /// إرسال رسالة مع بث حي مباشر (Streaming) للرد حرفاً بحرف/دفعة بدفعة.
+  Stream<String> sendMessageStream(
+    String userText, {
+    required String apiKey,
+    http.Client? httpClient,
+  }) async* {
+    final cleanKey = apiKey.trim();
+    if (cleanKey.isEmpty) {
+      throw Exception('يرجى إدخال مفتاح Gemini API في شاشة الضبط لتفعيل الخدمة.');
+    }
+    final cleanPrompt = userText.trim();
+    if (cleanPrompt.isEmpty) return;
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final userMsg = AiChatMessage(
+      id: 'u_$now',
+      role: 'user',
+      text: cleanPrompt,
+      timestamp: now,
+    );
+    _history.add(userMsg);
+
+    final contents = _history
+        .skip(_history.length > 24 ? _history.length - 24 : 0)
+        .map((m) => m.toContentPart())
+        .toList();
+
+    final requestBody = jsonEncode({
+      'system_instruction': {
+        'parts': [
+          {'text': systemInstruction.trim()}
+        ],
+      },
+      'contents': contents,
+      'generationConfig': {
+        'temperature': temperature,
+      },
+    });
+
+    final client = httpClient ?? http.Client();
+    final buffer = StringBuffer();
+    bool streamedAny = false;
+
+    const modelsToTry = <String>[
+      'gemini-flash-latest',
+      'gemini-2.5-flash',
+    ];
+
+    Object? lastErr;
+    for (final model in modelsToTry) {
+      try {
+        final streamUri = Uri.parse(
+          'https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?alt=sse&key=${Uri.encodeQueryComponent(cleanKey)}',
+        );
+        final req = http.Request('POST', streamUri);
+        req.headers['Content-Type'] = 'application/json';
+        req.body = requestBody;
+
+        final streamedResp =
+            await client.send(req).timeout(const Duration(seconds: 30));
+
+        if (streamedResp.statusCode == 200) {
+          final lines = streamedResp.stream
+              .transform(utf8.decoder)
+              .transform(const LineSplitter());
+          await for (final line in lines) {
+            final trimmed = line.trim();
+            if (!trimmed.startsWith('data:')) continue;
+            final payload = trimmed.substring(5).trim();
+            if (payload.isEmpty || payload == '[DONE]') continue;
+            try {
+              final decoded = jsonDecode(payload);
+              final chunk = _extractCandidateText(decoded);
+              if (chunk.isNotEmpty) {
+                streamedAny = true;
+                buffer.write(chunk);
+                yield chunk;
+              }
+            } catch (_) {}
+          }
+          if (streamedAny) break;
+        } else {
+          // محاولة استدعاء غير متدفق لنفس الموديل إن تعذر SSE
+          final fallbackUri = Uri.parse(
+            'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${Uri.encodeQueryComponent(cleanKey)}',
+          );
+          final res = await client
+              .post(
+                fallbackUri,
+                headers: {'Content-Type': 'application/json'},
+                body: requestBody,
+              )
+              .timeout(const Duration(seconds: 25));
+          if (res.statusCode == 200) {
+            final decoded = jsonDecode(utf8.decode(res.bodyBytes));
+            final fullText = _extractCandidateText(decoded);
+            if (fullText.isNotEmpty) {
+              streamedAny = true;
+              buffer.write(fullText);
+              yield fullText;
+              break;
+            }
+          } else {
+            lastErr = _parseGeminiError(res.statusCode, utf8.decode(res.bodyBytes));
+          }
+        }
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    final finalReply = buffer.toString().trim();
+    if (finalReply.isEmpty) {
+      // إزالة الرسالة المعلقة من السجل عند فشل الاتصال حتى لا تتلوث الجلسة
+      if (_history.isNotEmpty && _history.last.id == userMsg.id) {
+        _history.removeLast();
+      }
+      throw Exception(lastErr?.toString() ?? 'تعذر الحصول على رد من خدمة الذكاء الاصطناعي.');
+    }
+
+    final replyNow = DateTime.now().millisecondsSinceEpoch;
+    _history.add(
+      AiChatMessage(
+        id: 'm_$replyNow',
+        role: 'model',
+        text: finalReply,
+        timestamp: replyNow,
+      ),
+    );
+  }
+
+  /// إرسال رسالة والحصول على النص الكامل مباشرةً (مفيد للرد التلقائي في الدعم الفني).
+  Future<String> sendMessage(
+    String userText, {
+    required String apiKey,
+    http.Client? httpClient,
+  }) async {
+    final buf = StringBuffer();
+    await for (final chunk in sendMessageStream(
+      userText,
+      apiKey: apiKey,
+      httpClient: httpClient,
+    )) {
+      buf.write(chunk);
+    }
+    return buf.toString().trim();
+  }
+
+  static String _extractCandidateText(Object? decoded) {
+    if (decoded is! Map) return '';
+    final candidates = decoded['candidates'];
+    if (candidates is! List || candidates.isEmpty) return '';
+    final first = candidates.first;
+    if (first is! Map) return '';
+    final content = first['content'];
+    if (content is! Map) return '';
+    final parts = content['parts'];
+    if (parts is! List || parts.isEmpty) return '';
+    final sb = StringBuffer();
+    for (final p in parts) {
+      if (p is Map && p['text'] != null) {
+        sb.write('${p['text']}');
+      }
+    }
+    return sb.toString();
+  }
+
+  static String _parseGeminiError(int status, String rawBody) {
+    try {
+      final decoded = jsonDecode(rawBody);
+      if (decoded is Map && decoded['error'] is Map) {
+        final msg = asStr((decoded['error'] as Map)['message']);
+        if (msg.isNotEmpty) return 'خطأ Gemini ($status): $msg';
+      }
+    } catch (_) {}
+    if (status == 400 || status == 403) {
+      return 'مفتاح Gemini API غير صالح أو غير مفعل ($status). يرجى التحقق منه في شاشة الضبط.';
+    }
+    return 'فشل الاتصال بخدمة Gemini (كود $status)';
+  }
+}
+
+/// مدير الجلستين المستقلتين:
+/// 1) `ownerSession` (النمط الأول: رفيق المالك الشخصي — `temperature: 0.9`)
+/// 2) `supportSessionFor(wsId)` (النمط الثاني: الدعم الفني للمستخدمين — `temperature: 0.2`)
+class DualPersonaAiEngine {
+  DualPersonaAiEngine._();
+  static final DualPersonaAiEngine instance = DualPersonaAiEngine._();
+
+  String _apiKey = '';
+
+  /// الجلسة الأولى المستقلة: رفيق المالك الشخصي (Owner Mode).
+  final ChatSession ownerSession = ChatSession(
+    personaId: 'owner_companion',
+    systemInstruction: kOwnerSystemInstruction,
+    temperature: kOwnerTemperature,
+  );
+
+  /// الجلسات المستقلة للنمط الثاني: الدعم الفني للمستخدمين (لكل تذكرة/منشأة جلسة مستقلة).
+  final Map<String, ChatSession> _supportSessions = {};
+
+  void syncApiKey(String key) {
+    _apiKey = key.trim();
+  }
+
+  String get apiKey =>
+      _apiKey.isNotEmpty ? _apiKey : Rtdb.instance.geminiApiKey.trim();
+
+  bool get hasApiKey => apiKey.isNotEmpty;
+
+  /// الحصول على جلسة الدعم الفني المستقلة الخاصة بمنشأة معينة (`temperature: 0.2`).
+  ChatSession supportSessionFor(String workspaceId) {
+    return _supportSessions.putIfAbsent(
+      workspaceId,
+      () => ChatSession(
+        personaId: 'client_support_$workspaceId',
+        systemInstruction: kClientSupportSystemInstruction,
+        temperature: kClientSupportTemperature,
+      ),
+    );
+  }
+
+  void clearOwnerSession() {
+    ownerSession.clear();
+  }
+
+  void clearSupportSession(String workspaceId) {
+    _supportSessions.remove(workspaceId);
+  }
 }
