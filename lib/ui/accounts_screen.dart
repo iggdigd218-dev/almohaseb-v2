@@ -187,7 +187,6 @@ class _EnhancedFilterBarState extends ConsumerState<_EnhancedFilterBar> {
     final filter = widget.filter;
     final currencies = widget.currencies;
     final balanceFilter = widget.balanceFilter;
-    final summary = widget.summary;
     final n = ref.read(accountFilterProvider.notifier);
     final bNotifier = ref.read(_balanceFilterProvider.notifier);
     final isDark = Theme.of(context).brightness == Brightness.dark;

@@ -22,6 +22,7 @@ import 'package:http/http.dart' as http;
 import 'package:sqflite/sqflite.dart';
 
 import '../../core/factory_reset.dart';
+import '../../core/ids.dart';
 import 'account_workspace.dart';
 import '../../core/models.dart';
 import '../repository.dart';
@@ -2229,7 +2230,7 @@ class CloudJoin {
       }
     }
     if (!reuse) {
-      final newUid = repo.newGlobalId();
+      final newUid = newGlobalId();
       await db.insert('users', {
         'id': newUid,
         'name': effectiveName,

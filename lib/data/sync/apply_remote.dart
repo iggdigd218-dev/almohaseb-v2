@@ -594,7 +594,7 @@ extension ApplyRemoteOp on Repo {
         'onboarding.done',
         'first_use_at',
       };
-      if (localOnlySettings.contains('${op.entityId}')) {
+      if (localOnlySettings.contains(op.entityId)) {
         return false;
       }
     }

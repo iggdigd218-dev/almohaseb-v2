@@ -500,9 +500,9 @@ class _GeminiAssistantSheetState extends ConsumerState<_GeminiAssistantSheet> {
                     const SizedBox(height: 10),
                     const Divider(color: Colors.white24, height: 1),
                     const SizedBox(height: 10),
-                    Align(
+                    const Align(
                       alignment: AlignmentDirectional.centerStart,
-                      child: const Text(
+                      child: Text(
                         'اختر دور الروبوت (System Instruction):',
                         style: TextStyle(
                           color: Color(0xFFA7F3D0),
@@ -539,9 +539,9 @@ class _GeminiAssistantSheetState extends ConsumerState<_GeminiAssistantSheet> {
                       }).toList(),
                     ),
                     const SizedBox(height: 8),
-                    Align(
+                    const Align(
                       alignment: AlignmentDirectional.centerStart,
-                      child: const Text(
+                      child: Text(
                         'اختر نموذج Gemini حسب السرعة والتعقيد:',
                         style: TextStyle(
                           color: Color(0xFFA7F3D0),

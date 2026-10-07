@@ -277,10 +277,10 @@ class _HomeShellState extends ConsumerState<HomeShell>
         ref.read(itemsProvider);
         ref.read(itemCategoriesProvider);
       } else if (effectiveRole == UserRole.dataentry) {
-        ref.read(navAppModeProvider.notifier).setMode(NavAppMode.accounting);
+        ref.read(navAppModeProvider.notifier).setMode(NavAppMode.ledger);
         if (mounted) setState(() => _screen = AppScreen.inventory);
       } else {
-        ref.read(navAppModeProvider.notifier).setMode(NavAppMode.accounting);
+        ref.read(navAppModeProvider.notifier).setMode(NavAppMode.ledger);
         if (mounted) setState(() => _screen = AppScreen.dashboard);
       }
     } catch (_) {}
@@ -792,6 +792,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
         }
         if (!mounted) return;
         await repo.setSetting('trialWelcomed', '1');
+        if (!mounted) return;
         _modalBusy = true;
         try {
           await showTrialWelcomeDialog(context);
