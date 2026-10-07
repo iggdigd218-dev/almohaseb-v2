@@ -988,6 +988,17 @@ class SyncEngine {
         where: 'id = ?',
         whereArgs: [targetDeviceId],
       );
+      final st = await repo.settings();
+      final url = effectiveBackendUrl(st['cloudBackendUrl']);
+      if (url.isNotEmpty) {
+        final ws = _cloudTransport?.workspaceId ?? await repo.activeWorkspaceId();
+        final base = url.replaceAll(RegExp(r'/+$'), '');
+        final encWs = Uri.encodeComponent(ws);
+        final encDev = Uri.encodeComponent(targetDeviceId);
+        await http
+            .delete(Uri.parse('$base/workspaces/$encWs/evictions/$encDev.json'))
+            .timeout(const Duration(seconds: 10));
+      }
     } catch (_) {}
   }
 

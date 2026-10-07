@@ -1213,14 +1213,25 @@ class CloudJoin {
       }
     } catch (_) {}
 
-    // سجّل جهازنا في السجل السحابي حتى يراه المدير ويعيّن له الصلاحيات.
+    // سجّل جهازنا في السجل السحابي حتى يراه المدير ويعيّن له الصلاحيات،
+    // وتأكد من مسح أي شاهدة طرد قديمة في /evictions لهذه المساحة.
+    try {
+      await _delete('$root/evictions/${Uri.encodeComponent(ourId)}.json');
+    } catch (_) {}
     final own = await db.query('devices',
         where: 'id = ?', whereArgs: [ourId], limit: 1);
     if (own.isNotEmpty) {
       try {
         await _putJson(
             '$root/roster/${Uri.encodeComponent(ourId)}.json',
-            {..._safeDeviceRow(own.first), 'user_role': assignedRole.code},
+            {
+              ..._safeDeviceRow(own.first),
+              'is_paired': 1,
+              'is_owner': 0,
+              'revoked_at': '',
+              'expelled_at': '',
+              'user_role': assignedRole.code,
+            },
             timeout: const Duration(seconds: 20));
       } catch (_) {}
     }
@@ -1601,6 +1612,22 @@ class CloudJoin {
     final ourId = await ensureDeviceId(repo);
     final fp = await hardwareFingerprintRaw();
 
+    // ══ (إصلاح إعادة ربط جهاز سبق طرده) ══
+    // عند تقديم طلب انضمام جديد بدعوة صالحة، نمسح أي شاهدة طرد سابقة (/evictions)
+    // وأي حالة طرد محلية، حتى لا يُطرد الجهاز تلقائياً بعد موافقة المدير.
+    try {
+      await _delete('$root/evictions/${Uri.encodeComponent(ourId)}.json');
+    } catch (_) {}
+    try {
+      final db = await repo.database;
+      await db.update(
+        'devices',
+        {'revoked_at': '', 'expelled_at': ''},
+        where: 'id = ?',
+        whereArgs: [ourId],
+      );
+    } catch (_) {}
+
     // ══ (عزل الجهاز تلقائياً من المؤسسة السابقة عند إعادة التثبيت والانضمام لمؤسسة أخرى) ══
     try {
       final fpKey = await DeviceRegistry.fingerprintKey(repo);
@@ -1926,11 +1953,19 @@ class CloudJoin {
       if (req != null &&
           '${req['status'] ?? ''}' == 'approved' &&
           '${req['kind'] ?? ''}' == 'leave') {
+        try {
+          await _delete(requestPath(backendUrl, workspaceId, deviceId));
+        } catch (_) {}
         return true;
       }
       // 2) فحص عقدة الطرد الصريحة (evictions)
       final eviction = await _getJson('$root/evictions/$enc.json');
       if (eviction != null) {
+        // استهلاك وحذف شاهدة الطرد فور قراءتها حتى لا تبقى للأبد وتطرد الجهاز
+        // تلقائياً إذا أراد المدير ربطه مرة أخرى لاحقاً!
+        try {
+          await _delete('$root/evictions/$enc.json');
+        } catch (_) {}
         return true;
       }
       // 3) فحص عقدة السجل (roster): إذا تم وسمه صراحة كمطرود
@@ -2042,6 +2077,14 @@ class CloudJoin {
     // 1) اقرأ الطلب الأصلي أولاً (للحصول على uid و token)
     final existingReq =
         await _getJson(requestPath(backendUrl, workspaceId, deviceId));
+
+    // (إصلاح إعادة ربط جهاز سبق طرده أو حظره):
+    // موافقة المدير على طلب الانضمام الجديد تلغي فوراً أي شاهدة طرد سابقة في /evictions
+    // حتى لا يتعرض الجهاز للحظر أو الطرد التلقائي فور دخوله المجموعة.
+    final root0 = _root(backendUrl, workspaceId);
+    try {
+      await _delete('$root0/evictions/${Uri.encodeComponent(deviceId)}.json');
+    } catch (_) {}
 
     // 2) (الإصلاح الجوهري) اكتب approved فوراً — قبل أي عمل محلي ثقيل.
     // هذا يُخفي الطلب من قائمة pending عند كل المديرين، ويُنبه العضو
