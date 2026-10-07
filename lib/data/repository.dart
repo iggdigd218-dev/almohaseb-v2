@@ -354,7 +354,42 @@ class Repo {
         return true;
       }
 
-      final email = (st['account.email'] ?? st['email'] ?? '').trim();
+      var email = (st['account.email'] ?? st['email'] ?? '').trim();
+      var hasGoogleAuth = false;
+      try {
+        final gaRows = await db.query('google_auth', limit: 1);
+        if (gaRows.isNotEmpty) {
+          hasGoogleAuth = true;
+          final gaEmail = '${gaRows.first['email'] ?? ''}'.trim();
+          if (email.isEmpty && gaEmail.isNotEmpty) email = gaEmail;
+        }
+      } catch (_) {}
+      final hasAccountUid = (st['account.uid'] ?? '').trim().isNotEmpty ||
+          (st['account.idToken'] ?? '').trim().isNotEmpty;
+      final isManagerEmail = email.isNotEmpty &&
+          !email.startsWith('cashier@') &&
+          !email.startsWith('member@');
+      final hasPendingJoin = (st['pendingJoin.ws'] ?? '').trim().isNotEmpty ||
+          (st['pendingJoin.token'] ?? '').trim().isNotEmpty;
+
+      // إذا تم تخفيض هذا الجهاز رسمياً إلى «وكيل» بعد انتقال الإدارة بالبريد لجهاز أحدث:
+      final demotedMeta = await db.query(
+        'sync_meta',
+        where: "key = 'demotedToAgentBy'",
+        limit: 1,
+      );
+      final demotedBy = demotedMeta.isNotEmpty
+          ? '${demotedMeta.first['value'] ?? ''}'.trim()
+          : '';
+      if (demotedBy.isNotEmpty && demotedBy != ownId) {
+        return false;
+      }
+
+      // الجهاز المسجل ببريد المدير الرسمي (وليس عضواً منضماً عبر رمز دعوة) هو جهاز المدير دائماً
+      final isAuthenticatedManager = hasGoogleAuth ||
+          hasAccountUid ||
+          (isManagerEmail && !hasPendingJoin);
+
       final creator = (st['creatorDeviceId'] ?? '').trim();
       final isCreator = ownId != null && creator.isNotEmpty && ownId == creator;
 
@@ -363,49 +398,77 @@ class Repo {
           ? WorkspaceMode.parse(meta.first['value'] as String?).storageValue
           : '';
 
-      // ══ حماية صارمة للعضو المنضم (إصلاح فقدان العضوية عند إغلاق التطبيق وإعادة فتحه) ══
-      // إذا كان وضع المساحة 'member'، أو كان creatorDeviceId مسجلاً لجهاز آخر غير جهازنا،
-      // أو كان هناك جهاز آخر في جدول devices يحمل is_owner = 1، فإن هذا الجهاز عضو منضم
-      // ولا يجوز ترقيته إلى مدير (host) إطلاقاً!
-      final otherOwnerRows = ownId == null
-          ? <Map<String, Object?>>[]
-          : await db.query(
-              'devices',
-              columns: ['id'],
-              where: 'is_owner = 1 AND id != ?',
-              whereArgs: [ownId],
-              limit: 1,
+      // ══ حماية صارمة للعضو المنضم عبر رمز/باركود (عند عدم تسجيل دخول ببريد المدير) ══
+      if (!isAuthenticatedManager) {
+        final otherOwnerRows = ownId == null
+            ? <Map<String, Object?>>[]
+            : await db.query(
+                'devices',
+                columns: ['id'],
+                where: 'is_owner = 1 AND id != ?',
+                whereArgs: [ownId],
+                limit: 1,
+              );
+        final hasAnotherCreator =
+            ownId != null && creator.isNotEmpty && creator != ownId;
+        if (rawMode == 'member' ||
+            hasAnotherCreator ||
+            otherOwnerRows.isNotEmpty) {
+          if (rawMode != 'member') {
+            await db.insert(
+              'sync_meta',
+              {'key': 'workspaceMode', 'value': 'member'},
+              conflictAlgorithm: ConflictAlgorithm.replace,
             );
-      final hasAnotherCreator =
-          ownId != null && creator.isNotEmpty && creator != ownId;
-      if (rawMode == 'member' ||
-          hasAnotherCreator ||
-          otherOwnerRows.isNotEmpty) {
-        // تصحيح فوري لأي عضو انقلب وضعه إلى host بسبب خطأ سابق:
-        if (rawMode != 'member') {
-          await db.insert(
-            'sync_meta',
-            {'key': 'workspaceMode', 'value': 'member'},
-            conflictAlgorithm: ConflictAlgorithm.replace,
-          );
+          }
+          if (ownId != null) {
+            await db.update(
+              'devices',
+              {'is_owner': 0, 'is_paired': 1},
+              where: 'id = ? AND COALESCE(is_owner, 0) != 0',
+              whereArgs: [ownId],
+            );
+          }
+          return false;
         }
-        if (ownId != null) {
-          await db.update(
-            'devices',
-            {'is_owner': 0, 'is_paired': 1},
-            where: 'id = ? AND COALESCE(is_owner, 0) != 0',
-            whereArgs: [ownId],
-          );
-        }
-        return false;
       }
 
-      final isManagerEmail = email.isNotEmpty && !email.startsWith('cashier@') && !email.startsWith('member@');
-      if (!isCreator && !isManagerEmail && rawMode != 'host') {
+      if (!isCreator && !isAuthenticatedManager && rawMode != 'host') {
         return false;
       }
 
       if (ownId != null) {
+        // تحويل أي مدير سابق في جدول الأجهزة إلى دور «وكيل» (agent) ليبقى المدير واحداً فقط
+        try {
+          final prevOwners = await db.query(
+            'devices',
+            columns: ['id', 'user_id'],
+            where: 'is_owner = 1 AND id != ?',
+            whereArgs: [ownId],
+          );
+          final agentPermStr = defaultPerms(UserRole.agent)
+              .entries
+              .where((e) => e.value)
+              .map((e) => e.key)
+              .join(',');
+          for (final po in prevOwners) {
+            final pUid = po['user_id'] as int?;
+            if (pUid != null) {
+              await db.update(
+                'users',
+                {
+                  'role': 'agent',
+                  'permissions': agentPermStr,
+                  'active': 1,
+                  'updated_at': now,
+                },
+                where: 'id = ? AND COALESCE(is_me, 0) = 0',
+                whereArgs: [pUid],
+              );
+            }
+          }
+        } catch (_) {}
+
         await db.update(
           'devices',
           {
@@ -463,7 +526,7 @@ class Repo {
         );
       }
 
-      if (creator.isEmpty && ownId != null) {
+      if ((creator.isEmpty || isAuthenticatedManager) && ownId != null) {
         await setSetting('creatorDeviceId', ownId);
       }
 
@@ -4631,6 +4694,24 @@ class Repo {
         }
 
         await _validateOptionalReferences(txn);
+        if (_deviceId != null && _deviceId!.isNotEmpty) {
+          await txn.insert(
+            'settings',
+            {'key': 'sync.deviceId', 'value': _deviceId!},
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+          if (allowCrossFingerprint) {
+            await txn.insert(
+              'settings',
+              {'key': 'creatorDeviceId', 'value': _deviceId!},
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+            await txn.delete(
+              'sync_meta',
+              where: "key = 'demotedToAgentBy'",
+            );
+          }
+        }
         await txn.insert('activity', {
           'text': 'استيراد نسخة احتياطية ($imported سجلًا)',
           'ref_type': 'backup',
@@ -5999,34 +6080,95 @@ class Repo {
     final now = DateTime.now().toIso8601String();
     final ownId = requireDeviceId;
 
-    // ══ حارس أمان صارم: منع استدعاء استرداد الملكية على جهاز عضو منضم ══
-    final mode = await workspaceMode();
-    if (mode == 'member') return;
     final st = await settings();
-    final creator = (st['creatorDeviceId'] ?? '').trim();
-    if (creator.isNotEmpty && creator != ownId) {
-      await db.insert(
-        'sync_meta',
-        {'key': 'workspaceMode', 'value': 'member'},
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-      await db.update(
+    var email = (st['account.email'] ?? st['email'] ?? '').trim();
+    var hasGoogleAuth = false;
+    try {
+      final gaRows = await db.query('google_auth', limit: 1);
+      if (gaRows.isNotEmpty) {
+        hasGoogleAuth = true;
+        final gaEmail = '${gaRows.first['email'] ?? ''}'.trim();
+        if (email.isEmpty && gaEmail.isNotEmpty) email = gaEmail;
+      }
+    } catch (_) {}
+    final hasAccountUid = (st['account.uid'] ?? '').trim().isNotEmpty ||
+        (st['account.idToken'] ?? '').trim().isNotEmpty;
+    final isManagerEmail = email.isNotEmpty &&
+        !email.startsWith('cashier@') &&
+        !email.startsWith('member@');
+    final hasPendingJoin = (st['pendingJoin.ws'] ?? '').trim().isNotEmpty ||
+        (st['pendingJoin.token'] ?? '').trim().isNotEmpty;
+    final isAuthenticatedManager = hasGoogleAuth ||
+        hasAccountUid ||
+        (isManagerEmail && !hasPendingJoin);
+
+    // ══ حارس أمان صارم: منع استدعاء استرداد الملكية على جهاز عضو منضم لم يسجل دخولاً ببريد المدير ══
+    if (!isAuthenticatedManager) {
+      final mode = await workspaceMode();
+      if (mode == 'member') return;
+      final creator = (st['creatorDeviceId'] ?? '').trim();
+      if (creator.isNotEmpty && creator != ownId) {
+        await db.insert(
+          'sync_meta',
+          {'key': 'workspaceMode', 'value': 'member'},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        await db.update(
+          'devices',
+          {'is_owner': 0, 'is_paired': 1},
+          where: 'id = ?',
+          whereArgs: [ownId],
+        );
+        return;
+      }
+      final otherOwners = await db.query(
         'devices',
-        {'is_owner': 0, 'is_paired': 1},
-        where: 'id = ?',
+        columns: ['id'],
+        where: 'is_owner = 1 AND id != ?',
         whereArgs: [ownId],
+        limit: 1,
       );
-      return;
+      if (otherOwners.isNotEmpty) return;
     }
-    final otherOwners = await db.query(
+
+    final prevOwnerRows = await db.query(
       'devices',
-      columns: ['id'],
+      columns: ['id', 'user_id'],
       where: 'is_owner = 1 AND id != ?',
       whereArgs: [ownId],
-      limit: 1,
     );
-    if (otherOwners.isNotEmpty) return;
+
     await db.transaction((txn) async {
+      await txn.delete('sync_meta', where: "key = 'demotedToAgentBy'");
+      await txn.insert(
+        'settings',
+        {'key': 'creatorDeviceId', 'value': ownId},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+
+      // تحويل أي جهاز مدير سابق إلى دور «وكيل» (agent) ليبقى المدير واحداً فقط
+      final agentPermStr = defaultPerms(UserRole.agent)
+          .entries
+          .where((e) => e.value)
+          .map((e) => e.key)
+          .join(',');
+      for (final po in prevOwnerRows) {
+        final pUid = po['user_id'] as int?;
+        if (pUid != null) {
+          await txn.update(
+            'users',
+            {
+              'role': 'agent',
+              'permissions': agentPermStr,
+              'active': 1,
+              'updated_at': now,
+            },
+            where: 'id = ? AND COALESCE(is_me, 0) = 0',
+            whereArgs: [pUid],
+          );
+        }
+      }
+
       await txn.update(
         'devices',
         {
@@ -6082,15 +6224,41 @@ class Repo {
     await setSetting('account.type', 'enterprise');
     if (syncToCloud) {
       try {
-        final st = await settings();
-        final url = effectiveBackendUrl(st['cloudBackendUrl']);
+        final stAfter = await settings();
+        final url = effectiveBackendUrl(stAfter['cloudBackendUrl']);
         final ws = requireWorkspaceId;
         if (url.isNotEmpty && ws.isNotEmpty && ws != 'default') {
+          final prevOwnerId = prevOwnerRows.isNotEmpty
+              ? '${prevOwnerRows.first['id'] ?? ''}'
+              : '';
+          await queueOperation(
+            entityType: EntityKind.setting,
+            entityId: 'ownershipTransfer',
+            opType: OpKind.settings,
+            payload: {
+              'key': 'ownershipTransfer',
+              'value': jsonEncode({
+                'owner_device_id': ownId,
+                'owner_user_id': _currentUserId,
+                'previous_owner_device_id': prevOwnerId,
+                'email_takeover': true,
+                'demote_previous_to': 'agent',
+                'at': now,
+              }),
+            },
+          );
           await CloudJoin.registerCreatorIfAbsent(
             this,
             backendUrl: url,
             workspaceId: ws,
             deviceId: ownId,
+            forceOverwrite: true,
+          ).timeout(const Duration(seconds: 6));
+          await CloudJoin.demotePreviousOwnersInCloud(
+            this,
+            backendUrl: url,
+            workspaceId: ws,
+            currentOwnerDeviceId: ownId,
           ).timeout(const Duration(seconds: 6));
           await CloudJoin.syncRoster(this, db,
                   backendUrl: url, workspaceId: ws)

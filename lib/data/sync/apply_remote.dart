@@ -1021,6 +1021,7 @@ extension ApplyRemoteOp on Repo {
       final newOwnerUid = decoded['owner_user_id'];
       final isReclaim = decoded['reclaim'] == true;
       final isCreatorRecovery = decoded['creator_recovery'] == true;
+      final isEmailTakeover = decoded['email_takeover'] == true;
       if (newOwnerDev.isEmpty) return;
       // تحقق سيادي: مصدر العملية يجب أن يكون المالك المعروف محلياً —
       // جهاز عضو لا يستطيع تزوير نقل ملكية لنفسه.
@@ -1031,7 +1032,10 @@ extension ApplyRemoteOp on Repo {
         // آخر تسليم يحق له استعادة الملكية خلال نافذة الاسترجاع — نتحقق
         // أن المصدر هو فعلاً المالك السابق المعروف لدينا، لا أي عضو.
         bool allowed = false;
-        if (isReclaim) {
+        if (isEmailTakeover && op.deviceId == newOwnerDev) {
+          allowed = true;
+        }
+        if (!allowed && isReclaim) {
           final prev = await txn.query('sync_meta',
               where: 'key = ?', whereArgs: ['prevOwnerDeviceId'], limit: 1);
           allowed =
@@ -1044,9 +1048,6 @@ extension ApplyRemoteOp on Repo {
           final c = await txn.query('settings',
               where: 'key = ?', whereArgs: ['creatorDeviceId'], limit: 1);
           allowed = c.isNotEmpty && '${c.first['value']}' == op.deviceId;
-          // لا كاش محلياً بعد؟ التحقق الشبكي خارج المعاملة غير ممكن هنا —
-          // نتحفظ بالرفض؛ المصالحة السحابية (roster) ستوصل الملكية لاحقاً
-          // لأن creatorRecoverOwnership يرفعها لـ roster مباشرة أيضاً.
         }
         if (!allowed) return;
       }
@@ -1114,6 +1115,38 @@ extension ApplyRemoteOp on Repo {
         await txn.insert(
             'sync_meta', {'key': 'workspaceMode', 'value': 'host'},
             conflictAlgorithm: ConflictAlgorithm.replace);
+        await txn.delete('sync_meta',
+            where: 'key = ?', whereArgs: ['demotedToAgentBy']);
+      } else if (ourId.isNotEmpty &&
+          (ourId == prevOwnerId || isEmailTakeover)) {
+        final wasOwner = curOwner.any((r) => '${r['id']}' == ourId);
+        if (wasOwner || ourId == prevOwnerId) {
+          await txn.insert(
+              'sync_meta', {'key': 'workspaceMode', 'value': 'member'},
+              conflictAlgorithm: ConflictAlgorithm.replace);
+          await txn.insert(
+              'sync_meta', {'key': 'demotedToAgentBy', 'value': newOwnerDev},
+              conflictAlgorithm: ConflictAlgorithm.replace);
+          await txn.insert(
+              'settings', {'key': 'creatorDeviceId', 'value': newOwnerDev},
+              conflictAlgorithm: ConflictAlgorithm.replace);
+          final agentPermStr = defaultPerms(UserRole.agent)
+              .entries
+              .where((e) => e.value)
+              .map((e) => e.key)
+              .join(',');
+          await txn.update(
+            'users',
+            {
+              'role': 'agent',
+              'permissions': agentPermStr,
+              'active': 1,
+              'deleted_at': '',
+              'updated_at': now,
+            },
+            where: 'is_me = 1',
+          );
+        }
       }
     } catch (_) {
       // حمولة تالفة لا تسقط بقية السحبة.

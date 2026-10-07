@@ -1570,15 +1570,6 @@ class _HomeShellState extends ConsumerState<HomeShell>
                   child: Scaffold(
                     key: _scaffoldKey,
         appBar: AppBar(
-          bottom: PreferredSize(
-            preferredSize: const Size.fromHeight(1),
-            child: Container(
-              height: 1,
-              color: Theme.of(context).brightness == Brightness.dark
-                  ? const Color(0xFF1E293B)
-                  : const Color(0xFFE2E8F0),
-            ),
-          ),
           leading: Builder(
             builder: (ctx) {
               final isDark = Theme.of(ctx).brightness == Brightness.dark;
@@ -1591,7 +1582,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
                   child: InkWell(
                     onTap: () => Scaffold.of(ctx).openDrawer(),
                     child: Icon(
-                      Icons.menu_rounded,
+                      Icons.menu,
                       size: 20,
                       color: AppColors.textOf(ctx),
                     ),
@@ -1602,38 +1593,13 @@ class _HomeShellState extends ConsumerState<HomeShell>
           ),
           title: Consumer(
             builder: (ctx, rref, _) {
-              String heading = _screen.title;
-              if (_screen == AppScreen.dashboard) {
-                final devName =
-                    rref.watch(ownDeviceNameProvider).valueOrNull?.trim();
-                heading = (devName != null && devName.isNotEmpty)
-                    ? devName
-                    : 'لوحة التحكم';
+              if (_screen != AppScreen.dashboard) return Text(_screen.title);
+              final devName =
+                  rref.watch(ownDeviceNameProvider).valueOrNull?.trim();
+              if (devName != null && devName.isNotEmpty) {
+                return Text(devName, overflow: TextOverflow.ellipsis);
               }
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    heading,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 16.5,
-                      fontWeight: FontWeight.w900,
-                      color: AppColors.textOf(ctx),
-                    ),
-                  ),
-                  Text(
-                    'سجل المبيعات والديون • نظام محلي متكامل',
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.text2Of(ctx),
-                    ),
-                  ),
-                ],
-              );
+              return const Text('المحاسب');
             },
           ),
           actions: [
@@ -1644,166 +1610,164 @@ class _HomeShellState extends ConsumerState<HomeShell>
                 return _appBarSquircleAction(
                   tooltip: 'روبوت المحاسب الذكي (Gemini)',
                   bg: isDark
-                      ? const Color(0xFF0C4A6E)
-                      : const Color(0xFFF0F9FF),
+                      ? const Color(0xFF064E3B)
+                      : const Color(0xFFD1FAE5),
                   fg: isDark
-                      ? const Color(0xFF38BDF8)
-                      : const Color(0xFF0284C7),
+                      ? const Color(0xFFFCD34D)
+                      : const Color(0xFF047857),
                   border: Border.all(
                     color: isDark
-                        ? const Color(0xFF0369A1)
-                        : const Color(0xFFBAE6FD),
+                        ? const Color(0xFF10B981)
+                        : const Color(0xFF6EE7B7),
                     width: 1.1,
                   ),
                   icon: Icon(
-                    Icons.auto_awesome_rounded,
-                    size: 20,
+                    Icons.smart_toy_rounded,
+                    size: 21,
                     color: isDark
-                        ? const Color(0xFF38BDF8)
-                        : const Color(0xFF0284C7),
+                        ? const Color(0xFFFCD34D)
+                        : const Color(0xFF047857),
                   ),
                   onTap: () => openGeminiAssistantSheet(context, ref),
                 );
               },
             ),
-            // قائمة الخيارات الإضافية (⋮) قبل جرس الإشعارات
+            // رمز الإشعارات 🔔 (في مكان النقاط سابقاً، والآن النقاط في الزاوية)
+            // أو العكس: استبدال موقع النقاط الثلاث وجرس الإشعارات بحيث يعود الجرس إلى الزاوية مكان النقاط حالياً وتصبح النقاط قبله
             Consumer(
               builder: (ctx, rref, _) {
+                final unreadLocal =
+                    rref.watch(unreadCountProvider).valueOrNull ?? 0;
                 final isDark = Theme.of(ctx).brightness == Brightness.dark;
-                final currentTheme = rref.watch(themeModeProvider);
-                final darkActive = currentTheme == ThemeMode.dark ||
-                    (currentTheme == ThemeMode.system && isDark);
-                final hidden = rref.watch(hideBalancesProvider);
-
-                return PopupMenuButton<String>(
-                  tooltip: 'خيارات إضافية',
-                  icon: Container(
-                    width: 38,
-                    height: 38,
-                    decoration: BoxDecoration(
-                      color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
-                      borderRadius: BorderRadius.circular(12),
+                return ValueListenableBuilder<int>(
+                  valueListenable:
+                      CloudControlService.instance.unreadAlertCountNotifier,
+                  builder: (ctx, unreadCloud, _) {
+                    final unread = unreadLocal + unreadCloud;
+                    return _appBarSquircleAction(
+                      tooltip: 'الإشعارات',
+                      bg: isDark
+                          ? const Color(0xFF291E04)
+                          : const Color(0xFFFEF9C3),
+                      fg: const Color(0xFFB45309),
                       border: Border.all(
-                        color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+                        color: isDark
+                            ? const Color(0xFF854D0E)
+                            : const Color(0xFFFDE047),
+                        width: 1.1,
                       ),
-                    ),
-                    child: Icon(
-                      Icons.more_vert_rounded,
-                      size: 20,
-                      color: AppColors.textOf(ctx),
-                    ),
-                  ),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  onSelected: (val) {
-                    if (val == 'theme') {
-                      Sfx.tap();
-                      rref.read(themeModeProvider.notifier).state =
-                          darkActive ? ThemeMode.light : ThemeMode.dark;
-                    } else if (val == 'balances') {
-                      Sfx.tap();
-                      rref.read(hideBalancesProvider.notifier).state = !hidden;
-                    } else if (val == 'refresh') {
-                      bump(ref);
-                      _refreshSync();
-                      try {
-                        ref.read(syncEngineProvider).forceSyncNow();
-                      } catch (_) {}
-                      _checkForAppUpdate();
-                    }
-                  },
-                  itemBuilder: (c) => [
-                    PopupMenuItem(
-                      value: 'theme',
-                      child: Row(
-                        children: [
-                          Icon(
-                            darkActive ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-                            size: 19,
-                            color: darkActive ? const Color(0xFFFBBF24) : const Color(0xFFD97706),
-                          ),
-                          const SizedBox(width: 10),
-                          Text(darkActive ? 'التبديل إلى الوضع النهاري' : 'التبديل إلى الوضع الليلي'),
-                        ],
-                      ),
-                    ),
-                    PopupMenuItem(
-                      value: 'balances',
-                      child: Row(
-                        children: [
-                          Icon(
-                            hidden ? Icons.visibility_outlined : Icons.visibility_off_outlined,
-                            size: 19,
-                            color: const Color(0xFF7C3AED),
-                          ),
-                          const SizedBox(width: 10),
-                          Text(hidden ? 'إظهار الأرصدة' : 'إخفاء الأرصدة'),
-                        ],
-                      ),
-                    ),
-                    if (desktop) ...[
-                      const PopupMenuDivider(),
-                      const PopupMenuItem(
-                        value: 'refresh',
-                        child: Row(
-                          children: [
-                            Icon(Icons.refresh_rounded, size: 19, color: Color(0xFF16A34A)),
-                            SizedBox(width: 10),
-                            Text('تحديث والتحقق من الإصدار'),
-                          ],
+                      icon: Badge(
+                        isLabelVisible: unread > 0,
+                        label: Text(
+                          '$unread',
+                          style: const TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w900,
+                              color: Colors.white),
+                        ),
+                        backgroundColor: const Color(0xFFDC2626),
+                        child: GoldenBellIcon(
+                          size: 22,
+                          hasUnread: unread > 0,
                         ),
                       ),
-                    ],
-                  ],
+                      onTap: () => openNotifications(
+                        context,
+                        ref,
+                        onOpenEntity: openNotificationEntity,
+                      ),
+                    );
+                  },
                 );
               },
             ),
-            // جرس الإشعارات 🔔 في الزاوية اليسرى تماماً (مطابق لشاشة المعاينة)
+            // قائمة الخيارات الإضافية (⋮) في الزاوية
             Padding(
               padding: const EdgeInsetsDirectional.only(end: 6),
               child: Consumer(
                 builder: (ctx, rref, _) {
-                  final unreadLocal =
-                      rref.watch(unreadCountProvider).valueOrNull ?? 0;
                   final isDark = Theme.of(ctx).brightness == Brightness.dark;
-                  return ValueListenableBuilder<int>(
-                    valueListenable:
-                        CloudControlService.instance.unreadAlertCountNotifier,
-                    builder: (ctx, unreadCloud, _) {
-                      final unread = unreadLocal + unreadCloud;
-                      return _appBarSquircleAction(
-                        tooltip: 'الإشعارات والتنبيهات',
-                        bg: isDark
-                            ? const Color(0xFF291E04)
-                            : const Color(0xFFFFFBEB),
-                        fg: const Color(0xFFB45309),
-                        border: Border.all(
-                          color: isDark
-                              ? const Color(0xFF854D0E)
-                              : const Color(0xFFFDE68A),
-                          width: 1.1,
-                        ),
-                        icon: Badge(
-                          isLabelVisible: unread > 0,
-                          label: Text(
-                            '$unread',
-                            style: const TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w900,
-                                color: Colors.white),
-                          ),
-                          backgroundColor: const Color(0xFFE11D48),
-                          child: GoldenBellIcon(
-                            size: 22,
-                            hasUnread: unread > 0,
-                          ),
-                        ),
-                        onTap: () => openNotifications(
-                          context,
-                          ref,
-                          onOpenEntity: openNotificationEntity,
-                        ),
-                      );
+                  final currentTheme = rref.watch(themeModeProvider);
+                  final darkActive = currentTheme == ThemeMode.dark ||
+                      (currentTheme == ThemeMode.system && isDark);
+                  final hidden = rref.watch(hideBalancesProvider);
+
+                  return PopupMenuButton<String>(
+                    tooltip: 'خيارات إضافية',
+                    icon: Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Icon(
+                        Icons.more_vert_rounded,
+                        size: 20,
+                        color: AppColors.textOf(ctx),
+                      ),
+                    ),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    onSelected: (val) {
+                      if (val == 'theme') {
+                        Sfx.tap();
+                        rref.read(themeModeProvider.notifier).state =
+                            darkActive ? ThemeMode.light : ThemeMode.dark;
+                      } else if (val == 'balances') {
+                        Sfx.tap();
+                        rref.read(hideBalancesProvider.notifier).state = !hidden;
+                      } else if (val == 'refresh') {
+                        bump(ref);
+                        _refreshSync();
+                        try {
+                          ref.read(syncEngineProvider).forceSyncNow();
+                        } catch (_) {}
+                        _checkForAppUpdate();
+                      }
                     },
+                    itemBuilder: (c) => [
+                      PopupMenuItem(
+                        value: 'theme',
+                        child: Row(
+                          children: [
+                            Icon(
+                              darkActive ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+                              size: 19,
+                              color: darkActive ? const Color(0xFFFBBF24) : const Color(0xFFD97706),
+                            ),
+                            const SizedBox(width: 10),
+                            Text(darkActive ? 'التبديل إلى الوضع النهاري' : 'التبديل إلى الوضع الليلي'),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'balances',
+                        child: Row(
+                          children: [
+                            Icon(
+                              hidden ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                              size: 19,
+                              color: const Color(0xFF7C3AED),
+                            ),
+                            const SizedBox(width: 10),
+                            Text(hidden ? 'إظهار الأرصدة' : 'إخفاء الأرصدة'),
+                          ],
+                        ),
+                      ),
+                      if (desktop) ...[
+                        const PopupMenuDivider(),
+                        const PopupMenuItem(
+                          value: 'refresh',
+                          child: Row(
+                            children: [
+                              Icon(Icons.refresh_rounded, size: 19, color: Color(0xFF16A34A)),
+                              SizedBox(width: 10),
+                              Text('تحديث والتحقق من الإصدار'),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ],
                   );
                 },
               ),
@@ -1963,12 +1927,12 @@ class _BottomItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final activeColor = isDark ? const Color(0xFF38BDF8) : const Color(0xFF0284C7);
-    final inactiveColor = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
-    final pillBg = selected
-        ? (isDark ? const Color(0xFF0C4A6E).withValues(alpha: 0.65) : const Color(0xFFF0F9FF))
-        : Colors.transparent;
-    final iconFg = selected ? activeColor : inactiveColor;
+    final squircleBg = selected
+        ? tone.foreground
+        : (isDark ? tone.foreground.withValues(alpha: .22) : tone.background);
+    final squircleFg = selected
+        ? Colors.white
+        : (isDark ? Colors.white : tone.foreground);
 
     return InkWell(
       onTap: () {
@@ -1978,41 +1942,43 @@ class _BottomItem extends StatelessWidget {
       borderRadius: BorderRadius.circular(16),
       splashColor: Colors.transparent,
       highlightColor: Colors.transparent,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOutCubic,
-        constraints: const BoxConstraints(minWidth: 58),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: pillBg,
-          borderRadius: BorderRadius.circular(16),
-        ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            SizedBox(
-              height: 24,
-              child: Center(child: icon(selected, iconFg)),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+              width: selected ? 52 : 44,
+              height: 34,
+              decoration: BoxDecoration(
+                color: squircleBg,
+                borderRadius: BorderRadius.circular(14),
+                boxShadow: selected
+                    ? [
+                        BoxShadow(
+                          color: tone.foreground.withValues(alpha: 0.35),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ]
+                    : null,
+              ),
+              alignment: Alignment.center,
+              child: icon(selected, squircleFg),
             ),
-            const SizedBox(height: 2),
-            if (selected)
-              Container(
-                width: 5,
-                height: 5,
-                margin: const EdgeInsets.only(bottom: 2),
-                decoration: BoxDecoration(
-                  color: activeColor,
-                  shape: BoxShape.circle,
-                ),
-              )
-            else
-              const SizedBox(height: 7),
+            const SizedBox(height: 3),
             Text(
               label,
               style: TextStyle(
                 fontSize: 11,
                 fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
-                color: selected ? activeColor : inactiveColor,
+                color: selected
+                    ? (isDark ? Colors.white : tone.foreground)
+                    : (isDark
+                        ? const Color(0xFF94A3B8)
+                        : const Color(0xFF64748B)),
                 fontFamily: uiFontFamily,
               ),
             ),
@@ -2023,7 +1989,7 @@ class _BottomItem extends StatelessWidget {
   }
 }
 
-/// أيقونة الرسم البياني ثلاثية الأعمدة والملوّنة المميزة للتقارير (أخضر، أصفر، أزرق) — كما في شاشة المعاينة
+/// أيقونة الرسم البياني ثلاثية الأعمدة والملوّنة المميزة للتقارير (أخضر، أصفر، أزرق)
 class _MarkedBarChartIcon extends StatelessWidget {
   final bool selected;
   const _MarkedBarChartIcon({required this.selected});
@@ -2031,22 +1997,25 @@ class _MarkedBarChartIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (selected) {
+      return const Icon(Icons.bar_chart_rounded, color: Colors.white, size: 22);
+    }
     return Row(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
         Container(
           width: 4,
-          height: 11,
+          height: 12,
           decoration: BoxDecoration(
-            color: const Color(0xFF10B981),
+            color: const Color(0xFF22C55E),
             borderRadius: BorderRadius.circular(2),
           ),
         ),
         const SizedBox(width: 2.5),
         Container(
           width: 4,
-          height: 17,
+          height: 20,
           decoration: BoxDecoration(
             color: const Color(0xFFF59E0B),
             borderRadius: BorderRadius.circular(2),
@@ -2055,9 +2024,9 @@ class _MarkedBarChartIcon extends StatelessWidget {
         const SizedBox(width: 2.5),
         Container(
           width: 4,
-          height: 13,
+          height: 16,
           decoration: BoxDecoration(
-            color: const Color(0xFF0EA5E9),
+            color: const Color(0xFF3B82F6),
             borderRadius: BorderRadius.circular(2),
           ),
         ),
@@ -2066,7 +2035,7 @@ class _MarkedBarChartIcon extends StatelessWidget {
   }
 }
 
-/// أيقونة العمليات / الحركات المالية (CreditCard / Receipt) كما في شاشة المعاينة
+/// أيقونة الفاتورة / السند المميّزة بخطوط زرقاء للحركات
 class _MarkedReceiptIcon extends StatelessWidget {
   final bool selected;
   const _MarkedReceiptIcon({required this.selected});
@@ -2074,18 +2043,57 @@ class _MarkedReceiptIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final activeColor = isDark ? const Color(0xFF38BDF8) : const Color(0xFF0284C7);
-    final inactiveColor = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
-    return Icon(
-      Icons.credit_card_rounded,
-      color: selected ? activeColor : inactiveColor,
-      size: 21,
+    if (selected) {
+      return const Icon(
+        Icons.receipt_long_rounded,
+        color: Colors.white,
+        size: 21,
+      );
+    }
+    return Container(
+      width: 20,
+      height: 22,
+      decoration: BoxDecoration(
+        color: const Color(0xFFF1F5F9),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: const Color(0xFF38BDF8), width: 1.4),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 3),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Container(
+            height: 2,
+            width: 14,
+            decoration: BoxDecoration(
+              color: const Color(0xFF0284C7),
+              borderRadius: BorderRadius.circular(1),
+            ),
+          ),
+          Container(
+            height: 2,
+            width: 9,
+            decoration: BoxDecoration(
+              color: const Color(0xFF38BDF8),
+              borderRadius: BorderRadius.circular(1),
+            ),
+          ),
+          Container(
+            height: 2,
+            width: 12,
+            decoration: BoxDecoration(
+              color: const Color(0xFF0284C7),
+              borderRadius: BorderRadius.circular(1),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
 
-/// أيقونة الترس للإعدادات كما في شاشة المعاينة
+/// أيقونة الترس المعدني للإعدادات
 class _MarkedGearIcon extends StatelessWidget {
   final bool selected;
   const _MarkedGearIcon({required this.selected});
@@ -2093,18 +2101,18 @@ class _MarkedGearIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final activeColor = isDark ? const Color(0xFF38BDF8) : const Color(0xFF0284C7);
-    final inactiveColor = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
-    return Icon(
-      Icons.settings_outlined,
-      color: selected ? activeColor : inactiveColor,
-      size: 21,
+    if (selected) {
+      return const Icon(Icons.settings_rounded, color: Colors.white, size: 22);
+    }
+    return const Icon(
+      Icons.settings_rounded,
+      color: Color(0xFF64748B),
+      size: 22,
     );
   }
 }
 
-/// زر العملية العائم المميّز بالتدرج الدائري (Sky → Indigo) مع إطار أبيض كما في شاشة المعاينة
+/// زر العملية العائم المميّز بالتدرج الدائري كما في الصورة
 class _MarkedOperationFab extends StatelessWidget {
   final VoidCallback? onPressed;
   const _MarkedOperationFab({required this.onPressed});
@@ -2117,17 +2125,21 @@ class _MarkedOperationFab extends StatelessWidget {
       height: 58,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        border: Border.all(color: Colors.white, width: 2.2),
         gradient: const LinearGradient(
-          colors: [Color(0xFF0284C7), Color(0xFF0EA5E9), Color(0xFF4F46E5)],
-          begin: Alignment.bottomLeft,
-          end: Alignment.topRight,
+          colors: [Color(0xFFFB923C), Color(0xFF0284C7)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
         ),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF0EA5E9).withValues(alpha: 0.42),
-            blurRadius: 14,
-            offset: const Offset(0, 5),
+            color: const Color(0xFF0284C7).withValues(alpha: 0.4),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+          BoxShadow(
+            color: const Color(0xFFFB923C).withValues(alpha: 0.25),
+            blurRadius: 8,
+            offset: const Offset(-2, -2),
           ),
         ],
       ),
@@ -2139,7 +2151,7 @@ class _MarkedOperationFab extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.add_rounded, color: Colors.white, size: 23),
+              const Icon(Icons.add_rounded, color: Colors.white, size: 22),
               Text(
                 'عملية',
                 style: TextStyle(
@@ -2300,8 +2312,8 @@ class _Drawer extends ConsumerWidget {
           padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
           child: Text(
             title,
-            style: const TextStyle(
-              color: Color(0xFF94A3B8),
+            style: TextStyle(
+              color: AppColors.text3Of(ctx),
               fontSize: 11,
               fontWeight: FontWeight.w800,
               letterSpacing: .2,
@@ -2472,20 +2484,29 @@ class _Drawer extends ConsumerWidget {
     };
 
     return Drawer(
-      backgroundColor: const Color(0xFF0F172A),
+      backgroundColor: AppColors.surfaceOf(context),
       child: SafeArea(
         child: Column(
           children: [
-            // ---------- ترويسة الملف الشخصي والمنشأة (مطابقة لشاشة المعاينة Slate-900) ----------
+            // ---------- ترويسة الملف الشخصي والمنشأة ----------
             InkWell(
+              borderRadius: const BorderRadius.only(
+                bottomLeft: Radius.circular(22),
+                bottomRight: Radius.circular(22),
+              ),
               onTap: () => showAccountProfileDialog(context, ref),
               child: Container(
                 width: double.infinity,
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+                padding: const EdgeInsets.fromLTRB(16, 18, 16, 16),
                 decoration: const BoxDecoration(
-                  color: Color(0xFF0F172A),
-                  border: Border(
-                    bottom: BorderSide(color: Color(0xFF1E293B), width: 1),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [Color(0xFF1E3A5F), AppColors.primary],
+                  ),
+                  borderRadius: BorderRadius.only(
+                    bottomLeft: Radius.circular(22),
+                    bottomRight: Radius.circular(22),
                   ),
                 ),
               child: Column(
@@ -2493,83 +2514,46 @@ class _Drawer extends ConsumerWidget {
                 children: [
                   Row(
                     children: [
-                      // (2026-09-22) أيقونة المؤسسة بتدرج Sky→Indigo مع شارة التوثيق الخضراء ✓
+                      // (2026-09-22) أيقونة المؤسسة: المدير يغيّرها/يحذفها،
+                      // والعضو يراها فقط للقراءة بلا إمكانية للتعديل.
                       Consumer(
                         builder: (ctx, rref, _) {
                           final photo =
                               rref.watch(drawerPhotoProvider).valueOrNull ?? '';
                           const fallback = Icon(
-                            Icons.storefront_rounded,
+                            Icons.person,
                             color: Colors.white,
-                            size: 24,
+                            size: 30,
                           );
                           final Widget face = photo.startsWith('http')
                               ? Image.network(
                                   photo,
-                                  width: 46,
-                                  height: 46,
+                                  width: 54,
+                                  height: 54,
                                   fit: BoxFit.cover,
                                   errorBuilder: (_, __, ___) => fallback,
                                 )
                               : (photo.isNotEmpty
                                   ? Image.file(
                                       File(photo),
-                                      width: 46,
-                                      height: 46,
+                                      width: 54,
+                                      height: 54,
                                       fit: BoxFit.cover,
                                       errorBuilder: (_, __, ___) => fallback,
                                     )
                                   : fallback);
-                          final avatarContainer = Stack(
-                            clipBehavior: Clip.none,
-                            children: [
-                              Container(
-                                width: 46,
-                                height: 46,
-                                decoration: BoxDecoration(
-                                  gradient: const LinearGradient(
-                                    colors: [Color(0xFF0EA5E9), Color(0xFF4F46E5)],
-                                    begin: Alignment.bottomLeft,
-                                    end: Alignment.topRight,
-                                  ),
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: const Color(0xFF38BDF8).withValues(alpha: 0.45),
-                                    width: 2,
-                                  ),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: const Color(0xFF0EA5E9).withValues(alpha: 0.25),
-                                      blurRadius: 10,
-                                      offset: const Offset(0, 3),
-                                    ),
-                                  ],
-                                ),
-                                child: ClipOval(child: face),
+                          final avatarContainer = Container(
+                            width: 54,
+                            height: 54,
+                            decoration: BoxDecoration(
+                              color: Colors.white24,
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: Colors.white38,
+                                width: 2,
                               ),
-                              Positioned(
-                                bottom: -2,
-                                left: -2,
-                                child: Container(
-                                  width: 17,
-                                  height: 17,
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF10B981),
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                      color: const Color(0xFF0F172A),
-                                      width: 2,
-                                    ),
-                                  ),
-                                  alignment: Alignment.center,
-                                  child: const Icon(
-                                    Icons.check_rounded,
-                                    size: 10,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              ),
-                            ],
+                            ),
+                            child: ClipOval(child: face),
                           );
                           if (!isMasterAdmin) return avatarContainer;
                           return InkWell(
@@ -2755,73 +2739,16 @@ class _Drawer extends ConsumerWidget {
             ),
             ),
 
-            // ---------- شريط سياق الجلسة والجهاز (مطابق لشاشة المعاينة) ----------
-            Consumer(
-              builder: (ctx, rref, _) {
-                final st = rref.watch(settingsProvider).valueOrNull ??
-                    const <String, String>{};
-                final devId = (st['sync.deviceId'] ?? 'DEV-LOCAL').trim();
-                final standalone = wsMode == 'standalone';
-                return Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-                  decoration: const BoxDecoration(
-                    color: Color(0xFF020617),
-                    border: Border(
-                      bottom: BorderSide(color: Color(0xFF1E293B), width: 1),
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Flexible(
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(
-                              Icons.laptop_mac_rounded,
-                              size: 13,
-                              color: Color(0xFF64748B),
-                            ),
-                            const SizedBox(width: 6),
-                            Flexible(
-                              child: Text(
-                                devId,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 10.5,
-                                  color: Color(0xFF94A3B8),
-                                  fontFamily: 'monospace',
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Text(
-                        standalone ? 'قاعدة محلية مستقلة' : 'مزامنة المنشأة',
-                        style: const TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF94A3B8),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            ),
-
             // ---------- مفتاح كبسولي للتبديل بين وضع المبيعات ووضع المحاسبة ----------
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
               child: Container(
                 padding: const EdgeInsets.all(4),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF1E293B),
+                  color: dark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
                   borderRadius: BorderRadius.circular(22),
                   border: Border.all(
-                    color: const Color(0xFF334155),
+                    color: dark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
                   ),
                 ),
                 child: Row(
@@ -2841,13 +2768,13 @@ class _Drawer extends ConsumerWidget {
                           padding: const EdgeInsets.symmetric(vertical: 8),
                           decoration: BoxDecoration(
                             color: navMode == NavAppMode.pos
-                                ? const Color(0xFF0EA5E9)
+                                ? const Color(0xFF0284C7)
                                 : Colors.transparent,
                             borderRadius: BorderRadius.circular(18),
                             boxShadow: navMode == NavAppMode.pos
                                 ? [
                                     BoxShadow(
-                                      color: const Color(0xFF0EA5E9).withValues(alpha: .3),
+                                      color: const Color(0xFF0284C7).withValues(alpha: .3),
                                       blurRadius: 6,
                                       offset: const Offset(0, 2),
                                     ),
@@ -2862,7 +2789,7 @@ class _Drawer extends ConsumerWidget {
                                 size: 16,
                                 color: navMode == NavAppMode.pos
                                     ? Colors.white
-                                    : const Color(0xFF94A3B8),
+                                    : AppColors.text2Of(context),
                               ),
                               const SizedBox(width: 6),
                               Flexible(
@@ -2875,7 +2802,7 @@ class _Drawer extends ConsumerWidget {
                                     fontWeight: FontWeight.bold,
                                     color: navMode == NavAppMode.pos
                                         ? Colors.white
-                                        : const Color(0xFFCBD5E1),
+                                        : AppColors.text2Of(context),
                                   ),
                                 ),
                               ),
@@ -2926,7 +2853,7 @@ class _Drawer extends ConsumerWidget {
                                 size: 16,
                                 color: navMode == NavAppMode.ledger
                                     ? Colors.white
-                                    : const Color(0xFF94A3B8),
+                                    : AppColors.text2Of(context),
                               ),
                               const SizedBox(width: 6),
                               Flexible(
@@ -2939,7 +2866,7 @@ class _Drawer extends ConsumerWidget {
                                     fontWeight: FontWeight.bold,
                                     color: navMode == NavAppMode.ledger
                                         ? Colors.white
-                                        : const Color(0xFFCBD5E1),
+                                        : AppColors.text2Of(context),
                                   ),
                                 ),
                               ),
@@ -3015,7 +2942,7 @@ class _Drawer extends ConsumerWidget {
                 ],
               ),
             ),
-            const Divider(height: 1, color: Color(0xFF1E293B)),
+            const Divider(height: 1),
             // ---------- التحديثات (الإصدار وسجل التغييرات 3 أسطر) ----------
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
@@ -3026,11 +2953,11 @@ class _Drawer extends ConsumerWidget {
                   final hasUpdate = info?.hasUpdate ?? false;
                   return Material(
                     color: hasUpdate
-                        ? const Color(0xFF451A03)
-                        : const Color(0xFF1E293B),
-                    borderRadius: BorderRadius.circular(14),
+                        ? const Color(0xFFFEF3C7)
+                        : AppColors.surface2Of(context),
+                    borderRadius: BorderRadius.circular(16),
                     child: InkWell(
-                      borderRadius: BorderRadius.circular(14),
+                      borderRadius: BorderRadius.circular(16),
                       onTap: () {
                         Navigator.pop(context);
                         showModalBottomSheet(
@@ -3061,14 +2988,14 @@ class _Drawer extends ConsumerWidget {
                               decoration: BoxDecoration(
                                 color: hasUpdate
                                     ? const Color(0xFFF59E0B)
-                                    : const Color(0xFF0EA5E9).withValues(alpha: .18),
+                                    : AppColors.primary.withValues(alpha: .14),
                                 borderRadius: BorderRadius.circular(11),
                               ),
                               child: Icon(
                                 hasUpdate
                                     ? Icons.system_update_rounded
                                     : Icons.system_update_alt_rounded,
-                                color: hasUpdate ? Colors.white : const Color(0xFF38BDF8),
+                                color: hasUpdate ? Colors.white : AppColors.primary,
                                 size: 20,
                               ),
                             ),
@@ -3082,7 +3009,6 @@ class _Drawer extends ConsumerWidget {
                                     style: TextStyle(
                                       fontWeight: FontWeight.w800,
                                       fontSize: 13.5,
-                                      color: Colors.white,
                                     ),
                                   ),
                                   Text(
@@ -3092,8 +3018,8 @@ class _Drawer extends ConsumerWidget {
                                     style: TextStyle(
                                       fontSize: 11,
                                       color: hasUpdate
-                                          ? const Color(0xFFFBBF24)
-                                          : const Color(0xFF94A3B8),
+                                          ? const Color(0xFFB45309)
+                                          : AppColors.text3Of(context),
                                     ),
                                   ),
                                 ],
@@ -3127,9 +3053,9 @@ class _Drawer extends ConsumerWidget {
               padding: const EdgeInsets.only(bottom: 8),
               child: Text(
                 appVersionLabel,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 10.5,
-                  color: Color(0xFF64748B),
+                  color: AppColors.text3Of(context),
                 ),
               ),
             ),
@@ -3140,7 +3066,7 @@ class _Drawer extends ConsumerWidget {
   }
 }
 
-/// صف عنصر في القائمة الجانبية بتصميم شاشة المعاينة (bg-sky-500 للنشط وSlate-300 لغير النشط).
+/// صف عنصر في القائمة الجانبية بتصميم البطاقة النشطة.
 class _DrawerTile extends StatelessWidget {
   final AppScreen screen;
   final bool active;
@@ -3158,25 +3084,26 @@ class _DrawerTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final iconColor = active ? Colors.white : const Color(0xFF94A3B8);
-    final textColor = active ? Colors.white : const Color(0xFFCBD5E1);
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2.5),
+      padding: const EdgeInsets.symmetric(vertical: 3),
       child: Material(
-        color: active ? const Color(0xFF0EA5E9) : Colors.transparent,
-        borderRadius: BorderRadius.circular(12),
-        elevation: active ? 2 : 0,
-        shadowColor: const Color(0xFF0EA5E9).withValues(alpha: 0.35),
+        color: active ? AppColors.infoSoftOf(context) : Colors.transparent,
+        borderRadius: BorderRadius.circular(14),
         child: InkWell(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(14),
           onTap: onTap,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(14),
+              border: active
+                  ? Border.all(color: AppColors.infoOf(context), width: 1.4)
+                  : null,
             ),
             child: Row(
               children: [
+                // أيقونة الدردشة تحمل شارة عدد الرسائل غير المقروءة —
+                // المكان الرسمي لإشعار الرسائل داخل التطبيق.
                 if (screen == AppScreen.chat)
                   Consumer(
                     builder: (ctx, rref, _) {
@@ -3186,8 +3113,8 @@ class _DrawerTile extends StatelessWidget {
                         label: Text('$n'),
                         child: Icon(
                           active ? screen.activeIcon : screen.icon,
-                          color: iconColor,
-                          size: 20,
+                          color: active ? AppColors.infoOf(context) : color,
+                          size: 22,
                         ),
                       );
                     },
@@ -3195,17 +3122,19 @@ class _DrawerTile extends StatelessWidget {
                 else
                   Icon(
                     active ? screen.activeIcon : screen.icon,
-                    color: iconColor,
-                    size: 20,
+                    color: active ? AppColors.infoOf(context) : color,
+                    size: 22,
                   ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 14),
                 Expanded(
                   child: Text(
                     screen.title,
                     style: TextStyle(
-                      fontSize: 13.5,
-                      fontWeight: active ? FontWeight.w800 : FontWeight.w600,
-                      color: textColor,
+                      fontSize: 14,
+                      fontWeight: active ? FontWeight.w800 : FontWeight.w700,
+                      color: active
+                          ? AppColors.infoOf(context)
+                          : AppColors.textOf(context),
                     ),
                   ),
                 ),

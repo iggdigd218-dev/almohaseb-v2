@@ -334,8 +334,13 @@ class AccountWorkspace {
       return AccountLinkOutcome.failed;
     }
     try {
-      // جهاز عضو في مجموعة لا يُمَسّ ولا يُسمح له بتسجيل حساب Google أثناء ارتباطه بالمنشأة.
-      if (await repo.workspaceMode() == 'member') {
+      final stInit = await repo.settings();
+      final hasPendingJoin = (stInit['pendingJoin.ws'] ?? '').trim().isNotEmpty ||
+          (stInit['pendingJoin.token'] ?? '').trim().isNotEmpty;
+      // جهاز عضو منضم عبر رمز دعوة لا يُمَسّ، أما المدير المسجل ببريده فيُسمح له دائماً باسترداد إدارته.
+      if (await repo.workspaceMode() == 'member' &&
+          hasPendingJoin &&
+          account.email.trim().isEmpty) {
         return AccountLinkOutcome.memberUntouched;
       }
 
@@ -386,6 +391,7 @@ class AccountWorkspace {
             }
             await repo.checkAndAutoPromoteManager();
             await repo.ensureSelfPermissionRow(roleCode: 'admin');
+            await repo.restoreManagerOwnership();
             await _afterLink(repo, backendUrl, account, remoteWs)
                 .timeout(const Duration(seconds: 8), onTimeout: () {})
                 .catchError((_) {});

@@ -502,12 +502,15 @@ class CloudJoin {
     required String backendUrl,
     required String workspaceId,
     required String deviceId,
+    bool forceOverwrite = false,
   }) async {
     final path = '${_root(backendUrl, workspaceId)}/creator.json';
-    final existing = await _getJson(path);
-    if (existing != null &&
-        '${existing['creator_device_id'] ?? ''}'.isNotEmpty) {
-      return; // مسجل مسبقاً — لا يتغير أبداً.
+    if (!forceOverwrite) {
+      final existing = await _getJson(path);
+      if (existing != null &&
+          '${existing['creator_device_id'] ?? ''}'.isNotEmpty) {
+        return; // مسجل مسبقاً — لا يتغير أبداً.
+      }
     }
     await _putJson(path, {
       'creator_device_id': deviceId,
@@ -517,6 +520,49 @@ class CloudJoin {
     // نسخة محلية للعرض السريع دون شبكة.
     try {
       await repo.setSetting('creatorDeviceId', deviceId);
+    } catch (_) {}
+  }
+
+  /// عند انتقال الإدارة بالبريد لجهاز جديد: يتم خفض أي جهاز مدير سابق في السجل السحابي
+  /// (roster) إلى دور «وكيل» (agent) مع نزع is_owner عنه ليبقى المدير الفعال واحداً فقط.
+  static Future<void> demotePreviousOwnersInCloud(
+    Repo repo, {
+    required String backendUrl,
+    required String workspaceId,
+    required String currentOwnerDeviceId,
+  }) async {
+    try {
+      final root = _root(backendUrl, workspaceId);
+      final roster = await _getJson('$root/roster.json');
+      if (roster == null || roster.isEmpty) return;
+      final now = DateTime.now().toIso8601String();
+      for (final e in roster.entries) {
+        final devId = Uri.decodeComponent(e.key);
+        if (devId.isEmpty || devId == currentOwnerDeviceId) continue;
+        final val = e.value;
+        if (val is! Map) continue;
+        final wasOwner = val['is_owner'] == 1 ||
+            val['is_owner'] == true ||
+            '${val['is_owner'] ?? 0}' == '1' ||
+            '${val['user_role'] ?? ''}' == 'admin';
+        if (wasOwner) {
+          final updated = Map<String, Object?>.from(val);
+          updated['is_owner'] = 0;
+          updated['user_role'] = 'agent';
+          updated['role'] = 'agent';
+          updated['is_paired'] = 1;
+          updated['revoked_at'] = '';
+          updated['expelled_at'] = '';
+          updated['updated_at'] = now;
+          try {
+            await _putJson(
+              '$root/roster/${Uri.encodeComponent(devId)}.json',
+              updated,
+              timeout: const Duration(seconds: 15),
+            );
+          } catch (_) {}
+        }
+      }
     } catch (_) {}
   }
 
@@ -2731,10 +2777,88 @@ class CloudJoin {
         '${d['expelled_at'] ?? ''}'.isEmpty;
     final db = await repo.database;
     final ourId = (await repo.settings())['sync.deviceId'] ?? '';
-    final isOwnerDevice = await repo.isWorkspaceOwner();
+    var isOwnerDevice = await repo.isWorkspaceOwner();
     final rows = await db.query('devices');
     final now = DateTime.now().toIso8601String();
     var fixed = 0;
+
+    // ══ (قاعدة المدير الواحد الفعّال) ══
+    // إذا ظهر في السجل السحابي جهاز آخر يحمل is_owner = 1 بينما عقدة جهازنا في السحابة
+    // خُفِّضت إلى is_owner = 0 (بسبب تسجيل دخول المدير ببريده على جهاز جديد)،
+    // يتحول جهازنا فوراً إلى عضو بدور «وكيل» (agent) ليبقى المدير واحداً فقط.
+    if (isOwnerDevice && ourId.isNotEmpty) {
+      String cloudOwnerId = '';
+      for (final e in roster.entries) {
+        final rId = Uri.decodeComponent(e.key);
+        if (rId.isEmpty || rId == ourId) continue;
+        final d = e.value;
+        if (d is Map &&
+            active(d) &&
+            (d['is_owner'] == 1 ||
+                d['is_owner'] == true ||
+                '${d['is_owner'] ?? 0}' == '1')) {
+          cloudOwnerId = rId;
+          break;
+        }
+      }
+      final ourCloudEntry = roster[ourId];
+      final ourCloudDemoted = ourCloudEntry is Map &&
+          (ourCloudEntry['is_owner'] == 0 ||
+              '${ourCloudEntry['is_owner'] ?? 0}' == '0') &&
+          '${ourCloudEntry['user_role'] ?? ourCloudEntry['role'] ?? ''}' ==
+              'agent';
+      if (cloudOwnerId.isNotEmpty && ourCloudDemoted) {
+        try {
+          final agentPermStr = defaultPerms(UserRole.agent)
+              .entries
+              .where((e) => e.value)
+              .map((e) => e.key)
+              .join(',');
+          await db.transaction((txn) async {
+            await txn.update('devices', {'is_owner': 0, 'updated_at': now});
+            await txn.update(
+              'devices',
+              {'is_owner': 1, 'is_paired': 1, 'updated_at': now},
+              where: 'id = ?',
+              whereArgs: [cloudOwnerId],
+            );
+            await txn.insert(
+              'sync_meta',
+              {'key': 'workspaceMode', 'value': 'member'},
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+            await txn.insert(
+              'sync_meta',
+              {'key': 'ownerDeviceId', 'value': cloudOwnerId},
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+            await txn.insert(
+              'sync_meta',
+              {'key': 'demotedToAgentBy', 'value': cloudOwnerId},
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+            await txn.insert(
+              'settings',
+              {'key': 'creatorDeviceId', 'value': cloudOwnerId},
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+            await txn.update(
+              'users',
+              {
+                'role': 'agent',
+                'permissions': agentPermStr,
+                'active': 1,
+                'deleted_at': '',
+                'updated_at': now,
+              },
+              where: 'is_me = 1',
+            );
+          });
+          isOwnerDevice = false;
+          fixed++;
+        } catch (_) {}
+      }
+    }
 
     // ══ (2026-09-29 — قانون شاشة إدارة المجموعة: لا أشباح في السحابة) ══
     // إذا كان هذا جهاز المدير: أي عضو معتمد بالسحابة يظهر فوراً في إدارة المجموعة

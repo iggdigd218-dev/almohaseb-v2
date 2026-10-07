@@ -111,116 +111,9 @@ class DashboardScreen extends ConsumerWidget {
             ),
             data: (s) {
               final curs = currencies.valueOrNull ?? kDefaultCurrencies;
-              final wsMode =
-                  ref.watch(workspaceModeProvider).valueOrNull ?? 'standalone';
-              final isStandalone = wsMode == 'standalone';
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  // شريط حالة النظام والمزامنة (مطابق لشاشة المعاينة)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 12,
-                    ),
-                    decoration: BoxDecoration(
-                      color: AppColors.surfaceOf(context),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: AppColors.borderOf(context)),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 36,
-                          height: 36,
-                          decoration: BoxDecoration(
-                            color: AppColors.infoSoftOf(context),
-                            borderRadius: BorderRadius.circular(11),
-                          ),
-                          alignment: Alignment.center,
-                          child: Icon(
-                            Icons.verified_user_outlined,
-                            size: 19,
-                            color: AppColors.infoOf(context),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Flexible(
-                                    child: Text(
-                                      isStandalone
-                                          ? 'الحساب الفردي (تشغيل محلي 100%)'
-                                          : 'لوحة إدارة المنشأة (مزامنة فورية)',
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        fontSize: 12.5,
-                                        fontWeight: FontWeight.w800,
-                                        color: AppColors.textOf(context),
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 6),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 2,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: AppColors.greenSoftOf(context),
-                                      borderRadius: BorderRadius.circular(99),
-                                      border: Border.all(
-                                        color: AppColors.greenOf(context)
-                                            .withValues(alpha: 0.3),
-                                      ),
-                                    ),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Container(
-                                          width: 6,
-                                          height: 6,
-                                          decoration: BoxDecoration(
-                                            color: AppColors.greenOf(context),
-                                            shape: BoxShape.circle,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 4),
-                                        Text(
-                                          'متصل',
-                                          style: TextStyle(
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.w800,
-                                            color: AppColors.greenOf(context),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                'قاعدة البيانات المحلية تستجيب فورياً لجميع العمليات دون توقف',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: AppColors.text3Of(context),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 14),
                   _CurrencyCard(
                     currencies: curs,
                     net: s.net,
@@ -235,7 +128,7 @@ class DashboardScreen extends ConsumerWidget {
                     physics: const NeverScrollableScrollPhysics(),
                     mainAxisSpacing: 12,
                     crossAxisSpacing: 12,
-                    childAspectRatio: 0.85,
+                    childAspectRatio: 0.82,
                     children: [
                       for (final t in _mainTiles)
                         _FeatureTile(
@@ -254,7 +147,7 @@ class DashboardScreen extends ConsumerWidget {
                     children: [
                       _ChipSection(
                         label: 'المساعد الذكي',
-                        icon: Icons.auto_awesome_rounded,
+                        icon: Icons.smart_toy_rounded,
                         color: AppColors.greenOf(context),
                         onTap: () => openGeminiAssistantSheet(context, ref),
                       ),
@@ -302,23 +195,21 @@ class DashboardScreen extends ConsumerWidget {
                     children: [
                       Expanded(
                         child: StatCard(
-                          title: 'الإيرادات والقبض',
-                          value: hidden ? '••••' : Fmt.money(s.inflow),
-                          sub: 'من كافة الفواتير والعمليات',
-                          icon: Icons.trending_up_rounded,
+                          title: 'الحسابات',
+                          value: '${s.accountsCount}',
+                          icon: Icons.people_alt_outlined,
                           color: AppColors.infoOf(context),
-                          onTap: () => onOpen?.call(AppScreen.transactions),
+                          onTap: () => onOpen?.call(AppScreen.accounts),
                         ),
                       ),
                       const SizedBox(width: 10),
                       Expanded(
                         child: StatCard(
-                          title: 'المصروفات والصرف',
-                          value: hidden ? '••••' : Fmt.money(s.outflow),
-                          sub: 'إجمالي سندات الصرف والمصروفات',
-                          icon: Icons.north_east_rounded,
-                          color: AppColors.dangerOf(context),
-                          onTap: () => onOpen?.call(AppScreen.vouchers),
+                          title: 'العمليات',
+                          value: '${s.txCount}',
+                          icon: Icons.receipt_long_outlined,
+                          color: AppColors.violetOf(context),
+                          onTap: () => onOpen?.call(AppScreen.transactions),
                         ),
                       ),
                     ],
@@ -328,23 +219,19 @@ class DashboardScreen extends ConsumerWidget {
                     children: [
                       Expanded(
                         child: StatCard(
-                          title: 'الحسابات والعملاء',
-                          value: '${s.accountsCount} حساب',
-                          sub: 'إجمالي العملاء والموردين المسجلين',
-                          icon: Icons.people_alt_outlined,
-                          color: const Color(0xFF6366F1),
-                          onTap: () => onOpen?.call(AppScreen.accounts),
+                          title: 'الإيرادات والقبض',
+                          value: hidden ? '••••' : Fmt.money(s.inflow),
+                          icon: Icons.south_west,
+                          color: AppColors.greenOf(context),
                         ),
                       ),
                       const SizedBox(width: 10),
                       Expanded(
                         child: StatCard(
-                          title: 'العمليات المسجلة',
-                          value: '${s.txCount} عملية',
-                          sub: 'إجمالي القيود والحركات المالية',
-                          icon: Icons.receipt_long_outlined,
-                          color: AppColors.greenOf(context),
-                          onTap: () => onOpen?.call(AppScreen.transactions),
+                          title: 'المصروفات والصرف',
+                          value: hidden ? '••••' : Fmt.money(s.outflow),
+                          icon: Icons.north_east,
+                          color: AppColors.dangerOf(context),
                         ),
                       ),
                     ],

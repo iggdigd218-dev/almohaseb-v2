@@ -113,6 +113,11 @@ class FirebaseAuthRest {
   /// حفظ الجلسة محلياً — تبقى صالحة بلا إنترنت (لا انتهاء محلي).
   static Future<void> saveSession(Repo repo, FirebaseAccount a) async {
     _repo ??= repo;
+    try {
+      final db = await repo.database;
+      await db.delete('sync_meta', where: "key = 'demotedToAgentBy'");
+      await db.delete('settings', where: "key LIKE 'pendingJoin.%'");
+    } catch (_) {}
     await repo.setSetting(uidKey, a.uid);
     await repo.setSetting(emailKey, a.email);
     await repo.setSetting(nameKey, a.displayName);
