@@ -389,6 +389,19 @@ class CloudFirebaseTransport implements SyncTransport {
               if (idempotentQ.isNotEmpty) {
                 continue;
               }
+              String prevOwnerBeforeOp = '';
+              if (op.entityType == EntityKind.setting &&
+                  op.entityId == 'ownershipTransfer') {
+                final curOwnQ = await txn.query(
+                  'devices',
+                  columns: ['id'],
+                  where: 'is_owner = 1',
+                  limit: 1,
+                );
+                if (curOwnQ.isNotEmpty) {
+                  prevOwnerBeforeOp = '${curOwnQ.first['id'] ?? ''}';
+                }
+              }
               final ok = await repo.applyRemoteOperation(txn, op, r);
               if (ok) applied++;
               if (ok &&
@@ -403,12 +416,24 @@ class CloudFirebaseTransport implements SyncTransport {
                   op.deviceId != ourId) {
                 roleOps.add(op);
               }
-              // (إصلاح تسليم الإدارة) نقل ملكية وارد: إخطار المستلم فوراً.
+              // (إصلاح تسليم الإدارة) نقل ملكية وارد: إخطار المستلم فوراً فقط إذا تغيّر المدير فعلياً.
               if (ok &&
                   op.entityType == EntityKind.setting &&
                   op.entityId == 'ownershipTransfer' &&
                   op.deviceId != ourId) {
-                ownershipOps.add(op);
+                final curOwnAfterQ = await txn.query(
+                  'devices',
+                  columns: ['id'],
+                  where: 'is_owner = 1',
+                  limit: 1,
+                );
+                final ownerAfterOp = curOwnAfterQ.isNotEmpty
+                    ? '${curOwnAfterQ.first['id'] ?? ''}'
+                    : '';
+                if (ownerAfterOp.isNotEmpty &&
+                    ownerAfterOp != prevOwnerBeforeOp) {
+                  ownershipOps.add(op);
+                }
               }
             }
           });

@@ -6231,34 +6231,36 @@ class Repo {
           final prevOwnerId = prevOwnerRows.isNotEmpty
               ? '${prevOwnerRows.first['id'] ?? ''}'
               : '';
-          await queueOperation(
-            entityType: EntityKind.setting,
-            entityId: 'ownershipTransfer',
-            opType: OpKind.settings,
-            payload: {
-              'key': 'ownershipTransfer',
-              'value': jsonEncode({
-                'owner_device_id': ownId,
-                'owner_user_id': _currentUserId,
-                'previous_owner_device_id': prevOwnerId,
-                'email_takeover': true,
-                'demote_previous_to': 'agent',
-                'at': now,
-              }),
-            },
-          );
+          if (prevOwnerId.isNotEmpty && prevOwnerId != ownId) {
+            await queueOperation(
+              entityType: EntityKind.setting,
+              entityId: 'ownershipTransfer',
+              opType: OpKind.settings,
+              payload: {
+                'key': 'ownershipTransfer',
+                'value': jsonEncode({
+                  'owner_device_id': ownId,
+                  'owner_user_id': _currentUserId,
+                  'previous_owner_device_id': prevOwnerId,
+                  'email_takeover': true,
+                  'demote_previous_to': 'agent',
+                  'at': now,
+                }),
+              },
+            );
+            await CloudJoin.demotePreviousOwnersInCloud(
+              this,
+              backendUrl: url,
+              workspaceId: ws,
+              currentOwnerDeviceId: ownId,
+            ).timeout(const Duration(seconds: 6));
+          }
           await CloudJoin.registerCreatorIfAbsent(
             this,
             backendUrl: url,
             workspaceId: ws,
             deviceId: ownId,
-            forceOverwrite: true,
-          ).timeout(const Duration(seconds: 6));
-          await CloudJoin.demotePreviousOwnersInCloud(
-            this,
-            backendUrl: url,
-            workspaceId: ws,
-            currentOwnerDeviceId: ownId,
+            forceOverwrite: prevOwnerId.isNotEmpty && prevOwnerId != ownId,
           ).timeout(const Duration(seconds: 6));
           await CloudJoin.syncRoster(this, db,
                   backendUrl: url, workspaceId: ws)
