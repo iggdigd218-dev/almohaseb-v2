@@ -1632,141 +1632,142 @@ class _HomeShellState extends ConsumerState<HomeShell>
                 );
               },
             ),
-            // قائمة الخيارات الإضافية (⋮) — نقل الوضع الليلي، إخفاء الأرصدة، وتبديل الوردية
+            // رمز الإشعارات 🔔 (في مكان النقاط سابقاً، والآن النقاط في الزاوية)
+            // أو العكس: استبدال موقع النقاط الثلاث وجرس الإشعارات بحيث يعود الجرس إلى الزاوية مكان النقاط حالياً وتصبح النقاط قبله
             Consumer(
               builder: (ctx, rref, _) {
+                final unreadLocal =
+                    rref.watch(unreadCountProvider).valueOrNull ?? 0;
                 final isDark = Theme.of(ctx).brightness == Brightness.dark;
-                final currentTheme = rref.watch(themeModeProvider);
-                final darkActive = currentTheme == ThemeMode.dark ||
-                    (currentTheme == ThemeMode.system && isDark);
-                final hidden = rref.watch(hideBalancesProvider);
-
-                return PopupMenuButton<String>(
-                  tooltip: 'خيارات إضافية',
-                  icon: Container(
-                    width: 38,
-                    height: 38,
-                    decoration: BoxDecoration(
-                      color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Icon(
-                      Icons.more_vert_rounded,
-                      size: 20,
-                      color: AppColors.textOf(ctx),
-                    ),
-                  ),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  onSelected: (val) {
-                    if (val == 'theme') {
-                      Sfx.tap();
-                      rref.read(themeModeProvider.notifier).state =
-                          darkActive ? ThemeMode.light : ThemeMode.dark;
-                    } else if (val == 'balances') {
-                      Sfx.tap();
-                      rref.read(hideBalancesProvider.notifier).state = !hidden;
-                    } else if (val == 'refresh') {
-                      bump(ref);
-                      _refreshSync();
-                      try {
-                        ref.read(syncEngineProvider).forceSyncNow();
-                      } catch (_) {}
-                      _checkForAppUpdate();
-                    }
-                  },
-                  itemBuilder: (c) => [
-                    PopupMenuItem(
-                      value: 'theme',
-                      child: Row(
-                        children: [
-                          Icon(
-                            darkActive ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-                            size: 19,
-                            color: darkActive ? const Color(0xFFFBBF24) : const Color(0xFFD97706),
-                          ),
-                          const SizedBox(width: 10),
-                          Text(darkActive ? 'التبديل إلى الوضع النهاري' : 'التبديل إلى الوضع الليلي'),
-                        ],
+                return ValueListenableBuilder<int>(
+                  valueListenable:
+                      CloudControlService.instance.unreadAlertCountNotifier,
+                  builder: (ctx, unreadCloud, _) {
+                    final unread = unreadLocal + unreadCloud;
+                    return _appBarSquircleAction(
+                      tooltip: 'الإشعارات',
+                      bg: isDark
+                          ? const Color(0xFF291E04)
+                          : const Color(0xFFFEF9C3),
+                      fg: const Color(0xFFB45309),
+                      border: Border.all(
+                        color: isDark
+                            ? const Color(0xFF854D0E)
+                            : const Color(0xFFFDE047),
+                        width: 1.1,
                       ),
-                    ),
-                    PopupMenuItem(
-                      value: 'balances',
-                      child: Row(
-                        children: [
-                          Icon(
-                            hidden ? Icons.visibility_outlined : Icons.visibility_off_outlined,
-                            size: 19,
-                            color: const Color(0xFF7C3AED),
-                          ),
-                          const SizedBox(width: 10),
-                          Text(hidden ? 'إظهار الأرصدة' : 'إخفاء الأرصدة'),
-                        ],
-                      ),
-                    ),
-                    if (desktop) ...[
-                      const PopupMenuDivider(),
-                      const PopupMenuItem(
-                        value: 'refresh',
-                        child: Row(
-                          children: [
-                            Icon(Icons.refresh_rounded, size: 19, color: Color(0xFF16A34A)),
-                            SizedBox(width: 10),
-                            Text('تحديث والتحقق من الإصدار'),
-                          ],
+                      icon: Badge(
+                        isLabelVisible: unread > 0,
+                        label: Text(
+                          '$unread',
+                          style: const TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w900,
+                              color: Colors.white),
+                        ),
+                        backgroundColor: const Color(0xFFDC2626),
+                        child: GoldenBellIcon(
+                          size: 22,
+                          hasUnread: unread > 0,
                         ),
                       ),
-                    ],
-                  ],
+                      onTap: () => openNotifications(
+                        context,
+                        ref,
+                        onOpenEntity: openNotificationEntity,
+                      ),
+                    );
+                  },
                 );
               },
             ),
-            // رمز الإشعارات أعلى يسار الشاشة 🔔
+            // قائمة الخيارات الإضافية (⋮) في الزاوية
             Padding(
               padding: const EdgeInsetsDirectional.only(end: 6),
               child: Consumer(
                 builder: (ctx, rref, _) {
-                  final unreadLocal =
-                      rref.watch(unreadCountProvider).valueOrNull ?? 0;
                   final isDark = Theme.of(ctx).brightness == Brightness.dark;
-                  return ValueListenableBuilder<int>(
-                    valueListenable:
-                        CloudControlService.instance.unreadAlertCountNotifier,
-                    builder: (ctx, unreadCloud, _) {
-                      final unread = unreadLocal + unreadCloud;
-                      return _appBarSquircleAction(
-                        tooltip: 'الإشعارات',
-                        bg: isDark
-                            ? const Color(0xFF291E04)
-                            : const Color(0xFFFEF9C3),
-                        fg: const Color(0xFFB45309),
-                        border: Border.all(
-                          color: isDark
-                              ? const Color(0xFF854D0E)
-                              : const Color(0xFFFDE047),
-                          width: 1.1,
-                        ),
-                        icon: Badge(
-                          isLabelVisible: unread > 0,
-                          label: Text(
-                            '$unread',
-                            style: const TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w900,
-                                color: Colors.white),
-                          ),
-                          backgroundColor: const Color(0xFFDC2626),
-                          child: GoldenBellIcon(
-                            size: 22,
-                            hasUnread: unread > 0,
-                          ),
-                        ),
-                        onTap: () => openNotifications(
-                          context,
-                          ref,
-                          onOpenEntity: openNotificationEntity,
-                        ),
-                      );
+                  final currentTheme = rref.watch(themeModeProvider);
+                  final darkActive = currentTheme == ThemeMode.dark ||
+                      (currentTheme == ThemeMode.system && isDark);
+                  final hidden = rref.watch(hideBalancesProvider);
+
+                  return PopupMenuButton<String>(
+                    tooltip: 'خيارات إضافية',
+                    icon: Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Icon(
+                        Icons.more_vert_rounded,
+                        size: 20,
+                        color: AppColors.textOf(ctx),
+                      ),
+                    ),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    onSelected: (val) {
+                      if (val == 'theme') {
+                        Sfx.tap();
+                        rref.read(themeModeProvider.notifier).state =
+                            darkActive ? ThemeMode.light : ThemeMode.dark;
+                      } else if (val == 'balances') {
+                        Sfx.tap();
+                        rref.read(hideBalancesProvider.notifier).state = !hidden;
+                      } else if (val == 'refresh') {
+                        bump(ref);
+                        _refreshSync();
+                        try {
+                          ref.read(syncEngineProvider).forceSyncNow();
+                        } catch (_) {}
+                        _checkForAppUpdate();
+                      }
                     },
+                    itemBuilder: (c) => [
+                      PopupMenuItem(
+                        value: 'theme',
+                        child: Row(
+                          children: [
+                            Icon(
+                              darkActive ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+                              size: 19,
+                              color: darkActive ? const Color(0xFFFBBF24) : const Color(0xFFD97706),
+                            ),
+                            const SizedBox(width: 10),
+                            Text(darkActive ? 'التبديل إلى الوضع النهاري' : 'التبديل إلى الوضع الليلي'),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'balances',
+                        child: Row(
+                          children: [
+                            Icon(
+                              hidden ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                              size: 19,
+                              color: const Color(0xFF7C3AED),
+                            ),
+                            const SizedBox(width: 10),
+                            Text(hidden ? 'إظهار الأرصدة' : 'إخفاء الأرصدة'),
+                          ],
+                        ),
+                      ),
+                      if (desktop) ...[
+                        const PopupMenuDivider(),
+                        const PopupMenuItem(
+                          value: 'refresh',
+                          child: Row(
+                            children: [
+                              Icon(Icons.refresh_rounded, size: 19, color: Color(0xFF16A34A)),
+                              SizedBox(width: 10),
+                              Text('تحديث والتحقق من الإصدار'),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ],
                   );
                 },
               ),
@@ -1978,7 +1979,7 @@ class _BottomItem extends StatelessWidget {
                     : (isDark
                         ? const Color(0xFF94A3B8)
                         : const Color(0xFF64748B)),
-                fontFamily: 'Tajawal',
+                fontFamily: uiFontFamily,
               ),
             ),
           ],
@@ -2147,17 +2148,17 @@ class _MarkedOperationFab extends StatelessWidget {
         child: InkWell(
           customBorder: const CircleBorder(),
           onTap: onPressed,
-          child: const Column(
+          child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.add_rounded, color: Colors.white, size: 22),
+              const Icon(Icons.add_rounded, color: Colors.white, size: 22),
               Text(
                 'عملية',
                 style: TextStyle(
                   color: Colors.white,
                   fontSize: 10.5,
                   fontWeight: FontWeight.w800,
-                  fontFamily: 'Tajawal',
+                  fontFamily: uiFontFamily,
                   height: 1.0,
                 ),
               ),

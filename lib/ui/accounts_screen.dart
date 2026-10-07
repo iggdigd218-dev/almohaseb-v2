@@ -58,8 +58,7 @@ class AccountsScreen extends ConsumerWidget {
                   children: [
                     CircularProgressIndicator(),
                     SizedBox(height: 12),
-                    Text('جارٍ تحميل الحسابات…',
-                        style: TextStyle(fontFamily: 'Tajawal')),
+                    Text('جارٍ تحميل الحسابات…'),
                   ],
                 ),
               ),
@@ -80,8 +79,7 @@ class AccountsScreen extends ConsumerWidget {
                     FilledButton.icon(
                       onPressed: () => bump(ref),
                       icon: const Icon(Icons.refresh),
-                      label: const Text('إعادة المحاولة',
-                          style: TextStyle(fontFamily: 'Tajawal')),
+                      label: const Text('إعادة المحاولة'),
                     ),
                   ],
                 ),
@@ -119,8 +117,7 @@ class AccountsScreen extends ConsumerWidget {
                       ? FilledButton.icon(
                           onPressed: () => openAccountForm(context, ref),
                           icon: const Icon(Icons.add),
-                          label: const Text('إضافة حساب',
-                              style: TextStyle(fontFamily: 'Tajawal')),
+                          label: const Text('إضافة حساب'),
                         )
                       : null,
                 );
@@ -228,7 +225,6 @@ class _CurrencySwipeHeaderState extends ConsumerState<_CurrencySwipeHeader> {
                               color: Colors.white,
                               fontSize: 15.5,
                               fontWeight: FontWeight.w800,
-                              fontFamily: 'Tajawal',
                             ),
                           ),
                           const Spacer(),
@@ -256,7 +252,6 @@ class _CurrencySwipeHeaderState extends ConsumerState<_CurrencySwipeHeader> {
                                       color: Color(0xFFFECACA),
                                       fontSize: 11.5,
                                       fontWeight: FontWeight.w700,
-                                      fontFamily: 'Tajawal',
                                     ),
                                   ),
                                   const SizedBox(height: 2),
@@ -268,7 +263,6 @@ class _CurrencySwipeHeaderState extends ConsumerState<_CurrencySwipeHeader> {
                                         color: Colors.white,
                                         fontSize: 16,
                                         fontWeight: FontWeight.w900,
-                                        fontFamily: 'Tajawal',
                                       ),
                                     ),
                                   ),
@@ -295,7 +289,6 @@ class _CurrencySwipeHeaderState extends ConsumerState<_CurrencySwipeHeader> {
                                       color: Color(0xFFA7F3D0),
                                       fontSize: 11.5,
                                       fontWeight: FontWeight.w700,
-                                      fontFamily: 'Tajawal',
                                     ),
                                   ),
                                   const SizedBox(height: 2),
@@ -307,7 +300,6 @@ class _CurrencySwipeHeaderState extends ConsumerState<_CurrencySwipeHeader> {
                                         color: Colors.white,
                                         fontSize: 16,
                                         fontWeight: FontWeight.w900,
-                                        fontFamily: 'Tajawal',
                                       ),
                                     ),
                                   ),
@@ -335,7 +327,6 @@ class _CurrencySwipeHeaderState extends ConsumerState<_CurrencySwipeHeader> {
                                 color: Colors.white,
                                 fontSize: 11,
                                 fontWeight: FontWeight.w700,
-                                fontFamily: 'Tajawal',
                               ),
                             ),
                           ),
@@ -344,7 +335,6 @@ class _CurrencySwipeHeaderState extends ConsumerState<_CurrencySwipeHeader> {
                             style: TextStyle(
                               color: Colors.white70,
                               fontSize: 10.5,
-                              fontFamily: 'Tajawal',
                             ),
                           ),
                         ],
@@ -411,7 +401,7 @@ class _EnhancedFilterBar extends ConsumerWidget {
           TextField(
             decoration: InputDecoration(
               hintText: 'بحث بالاسم أو الهاتف أو الملاحظات…',
-              hintStyle: const TextStyle(fontFamily: 'Tajawal', fontSize: 13),
+              hintStyle: const TextStyle(fontSize: 13),
               prefixIcon: const Icon(Icons.search, size: 20),
               suffixIcon: filter.query.isEmpty
                   ? null
@@ -430,7 +420,7 @@ class _EnhancedFilterBar extends ConsumerWidget {
                 borderSide: BorderSide.none,
               ),
             ),
-            style: const TextStyle(fontFamily: 'Tajawal', fontSize: 13.5),
+            style: const TextStyle(fontSize: 13.5),
             controller: TextEditingController(
               text: filter.query,
             )..selection = TextSelection.collapsed(offset: filter.query.length),
@@ -538,7 +528,6 @@ class _EnhancedFilterBar extends ConsumerWidget {
                   : (isDark
                       ? const Color(0xFF94A3B8)
                       : const Color(0xFF475569)),
-              fontFamily: 'Tajawal',
             ),
           ),
         ),
@@ -650,7 +639,6 @@ class _AccountCard extends StatelessWidget {
                       color: accent,
                       fontSize: 16,
                       fontWeight: FontWeight.w800,
-                      fontFamily: 'Tajawal',
                     ),
                   ),
                 ),
@@ -667,7 +655,6 @@ class _AccountCard extends StatelessWidget {
                         style: const TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.w800,
-                          fontFamily: 'Tajawal',
                         ),
                       ),
                       const SizedBox(height: 3),
@@ -684,7 +671,6 @@ class _AccountCard extends StatelessWidget {
                           color: isDark
                               ? const Color(0xFF94A3B8)
                               : const Color(0xFF64748B),
-                          fontFamily: 'Tajawal',
                         ),
                       ),
                     ],
@@ -721,7 +707,6 @@ class _AccountCard extends StatelessWidget {
                                   : (isDark
                                       ? const Color(0xFF94A3B8)
                                       : const Color(0xFF64748B))),
-                          fontFamily: 'Tajawal',
                         ),
                       ),
                     const SizedBox(height: 2),
@@ -737,7 +722,6 @@ class _AccountCard extends StatelessWidget {
                                 : (isDark
                                     ? const Color(0xFF64748B)
                                     : const Color(0xFF94A3B8))),
-                        fontFamily: 'Tajawal',
                       ),
                     ),
                   ],
