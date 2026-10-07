@@ -725,17 +725,12 @@ class Repo {
     // standalone ⇒ host) أي قراءة عابرة لـ workspaceMode أثناء التصفير
     // فيعيد الجهاز المطرود host من جديد.
     try {
-      await db.delete('settings', where: 'key IN (?, ?, ?, ?, ?, ?, ?, ?, ?)', whereArgs: [
-        'has_completed_onboarding',
-        'cloudBackendUrl',
-        'cloudCode',
-        'cloudAutoSync',
-        'sync.workspaceId',
-        'account.type',
-        'account.email',
-        'creatorDeviceId',
-        accountModeKey,
-      ]);
+      await db.delete(
+        'settings',
+        where:
+            "key IN ('has_completed_onboarding','onboarding.done','cloudBackendUrl','cloudCode','cloudAutoSync','sync.workspaceId','account.type','account.email','email','creatorDeviceId',?) OR key LIKE 'pendingJoin.%'",
+        whereArgs: [accountModeKey],
+      );
     } catch (_) {}
     final devName = await deviceName(this);
     final adminPerms = defaultPerms(UserRole.admin);
@@ -794,6 +789,7 @@ class Repo {
         'is_owner': 1,
         'auth_secret': newSecret,
         'revoked_at': '',
+        'expelled_at': '',
         'last_seen_at': now,
         'last_sync_at': '',
         'created_at': now,
@@ -812,6 +808,11 @@ class Repo {
         'created_at': now,
         'updated_at': now,
       });
+      await txn.delete(
+        'sync_meta',
+        where:
+            "key LIKE 'lastCloudTs:%' OR key LIKE 'lastRosterPush:%' OR key LIKE 'lastLanTs:%' OR key = 'ownerDeviceId'",
+      );
       await txn.insert(
           'sync_meta',
           {

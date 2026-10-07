@@ -567,6 +567,37 @@ extension ApplyRemoteOp on Repo {
     if (op.opType == OpKind.settings && op.entityType != EntityKind.setting) {
       throw const FormatException('Invalid settings operation');
     }
+    if (op.entityType == EntityKind.setting) {
+      const localOnlySettings = <String>{
+        'sync.deviceId',
+        'sync.deviceName',
+        'sync.hwFingerprint',
+        'sync.workspaceId',
+        'cloudBackendUrl',
+        'cloudAutoSync',
+        'cloudCode',
+        'theme',
+        'fontScale',
+        'fontFamily',
+        'account.type',
+        'account.email',
+        'account.uid',
+        'account.name',
+        'account.idToken',
+        'account.refreshToken',
+        'email',
+        'profile_email',
+        'user.email',
+        'creatorDeviceId',
+        'ownerDeviceId',
+        'workspaceMode',
+        'onboarding.done',
+        'first_use_at',
+      };
+      if (localOnlySettings.contains('${op.entityId}')) {
+        return false;
+      }
+    }
     // (2026-09-28/30) ممنوع المزامنة خارج مساحة العمل الواحدة للمنشأة (رفض المساحات الغريبة)
     final currentWs = requireWorkspaceId;
     if (op.workspaceId == 'WS-STRANGE-ALIEN' ||

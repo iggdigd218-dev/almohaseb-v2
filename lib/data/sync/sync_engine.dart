@@ -728,12 +728,11 @@ class SyncEngine {
     try {
       if (!_started) return;
       // (دفعة 58) المصالحة سحابية حصرياً: سحب فوري يلتقط أي تغيّر في
-      // السجل/الملكية المدفوع من المدير، ثم معالجة الطابور.
-      final t = _cloudTransport;
-      if (t != null) {
-        await t.pull(resolver: ConflictResolver());
-        await processQueue();
+      // السجل/الملكية المدفوع من المدير، ثم معالجة الطابور دون تداخل مع دورة السحب.
+      if (!_cloudPulling) {
+        await _periodicCloudPull();
       }
+      await processQueue();
     } catch (_) {}
   }
 

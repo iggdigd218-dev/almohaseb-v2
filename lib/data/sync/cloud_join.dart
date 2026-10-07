@@ -769,7 +769,12 @@ class CloudJoin {
     ];
     for (final t in tables) {
       final rows = await db.query(t);
-      snapshot[t] = rows.map((source) {
+      final filteredRows = t == 'devices'
+          ? rows.where((r) =>
+              '${r['revoked_at'] ?? ''}'.trim().isEmpty &&
+              '${r['expelled_at'] ?? ''}'.trim().isEmpty)
+          : rows;
+      snapshot[t] = filteredRows.map((source) {
         final row = Map<String, Object?>.from(source);
         if (t == 'users') {
           row['pin'] = '';
@@ -781,6 +786,8 @@ class CloudJoin {
           row['auth_secret'] = '';
           row['pair_token'] = '';
           row['pair_token_exp'] = '';
+          row['revoked_at'] = '';
+          row['expelled_at'] = '';
         }
         return row;
       }).toList();
@@ -792,7 +799,7 @@ class CloudJoin {
     try {
       final orgRows = await db.query('settings',
           where:
-              "key IN ('businessName','businessNameEn','address','phone','whatsapp','email','managerName','voucherFooter','defaultVoucherNotes')");
+              "key IN ('businessName','businessNameEn','address','phone','whatsapp','managerName','voucherFooter','defaultVoucherNotes')");
       snapshot['orgSettings'] = {
         for (final r in orgRows) '${r['key']}': r['value']
       };
@@ -905,9 +912,14 @@ class CloudJoin {
       }
     }
 
-    // رفع سجل الأجهزة أيضاً حتى تكون الحالة السحابية كاملة قبل انضمام العضو.
+    // رفع سجل الأجهزة النشطة فقط حتى تكون الحالة السحابية كاملة قبل انضمام العضو
+    // دون إعادة رفع أجهزة مطرودة أو محظورة سابقاً.
     try {
-      final devices = await db.query('devices');
+      final devices = await db.query(
+        'devices',
+        where:
+            "COALESCE(revoked_at,'') = '' AND COALESCE(expelled_at,'') = '' AND is_paired = 1",
+      );
       for (final d in devices) {
         await _putJson('$root/roster/${Uri.encodeComponent('${d['id']}')}.json',
             _safeDeviceRow(d),
@@ -1130,7 +1142,11 @@ class CloudJoin {
         {
           'workspace_id': ws2,
           'is_owner': 0,
+          'is_paired': 1,
+          'revoked_at': '',
+          'expelled_at': '',
           'user_id': memberUid,
+          'last_seen_at': nowIso,
           'updated_at': nowIso,
         },
         where: 'id = ?',
@@ -1336,6 +1352,18 @@ class CloudJoin {
           } catch (_) {}
         } else {
           final localUpd = '${local['updated_at'] ?? ''}';
+          final localActive = (local['is_paired'] as int? ?? 0) == 1 &&
+              '${local['revoked_at'] ?? ''}'.isEmpty &&
+              '${local['expelled_at'] ?? ''}'.isEmpty;
+          final remoteExpelled = '${r['expelled_at'] ?? ''}'.isNotEmpty ||
+              '${r['revoked_at'] ?? ''}'.isNotEmpty;
+          final isolatedBySelf =
+              '${r['isolation_reason'] ?? ''}' == 'joined_another_workspace';
+          // حماية المدير: إذا كان العضو نشطاً ومعتمداً لدى المدير محلياً، لا نسمح
+          // لنسخة سحابية قديمة/يتيمة بطرده على جهاز المدير إلا إذا عزل العضو نفسه.
+          if (isOwner && localActive && remoteExpelled && !isolatedBySelf) {
+            continue;
+          }
           if (remoteUpd.compareTo(localUpd) <= 0) continue;
           final row = _safeDeviceRow(r);
           row.remove('id');
@@ -1345,6 +1373,8 @@ class CloudJoin {
           // لا نلمس سرّ المصادقة المحلي (قد يكون تعلّمه عبر اقتران LAN).
           row.remove('auth_secret');
           row['workspace_id'] = localWs;
+          row['revoked_at'] = '${r['revoked_at'] ?? ''}';
+          row['expelled_at'] = '${r['expelled_at'] ?? ''}';
           try {
             await db.update('devices', row, where: 'id = ?', whereArgs: [id]);
             changed = true;
@@ -1374,7 +1404,7 @@ class CloudJoin {
       }
     }
 
-    // 2) الرفع إلى السحابة (التغييرات فقط منذ آخر رفع).
+    // 2) الرفع إلى السحابة (الأجهزة النشطة فقط حتى لا نعيد رفع أجهزة مطرودة إلى roster).
     try {
       final metaKey = 'lastRosterPush:$workspaceId';
       final metaRows = await db.query('sync_meta',
@@ -1384,23 +1414,36 @@ class CloudJoin {
       // (دفعة 56) ضمّ دور المستخدم المرتبط لكل جهاز — حتى تعرض بقية
       // الأجهزة شارة الدور الصحيحة فور تغييرها من المدير.
       final rows = isOwner
-          ? await db.rawQuery('SELECT d.*, u.role AS user_role '
-              'FROM devices d LEFT JOIN users u ON u.id = d.user_id')
+          ? await db.rawQuery(
+              "SELECT d.*, u.role AS user_role "
+              "FROM devices d LEFT JOIN users u ON u.id = d.user_id "
+              "WHERE COALESCE(d.revoked_at,'') = '' AND COALESCE(d.expelled_at,'') = '' AND d.is_paired = 1")
           : await db.rawQuery(
-              'SELECT d.*, u.role AS user_role FROM devices d '
-              'LEFT JOIN users u ON u.id = d.user_id WHERE d.id = ?',
+              "SELECT d.*, u.role AS user_role FROM devices d "
+              "LEFT JOIN users u ON u.id = d.user_id "
+              "WHERE d.id = ? AND COALESCE(d.revoked_at,'') = '' AND COALESCE(d.expelled_at,'') = ''",
               [ourId]);
       var maxUpd = lastPush;
       for (final d in rows) {
+        final devIdStr = '${d['id'] ?? ''}';
         final upd = '${d['updated_at'] ?? ''}';
-        if (upd.compareTo(lastPush) <= 0) continue;
+        final remoteEntry = remote?[devIdStr];
+        final missingOrRevokedInCloud = remote == null ||
+            remoteEntry is! Map ||
+            '${remoteEntry['revoked_at'] ?? ''}'.isNotEmpty ||
+            '${remoteEntry['expelled_at'] ?? ''}'.isNotEmpty ||
+            (remoteEntry['is_paired'] as int? ?? 0) != 1;
+        if (!missingOrRevokedInCloud && upd.compareTo(lastPush) <= 0) continue;
         final map = _safeDeviceRow(Map<String, Object?>.from(d));
         if (!isOwner) {
           map['is_owner'] = 0;
         }
         map['workspace_id'] = workspaceId;
+        map['revoked_at'] = '';
+        map['expelled_at'] = '';
+        map['is_paired'] = 1;
         await _putJson(
-            '$root/roster/${Uri.encodeComponent('${d['id']}')}.json',
+            '$root/roster/${Uri.encodeComponent(devIdStr)}.json',
             map,
             timeout: const Duration(seconds: 20));
         if (upd.compareTo(maxUpd) > 0) maxUpd = upd;
@@ -2080,37 +2123,13 @@ class CloudJoin {
 
     // (إصلاح إعادة ربط جهاز سبق طرده أو حظره):
     // موافقة المدير على طلب الانضمام الجديد تلغي فوراً أي شاهدة طرد سابقة في /evictions
-    // حتى لا يتعرض الجهاز للحظر أو الطرد التلقائي فور دخوله المجموعة.
+    // وتحدّث سجل الجهاز محلياً وسحابياً قبل إعلان approved حتى لا يصطدم العضو بسجل طرد قديم.
     final root0 = _root(backendUrl, workspaceId);
     try {
       await _delete('$root0/evictions/${Uri.encodeComponent(deviceId)}.json');
     } catch (_) {}
 
-    // 2) (الإصلاح الجوهري) اكتب approved فوراً — قبل أي عمل محلي ثقيل.
-    // هذا يُخفي الطلب من قائمة pending عند كل المديرين، ويُنبه العضو
-    // عبر SSE لحظياً ليبدأ الترطيب. حتى لو فشل ما بعده، الطلب لن يظهر
-    // كـ pending مرة أخرى.
-    try {
-      await _putJson(requestPath(backendUrl, workspaceId, deviceId), {
-        ...?existingReq,
-        'status': 'approved',
-        'role': roleCode,
-        'approvedAt': {'.sv': 'timestamp'},
-        'deleteAfterMs': DateTime.now().millisecondsSinceEpoch +
-            _approvedRequestTtl.inMilliseconds,
-        'expiresAt':
-            DateTime.now().add(_approvedRequestTtl).toIso8601String(),
-      }, timeout: const Duration(seconds: 20));
-    } catch (e) {
-      // فشل كتابة approved = فشل الموافقة كلها — لا نكمل
-      throw CloudJoinException(
-          '❌ فشل الموافقة: تعذر تحديث حالة الطلب في السحابة.\n'
-          'السبب: $e\n'
-          'الحل: تحقق من الإنترنت وأعد المحاولة.');
-    }
-
-    // 3) الآن أكمل العمل المحلي والرفع السحابي — حتى لو فشل، الطلب
-    // يبقى approved ولن يظهر مرة أخرى في قائمة الانتظار.
+    // 2) إعداد المستخدم والجهاز محلياً ورفع سجل نظيف إلى /roster قبل إشعار العضو بـ approved
     final db = await repo.database;
     final now = DateTime.now().toIso8601String();
     final initialRole = UserRole.values.firstWhere((r) => r.code == roleCode,
@@ -2245,16 +2264,9 @@ class CloudJoin {
           if (cur2 > max2) {
             await db.delete('devices', where: 'id = ?', whereArgs: [deviceId]);
             try {
-              await db.delete('users', where: 'id = ?', whereArgs: [uid]);
-            } catch (_) {}
-            // أعد الطلب إلى pending حتى يرى المدير السبب
-            try {
-              await _putJson(requestPath(backendUrl, workspaceId, deviceId), {
-                ...?existingReq,
-                'status': 'pending',
-                'requestedAt': DateTime.now().toIso8601String(),
-                'error': 'seat_limit_$cur2/$max2',
-              }, timeout: const Duration(seconds: 20));
+              if (!reuse) {
+                await db.delete('users', where: 'id = ?', whereArgs: [uid]);
+              }
             } catch (_) {}
             throw CloudJoinException(
                 '🪑 تم استنفاد عدد الأجهزة أثناء الموافقة '
@@ -2266,14 +2278,22 @@ class CloudJoin {
       if (e is CloudJoinException) rethrow;
     }
 
-    // رفع roster و members — أفضل جهد، لا يفشل الموافقة لو تعثر
+    // 3) رفع سجل الجهاز النظيف إلى /roster و /members أولاً قبل إشعار العضو
     final root = _root(backendUrl, workspaceId);
     try {
       final own = await db.query('devices',
           where: 'id = ?', whereArgs: [deviceId], limit: 1);
       if (own.isNotEmpty) {
-        await _putJson('$root/roster/${Uri.encodeComponent(deviceId)}.json',
-            {..._safeDeviceRow(own.first), 'user_role': role.code},
+        await _putJson(
+            '$root/roster/${Uri.encodeComponent(deviceId)}.json',
+            {
+              ..._safeDeviceRow(own.first),
+              'is_paired': 1,
+              'is_owner': 0,
+              'revoked_at': '',
+              'expelled_at': '',
+              'user_role': role.code,
+            },
             timeout: const Duration(seconds: 20));
       }
       final memberUid = '${existingReq?['uid'] ?? ''}'.trim();
@@ -2289,8 +2309,25 @@ class CloudJoin {
           timeout: const Duration(seconds: 20),
         );
       }
-    } catch (_) {
-      // roster فشل — سيُعاد رفعه في دورة المزامنة التالية
+    } catch (_) {}
+
+    // 4) كتابة approved في /joinRequests لإشعار العضو ببدء الترطيب بعد تجهيز /roster
+    try {
+      await _putJson(requestPath(backendUrl, workspaceId, deviceId), {
+        ...?existingReq,
+        'status': 'approved',
+        'role': roleCode,
+        'approvedAt': {'.sv': 'timestamp'},
+        'deleteAfterMs': DateTime.now().millisecondsSinceEpoch +
+            _approvedRequestTtl.inMilliseconds,
+        'expiresAt':
+            DateTime.now().add(_approvedRequestTtl).toIso8601String(),
+      }, timeout: const Duration(seconds: 20));
+    } catch (e) {
+      throw CloudJoinException(
+          '❌ فشل الموافقة: تعذر تحديث حالة الطلب في السحابة.\n'
+          'السبب: $e\n'
+          'الحل: تحقق من الإنترنت وأعد المحاولة.');
     }
   }
 
@@ -2351,6 +2388,11 @@ class CloudJoin {
         if (r is Map) row = r;
       } catch (_) {}
       if (row == null) continue;
+      if ('${row['revoked_at'] ?? ''}'.trim().isNotEmpty ||
+          '${row['expelled_at'] ?? ''}'.trim().isNotEmpty ||
+          (row['is_paired'] as int? ?? 1) == 0) {
+        continue;
+      }
       int ms(Object? v) =>
           DateTime.tryParse('${v ?? ''}')?.millisecondsSinceEpoch ?? 0;
       final ts = [
@@ -2498,8 +2540,16 @@ class CloudJoin {
   }) async {
     try {
       final devId = await ensureDeviceId(repo);
-      final current = (await repo.settings())['sync.workspaceId'] ?? '';
+      final st = await repo.settings();
+      final current = st['sync.workspaceId'] ?? '';
       final mode = await repo.workspaceMode();
+      final onboardingDone = (st['onboarding.done'] ?? '') == '1';
+      final hasLocalEmail = (st['account.email'] ?? '').trim().isNotEmpty;
+
+      // ══ حماية التثبيت الجديد: لا نربط الجهاز تلقائياً بأي مساحة سحابية قبل إتمام شاشة البداية ══
+      if (!onboardingDone && !hasLocalEmail && mode != 'member') {
+        return '';
+      }
 
       // ══ العضو المنضم مقيد حصرياً بمساحة المنشأة المعتمدة ولا يتنقل إطلاقاً ══
       if (mode == 'member' && current.trim().isNotEmpty && current.trim() != 'default') {
@@ -2515,7 +2565,9 @@ class CloudJoin {
           final curRoster = await _getJson(
               '${_root(backendUrl, curWs)}/roster/${Uri.encodeComponent(devId)}.json');
           if (curRoster != null &&
-              ('${curRoster['id'] ?? ''}' == devId || curRoster.isNotEmpty)) {
+              ('${curRoster['id'] ?? ''}' == devId || curRoster.isNotEmpty) &&
+              '${curRoster['revoked_at'] ?? ''}'.trim().isEmpty &&
+              '${curRoster['expelled_at'] ?? ''}'.trim().isEmpty) {
             return curWs;
           }
           if (await repo.isWorkspaceOwner()) {
@@ -2679,6 +2731,7 @@ class CloudJoin {
         '${d['expelled_at'] ?? ''}'.isEmpty;
     final db = await repo.database;
     final ourId = (await repo.settings())['sync.deviceId'] ?? '';
+    final isOwnerDevice = await repo.isWorkspaceOwner();
     final rows = await db.query('devices');
     final now = DateTime.now().toIso8601String();
     var fixed = 0;
@@ -2737,7 +2790,31 @@ class CloudJoin {
         }
         continue;
       }
-      // بلا عضوية سحابية = شبح (أو مفصول من جهاز آخر) ⇒ وسمه مفصولاً.
+      // على جهاز المدير المالك: إذا كان العضو مقترناً ونشطاً محلياً والـ roster السحابي
+      // يفتقر لعقدته (بسبب تأخر شبكة أو تنظيف سابق)، فإن المدير هو المرجع ويعيد
+      // رفع عقدة العضو للسحابة بدلاً من طرده محلياً بالخطأ!
+      final localActive = (r['is_paired'] as int? ?? 0) == 1 &&
+          '${r['revoked_at'] ?? ''}'.isEmpty &&
+          '${r['expelled_at'] ?? ''}'.isEmpty;
+      final isolatedByMember = entry is Map &&
+          '${entry['isolation_reason'] ?? ''}' == 'joined_another_workspace';
+      if (isOwnerDevice && localActive && !isolatedByMember) {
+        try {
+          final map = _safeDeviceRow(Map<String, Object?>.from(r));
+          map['workspace_id'] = workspaceId;
+          map['is_paired'] = 1;
+          map['is_owner'] = 0;
+          map['revoked_at'] = '';
+          map['expelled_at'] = '';
+          await _putJson(
+            '$root/roster/${Uri.encodeComponent(id)}.json',
+            map,
+            timeout: const Duration(seconds: 15),
+          );
+        } catch (_) {}
+        continue;
+      }
+      // بلا عضوية سحابية = شبح (أو مفصول من المدير) ⇒ وسمه مفصولاً.
       if ('${r['expelled_at'] ?? ''}'.isEmpty ||
           (r['is_paired'] as int? ?? 0) == 1) {
         await db.update(

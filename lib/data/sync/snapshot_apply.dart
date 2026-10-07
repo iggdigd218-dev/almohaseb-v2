@@ -77,8 +77,11 @@ class SnapshotApply {
                     (map['auth_secret'] as String?) ?? '');
               }
               if (map['id'] == ourDeviceId) {
-                // سجلنا كما يعرفه المضيف — لسنا مالكين.
+                // سجلنا كما يعرفه المضيف — لسنا مالكين، ونمسح أي طرد أو حظر سابق.
                 map['is_owner'] = 0;
+                map['is_paired'] = 1;
+                map['revoked_at'] = '';
+                map['expelled_at'] = '';
               } else if ((map['is_owner'] ?? 0) == 1) {
                 // تأكد من أن سجل المضيف يظل is_owner=1 (المالك الشرعي).
                 map['is_owner'] = 1;
@@ -145,7 +148,6 @@ class SnapshotApply {
         'address',
         'phone',
         'whatsapp',
-        'email',
         'managerName',
         'voucherFooter',
         'defaultVoucherNotes',
@@ -240,6 +242,8 @@ class SnapshotApply {
               'name': 'جهاز عضو',
               'is_owner': 0,
               'is_paired': 1,
+              'revoked_at': '',
+              'expelled_at': '',
               'created_at': nowIso,
               'updated_at': nowIso,
             },
@@ -252,13 +256,15 @@ class SnapshotApply {
               'workspace_id': wsId,
               'is_owner': 0,
               'is_paired': 1,
+              'revoked_at': '',
+              'expelled_at': '',
               'updated_at': nowIso,
             },
             where: 'id = ?',
             whereArgs: [ourDeviceId],
           );
         }
-        // ضبط وضع المساحة على "عضو"
+        // ضبط وضع المساحة على "عضو" وحذف أي سجل ملكية سابق
         await txn.insert(
             'sync_meta',
             {
@@ -266,6 +272,7 @@ class SnapshotApply {
               'value': 'member',
             },
             conflictAlgorithm: ConflictAlgorithm.replace);
+        await txn.delete('sync_meta', where: "key = 'ownerDeviceId'");
 
         // منشئ هذه المساحة هو المدير (hostId) وليس جهاز العضو
         if (hostId.isNotEmpty) {

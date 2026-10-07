@@ -48,7 +48,7 @@ Future<String?> hardwareFingerprintRaw() async {
     final plugin = DeviceInfoPlugin();
     if (PlatformInfo.isAndroid) {
       final a = await plugin.androidInfo
-          .timeout(const Duration(milliseconds: 400));
+          .timeout(const Duration(milliseconds: 2500));
       // (تدعيم البصمة) مكوّنات عتادية ثابتة لنفس الجهاز الفعلي حتى بعد
       // مسح بيانات التطبيق أو إعادة تثبيته:
       //  • ANDROID_ID (a.id): ثابت عبر إعادة التثبيت ومسح البيانات —
@@ -65,24 +65,24 @@ Future<String?> hardwareFingerprintRaw() async {
     }
     if (PlatformInfo.isWindows) {
       final w = await plugin.windowsInfo
-          .timeout(const Duration(milliseconds: 400));
+          .timeout(const Duration(milliseconds: 2500));
       // deviceId = MachineGuid — ثابت عبر إعادة تثبيت التطبيق.
       return 'windows:${w.deviceId}|${w.computerName}';
     }
     if (PlatformInfo.isLinux) {
       final l = await plugin.linuxInfo
-          .timeout(const Duration(milliseconds: 400));
+          .timeout(const Duration(milliseconds: 2500));
       // machineId من /etc/machine-id — ثابت للنظام.
       return 'linux:${l.machineId ?? l.id}|${l.name}';
     }
     if (PlatformInfo.isMacOS) {
       final m = await plugin.macOsInfo
-          .timeout(const Duration(milliseconds: 400));
+          .timeout(const Duration(milliseconds: 2500));
       return 'macos:${m.systemGUID ?? m.computerName}';
     }
     if (PlatformInfo.isIOS) {
       final i =
-          await plugin.iosInfo.timeout(const Duration(milliseconds: 400));
+          await plugin.iosInfo.timeout(const Duration(milliseconds: 2500));
       return 'ios:${i.identifierForVendor ?? i.utsname.machine}';
     }
   } catch (_) {
@@ -107,12 +107,14 @@ Future<String> ensureDeviceId(Repo repo) async {
   final st = await repo.settings();
   final existing = st[_deviceIdKey];
   if (existing != null && existing.trim().isNotEmpty) return existing.trim();
-  final hw = await deterministicDeviceId();
+  final raw = await hardwareFingerprintRaw();
+  final hw = (raw != null && raw.trim().isNotEmpty)
+      ? formatDeviceId(_hashToCode(raw))
+      : null;
   final fresh = hw ?? formatDeviceId(generateDeviceCode());
   await repo.setSetting(_deviceIdKey, fresh);
   // نحفظ البصمة الخام (مُجزأة) للمطابقة المستقبلية ضد سجلات قديمة.
-  final raw = await hardwareFingerprintRaw();
-  if (raw != null) {
+  if (raw != null && raw.trim().isNotEmpty) {
     await repo.setSetting(_hwFingerprintKey, _hashToCode(raw, 24));
   }
   return fresh;
