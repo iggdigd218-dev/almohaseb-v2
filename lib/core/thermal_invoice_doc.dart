@@ -7,12 +7,15 @@
 //   2. إتاحة بناء المستند للاختبار الآلي (بند «اختبار إنشاء المعاينة»).
 library;
 
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
 import 'format.dart';
+import 'media_paths.dart';
 import 'models.dart';
 import 'pdf_fonts.dart';
 import '../data/sync/subscription_guard.dart' show kWatermarkText;
@@ -39,10 +42,42 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
   required String orgName,
   required String orgPhone,
   required String footer,
+  String logoPath = '',
+  String logoBase64 = '',
   bool stamp = false,
 }) async {
   // (بند 2) تحميل الخط العربي قبل إنشاء المستند — مرة واحدة ومخبّأة.
   final fonts = await PdfFonts.load();
+
+  pw.MemoryImage? logoImg;
+  if (logoBase64.trim().isNotEmpty) {
+    try {
+      final bytes = base64Decode(logoBase64.trim());
+      if (bytes.isNotEmpty) logoImg = pw.MemoryImage(bytes);
+    } catch (_) {}
+  }
+  if (logoImg == null &&
+      logoPath.trim().isNotEmpty &&
+      !logoPath.trim().startsWith('http')) {
+    try {
+      final f = File(MediaPaths.toAbsolute(logoPath.trim()));
+      if (await f.exists()) {
+        logoImg = pw.MemoryImage(await f.readAsBytes());
+      }
+    } catch (_) {}
+  }
+
+  // استخراج تفاصيل البيع الجزئي إن وُجدت في ملاحظات الفاتورة
+  String? paidVal;
+  String? remainVal;
+  for (final l in tx.notes.split('\n')) {
+    final t = l.trim();
+    if (t.startsWith('المبلغ المدفوع:')) {
+      paidVal = t.substring('المبلغ المدفوع:'.length).trim();
+    } else if (t.startsWith('المبلغ المتبقي:')) {
+      remainVal = t.substring('المبلغ المتبقي:'.length).trim();
+    }
+  }
 
   final doc = pw.Document(
     // (بند 3) تعيين الخط في ثيم المستند: يورّثه لكل النصوص تلقائياً.
@@ -69,6 +104,19 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
           child: pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.center,
             children: [
+              if (logoImg != null) ...[
+                pw.Container(
+                  width: 48,
+                  height: 48,
+                  padding: const pw.EdgeInsets.all(3),
+                  decoration: pw.BoxDecoration(
+                    border: pw.Border.all(color: PdfColors.grey400, width: 0.6),
+                    borderRadius: pw.BorderRadius.circular(8),
+                  ),
+                  child: pw.Image(logoImg, fit: pw.BoxFit.contain),
+                ),
+                pw.SizedBox(height: 6),
+              ],
               pw.Text(
                 orgName,
                 style: pw.TextStyle(
@@ -147,6 +195,54 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                   ),
                 ],
               ),
+              if (paidVal != null && paidVal.isNotEmpty) ...[
+                pw.SizedBox(height: 3),
+                pw.Row(
+                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                  children: [
+                    pw.Text(
+                      'المبلغ المدفوع مقدماً:',
+                      style: pw.TextStyle(
+                        font: fonts.bold,
+                        fontWeight: pw.FontWeight.bold,
+                        fontSize: 10,
+                      ),
+                    ),
+                    pw.Text(
+                      paidVal,
+                      style: pw.TextStyle(
+                        font: fonts.bold,
+                        fontWeight: pw.FontWeight.bold,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+              if (remainVal != null && remainVal.isNotEmpty) ...[
+                pw.SizedBox(height: 2),
+                pw.Row(
+                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                  children: [
+                    pw.Text(
+                      'المبلغ المتبقي (آجل):',
+                      style: pw.TextStyle(
+                        font: fonts.bold,
+                        fontWeight: pw.FontWeight.bold,
+                        fontSize: 10,
+                      ),
+                    ),
+                    pw.Text(
+                      remainVal,
+                      style: pw.TextStyle(
+                        font: fonts.bold,
+                        fontWeight: pw.FontWeight.bold,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
               pw.SizedBox(height: 8),
               pw.Text(
                 footer,
@@ -184,6 +280,8 @@ Future<Uint8List> buildThermalInvoicePdf({
   required String orgName,
   required String orgPhone,
   required String footer,
+  String logoPath = '',
+  String logoBase64 = '',
   bool stamp = false,
 }) async =>
     (await buildThermalInvoiceDocument(
@@ -193,6 +291,8 @@ Future<Uint8List> buildThermalInvoicePdf({
       orgName: orgName,
       orgPhone: orgPhone,
       footer: footer,
+      logoPath: logoPath,
+      logoBase64: logoBase64,
       stamp: stamp,
     ))
         .bytes;

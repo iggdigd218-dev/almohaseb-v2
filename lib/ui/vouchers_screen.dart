@@ -6,7 +6,9 @@ import 'package:url_launcher/url_launcher.dart';
 import '../core/accounting.dart';
 import '../core/format.dart';
 import '../core/models.dart';
+import '../core/receipt_image.dart';
 import '../core/theme.dart';
+import '../core/whatsapp.dart';
 import '../data/providers.dart';
 import '../data/sync/subscription_guard.dart' show Feature;
 import 'trial_ui.dart' show featureNeedsStamp;
@@ -398,6 +400,29 @@ Future<void> openVoucherPreview(
                           orgName: org.name,
                           items: items,
                         );
+                        try {
+                          final imgPath = await buildReceiptImage(
+                            ReceiptData.fromVoucher(
+                              v: v,
+                              account: account,
+                              currency: currency,
+                              settings: settings,
+                              items: items,
+                            ),
+                          );
+                          final installed = await WhatsApp.installed();
+                          String? pkg;
+                          if (installed.contains('com.whatsapp.w4b')) {
+                            pkg = 'com.whatsapp.w4b';
+                          }
+                          final res = await WhatsApp.send(
+                            phone: account?.contactNumber ?? '',
+                            text: text,
+                            imagePath: imgPath,
+                            package: pkg,
+                          );
+                          if (res == WaResult.ok) return;
+                        } catch (_) {}
                         final uri = Uri.parse(
                           'https://wa.me/$number?text=${Uri.encodeComponent(text)}',
                         );
@@ -447,12 +472,18 @@ Future<void> openVoucherForm(BuildContext context, WidgetRef ref) =>
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (ctx) => ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(ctx).height * 0.85,
-        ),
-        child: const _VoucherForm(),
-      ),
+      builder: (ctx) {
+        final kb = MediaQuery.viewInsetsOf(ctx).bottom;
+        final h = MediaQuery.sizeOf(ctx).height;
+        final maxH = (h - kb - 24).clamp(260.0, h * 0.76);
+        return Padding(
+          padding: EdgeInsets.only(bottom: kb),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: maxH),
+            child: const _VoucherForm(),
+          ),
+        );
+      },
     );
 
 class _VoucherForm extends ConsumerStatefulWidget {

@@ -94,7 +94,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Future<void> _createLocalBackup(BuildContext context) async {
     try {
       final repo = ref.read(repoProvider);
-      final payload = await repo.exportForLocalBackup(withImages: true);
+      final payload = await repo.exportForLocalBackup(withImages: false);
       final dir = await getApplicationDocumentsDirectory();
       final ts = DateTime.now()
           .toIso8601String()

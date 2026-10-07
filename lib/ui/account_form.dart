@@ -27,39 +27,45 @@ Future<bool> openAccountForm(
     isScrollControlled: true,
     useSafeArea: true,
     backgroundColor: Colors.transparent,
-    builder: (ctx) => ConstrainedBox(
-      constraints: BoxConstraints(
-        maxHeight: MediaQuery.sizeOf(ctx).height * 0.85,
-      ),
-      child: Container(
-        decoration: BoxDecoration(
-          color: AppColors.surfaceOf(ctx),
-          borderRadius: AppRadius.sheetTop,
-        ),
-        child: SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(height: 8),
-              Container(
-                width: 44,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: AppColors.borderOf(ctx),
-                  borderRadius: BorderRadius.circular(99),
-                ),
+    builder: (ctx) {
+      final kb = MediaQuery.viewInsetsOf(ctx).bottom;
+      final h = MediaQuery.sizeOf(ctx).height;
+      final maxH = (h - kb - 20).clamp(260.0, h * 0.76);
+      return Padding(
+        padding: EdgeInsets.only(bottom: kb),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: maxH),
+          child: Container(
+            decoration: BoxDecoration(
+              color: AppColors.surfaceOf(ctx),
+              borderRadius: AppRadius.sheetTop,
+            ),
+            child: SafeArea(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(height: 8),
+                  Container(
+                    width: 44,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: AppColors.borderOf(ctx),
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                  ),
+                  Flexible(
+                    child: AccountFormScreen(
+                      existing: existing,
+                      embedded: true,
+                    ),
+                  ),
+                ],
               ),
-              Flexible(
-                child: AccountFormScreen(
-                  existing: existing,
-                  embedded: true,
-                ),
-              ),
-            ],
+            ),
           ),
         ),
-      ),
-    ),
+      );
+    },
   );
   return r ?? false;
 }

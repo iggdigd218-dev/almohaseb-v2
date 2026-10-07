@@ -118,6 +118,16 @@ class _HomeShellState extends ConsumerState<HomeShell>
   // يظهر فوق كل شيء لحظة وصول الطلب، لا فقط داخل شاشة إدارة المجموعة.
   JoinRequestWatcher? _globalJoinWatcher;
   bool _joinSheetShowing = false;
+  bool _modalBusy = false;
+
+  /// هل توجد نافذة منبثقة (حوار أو ورقة سفلية) مفتوحة حالياً؟ يمنع تراكب النوافذ.
+  bool get _isAnotherModalOpen {
+    if (!mounted) return true;
+    if (_modalBusy || _joinSheetShowing) return true;
+    final route = ModalRoute.of(context);
+    if (route != null && !route.isCurrent) return true;
+    return false;
+  }
 
   /// (منع تكرار الحوار) مفاتيح طلبات الانضمام التي عُرض حوارها واكتمل
   /// اتخاذ قرار فيها خلال هذه الجلسة — فلا يُعاد فتح نفس الحوار لنفس
@@ -282,11 +292,15 @@ class _HomeShellState extends ConsumerState<HomeShell>
     } catch (_) {}
   }
 
-  /// داخل مجموعة: يشغّل خدمة اليقظة (foreground service) ليستقبل الجهاز
-  /// العمليات والإشعارات فوراً حتى والشاشة مطفأة، ويطلب — بنوافذ النظام
-  /// الرسمية — إذن الإشعارات (أندرويد 13+) والإعفاء من تحسينات البطارية.
+  /// يطلب إذن الإشعارات الرسمي للنظام عند الحاجة، ويشغّل خدمة اليقظة
+  /// والإعفاء من تحسينات البطارية داخل المجموعة.
   Future<void> _ensureGroupKeepAlive() async {
     try {
+      // إذن الإشعارات (أندرويد 13+): يُطلب بنافذة النظام الرسمية ليتمكن
+      // التطبيق من إظهار إشعارات العمليات والتنبيهات والتحديثات.
+      if (!await NexKeepAlive.hasPermission(NexKeepAlive.permNotifications)) {
+        await NexKeepAlive.requestPermission(NexKeepAlive.permNotifications);
+      }
       final repo0 = ref.read(repoProvider);
       final mode = await repo0.workspaceMode();
       final st0 = await repo0.settings();
@@ -295,10 +309,6 @@ class _HomeShellState extends ConsumerState<HomeShell>
       final inGroup = mode != 'standalone';
       await NexKeepAlive.setEnabled(inGroup && wantBg);
       if (!inGroup || !wantBg) return;
-      // إذن الإشعارات: نافذة النظام مباشرة (لا نافذة مصطنعة).
-      if (!await NexKeepAlive.hasPermission(NexKeepAlive.permNotifications)) {
-        await NexKeepAlive.requestPermission(NexKeepAlive.permNotifications);
-      }
       // الإعفاء من تحسينات البطارية: نافذة النظام الرسمية، مرة واحدة فقط
       // (إن رفض لا نلاحقه في كل إقلاع).
       final repo = ref.read(repoProvider);
@@ -618,6 +628,16 @@ class _HomeShellState extends ConsumerState<HomeShell>
         entityId: alert.id,
       );
       if (alert.isModal) {
+        if (_isAnotherModalOpen) {
+          _showTappableNotice(
+            alert.title,
+            alert.body,
+            entityType: 'cloud_alert',
+            entityId: alert.id,
+          );
+          return;
+        }
+        _modalBusy = true;
         showDialog<void>(
           context: context,
           builder: (ctx) => AlertDialog(
@@ -636,7 +656,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
               ),
             ],
           ),
-        );
+        ).whenComplete(() => _modalBusy = false);
       } else {
         _showTappableNotice(
           alert.title,
@@ -678,16 +698,21 @@ class _HomeShellState extends ConsumerState<HomeShell>
       final msg = isMorning
           ? 'صباح الخير! نتمنى لك يوماً موفقاً مليئاً بالمبيعات الطيبة.'
           : 'مساء الخير! نتمنى لك أمسية هادئة وحسابات رابحة.';
-      // صوت هادئ عبر إشعار النظام + نافذة داخلية أنيقة.
+      // صوت هادئ عبر إشعار النظام + نافذة داخلية أنيقة (بشرط عدم وجود نافذة أخرى مفتوحة).
       Sfx.systemNotify(title: title, body: msg, peaceful: true);
-      if (!mounted) return;
-      await showAppNotice(
-        context,
-        title: title,
-        message: msg,
-        kind: AppNoticeKind.info,
-        playSound: false,
-      );
+      if (!mounted || _isAnotherModalOpen) return;
+      _modalBusy = true;
+      try {
+        await showAppNotice(
+          context,
+          title: title,
+          message: msg,
+          kind: AppNoticeKind.info,
+          playSound: false,
+        );
+      } finally {
+        _modalBusy = false;
+      }
     } catch (_) {
       // التحية كمالية — لا تعطل شيئاً.
     }
@@ -764,22 +789,40 @@ class _HomeShellState extends ConsumerState<HomeShell>
         force: true,
       );
       if (!mounted || sub.status == 'none') return;
-      // (أ) الترحيب — مرة واحدة فقط.
+      // (أ) الترحيب — مرة واحدة فقط (ينتظر إغلاق أي نافذة أخرى منعاً للتراكب).
       if (sub.status == 'trial' &&
           !sub.expired &&
           (st['trialWelcomed'] ?? '') != '1') {
+        while (mounted && _isAnotherModalOpen) {
+          await Future<void>.delayed(const Duration(seconds: 2));
+        }
+        if (!mounted) return;
         await repo.setSetting('trialWelcomed', '1');
-        if (mounted) await showTrialWelcomeDialog(context);
+        _modalBusy = true;
+        try {
+          await showTrialWelcomeDialog(context);
+        } finally {
+          _modalBusy = false;
+        }
       }
       // (ب) الانتهاء — مرة واحدة لكل انتهاء، برسالة بحسب الدور والخطة:
       // المدير يرى بطاقة الشراء/التجديد؛ جهاز الموظف في مؤسسة يرى تنبيه
       // «راجع إدارة النظام» (القسم 3 — لا يُطالَب الموظف بالدفع).
       if (sub.expired && (st['trialExpiredShown'] ?? '') != '1') {
+        while (mounted && _isAnotherModalOpen) {
+          await Future<void>.delayed(const Duration(seconds: 2));
+        }
+        if (!mounted) return;
         await repo.setSetting('trialExpiredShown', '1');
         final owner = await repo.isWorkspaceOwner();
         if (!mounted) return;
         if (owner) {
-          await showTrialExpiredSheet(context);
+          _modalBusy = true;
+          try {
+            await showTrialExpiredSheet(context);
+          } finally {
+            _modalBusy = false;
+          }
         } else {
           ChatHooks.onMemberNotice?.call(
             '☁️ المزامنة السحابية متوقفة',
@@ -892,8 +935,16 @@ class _HomeShellState extends ConsumerState<HomeShell>
         latest.build == kAppBuild;
     await repo.setSetting('whatsNewSeenVersion', buildKey);
     if (!isCurrentRelease || info.notes.trim().isEmpty) return;
+    while (mounted && _isAnotherModalOpen) {
+      await Future<void>.delayed(const Duration(seconds: 2));
+    }
     if (!mounted) return;
-    await showWhatsNewDialog(context, kAppVersion, info.notes);
+    _modalBusy = true;
+    try {
+      await showWhatsNewDialog(context, kAppVersion, info.notes);
+    } finally {
+      _modalBusy = false;
+    }
   }
 
   /// فحص تحديث صامت عند الإقلاع: لا يزعج المستخدم إلا إذا وُجد تحديث فعلًا،
@@ -930,8 +981,16 @@ class _HomeShellState extends ConsumerState<HomeShell>
         );
         await repo.setSetting('lastUpdatePromptBuild', latestKey);
       }
+      while (mounted && _isAnotherModalOpen) {
+        await Future<void>.delayed(const Duration(seconds: 2));
+      }
       if (!mounted) return;
-      await showUpdateDialog(context, ref, info);
+      _modalBusy = true;
+      try {
+        await showUpdateDialog(context, ref, info);
+      } finally {
+        _modalBusy = false;
+      }
     } catch (_) {
       // الفحص الصامت لا يجب أن يعطّل الإقلاع أبدًا.
     }

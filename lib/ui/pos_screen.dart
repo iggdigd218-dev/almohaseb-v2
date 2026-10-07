@@ -1291,56 +1291,79 @@ class _PosScreenState extends ConsumerState<PosScreen>
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (ctx) {
+        final kb = MediaQuery.viewInsetsOf(ctx).bottom;
+        final h = MediaQuery.sizeOf(ctx).height;
+        final maxH = (h - kb - 20).clamp(260.0, h * 0.74);
         return Padding(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.of(ctx).viewInsets.bottom,
-          ),
-          child: StatefulBuilder(
-            builder: (context, setSheetState) {
-              final accounts = ref.watch(allAccountsProvider).valueOrNull ?? [];
-              final currencies = ref.watch(currenciesProvider).valueOrNull ??
-                  kDefaultCurrencies;
-              final cur = currencies.first;
-              final customers = accounts
-                  .where(
-                    (a) =>
-                        a.kind == AccountKind.customer ||
-                        a.kind == AccountKind.general,
-                  )
-                  .toList();
-              final needsAccount = _payment != _PosPayment.cash;
-              final accountMissing = needsAccount && _selectedCustomerId == null;
+          padding: EdgeInsets.only(bottom: kb),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: maxH),
+            child: StatefulBuilder(
+              builder: (context, setSheetState) {
+                final accounts =
+                    ref.watch(allAccountsProvider).valueOrNull ?? [];
+                final currencies =
+                    ref.watch(currenciesProvider).valueOrNull ??
+                        kDefaultCurrencies;
+                final cur = currencies.first;
+                final customers = accounts
+                    .where(
+                      (a) =>
+                          a.kind == AccountKind.customer ||
+                          a.kind == AccountKind.general,
+                    )
+                    .toList();
+                final needsAccount = _payment != _PosPayment.cash;
+                final accountMissing =
+                    needsAccount && _selectedCustomerId == null;
+                final paidNow = _payment == _PosPayment.partial
+                    ? (Fmt.parseAmount(
+                            ThousandsFormatter.strip(_paidCtrl.text)) ??
+                        0.0)
+                    : (_payment == _PosPayment.cash ? _netTotal : 0.0);
+                final remainingNow =
+                    (_netTotal - paidNow).clamp(0.0, double.infinity);
 
-              return SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          'إتمام الفاتورة 🛒',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
+                return Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            'إتمام الفاتورة 🛒',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
                           ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.close),
-                          onPressed: () => Navigator.pop(context),
-                        ),
-                      ],
-                    ),
-                    const Divider(),
-
-                    // قائمة أصناف السلة — الكمية قابلة للنقر لإدخال مباشر.
-                    for (final entry in _cart.values) ...[
+                          IconButton(
+                            visualDensity: VisualDensity.compact,
+                            icon: const Icon(Icons.close, size: 20),
+                            onPressed: () => Navigator.pop(context),
+                          ),
+                        ],
+                      ),
+                      const Divider(height: 8),
+                      Flexible(
+                        child: SingleChildScrollView(
+                          keyboardDismissBehavior:
+                              ScrollViewKeyboardDismissBehavior.onDrag,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              // قائمة أصناف السلة — الكمية قابلة للنقر لإدخال مباشر.
+                              for (final entry in _cart.values) ...[
                       Row(
                         children: [
                           Expanded(
@@ -1726,101 +1749,152 @@ class _PosScreenState extends ConsumerState<PosScreen>
                       ],
                     ),
 
-                    const SizedBox(height: 16),
-
-                    // الملخص المالي
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: AppColors.primarySoftOf(context),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Column(
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text('المجموع الفرعي:'),
-                              Text('${Fmt.money(_subtotal)} ${cur.symbol}'),
-                            ],
-                          ),
-                          if (_discount > 0) ...[
-                            const SizedBox(height: 4),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text(
-                                  _draft.discountIsPercent
-                                      ? 'الخصم (${_draft.discountText.trim()}٪):'
-                                      : 'الخصم:',
-                                  style:
-                                      const TextStyle(color: AppColors.red),
-                                ),
-                                Text(
-                                  '-${Fmt.money(_discount)} ${cur.symbol}',
-                                  style: const TextStyle(color: AppColors.red),
-                                ),
-                              ],
-                            ),
-                          ],
-                          const Divider(),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text(
-                                'الصافي الإجمالي:',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                ),
-                              ),
-                              Text(
-                                '${Fmt.money(_netTotal)} ${cur.symbol}',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w900,
-                                  fontSize: 18,
-                                  color: AppColors.primaryOf(context),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    const SizedBox(height: 20),
-
-                    // زر تأكيد عريض مع قفل فوري ضد النقر المزدوج.
-                    SizedBox(
-                      width: double.infinity,
-                      height: 52,
-                      child: FilledButton.icon(
-                        onPressed: _saving ? null : () => _executeSale(ctx),
-                        icon: _saving
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : const Icon(Icons.check_circle_outline),
-                        label: Text(
-                          _saving ? 'جارٍ الحفظ…' : 'تأكيد وإصدار الفاتورة',
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ),
+                    const SizedBox(height: 10),
                   ],
                 ),
-              );
-            },
-          ),
-        );
+              ),
+            ),
+            // الملخص المالي وزر التأكيد مثبتان أسفل النافذة وفوق الكيبورد دائماً
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: AppColors.primarySoftOf(context),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('المجموع الفرعي:',
+                          style: TextStyle(fontSize: 12.5)),
+                      Text('${Fmt.money(_subtotal)} ${cur.symbol}',
+                          style: const TextStyle(fontSize: 12.5)),
+                    ],
+                  ),
+                  if (_discount > 0) ...[
+                    const SizedBox(height: 2),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          _draft.discountIsPercent
+                              ? 'الخصم (${_draft.discountText.trim()}٪):'
+                              : 'الخصم:',
+                          style: const TextStyle(
+                              color: AppColors.red, fontSize: 12.5),
+                        ),
+                        Text(
+                          '-${Fmt.money(_discount)} ${cur.symbol}',
+                          style: const TextStyle(
+                              color: AppColors.red, fontSize: 12.5),
+                        ),
+                      ],
+                    ),
+                  ],
+                  const Divider(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'الصافي الإجمالي:',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                      ),
+                      Text(
+                        '${Fmt.money(_netTotal)} ${cur.symbol}',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w900,
+                          fontSize: 17,
+                          color: AppColors.primaryOf(context),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (_payment == _PosPayment.partial) ...[
+                    const Divider(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          'المبلغ المدفوع مقدماً:',
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.green,
+                          ),
+                        ),
+                        Text(
+                          '${Fmt.money(paidNow, cur.decimal)} ${cur.symbol}',
+                          style: const TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w800,
+                            color: AppColors.green,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          'المبلغ المتبقي (آجل):',
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.red,
+                          ),
+                        ),
+                        Text(
+                          '${Fmt.money(remainingNow, cur.decimal)} ${cur.symbol}',
+                          style: const TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w800,
+                            color: AppColors.red,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            // زر تأكيد عريض مع قفل فوري ضد النقر المزدوج.
+            SizedBox(
+              width: double.infinity,
+              height: 46,
+              child: FilledButton.icon(
+                onPressed: _saving ? null : () => _executeSale(ctx),
+                icon: _saving
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.check_circle_outline, size: 20),
+                label: Text(
+                  _saving ? 'جارٍ الحفظ…' : 'تأكيد وإصدار الفاتورة',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  ),
+);
       },
     );
   }
@@ -2090,9 +2164,24 @@ class _PosScreenState extends ConsumerState<PosScreen>
       }
 
       if (mounted) {
+        final isPartialSale = _payment == _PosPayment.partial;
+        final paidAmt = isPartialSale
+            ? (Fmt.parseAmount(ThousandsFormatter.strip(_paidCtrl.text)) ?? 0.0)
+            : (_payment == _PosPayment.cash ? _netTotal : 0.0);
+        final remAmt = (_netTotal - paidAmt).clamp(0.0, double.infinity);
+        final totAmt = _netTotal;
+        final sym = cur.symbol;
         if (sheetCtx != null && sheetCtx.mounted) Navigator.pop(sheetCtx);
         Sfx.opCreated(); // صوت الدفع + اهتزاز طويل (1.5 ث) عند إنشاء العملية.
-        _showSuccessDialog(txId, refNum, lines);
+        _showSuccessDialog(
+          txId,
+          refNum,
+          lines,
+          totalAmount: totAmt,
+          paidAmount: isPartialSale ? paidAmt : null,
+          remainingAmount: isPartialSale ? remAmt : null,
+          currencySymbol: sym,
+        );
         _clearCart();
       }
     } catch (e) {
@@ -2110,7 +2199,15 @@ class _PosScreenState extends ConsumerState<PosScreen>
     }
   }
 
-  void _showSuccessDialog(int txId, String refNum, List<InvoiceLine> lines) {
+  void _showSuccessDialog(
+    int txId,
+    String refNum,
+    List<InvoiceLine> lines, {
+    double? totalAmount,
+    double? paidAmount,
+    double? remainingAmount,
+    String currencySymbol = '',
+  }) {
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -2129,6 +2226,49 @@ class _PosScreenState extends ConsumerState<PosScreen>
             children: [
               Text('رقم الفاتورة: $refNum'),
               Text('عدد الأصناف: ${lines.length}'),
+              if (totalAmount != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  'إجمالي الفاتورة: ${Fmt.money(totalAmount)} $currencySymbol',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ],
+              if (paidAmount != null && remainingAmount != null) ...[
+                const SizedBox(height: 6),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: Colors.orange.withValues(alpha: 0.4),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '✅ المبلغ المدفوع: ${Fmt.money(paidAmount)} $currencySymbol',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          color: AppColors.green,
+                          fontSize: 13,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '🔴 المبلغ المتبقي (آجل): ${Fmt.money(remainingAmount)} $currencySymbol',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          color: AppColors.red,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
               const SizedBox(height: 12),
               const Text(
                 'يمكنك طباعة الإيصال الحراري أو مشاركة الفاتورة عبر واتساب مباشرة:',
@@ -2195,6 +2335,13 @@ class _PosScreenState extends ConsumerState<PosScreen>
     final orgName = (st['businessName'] ?? 'المتجر').trim();
     final orgPhone = (st['phone'] ?? '').trim();
     final footer = (st['voucherFooter'] ?? 'شكراً لزيارتكم!').trim();
+    final logoPath = (st['logo'] ??
+            st['logoPath'] ??
+            st['account.photoPath'] ??
+            '')
+        .trim();
+    final logoBase64 =
+        (st['org.icon.b64'] ?? st['logoBase64'] ?? '').trim();
 
     // (2026-09-24) بناء الفاتورة انتقل إلى thermal_invoice_doc.dart: المستند
     // صار يحمل الخط العربي المدمج (Cairo) واتجاه RTL، بدل مستند بلا ثيم
@@ -2206,6 +2353,8 @@ class _PosScreenState extends ConsumerState<PosScreen>
       orgName: orgName,
       orgPhone: orgPhone,
       footer: footer,
+      logoPath: logoPath,
+      logoBase64: logoBase64,
       stamp: stamp,
     );
 
@@ -2256,12 +2405,18 @@ class _PosHistoryTab extends ConsumerWidget {
           itemBuilder: (context, i) {
             final tx = posTxs[i];
             final account = page.accounts[tx.accountId];
+            final isPartial = tx.notes.contains('المبلغ المدفوع:');
 
             return Card(
               child: ListTile(
                 leading: CircleAvatar(
-                  backgroundColor: AppColors.primarySoftOf(context),
-                  child: const Icon(Icons.receipt, color: AppColors.teal),
+                  backgroundColor: isPartial
+                      ? Colors.orange.withValues(alpha: 0.14)
+                      : AppColors.primarySoftOf(context),
+                  child: Icon(
+                    isPartial ? Icons.pie_chart_outline : Icons.receipt,
+                    color: isPartial ? Colors.deepOrange : AppColors.teal,
+                  ),
                 ),
                 title: Text(
                   tx.reference.isNotEmpty
@@ -2269,12 +2424,34 @@ class _PosHistoryTab extends ConsumerWidget {
                       : tx.description,
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
-                subtitle: Text(
-                  '${account?.name ?? 'عميل نقدي'} • ${Fmt.date(tx.date)}',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: AppColors.text2Of(context),
-                  ),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${account?.name ?? 'عميل نقدي'} • ${Fmt.date(tx.date)}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: AppColors.text2Of(context),
+                      ),
+                    ),
+                    if (isPartial && tx.notes.trim().isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          tx.notes
+                              .split('\n')
+                              .where((l) =>
+                                  l.contains('المبلغ المدفوع:') ||
+                                  l.contains('المبلغ المتبقي:'))
+                              .join(' | '),
+                          style: const TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.deepOrange,
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
                 trailing: Text(
                   '${Fmt.money(tx.amount)} ${tx.currency}',
@@ -2294,21 +2471,50 @@ class _PosHistoryTab extends ConsumerWidget {
                         title: Text('تفاصيل ${tx.reference}'),
                         content: SizedBox(
                           width: double.maxFinite,
-                          child: items.isEmpty
-                              ? const Text('لا توجد أصناف مسجلة لهذه الفاتورة.')
-                              : ListView.builder(
-                                  shrinkWrap: true,
-                                  itemCount: items.length,
-                                  itemBuilder: (_, idx) {
-                                    final it = items[idx];
-                                    return ListTile(
-                                      title: Text(it.name),
-                                      trailing: Text(
-                                        '${it.quantity} × ${Fmt.money(it.unitPrice)} = ${Fmt.money(it.total)}',
-                                      ),
-                                    );
-                                  },
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (tx.notes.trim().isNotEmpty) ...[
+                                Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.all(8),
+                                  margin: const EdgeInsets.only(bottom: 8),
+                                  decoration: BoxDecoration(
+                                    color: Colors.orange.withValues(alpha: 0.1),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Text(
+                                    tx.notes.trim(),
+                                    style: const TextStyle(
+                                      fontSize: 12.5,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
                                 ),
+                              ],
+                              if (items.isEmpty)
+                                const Text(
+                                    'لا توجد أصناف مسجلة لهذه الفاتورة.')
+                              else
+                                Flexible(
+                                  child: ListView.builder(
+                                    shrinkWrap: true,
+                                    itemCount: items.length,
+                                    itemBuilder: (_, idx) {
+                                      final it = items[idx];
+                                      return ListTile(
+                                        dense: true,
+                                        title: Text(it.name),
+                                        trailing: Text(
+                                          '${it.quantity} × ${Fmt.money(it.unitPrice)} = ${Fmt.money(it.total)}',
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                            ],
+                          ),
                         ),
                         actions: [
                           TextButton(

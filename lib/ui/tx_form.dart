@@ -7,8 +7,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/accounting.dart';
 import '../core/format.dart';
+import '../core/keep_alive_service.dart';
 import '../core/media_paths.dart';
 import '../core/models.dart';
+import '../core/permission_dialog.dart';
 import '../core/sfx.dart';
 import '../core/receipt_image.dart';
 import '../core/theme.dart';
@@ -33,17 +35,23 @@ Future<Object?> openTxForm(
       useSafeArea: true,
       isDismissible: false,
       enableDrag: false,
-      builder: (ctx) => ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(ctx).height * 0.85,
-        ),
-        child: TxForm(
-          existing: existing,
-          presetAccountId: presetAccountId,
-          isCopy: isCopy,
-          presetType: presetType,
-        ),
-      ),
+      builder: (ctx) {
+        final kb = MediaQuery.viewInsetsOf(ctx).bottom;
+        final h = MediaQuery.sizeOf(ctx).height;
+        final maxH = (h - kb - 20).clamp(260.0, h * 0.76);
+        return Padding(
+          padding: EdgeInsets.only(bottom: kb),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: maxH),
+            child: TxForm(
+              existing: existing,
+              presetAccountId: presetAccountId,
+              isCopy: isCopy,
+              presetType: presetType,
+            ),
+          ),
+        );
+      },
     );
 
 class TxForm extends ConsumerStatefulWidget {
@@ -441,188 +449,208 @@ class _TxFormState extends ConsumerState<TxForm> {
         : (widget.existing != null ? '✏️ تعديل عملية' : '＋ عملية جديدة');
     return PopScope(
       canPop: !_saving,
-      child: Padding(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.of(context).viewInsets.bottom,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 8),
-            Container(
-              width: 42,
-              height: 4,
-              decoration: BoxDecoration(
-                color: AppColors.borderOf(context),
-                borderRadius: BorderRadius.circular(4),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 6),
+          Container(
+            width: 38,
+            height: 4,
+            decoration: BoxDecoration(
+              color: AppColors.borderOf(context),
+              borderRadius: BorderRadius.circular(4),
+            ),
+          ),
+          // ترويسة مدمجة أنيقة توفر المساحة الرأسية
+          Container(
+            margin: const EdgeInsets.fromLTRB(14, 8, 14, 2),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                begin: Alignment.topRight,
+                end: Alignment.bottomLeft,
+                colors: [Color(0xFF1E3A5F), AppColors.primary],
+              ),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.edit_note_rounded,
+                    color: Colors.white, size: 22),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    title,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15.5,
+                    ),
+                  ),
+                ),
+                InkWell(
+                  onTap: _saving ? null : () => Navigator.pop(context),
+                  borderRadius: BorderRadius.circular(20),
+                  child: const Padding(
+                    padding: EdgeInsets.all(4),
+                    child: Icon(Icons.close, color: Colors.white, size: 20),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Flexible(
+            child: Form(
+              key: _formKey,
+              autovalidateMode: AutovalidateMode.onUserInteraction,
+              child: SingleChildScrollView(
+                keyboardDismissBehavior:
+                    ScrollViewKeyboardDismissBehavior.onDrag,
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _typeChips(),
+                    const SizedBox(height: 10),
+                    _accountPickers(),
+                    const SizedBox(height: 10),
+                    _amountRow(),
+                    const SizedBox(height: 4),
+                    AmountWords(controller: _amount),
+                    if (_hasInvoiceDetails) ...[
+                      const SizedBox(height: 6),
+                      _invoiceShortcut(),
+                    ],
+                    if (_type == OpType.settle) ...[
+                      const SizedBox(height: 10),
+                      _signPicker(),
+                    ],
+                    const SizedBox(height: 8),
+                    TextFormField(
+                      controller: _desc,
+                      scrollPadding: const EdgeInsets.only(bottom: 120),
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        labelText: 'البيان / الوصف',
+                        prefixIcon: Icon(Icons.notes_outlined),
+                        hintText: 'وصف مختصر (اختياري)',
+                      ),
+                      textInputAction: TextInputAction.done,
+                    ),
+                    Theme(
+                      data: Theme.of(context)
+                          .copyWith(dividerColor: Colors.transparent),
+                      child: ExpansionTile(
+                        tilePadding: EdgeInsets.zero,
+                        childrenPadding: EdgeInsets.zero,
+                        visualDensity: VisualDensity.compact,
+                        title: Text(
+                          _advancedOpen
+                              ? 'إخفاء التفاصيل الإضافية'
+                              : 'التفاصيل الإضافية',
+                          style: const TextStyle(fontSize: 13.5),
+                        ),
+                        leading: const Icon(Icons.tune, size: 20),
+                        onExpansionChanged: (v) =>
+                            setState(() => _advancedOpen = v),
+                        children: [
+                          const SizedBox(height: 4),
+                          _datePicker(),
+                          const SizedBox(height: 10),
+                          TextFormField(
+                            controller: _ref,
+                            scrollPadding: const EdgeInsets.only(bottom: 120),
+                            decoration: const InputDecoration(
+                              isDense: true,
+                              labelText: 'رقم مرجعي',
+                              prefixIcon: Icon(Icons.tag),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          TextFormField(
+                            controller: _notes,
+                            scrollPadding: const EdgeInsets.only(bottom: 120),
+                            decoration: const InputDecoration(
+                              isDense: true,
+                              labelText: 'ملاحظات',
+                              prefixIcon: Icon(Icons.sticky_note_2_outlined),
+                            ),
+                            maxLines: 2,
+                          ),
+                          const SizedBox(height: 8),
+                          _smallImagePicker(),
+                        ],
+                      ),
+                    ),
+                    if (_saveSlow)
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 6),
+                        child: Text(
+                            'الحفظ أبطأ من المعتاد. ننتظر نتيجة قاعدة البيانات؛ لا تُكرر العملية.',
+                            textAlign: TextAlign.center,
+                            style:
+                                TextStyle(color: Colors.orange, fontSize: 12)),
+                      ),
+                  ],
+                ),
               ),
             ),
-            // ترويسة ملوّنة بنفس طابع التصميم المرجعي.
-            Container(
-              margin: const EdgeInsets.fromLTRB(14, 12, 14, 4),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  begin: Alignment.topRight,
-                  end: Alignment.bottomLeft,
-                  colors: [Color(0xFF1E3A5F), AppColors.primary],
-                ),
-                borderRadius: BorderRadius.circular(16),
-              ),
+          ),
+          // شريط أزرار الحفظ والإلغاء مثبّت أسفل النافذة وفوق الكيبورد دائماً
+          SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
               child: Row(
                 children: [
-                  const Icon(Icons.edit_note_rounded,
-                      color: Colors.white, size: 26),
-                  const SizedBox(width: 10),
                   Expanded(
-                    child: Text(
-                      title,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w800,
-                        fontSize: 17,
+                    flex: 3,
+                    child: SizedBox(
+                      height: 44,
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          textStyle: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        onPressed: _saving ? null : _save,
+                        icon: _saving
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(Icons.save_outlined, size: 20),
+                        label: Text(
+                          _saving ? 'جارٍ الحفظ...' : 'حفظ العملية',
+                        ),
                       ),
                     ),
                   ),
-                  InkWell(
-                    onTap:
-                        _saving ? null : () => Navigator.pop(context),
-                    borderRadius: BorderRadius.circular(20),
-                    child: const Padding(
-                      padding: EdgeInsets.all(6),
-                      child: Icon(Icons.close, color: Colors.white, size: 22),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    flex: 1,
+                    child: SizedBox(
+                      height: 44,
+                      child: OutlinedButton(
+                        onPressed:
+                            _saving ? null : () => Navigator.pop(context),
+                        child: const Text('إلغاء'),
+                      ),
                     ),
                   ),
                 ],
               ),
             ),
-            Flexible(
-              child: Form(
-                key: _formKey,
-                autovalidateMode: AutovalidateMode.onUserInteraction,
-                child: SingleChildScrollView(
-                  keyboardDismissBehavior:
-                      ScrollViewKeyboardDismissBehavior.onDrag,
-                  padding: const EdgeInsets.fromLTRB(18, 16, 18, 20),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _typeChips(),
-                      const SizedBox(height: 14),
-                      _accountPickers(),
-                      const SizedBox(height: 14),
-                      _amountRow(),
-                      const SizedBox(height: 6),
-                      AmountWords(controller: _amount),
-                      if (_hasInvoiceDetails) ...[
-                        const SizedBox(height: 8),
-                        _invoiceShortcut(),
-                      ],
-                      if (_type == OpType.settle) ...[
-                        const SizedBox(height: 14),
-                        _signPicker(),
-                      ],
-                      const SizedBox(height: 10),
-                      TextFormField(
-                        controller: _desc,
-                        decoration: const InputDecoration(
-                          labelText: 'البيان / الوصف',
-                          prefixIcon: Icon(Icons.notes_outlined),
-                          hintText: 'وصف مختصر (اختياري)',
-                        ),
-                        textInputAction: TextInputAction.done,
-                      ),
-                      Theme(
-                        data: Theme.of(context)
-                            .copyWith(dividerColor: Colors.transparent),
-                        child: ExpansionTile(
-                          tilePadding: EdgeInsets.zero,
-                          childrenPadding: EdgeInsets.zero,
-                          title: Text(
-                            _advancedOpen
-                                ? 'إخفاء التفاصيل الإضافية'
-                                : 'التفاصيل الإضافية',
-                          ),
-                          leading: const Icon(Icons.tune),
-                          onExpansionChanged: (v) =>
-                              setState(() => _advancedOpen = v),
-                          children: [
-                            const SizedBox(height: 6),
-                            _datePicker(),
-                            const SizedBox(height: 14),
-                            TextFormField(
-                              controller: _ref,
-                              decoration: const InputDecoration(
-                                labelText: 'رقم مرجعي',
-                                prefixIcon: Icon(Icons.tag),
-                              ),
-                            ),
-                            const SizedBox(height: 14),
-                            TextFormField(
-                              controller: _notes,
-                              decoration: const InputDecoration(
-                                labelText: 'ملاحظات',
-                                prefixIcon: Icon(Icons.sticky_note_2_outlined),
-                              ),
-                              maxLines: 2,
-                            ),
-                            const SizedBox(height: 10),
-                            _smallImagePicker(),
-                          ],
-                        ),
-                      ),
-                      if (_saveSlow)
-                        const Padding(
-                          padding: EdgeInsets.only(bottom: 10),
-                          child: Text(
-                              'الحفظ أبطأ من المعتاد. ننتظر نتيجة قاعدة البيانات؛ لا تُكرر العملية.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: Colors.orange)),
-                        ),
-                      const SizedBox(height: 14),
-                      SizedBox(
-                        width: double.infinity,
-                        height: 52,
-                        child: FilledButton.icon(
-                          style: FilledButton.styleFrom(
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            textStyle: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                          onPressed: _saving ? null : _save,
-                          icon: _saving
-                              ? const SizedBox(
-                                  width: 20,
-                                  height: 20,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2.2,
-                                    color: Colors.white,
-                                  ),
-                                )
-                              : const Icon(Icons.save_outlined, size: 22),
-                          label: Text(
-                            _saving ? 'جارٍ الحفظ...' : 'حفظ العملية',
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      TextButton(
-                        onPressed:
-                            _saving ? null : () => Navigator.pop(context),
-                        child: const Text('إلغاء'),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -698,6 +726,21 @@ class _TxFormState extends ConsumerState<TxForm> {
 
   Future<void> _captureImage() async {
     try {
+      if (!await NexKeepAlive.hasPermission(NexKeepAlive.permCamera)) {
+        final granted =
+            await NexKeepAlive.requestPermission(NexKeepAlive.permCamera);
+        if (!granted) {
+          if (!mounted) return;
+          final retry = await showPermissionRationale(
+            context,
+            PermissionRationale.camera,
+          );
+          if (!retry) return;
+          final second =
+              await NexKeepAlive.requestPermission(NexKeepAlive.permCamera);
+          if (!second) return;
+        }
+      }
       final x = await ImagePicker().pickImage(
         source: ImageSource.camera,
         imageQuality: 82,
@@ -781,7 +824,7 @@ class _TxFormState extends ConsumerState<TxForm> {
                 borderRadius: BorderRadius.circular(14),
                 child: Container(
                   padding: const EdgeInsets.symmetric(
-                    vertical: 11,
+                    vertical: 8,
                     horizontal: 8,
                   ),
                   decoration: BoxDecoration(

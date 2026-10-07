@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -8,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'accounting.dart';
 import 'format.dart';
+import 'media_paths.dart';
 import 'models.dart';
 import 'words.dart';
 
@@ -20,11 +22,13 @@ class ReceiptData {
   final double amount;
   final CurrencyDef currency;
   final String statement;
+  final String notes;
   final DateTime date;
   final double? balanceAfter;
   final String orgName;
   final String orgPhone;
   final String logoPath;
+  final String logoBase64;
   final String footer;
   final List<InvoiceLine> items;
 
@@ -36,11 +40,13 @@ class ReceiptData {
     required this.amount,
     required this.currency,
     this.statement = '',
+    this.notes = '',
     required this.date,
     this.balanceAfter,
     this.orgName = '',
     this.orgPhone = '',
     this.logoPath = '',
+    this.logoBase64 = '',
     this.footer = '',
     this.items = const [],
     this.isDebit = true,
@@ -59,7 +65,9 @@ class ReceiptData {
   }) =>
       ReceiptData(
         title: tx.type == OpType.debit && items.isNotEmpty
-            ? 'فاتورة مبيع آجل'
+            ? (tx.notes.contains('المبلغ المدفوع:')
+                ? 'فاتورة مبيعات (دفع جزئي)'
+                : 'فاتورة مبيع آجل')
             : tx.type.label,
         number: tx.reference,
         accountName: account?.name ?? '—',
@@ -67,17 +75,57 @@ class ReceiptData {
         amount: tx.amount,
         currency: currency,
         statement: tx.description,
+        notes: tx.notes,
         date: tx.date,
         balanceAfter: balanceAfter,
         orgName: settings['businessName'] ?? '',
         orgPhone: settings['phone'] ?? '',
-        logoPath: settings['logo'] ?? '',
+        logoPath: (settings['logo'] ??
+                settings['logoPath'] ??
+                settings['account.photoPath'] ??
+                '')
+            .trim(),
+        logoBase64:
+            (settings['org.icon.b64'] ?? settings['logoBase64'] ?? '').trim(),
         footer: settings['voucherFooter'] ?? '',
         items: items,
         // المبلغ عليه (مدين/صرف/مصروف) = أحمر؛ له (قبض/دائن/إيراد) = أخضر.
         isDebit: tx.type == OpType.debit ||
             tx.type == OpType.outflow ||
             tx.type == OpType.expense,
+      );
+
+  factory ReceiptData.fromVoucher({
+    required Voucher v,
+    required Account? account,
+    required CurrencyDef currency,
+    double? balanceAfter,
+    required Map<String, String> settings,
+    List<InvoiceLine> items = const [],
+  }) =>
+      ReceiptData(
+        title: v.kind.label,
+        number: v.number,
+        accountName: account?.name ?? '—',
+        accountPhone: account?.phone ?? '',
+        amount: v.amount,
+        currency: currency,
+        statement: v.statement,
+        notes: v.notes,
+        date: v.date,
+        balanceAfter: balanceAfter,
+        orgName: settings['businessName'] ?? '',
+        orgPhone: settings['phone'] ?? '',
+        logoPath: (settings['logo'] ??
+                settings['logoPath'] ??
+                settings['account.photoPath'] ??
+                '')
+            .trim(),
+        logoBase64:
+            (settings['org.icon.b64'] ?? settings['logoBase64'] ?? '').trim(),
+        footer: settings['voucherFooter'] ?? '',
+        items: items,
+        isDebit: v.kind == VoucherKind.payment,
       );
 }
 
@@ -88,6 +136,18 @@ class ReceiptData {
 Future<String> buildReceiptImage(ReceiptData d) async {
   const w = 1000.0;
   const pad = 48.0;
+
+  // استخراج المبلغ المدفوع والمتبقي في حال البيع الجزئي
+  String? paidVal;
+  String? remainVal;
+  for (final l in d.notes.split('\n')) {
+    final t = l.trim();
+    if (t.startsWith('المبلغ المدفوع:')) {
+      paidVal = t.substring('المبلغ المدفوع:'.length).trim();
+    } else if (t.startsWith('المبلغ المتبقي:')) {
+      remainVal = t.substring('المبلغ المتبقي:'.length).trim();
+    }
+  }
 
   // تخطيط مستوحى من سندات «تدوين الحسابات» و«نكسورا»:
   // ترويسة خضراء (اسم المنشأة/الهاتف/الشعار) ← شريط «سند عملية» مع الرقم
@@ -101,7 +161,10 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   final infoRows = 1 + // اسم الحساب
       (d.accountPhone.isNotEmpty ? 1 : 0) +
       1; // التاريخ والوقت (يُرسم لاحقاً في قسم التفاصيل)
-  final detailRows = (d.statement.isNotEmpty ? 1 : 0) + 1;
+  final partialRows =
+      (paidVal != null && paidVal.isNotEmpty ? 1 : 0) +
+      (remainVal != null && remainVal.isNotEmpty ? 1 : 0);
+  final detailRows = (d.statement.isNotEmpty ? 1 : 0) + partialRows + 1;
   final itemsBlock =
       d.items.isEmpty ? 0.0 : (54.0 + d.items.length * 52.0 + 56.0 + 24.0);
   final balanceBlock = d.balanceAfter != null ? 96.0 : 0.0;
@@ -119,13 +182,26 @@ Future<String> buildReceiptImage(ReceiptData d) async {
       40;
 
   ui.Image? logo;
-  if (d.logoPath.trim().isNotEmpty) {
+  Uint8List? logoBytes;
+  if (d.logoBase64.trim().isNotEmpty) {
     try {
-      final file = File(d.logoPath);
+      logoBytes = base64Decode(d.logoBase64.trim());
+    } catch (_) {}
+  }
+  if (logoBytes == null &&
+      d.logoPath.trim().isNotEmpty &&
+      !d.logoPath.trim().startsWith('http')) {
+    try {
+      final file = File(MediaPaths.toAbsolute(d.logoPath.trim()));
       if (await file.exists()) {
-        final codec = await ui.instantiateImageCodec(await file.readAsBytes());
-        logo = (await codec.getNextFrame()).image;
+        logoBytes = await file.readAsBytes();
       }
+    } catch (_) {}
+  }
+  if (logoBytes != null && logoBytes.isNotEmpty) {
+    try {
+      final codec = await ui.instantiateImageCodec(logoBytes);
+      logo = (await codec.getNextFrame()).image;
     } catch (_) {
       // شعار غير صالح لا يمنع إنشاء السند؛ نتابع من دون صورة.
     }
@@ -275,7 +351,13 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     divider();
   }
 
-  // ===== 6) التفاصيل + التاريخ والوقت =====
+  // ===== 6) التفاصيل + المدفوع والمتبقي (إن وُجد) + التاريخ والوقت =====
+  if (paidVal != null && paidVal.isNotEmpty) {
+    infoRow('المبلغ المدفوع مقدماً', paidVal, valueColor: green, big: true);
+  }
+  if (remainVal != null && remainVal.isNotEmpty) {
+    infoRow('المبلغ المتبقي (آجل)', remainVal, valueColor: red, big: true);
+  }
   if (d.statement.isNotEmpty) infoRow('التفاصيل', d.statement);
   infoRow('التاريخ والوقت', Fmt.dateTime(d.date));
   y += 4;

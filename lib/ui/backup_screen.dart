@@ -38,9 +38,6 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
   /// تملك زر تسجيل، وDrive صلاحية تُمنح بعده لا مدخل تسجيل مستقل.
   String? _accountEmail;
 
-  /// تضمين صور العمليات داخل ملف النسخة (البند ١٣).
-  bool _withImages = true;
-
   // (المعمارية الصامتة) كرت «المزامنة السحابية Firebase» أُزيل بالكامل:
   // النسخ السحابي يعمل تلقائياً وبصمت على الرابط المضمّن ومساحة العمل
   // الحالية — لا حقول رابط/رمز ولا أزرار رفع/سحب يدوية بعد اليوم.
@@ -90,7 +87,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
 
   Future<File> _createBackupFile() async {
     final data =
-        await ref.read(repoProvider).exportAll(withImages: _withImages);
+        await ref.read(repoProvider).exportAll(withImages: false);
     final json = const JsonEncoder.withIndent('  ').convert(data);
     final dir = await getTemporaryDirectory();
     final stamp =
@@ -108,19 +105,13 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
         XFile(file.path),
       ], subject: 'نسخة احتياطية — إدارة البيانات');
       if (mounted) {
-        final raw = await file.readAsString();
-        final map = jsonDecode(raw) as Map;
-        final n = (map['images'] as Map?)?.length ?? 0;
-        if (!mounted) return;
         showSnack(
           context,
-          n > 0
-              ? 'تم إنشاء النسخة ✅ (تتضمّن $n صورة)'
-              : 'تم إنشاء النسخة الاحتياطية ✅',
+          'تم إنشاء النسخة الاحتياطية ✅',
         );
         await ref.read(repoProvider).notify(
               title: 'تم إنشاء نسخة احتياطية',
-              body: n > 0 ? 'ملف النسخة يتضمّن $n صورة' : 'اكتمل تصدير بياناتك بنجاح',
+              body: 'اكتمل تصدير بياناتك بنجاح',
               kind: 'success',
             );
       }
@@ -398,33 +389,15 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'تُحفظ النسخة كملف واحد يحتوي كل الحسابات والعمليات والسندات '
-                  'والأصناف والإعدادات، ويمكنك حفظه في هاتفك أو إرساله لنفسك.',
+                  'تُحفظ النسخة كملف نصي خفيف وسريع يحتوي كل الحسابات والعمليات '
+                  'والسندات والأصناف والإعدادات (دون الصور حفاظاً على صغر حجم البيانات والمساحة السحابية).',
                   style: TextStyle(
                     fontSize: 12.5,
                     height: 1.6,
                     color: AppColors.text2Of(context),
                   ),
                 ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                  secondary: const Icon(Icons.image_outlined),
-                  title: const Text(
-                    'تضمين صور العمليات',
-                    style: TextStyle(
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  subtitle: const Text(
-                    'يجعل الملف أكبر لكنه ينقل الإيصالات والشعار معه إلى أي هاتف',
-                    style: TextStyle(fontSize: 11.5),
-                  ),
-                  value: _withImages,
-                  onChanged: (v) => setState(() => _withImages = v),
-                ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 12),
                 Row(
                   children: [
                     Expanded(
@@ -629,7 +602,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
                 Text(
                   'التطبيق يعمل بلا إنترنت وكل البيانات محفوظة داخل جهازك، '
                   'ولا يوجد خادم يزامن الأجهزة لحظيًا. للعمل على هاتف ثانٍ:\n\n'
-                  '١) أنشئ نسخة احتياطية هنا مع تضمين الصور.\n'
+                  '١) أنشئ نسخة احتياطية هنا.\n'
                   '٢) أرسل الملف إلى الهاتف الآخر (واتساب أو درايف أو كابل).\n'
                   '٣) في الهاتف الآخر: النسخ الاحتياطي ← استعادة، واختر الملف.\n\n'
                   'ملاحظة مهمة: الاستعادة تستبدل بيانات الجهاز الثاني بالكامل، '

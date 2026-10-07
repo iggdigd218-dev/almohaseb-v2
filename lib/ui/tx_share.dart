@@ -122,6 +122,17 @@ class TxShare {
       'التاريخ: ${Fmt.date(tx.date)}',
       if (tx.reference.trim().isNotEmpty) 'رقم العملية: ${tx.reference.trim()}',
       if (tx.description.trim().isNotEmpty) 'البيان: ${tx.description.trim()}',
+      if (tx.notes.trim().isNotEmpty) ...[
+        for (final nl in tx.notes
+            .split('\n')
+            .map((s) => s.trim())
+            .where((s) => s.isNotEmpty))
+          nl.startsWith('المبلغ المدفوع')
+              ? '✅ $nl'
+              : (nl.startsWith('المبلغ المتبقي') || nl.startsWith('المتبقي')
+                  ? '🔴 $nl'
+                  : '📝 $nl'),
+      ],
     ];
     if (items.isNotEmpty) {
       lines.add('━━━━━━━━━━━━━');
@@ -230,7 +241,12 @@ class TxShare {
       }
       return TxShareOutcome.failed;
     }
-    final hasLogo = (currentSettings['logo'] ?? '').trim().isNotEmpty;
+    final hasLogo =
+        (currentSettings['org.icon.b64'] ?? '').trim().isNotEmpty ||
+            (currentSettings['logoBase64'] ?? '').trim().isNotEmpty ||
+            (currentSettings['logo'] ?? '').trim().isNotEmpty ||
+            (currentSettings['logoPath'] ?? '').trim().isNotEmpty ||
+            (currentSettings['account.photoPath'] ?? '').trim().isNotEmpty;
     final needsFreshReceipt =
         tx.type == OpType.debit || itemLines.isNotEmpty || hasLogo;
 
@@ -390,7 +406,11 @@ Future<void> showReceiptPreview(
       ? const <InvoiceLine>[]
       : await repo.transactionItems(tx.id!);
   final currentSettings = await repo.settings();
-  final hasLogo = (currentSettings['logo'] ?? '').trim().isNotEmpty;
+  final hasLogo = (currentSettings['org.icon.b64'] ?? '').trim().isNotEmpty ||
+      (currentSettings['logoBase64'] ?? '').trim().isNotEmpty ||
+      (currentSettings['logo'] ?? '').trim().isNotEmpty ||
+      (currentSettings['logoPath'] ?? '').trim().isNotEmpty ||
+      (currentSettings['account.photoPath'] ?? '').trim().isNotEmpty;
   final needsFreshReceipt =
       tx.type == OpType.debit || itemLines.isNotEmpty || hasLogo;
   try {

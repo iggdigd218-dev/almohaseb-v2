@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -6,6 +7,7 @@ import 'package:pdf/widgets.dart' as pw;
 
 import '../core/accounting.dart';
 import '../core/format.dart';
+import '../core/media_paths.dart';
 import '../core/models.dart';
 import '../core/pdf_fonts.dart';
 import '../core/words.dart';
@@ -20,6 +22,7 @@ class OrgInfo {
   final String email;
   final String managerName;
   final String logoPath;
+  final String logoBase64;
   final String footer;
 
   const OrgInfo({
@@ -30,6 +33,7 @@ class OrgInfo {
     this.email = '',
     this.managerName = '',
     this.logoPath = '',
+    this.logoBase64 = '',
     this.footer = 'هذا السند آلي ولا يحتاج إلى ختم أو توقيع.',
   });
 
@@ -45,7 +49,9 @@ class OrgInfo {
         ].where((e) => e != null && e.trim().isNotEmpty).join(' — '),
         email: s['email'] ?? '',
         managerName: s['managerName'] ?? '',
-        logoPath: s['logo'] ?? '',
+        logoPath: (s['logo'] ?? s['logoPath'] ?? s['account.photoPath'] ?? '')
+            .trim(),
+        logoBase64: (s['org.icon.b64'] ?? s['logoBase64'] ?? '').trim(),
         footer: s['voucherFooter']?.trim().isNotEmpty == true
             ? s['voucherFooter']!
             : 'هذا السند آلي ولا يحتاج إلى ختم أو توقيع.',
@@ -80,9 +86,17 @@ Future<Uint8List> buildVoucherPdf({
   final bold = fonts.bold;
 
   pw.MemoryImage? logo;
-  if (org.logoPath.trim().isNotEmpty) {
+  if (org.logoBase64.trim().isNotEmpty) {
     try {
-      final file = File(org.logoPath);
+      final bytes = base64Decode(org.logoBase64.trim());
+      if (bytes.isNotEmpty) logo = pw.MemoryImage(bytes);
+    } catch (_) {}
+  }
+  if (logo == null &&
+      org.logoPath.trim().isNotEmpty &&
+      !org.logoPath.trim().startsWith('http')) {
+    try {
+      final file = File(MediaPaths.toAbsolute(org.logoPath.trim()));
       if (await file.exists()) {
         logo = pw.MemoryImage(await file.readAsBytes());
       }

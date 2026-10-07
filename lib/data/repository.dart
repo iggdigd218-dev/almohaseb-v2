@@ -4420,10 +4420,10 @@ class Repo {
   Future<Map<String, Object?>> exportForLocalBackup({
     bool withImages = false,
   }) =>
-      exportAll(withImages: withImages, localOnly: true);
+      exportAll(withImages: false, localOnly: true);
 
   Future<Map<String, Object?>> exportAll({
-    bool withImages = true,
+    bool withImages = false,
     bool localOnly = false,
   }) async {
     if (!localOnly) await _ensureCan('export');
@@ -4431,68 +4431,26 @@ class Repo {
     final data = <String, Object?>{};
     for (final t in backupTables) {
       try {
-        data[t] = await db.query(t);
+        final rows = await db.query(t);
+        if (t == 'settings') {
+          // منع تضمين الصور المرمزة base64 في النسخة الاحتياطية حفاظاً على حجم البيانات والسحابة
+          data[t] = rows
+              .where((r) =>
+                  r['key'] != 'org.icon.b64' &&
+                  r['key'] != 'logoBase64' &&
+                  r['key'] != 'logo')
+              .toList();
+        } else {
+          data[t] = rows;
+        }
       } catch (e) {
         throw StateError('تعذّر تصدير جدول $t؛ لم تُنشأ نسخة ناقصة: $e');
       }
     }
 
-    final images = <String, String>{};
-    if (withImages) {
-      for (final entry in [
-        (data['transactions'], 'image'),
-        (data['transactions'], 'attachment'),
-        (data['accounts'], 'image'),
-        (data['items'], 'image'),
-      ]) {
-        final rows = entry.$1;
-        if (rows is! List) continue;
-        for (final row in rows) {
-          if (row is! Map) continue;
-          final path = (row[entry.$2] ?? '') as String? ?? '';
-          if (path.isEmpty || images.containsKey(path)) continue;
-          try {
-            final f = File(MediaPaths.toAbsolute(path));
-            if (!f.existsSync()) {
-              throw StateError('الصورة المشار إليها غير موجودة: $path');
-            }
-            if (f.lengthSync() > 10 * 1024 * 1024) {
-              throw StateError('حجم الصورة أكبر من 10 م.ب: $path');
-            }
-            images[path] = base64Encode(await f.readAsBytes());
-          } catch (e) {
-            throw StateError(
-              'تعذّر تضمين الصورة $path؛ لم تُنشأ نسخة ناقصة: $e',
-            );
-          }
-        }
-      }
-
-      // شعار المؤسسة محفوظ في settings.value، لذلك نضمّنه صراحةً في
-      // ملف النسخة حتى يظهر على السندات بعد النقل إلى جهاز آخر.
-      final settingsRows = data['settings'];
-      if (settingsRows is List) {
-        for (final row in settingsRows) {
-          if (row is! Map || row['key'] != 'logo') continue;
-          final path = (row['value'] ?? '') as String? ?? '';
-          if (path.isEmpty || images.containsKey(path)) continue;
-          try {
-            final f = File(path);
-            if (!f.existsSync()) {
-              throw StateError('شعار المؤسسة المشار إليه غير موجود: $path');
-            }
-            if (f.lengthSync() > 10 * 1024 * 1024) {
-              throw StateError('حجم شعار المؤسسة أكبر من 10 م.ب: $path');
-            }
-            images[path] = base64Encode(await f.readAsBytes());
-          } catch (e) {
-            throw StateError(
-              'تعذّر تضمين شعار المؤسسة $path؛ لم تُنشأ نسخة ناقصة: $e',
-            );
-          }
-        }
-      }
-    }
+    // (قانون حجم البيانات) يُمنع تضمين الصور داخل النسخ الاحتياطية حفاظاً على
+    // صغر حجم البيانات والمساحة السحابية.
+    const images = <String, String>{};
 
     // بصمة المجموعة: معرّف جهاز المدير (المالك) يميّز كل مجموعة عن غيرها،
     // فلا تُستورد نسخة احتياطية صادرة من مجموعة أخرى.
