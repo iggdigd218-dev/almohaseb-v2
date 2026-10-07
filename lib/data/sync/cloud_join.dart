@@ -1155,10 +1155,22 @@ class CloudJoin {
         },
         conflictAlgorithm: ConflictAlgorithm.replace);
     // (الاسترداد السيادي) كاش سجل المنشئ الدائم محلياً: تتحقق منه
-    // apply_remote عند وصول عملية creator_recovery.
+    // apply_remote عند وصول عملية creator_recovery، كما يمنع ترقية العضو بالخطأ إلى مدير.
     try {
-      final creator = await fetchCreatorDeviceId(
+      var creator = await fetchCreatorDeviceId(
           backendUrl: url, workspaceId: workspaceId);
+      if (creator.isEmpty) {
+        final ownerRows = await db.query(
+          'devices',
+          columns: ['id'],
+          where: 'is_owner = 1 AND id != ?',
+          whereArgs: [ourId],
+          limit: 1,
+        );
+        if (ownerRows.isNotEmpty) {
+          creator = '${ownerRows.first['id'] ?? ''}'.trim();
+        }
+      }
       if (creator.isNotEmpty) {
         await repo.setSetting('creatorDeviceId', creator);
       }

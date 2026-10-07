@@ -141,24 +141,10 @@ class GoogleAuthService {
       }());
       return GoogleAuthResult.ok(cached);
     }
-    try {
-      final a = gs.currentUser;
-      final restored = a ??
-          await gs
-              .signInSilently(suppressErrors: true)
-              .timeout(const Duration(seconds: 4), onTimeout: () => null);
-      if (restored != null) {
-        final auth =
-            await restored.authentication.timeout(const Duration(seconds: 5));
-        final u = _mapAccount(restored, auth.idToken);
-        await _persist(u);
-        return GoogleAuthResult.ok(u);
-      }
-      await _clear();
-      return const GoogleAuthResult.ok(null);
-    } catch (e) {
-      return const GoogleAuthResult.ok(null);
-    }
+    // إن لم تكن هناك جلسة Google محفوظة مسبقاً في قاعدة البيانات المحلية (cached == null)،
+    // لا نستدعي signInSilently تلقائياً عند إقلاع التطبيق لئلا يُسجَّل دخول المستخدم
+    // بصمت وتُنشأ له مجموعة تلقائياً عند تثبيت التطبيق لأول مرة على جهاز جديد.
+    return const GoogleAuthResult.ok(null);
   }
 
   /// تسجيل الدخول (يفتح نافذة Google للمستخدم) مع حماية صارمة ضد التعليق عند اختيار الحساب.

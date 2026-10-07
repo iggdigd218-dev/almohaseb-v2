@@ -359,10 +359,49 @@ class Repo {
       final isCreator = ownId != null && creator.isNotEmpty && ownId == creator;
 
       final meta = await db.query('sync_meta', where: "key = 'workspaceMode'", limit: 1);
-      final rawMode = meta.isNotEmpty ? '${meta.first['value'] ?? ''}' : '';
+      final rawMode = meta.isNotEmpty
+          ? WorkspaceMode.parse(meta.first['value'] as String?).storageValue
+          : '';
+
+      // ══ حماية صارمة للعضو المنضم (إصلاح فقدان العضوية عند إغلاق التطبيق وإعادة فتحه) ══
+      // إذا كان وضع المساحة 'member'، أو كان creatorDeviceId مسجلاً لجهاز آخر غير جهازنا،
+      // أو كان هناك جهاز آخر في جدول devices يحمل is_owner = 1، فإن هذا الجهاز عضو منضم
+      // ولا يجوز ترقيته إلى مدير (host) إطلاقاً!
+      final otherOwnerRows = ownId == null
+          ? <Map<String, Object?>>[]
+          : await db.query(
+              'devices',
+              columns: ['id'],
+              where: 'is_owner = 1 AND id != ?',
+              whereArgs: [ownId],
+              limit: 1,
+            );
+      final hasAnotherCreator =
+          ownId != null && creator.isNotEmpty && creator != ownId;
+      if (rawMode == 'member' ||
+          hasAnotherCreator ||
+          otherOwnerRows.isNotEmpty) {
+        // تصحيح فوري لأي عضو انقلب وضعه إلى host بسبب خطأ سابق:
+        if (rawMode != 'member') {
+          await db.insert(
+            'sync_meta',
+            {'key': 'workspaceMode', 'value': 'member'},
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        }
+        if (ownId != null) {
+          await db.update(
+            'devices',
+            {'is_owner': 0, 'is_paired': 1},
+            where: 'id = ? AND COALESCE(is_owner, 0) != 0',
+            whereArgs: [ownId],
+          );
+        }
+        return false;
+      }
 
       final isManagerEmail = email.isNotEmpty && !email.startsWith('cashier@') && !email.startsWith('member@');
-      if (!isCreator && !isManagerEmail && rawMode != 'host' && (st['account.type'] ?? '') != 'enterprise') {
+      if (!isCreator && !isManagerEmail && rawMode != 'host') {
         return false;
       }
 
@@ -453,12 +492,38 @@ class Repo {
       return 'member';
     }
 
-    // ══ التئام ذاتي لدور المدير في وضع المؤسسة فقط ══
+    // ══ إصلاح ذاتي للأعضاء الذين انقلب وضعهم إلى host بالخطأ في نسخة سابقة ══
+    if (mode == 'host' && _deviceId != null) {
+      try {
+        final st = await settings();
+        final creator = (st['creatorDeviceId'] ?? '').trim();
+        final email = (st['account.email'] ?? st['email'] ?? '').trim();
+        if (creator.isNotEmpty && creator != _deviceId && email.isEmpty) {
+          await db.insert(
+            'sync_meta',
+            {'key': 'workspaceMode', 'value': 'member'},
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+          await db.update(
+            'devices',
+            {'is_owner': 0, 'is_paired': 1},
+            where: 'id = ?',
+            whereArgs: [_deviceId],
+          );
+          return 'member';
+        }
+      } catch (_) {}
+    }
+
+    // ══ التئام ذاتي لدور المدير في وضع المؤسسة فقط (بشرط عدم وجود منشئ آخر) ══
     if (mode == 'standalone') {
       try {
         final st = await settings();
         final isEnterprise = (st['account.type'] ?? '') == 'enterprise';
-        if (isEnterprise && _deviceId != null) {
+        final creator = (st['creatorDeviceId'] ?? '').trim();
+        final isNotAnotherCreator =
+            creator.isEmpty || (_deviceId != null && creator == _deviceId);
+        if (isEnterprise && _deviceId != null && isNotAnotherCreator) {
           final dev = await db.query('devices',
               where: 'id = ?', whereArgs: [_deviceId], limit: 1);
           final ownerFlag =
@@ -490,17 +555,6 @@ class Repo {
 
       final mode = await workspaceMode();
       if (mode == 'member') {
-        final url = effectiveBackendUrl(st['cloudBackendUrl']);
-        if (url.isNotEmpty) {
-          final creator = (st['creatorDeviceId'] ?? '').trim();
-          final email = (st['account.email'] ?? st['email'] ?? '').trim();
-          final isCreator = _deviceId != null && creator.isNotEmpty && _deviceId == creator;
-          final isManagerEmail = email.isNotEmpty && !email.startsWith('cashier@') && !email.startsWith('member@');
-          if (isCreator || isManagerEmail) {
-            await checkAndAutoPromoteManager();
-            return true;
-          }
-        }
         return false;
       }
 
@@ -5943,6 +5997,34 @@ class Repo {
     final db = await _db;
     final now = DateTime.now().toIso8601String();
     final ownId = requireDeviceId;
+
+    // ══ حارس أمان صارم: منع استدعاء استرداد الملكية على جهاز عضو منضم ══
+    final mode = await workspaceMode();
+    if (mode == 'member') return;
+    final st = await settings();
+    final creator = (st['creatorDeviceId'] ?? '').trim();
+    if (creator.isNotEmpty && creator != ownId) {
+      await db.insert(
+        'sync_meta',
+        {'key': 'workspaceMode', 'value': 'member'},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await db.update(
+        'devices',
+        {'is_owner': 0, 'is_paired': 1},
+        where: 'id = ?',
+        whereArgs: [ownId],
+      );
+      return;
+    }
+    final otherOwners = await db.query(
+      'devices',
+      columns: ['id'],
+      where: 'is_owner = 1 AND id != ?',
+      whereArgs: [ownId],
+      limit: 1,
+    );
+    if (otherOwners.isNotEmpty) return;
     await db.transaction((txn) async {
       await txn.update(
         'devices',
