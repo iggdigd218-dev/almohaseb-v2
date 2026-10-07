@@ -10,7 +10,7 @@ interface ChangelogModalProps {
 export const ChangelogModal: React.FC<ChangelogModalProps> = ({
   isOpen,
   onClose,
-  version = '3.85.1',
+  version = '3.87.0',
 }) => {
   if (!isOpen) return null;
 
@@ -30,7 +30,7 @@ export const ChangelogModal: React.FC<ChangelogModalProps> = ({
                   v{version}
                 </span>
               </div>
-              <p className="text-xs text-slate-500 mt-0.5">تحسينات شاملة للدخول ومساحة العمل والاشتراك</p>
+              <p className="text-xs text-slate-500 mt-0.5">تحسينات شاملة للصلاحيات والواجهة والأداء</p>
             </div>
           </div>
           <button
@@ -41,14 +41,14 @@ export const ChangelogModal: React.FC<ChangelogModalProps> = ({
           </button>
         </div>
 
-        {/* User-facing Changelog: Exactly 3 lines, simple Arabic, no technical jargon */}
+        {/* User-facing Changelog */}
         <div className="space-y-3 py-1">
           <div className="flex items-start gap-3">
             <div className="w-6 h-6 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0 mt-0.5">
               <CheckCircle2 className="w-4 h-4" />
             </div>
             <p className="text-xs text-slate-700 font-medium leading-relaxed">
-              تسجيل دخول صريح ورسمي بجوجل واسترجاع مساحة العمل والاشتراك فوراً.
+              توحيد نافذة صلاحيات وأدوار الأجهزة وعزل صلاحيات كل عضو بدقة دون أي تداخل.
             </p>
           </div>
 
@@ -57,7 +57,7 @@ export const ChangelogModal: React.FC<ChangelogModalProps> = ({
               <CheckCircle2 className="w-4 h-4" />
             </div>
             <p className="text-xs text-slate-700 font-medium leading-relaxed">
-              منح صلاحية مدير النظام كاملة لكل مسجل بالبريد لإنشاء المجموعات وإدارتها.
+              توحيد النمط البصري في الواجهة الرئيسية وشاشة العملاء وإزالة العناصر المكررة.
             </p>
           </div>
 
@@ -66,7 +66,7 @@ export const ChangelogModal: React.FC<ChangelogModalProps> = ({
               <CheckCircle2 className="w-4 h-4" />
             </div>
             <p className="text-xs text-slate-700 font-medium leading-relaxed">
-              تمييز كامل بين الحساب الفردي المستقل وحساب المنشأة مع حفظ حقوق المالك.
+              معالجة شريط التنقل السفلي وزر الرجوع على أجهزة Android 11+ ومنع ارتفاع حرارة الجهاز.
             </p>
           </div>
         </div>

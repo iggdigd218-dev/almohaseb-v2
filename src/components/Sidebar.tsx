@@ -327,7 +327,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <Sparkles className="w-3 h-3 text-sky-400" />
             <span>ما الجديد؟</span>
           </button>
-          <span className="font-mono text-slate-400 font-bold">v3.85.1</span>
+          <span className="font-mono text-slate-400 font-bold">v3.87.0</span>
         </div>
       </div>
     </aside>

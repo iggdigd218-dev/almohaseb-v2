@@ -640,9 +640,15 @@ class _TxFormState extends ConsumerState<TxForm> {
                     child: SizedBox(
                       height: 44,
                       child: OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                        ),
                         onPressed:
                             _saving ? null : () => Navigator.pop(context),
-                        child: const Text('إلغاء'),
+                        child: const FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text('إلغاء'),
+                        ),
                       ),
                     ),
                   ),

@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 /// **Noto Naskh Arabic** (خط النسخ العربي الفاخر) متطابق كلياً مع نسخة الويب
 /// المعتمدة في شاشة المعاينة. الخط مضمّن محلياً في `assets/fonts/NotoNaskhArabic-*.ttf`
 /// ويعمل دون اتصال بالكامل وبأعلى دقة قراءة.
-String? get uiFontFamily => 'Noto Naskh Arabic';
+String? get uiFontFamily => 'Tajawal';
 
 /// ألوان نكسورا — متطابقة تماماً مع تصميم نسخة الويب الأنيقة والعصرية.
 class AppColors {

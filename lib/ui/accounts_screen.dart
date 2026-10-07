@@ -34,11 +34,6 @@ class AccountsScreen extends ConsumerWidget {
 
     return Column(
       children: [
-        // بطاقة ملخص العملات العلوية القابلة للسحب
-        _CurrencySwipeHeader(
-          currencies: curs,
-          summary: summary,
-        ),
         // شريط الفلترة المتقدم والبحث
         _EnhancedFilterBar(
           filter: filter,
@@ -144,236 +139,7 @@ class AccountsScreen extends ConsumerWidget {
   }
 }
 
-class _CurrencySwipeHeader extends ConsumerStatefulWidget {
-  final List<CurrencyDef> currencies;
-  final Summary? summary;
-
-  const _CurrencySwipeHeader({
-    required this.currencies,
-    required this.summary,
-  });
-
-  @override
-  ConsumerState<_CurrencySwipeHeader> createState() =>
-      _CurrencySwipeHeaderState();
-}
-
-class _CurrencySwipeHeaderState extends ConsumerState<_CurrencySwipeHeader> {
-  final _pageController = PageController(viewportFraction: 0.94);
-  int _currentPage = 0;
-
-  @override
-  void dispose() {
-    _pageController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (widget.currencies.isEmpty) return const SizedBox.shrink();
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final allAccounts = ref.watch(allAccountsProvider).valueOrNull ?? const [];
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        SizedBox(
-          height: 168,
-          child: PageView.builder(
-            controller: _pageController,
-            itemCount: widget.currencies.length,
-            onPageChanged: (i) => setState(() => _currentPage = i),
-            itemBuilder: (context, i) {
-              final c = widget.currencies[i];
-              final debt = widget.summary?.owedByUs[c.code] ?? 0;
-              final credit = widget.summary?.owedToUs[c.code] ?? 0;
-              final count =
-                  allAccounts.where((a) => a.currency == c.code).length;
-
-              return Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-                child: Container(
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(18),
-                    gradient: LinearGradient(
-                      colors: isDark
-                          ? const [Color(0xFF0F172A), Color(0xFF1E293B)]
-                          : const [Color(0xFF0284C7), Color(0xFF0369A1)],
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: (isDark ? Colors.black : const Color(0xFF0284C7))
-                            .withValues(alpha: 0.28),
-                        blurRadius: 10,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
-                  ),
-                  padding: const EdgeInsets.all(14),
-                  child: Column(
-                    children: [
-                      // الصف العلوي: العلم والاسم
-                      Row(
-                        children: [
-                          Text(c.flag, style: const TextStyle(fontSize: 18)),
-                          const SizedBox(width: 8),
-                          Text(
-                            c.name,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 15.5,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                          const Spacer(),
-                        ],
-                      ),
-                      const SizedBox(height: 10),
-                      // بطاقتان مدمجتان: الإجمالي عليكم والإجمالي لكم
-                      Row(
-                        children: [
-                          // الإجمالي عليكم
-                          Expanded(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  vertical: 8, horizontal: 10),
-                              decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.12),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text(
-                                    'الإجمالي عليكم',
-                                    style: TextStyle(
-                                      color: Color(0xFFFECACA),
-                                      fontSize: 11.5,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  FittedBox(
-                                    fit: BoxFit.scaleDown,
-                                    child: Text(
-                                      '${Fmt.moneyFor(debt, c)} ${c.symbol}',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.w900,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          // الإجمالي لكم
-                          Expanded(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  vertical: 8, horizontal: 10),
-                              decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.12),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text(
-                                    'الإجمالي لكم',
-                                    style: TextStyle(
-                                      color: Color(0xFFA7F3D0),
-                                      fontSize: 11.5,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  FittedBox(
-                                    fit: BoxFit.scaleDown,
-                                    child: Text(
-                                      '${Fmt.moneyFor(credit, c)} ${c.symbol}',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.w900,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const Spacer(),
-                      // الصف السفلي: عدد العملاء
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.15),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Text(
-                              'عدد العملاء $count',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
-                          const Text(
-                            'اسحب البطاقات للتبديل بين العملات',
-                            style: TextStyle(
-                              color: Colors.white70,
-                              fontSize: 10.5,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-        // مؤشر الصفحات النقطي
-        if (widget.currencies.length > 1)
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(
-              widget.currencies.length,
-              (index) => AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                margin: const EdgeInsets.symmetric(horizontal: 3, vertical: 4),
-                width: _currentPage == index ? 16 : 6,
-                height: 5,
-                decoration: BoxDecoration(
-                  color: _currentPage == index
-                      ? const Color(0xFF0284C7)
-                      : (isDark
-                          ? const Color(0xFF475569)
-                          : const Color(0xFFCBD5E1)),
-                  borderRadius: BorderRadius.circular(3),
-                ),
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-class _EnhancedFilterBar extends ConsumerWidget {
+class _EnhancedFilterBar extends ConsumerStatefulWidget {
   final AccountFilter filter;
   final List<CurrencyDef> currencies;
   final _BalanceFilter balanceFilter;
@@ -387,13 +153,47 @@ class _EnhancedFilterBar extends ConsumerWidget {
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_EnhancedFilterBar> createState() => _EnhancedFilterBarState();
+}
+
+class _EnhancedFilterBarState extends ConsumerState<_EnhancedFilterBar> {
+  late final TextEditingController _searchCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _searchCtrl = TextEditingController(text: widget.filter.query);
+  }
+
+  @override
+  void didUpdateWidget(covariant _EnhancedFilterBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.filter.query != _searchCtrl.text) {
+      _searchCtrl.value = TextEditingValue(
+        text: widget.filter.query,
+        selection: TextSelection.collapsed(offset: widget.filter.query.length),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filter = widget.filter;
+    final currencies = widget.currencies;
+    final balanceFilter = widget.balanceFilter;
+    final summary = widget.summary;
     final n = ref.read(accountFilterProvider.notifier);
     final bNotifier = ref.read(_balanceFilterProvider.notifier);
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 4, 14, 6),
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 6),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -407,7 +207,10 @@ class _EnhancedFilterBar extends ConsumerWidget {
                   ? null
                   : IconButton(
                       icon: const Icon(Icons.close, size: 18),
-                      onPressed: () => n.state = filter.copyWith(query: ''),
+                      onPressed: () {
+                        _searchCtrl.clear();
+                        n.state = filter.copyWith(query: '');
+                      },
                     ),
               isDense: true,
               contentPadding:
@@ -421,9 +224,7 @@ class _EnhancedFilterBar extends ConsumerWidget {
               ),
             ),
             style: const TextStyle(fontSize: 13.5),
-            controller: TextEditingController(
-              text: filter.query,
-            )..selection = TextSelection.collapsed(offset: filter.query.length),
+            controller: _searchCtrl,
             onChanged: (v) => n.state = filter.copyWith(query: v),
           ),
           const SizedBox(height: 7),

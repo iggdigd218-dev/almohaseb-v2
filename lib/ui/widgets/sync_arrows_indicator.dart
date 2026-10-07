@@ -98,8 +98,8 @@ class SyncArrowsIndicator extends ConsumerWidget {
   }
 }
 
-/// أسهم مزامنة بارزة ومصمتة بخط عريض وبلا تباعد مفرط
-class _BoldAnimatedSyncArrows extends StatefulWidget {
+/// أسهم مزامنة بارزة ومصمتة بخط عريض وبلا استنزاف للمعالج
+class _BoldAnimatedSyncArrows extends StatelessWidget {
   final Color upColor;
   final Color downColor;
   final bool upActive;
@@ -113,71 +113,15 @@ class _BoldAnimatedSyncArrows extends StatefulWidget {
   });
 
   @override
-  State<_BoldAnimatedSyncArrows> createState() =>
-      _BoldAnimatedSyncArrowsState();
-}
-
-class _BoldAnimatedSyncArrowsState extends State<_BoldAnimatedSyncArrows>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _pulseCtrl;
-  late final Animation<double> _pulseAnim;
-
-  @override
-  void initState() {
-    super.initState();
-    _pulseCtrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    );
-    _pulseAnim = Tween<double>(begin: 0.35, end: 1.0).animate(
-      CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut),
-    );
-    _evaluatePulse();
-  }
-
-  @override
-  void didUpdateWidget(covariant _BoldAnimatedSyncArrows old) {
-    super.didUpdateWidget(old);
-    if (old.upActive != widget.upActive ||
-        old.downActive != widget.downActive) {
-      _evaluatePulse();
-    }
-  }
-
-  void _evaluatePulse() {
-    if (widget.upActive || widget.downActive) {
-      if (!_pulseCtrl.isAnimating) _pulseCtrl.repeat(reverse: true);
-    } else {
-      if (_pulseCtrl.isAnimating) {
-        _pulseCtrl.stop();
-        _pulseCtrl.value = 1.0;
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    _pulseCtrl.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _pulseAnim,
-      builder: (context, _) {
-        final upAlpha = widget.upActive ? _pulseAnim.value : 1.0;
-        final downAlpha = widget.downActive ? _pulseAnim.value : 1.0;
-        return CustomPaint(
-          size: const Size(30, 30),
-          painter: _BoldSyncArrowsPainter(
-            upColor: widget.upColor,
-            downColor: widget.downColor,
-            upOpacity: upAlpha,
-            downOpacity: downAlpha,
-          ),
-        );
-      },
+    return CustomPaint(
+      size: const Size(30, 30),
+      painter: _BoldSyncArrowsPainter(
+        upColor: upColor,
+        downColor: downColor,
+        upOpacity: upActive ? 0.85 : 1.0,
+        downOpacity: downActive ? 0.85 : 1.0,
+      ),
     );
   }
 }

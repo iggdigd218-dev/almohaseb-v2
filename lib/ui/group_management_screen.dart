@@ -19,7 +19,7 @@ import '../data/sync/cloud_join.dart';
 import '../data/sync/firebase_auth_service.dart';
 import '../data/sync/google_auth_service.dart';
 import 'cloud_sync_section.dart';
-import 'devices_screen.dart' show DeviceCard;
+import 'devices_screen.dart' show DeviceCard, showDevicePermissionsDialog;
 import 'trial_ui.dart' show SeatUsageBadge;
 import 'widgets.dart';
 import '../core/cloud_config.dart';
@@ -33,21 +33,9 @@ class GroupManagementScreen extends ConsumerStatefulWidget {
 }
 
 class _State extends ConsumerState<GroupManagementScreen> {
-  // (دفعة 57) قناة SSE حيّة على /joinRequests بدل استطلاع كل 5 ثوانٍ —
-  // طلب الاقتران يصل للمدير لحظياً بصفر كمون وبلا ضجيج شبكي دوري.
-  JoinRequestWatcher? _joinReqWatcher;
-
-  /// (إصلاح 2026-09-18 — طلبات لا تزال تظهر بعد الموافقة)
-  /// أجهزة تمت الموافقة عليها في هذه الجلسة — لا تُعرض مرة أخرى حتى لو
-  /// بقيت عقدتها approved في السحابة لمدة 10 دقائق.
-  final Set<String> _recentlyApproved = {};
-  DateTime _lastCheck = DateTime.fromMillisecondsSinceEpoch(0);
-
   @override
   void initState() {
     super.initState();
-    _startJoinRequestWatcher();
-    _checkJoinRequests();
     _reconcileRoster();
   }
 
@@ -67,95 +55,6 @@ class _State extends ConsumerState<GroupManagementScreen> {
               backendUrl: url, workspaceId: ws);
       if (fixed > 0 && mounted) bump(ref);
     } catch (_) {}
-  }
-
-  Future<void> _startJoinRequestWatcher() async {
-    try {
-      final repo = ref.read(repoProvider);
-      if (!await repo.isWorkspaceOwner()) return;
-      final st = await repo.settings();
-      final url = effectiveBackendUrl(st['cloudBackendUrl']);
-      if (url.isEmpty || !mounted) return;
-      final ws = await repo.activeWorkspaceId();
-      _joinReqWatcher = JoinRequestWatcher(
-        backendUrl: url,
-        workspaceId: ws,
-        onRequestsChanged: () {
-          if (mounted) _checkJoinRequests();
-        },
-      )..start();
-    } catch (_) {}
-  }
-
-  @override
-  void dispose() {
-    _joinReqWatcher?.stop();
-    super.dispose();
-  }
-
-  bool _joinSheetOpen = false;
-
-  Future<void> _checkJoinRequests() async {
-    if (!mounted || _joinSheetOpen) return;
-    // منع الاستدعاء المتكرر السريع (debounce 2 ثانية)
-    final now = DateTime.now();
-    if (now.difference(_lastCheck).inSeconds < 2) return;
-    _lastCheck = now;
-    try {
-      final repo = ref.read(repoProvider);
-      if (!await repo.isWorkspaceOwner()) return;
-      final st = await repo.settings();
-      final url = effectiveBackendUrl(st['cloudBackendUrl']);
-      if (url.isEmpty) return;
-      final ws = await repo.activeWorkspaceId();
-      final db = await repo.database;
-      var reqs = await CloudJoin.fetchJoinRequests(repo,
-          backendUrl: url, workspaceId: ws);
-      // فلتر إضافي: لا تعرض ما وافقنا عليه للتو في هذه الجلسة
-      reqs = reqs.where((r) {
-        final id = '${r['deviceId'] ?? ''}';
-        return !_recentlyApproved.contains(id);
-      }).toList();
-      if (reqs.isEmpty || !mounted) return;
-      _joinSheetOpen = true;
-      final firstId = '${reqs.first['deviceId'] ?? ''}';
-      await showJoinApprovalSheet(context, ref, reqs.first,
-          backendUrl: url, workspaceId: ws);
-      // بعد إغلاق النافذة: إن تمت الموافقة، سجّل الجهاز كمُعالج
-      // حتى لا يظهر مرة أخرى حتى لو بقيت عقدة approved في السحابة
-      if (firstId.isNotEmpty) {
-        // تحقق هل الجهاز أصبح مقترناً فعلاً؟
-        final dev = await db.query('devices',
-            where: 'id = ? AND is_paired = 1', whereArgs: [firstId], limit: 1);
-        if (dev.isNotEmpty) {
-          _recentlyApproved.add(firstId);
-          // (إصلاح حرج 2026-09-18 — سباق الموافقة/الاختفاء) الحذف الفوري
-          // للطلب هنا كان سباقاً قاتلاً: العضو قد يكون بين رؤية approved
-          // وسحب اللقطة بضع ثوانٍ، فيصادف استطلاعه عقدة محذوفة ويرمي
-          // «انتهى طلب الانضمام أو حُذف من المدير» رغم الموافقة.
-          // مسؤولية الحذف الآن: (1) جهاز العضو كآخر خطوة في
-          // completeApprovedJoin بعد نجاح الحفظ في SQLite، (2) التقليم
-          // الدوري pruneStaleJoinRequests بعد مهلة 10 دقائق.
-        }
-      }
-      _joinSheetOpen = false;
-      if (mounted) bump(ref);
-      // إن كانت هناك طلبات أخرى معلقة، اعرض التالي بعد مهلة قصيرة
-      if (mounted) {
-        final remaining = await CloudJoin.fetchJoinRequests(repo,
-            backendUrl: url, workspaceId: ws);
-        final filtered = remaining.where((r) {
-          final id = '${r['deviceId'] ?? ''}';
-          return !_recentlyApproved.contains(id);
-        }).toList();
-        if (filtered.isNotEmpty) {
-          await Future<void>.delayed(const Duration(seconds: 1));
-          if (mounted) _checkJoinRequests();
-        }
-      }
-    } catch (_) {
-      _joinSheetOpen = false;
-    }
   }
 
   @override
@@ -412,138 +311,8 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
     BuildContext context,
     WidgetRef ref,
     Map<String, Object?> device,
-  ) async {
-    final users = ref.read(usersProvider).valueOrNull ?? const <AppUser>[];
-    final uid = device['user_id'] as int?;
-    AppUser? current;
-    if (uid != null) {
-      try {
-        current = users.firstWhere((u) => u.id == uid);
-      } catch (_) {
-        current = null;
-      }
-    }
-    var role = current?.role ?? UserRole.viewer;
-    var perms = <String>{
-      ...kPerms
-          .where((p) => (current?.permissions[p.key] ?? false))
-          .map((p) => p.key)
-    };
-    // نلتقط المراجع قبل فتح النافذة: الشاشة الخلفية يُعاد بناؤها مع كل
-    // نشاط مزامنة، وإن أُتلفت أثناء فتح النافذة يصبح ref غير صالح
-    // («Cannot use ref after the widget was disposed») فيفشل الحفظ.
-    final repo = ref.read(repoProvider);
-    final engine = ref.read(syncEngineProvider);
-
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDlg) {
-          void setRole(UserRole r) {
-            setDlg(() {
-              role = r;
-              perms = defaultPerms(r)
-                  .entries
-                  .where((e) => e.value)
-                  .map((e) => e.key)
-                  .toSet();
-            });
-          }
-
-          // دور المدير لا يُمنح لأي عضو — الوكيل أعلى دور متاح، يقوم
-          // بعمل المدير أثناء غيابه ويملك كل الصلاحيات افتراضياً.
-          final isAgent = role == UserRole.agent;
-          return AlertDialog(
-            title: Text('صلاحيات: ${device['name'] ?? 'الجهاز'}'),
-            content: SizedBox(
-              width: double.maxFinite,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Text('الدور',
-                      style: TextStyle(fontWeight: FontWeight.w700)),
-                  const SizedBox(height: 6),
-                  Wrap(
-                    spacing: 8,
-                    children: [
-                      // «مدير النظام» محذوف من الخيارات: لا يُمنح لأي عضو.
-                      for (final r in UserRole.values)
-                        if (r != UserRole.admin)
-                          ChoiceChip(
-                            label: Text('${r.icon} ${r.label}'),
-                            selected: role == r,
-                            onSelected: (_) => setRole(r),
-                          ),
-                    ],
-                  ),
-                  if (isAgent)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Text(
-                        '🛡️ الوكيل يقوم بعمل المدير أثناء غيابه — يملك كل '
-                        'الصلاحيات، ويمكنك تعديلها بدقة أدناه.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          height: 1.5,
-                          color: AppColors.infoOf(ctx),
-                        ),
-                      ),
-                    ),
-                  const SizedBox(height: 14),
-                  const Text('الصلاحيات التفصيلية',
-                      style: TextStyle(fontWeight: FontWeight.w700)),
-                  const SizedBox(height: 4),
-                  for (final p in kPerms)
-                    CheckboxListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      value: perms.contains(p.key),
-                      title: Text(p.label),
-                      onChanged: (v) => setDlg(() {
-                        if (v == true) {
-                          perms.add(p.key);
-                        } else {
-                          perms.remove(p.key);
-                        }
-                      }),
-                    ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('إلغاء'),
-              ),
-              FilledButton(
-                onPressed: () async {
-                  try {
-                    // repo/engine مُلتقطان قبل فتح النافذة — لا نلمس ref
-                    // هنا إطلاقاً: قد تكون الشاشة الخلفية أُتلفت وأُعيد
-                    // بناؤها أثناء بقاء النافذة مفتوحة.
-                    await repo.setDevicePermissions(
-                        device['id'] as String, role, perms);
-                    // فرض فوري: نبثّ إشعارًا لكل الأقران ليسحب الجهاز المعني
-                    // صلاحياته الجديدة خلال ثوانٍ (<10 ثوانٍ) دون انتظار الدورية.
-                    await engine.broadcastRosterChange();
-                    if (ctx.mounted) Navigator.pop(ctx);
-                    Sfx.success();
-                  } catch (e) {
-                    Sfx.error();
-                    if (ctx.mounted) {
-                      showSnack(ctx, 'تعذّر حفظ الصلاحيات: $e', error: true);
-                    }
-                  }
-                },
-                child: const Text('حفظ الصلاحيات'),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-  }
+  ) =>
+      showDevicePermissionsDialog(context, ref, device);
 
   @override
   Widget build(BuildContext context) {

@@ -354,24 +354,6 @@ class Repo {
         return true;
       }
 
-      var email = (st['account.email'] ?? st['email'] ?? '').trim();
-      var hasGoogleAuth = false;
-      try {
-        final gaRows = await db.query('google_auth', limit: 1);
-        if (gaRows.isNotEmpty) {
-          hasGoogleAuth = true;
-          final gaEmail = '${gaRows.first['email'] ?? ''}'.trim();
-          if (email.isEmpty && gaEmail.isNotEmpty) email = gaEmail;
-        }
-      } catch (_) {}
-      final hasAccountUid = (st['account.uid'] ?? '').trim().isNotEmpty ||
-          (st['account.idToken'] ?? '').trim().isNotEmpty;
-      final isManagerEmail = email.isNotEmpty &&
-          !email.startsWith('cashier@') &&
-          !email.startsWith('member@');
-      final hasPendingJoin = (st['pendingJoin.ws'] ?? '').trim().isNotEmpty ||
-          (st['pendingJoin.token'] ?? '').trim().isNotEmpty;
-
       // إذا تم تخفيض هذا الجهاز رسمياً إلى «وكيل» بعد انتقال الإدارة بالبريد لجهاز أحدث:
       final demotedMeta = await db.query(
         'sync_meta',
@@ -385,11 +367,7 @@ class Repo {
         return false;
       }
 
-      // الجهاز المسجل ببريد المدير الرسمي (وليس عضواً منضماً عبر رمز دعوة) هو جهاز المدير دائماً
-      final isAuthenticatedManager = hasGoogleAuth ||
-          hasAccountUid ||
-          (isManagerEmail && !hasPendingJoin);
-
+      final email = (st['account.email'] ?? st['email'] ?? '').trim();
       final creator = (st['creatorDeviceId'] ?? '').trim();
       final isCreator = ownId != null && creator.isNotEmpty && ownId == creator;
 
@@ -398,42 +376,19 @@ class Repo {
           ? WorkspaceMode.parse(meta.first['value'] as String?).storageValue
           : '';
 
-      // ══ حماية صارمة للعضو المنضم عبر رمز/باركود (عند عدم تسجيل دخول ببريد المدير) ══
-      if (!isAuthenticatedManager) {
-        final otherOwnerRows = ownId == null
-            ? <Map<String, Object?>>[]
-            : await db.query(
-                'devices',
-                columns: ['id'],
-                where: 'is_owner = 1 AND id != ?',
-                whereArgs: [ownId],
-                limit: 1,
-              );
-        final hasAnotherCreator =
-            ownId != null && creator.isNotEmpty && creator != ownId;
-        if (rawMode == 'member' ||
-            hasAnotherCreator ||
-            otherOwnerRows.isNotEmpty) {
-          if (rawMode != 'member') {
-            await db.insert(
-              'sync_meta',
-              {'key': 'workspaceMode', 'value': 'member'},
-              conflictAlgorithm: ConflictAlgorithm.replace,
-            );
-          }
-          if (ownId != null) {
-            await db.update(
-              'devices',
-              {'is_owner': 0, 'is_paired': 1},
-              where: 'id = ? AND COALESCE(is_owner, 0) != 0',
-              whereArgs: [ownId],
-            );
-          }
-          return false;
-        }
+      final isManagerEmail = email.isNotEmpty &&
+          !email.startsWith('cashier@') &&
+          !email.startsWith('member@');
+
+      // إذا كان الجهاز عضواً منضماً وليس المنشئ ولا مسجلاً ببريد المدير، فلا يُرقّى أبداً
+      if (rawMode == 'member' && !isCreator && !isManagerEmail) {
+        return false;
       }
 
-      if (!isCreator && !isAuthenticatedManager && rawMode != 'host') {
+      if (!isCreator &&
+          !isManagerEmail &&
+          rawMode != 'host' &&
+          (st['account.type'] ?? '') != 'enterprise') {
         return false;
       }
 
@@ -526,7 +481,7 @@ class Repo {
         );
       }
 
-      if ((creator.isEmpty || isAuthenticatedManager) && ownId != null) {
+      if ((creator.isEmpty || isManagerEmail) && ownId != null) {
         await setSetting('creatorDeviceId', ownId);
       }
 
@@ -555,38 +510,12 @@ class Repo {
       return 'member';
     }
 
-    // ══ إصلاح ذاتي للأعضاء الذين انقلب وضعهم إلى host بالخطأ في نسخة سابقة ══
-    if (mode == 'host' && _deviceId != null) {
-      try {
-        final st = await settings();
-        final creator = (st['creatorDeviceId'] ?? '').trim();
-        final email = (st['account.email'] ?? st['email'] ?? '').trim();
-        if (creator.isNotEmpty && creator != _deviceId && email.isEmpty) {
-          await db.insert(
-            'sync_meta',
-            {'key': 'workspaceMode', 'value': 'member'},
-            conflictAlgorithm: ConflictAlgorithm.replace,
-          );
-          await db.update(
-            'devices',
-            {'is_owner': 0, 'is_paired': 1},
-            where: 'id = ?',
-            whereArgs: [_deviceId],
-          );
-          return 'member';
-        }
-      } catch (_) {}
-    }
-
-    // ══ التئام ذاتي لدور المدير في وضع المؤسسة فقط (بشرط عدم وجود منشئ آخر) ══
+    // ══ التئام ذاتي لدور المدير في وضع المؤسسة فقط ══
     if (mode == 'standalone') {
       try {
         final st = await settings();
         final isEnterprise = (st['account.type'] ?? '') == 'enterprise';
-        final creator = (st['creatorDeviceId'] ?? '').trim();
-        final isNotAnotherCreator =
-            creator.isEmpty || (_deviceId != null && creator == _deviceId);
-        if (isEnterprise && _deviceId != null && isNotAnotherCreator) {
+        if (isEnterprise && _deviceId != null) {
           final dev = await db.query('devices',
               where: 'id = ?', whereArgs: [_deviceId], limit: 1);
           final ownerFlag =
@@ -618,6 +547,29 @@ class Repo {
 
       final mode = await workspaceMode();
       if (mode == 'member') {
+        final url = effectiveBackendUrl(st['cloudBackendUrl']);
+        if (url.isNotEmpty) {
+          final db = await _db;
+          final demotedMeta = await db.query(
+            'sync_meta',
+            where: "key = 'demotedToAgentBy'",
+            limit: 1,
+          );
+          final demotedBy = demotedMeta.isNotEmpty
+              ? '${demotedMeta.first['value'] ?? ''}'.trim()
+              : '';
+          if (demotedBy.isNotEmpty && demotedBy != _deviceId) {
+            return false;
+          }
+          final creator = (st['creatorDeviceId'] ?? '').trim();
+          final email = (st['account.email'] ?? st['email'] ?? '').trim();
+          final isCreator = _deviceId != null && creator.isNotEmpty && _deviceId == creator;
+          final isManagerEmail = email.isNotEmpty && !email.startsWith('cashier@') && !email.startsWith('member@');
+          if (isCreator || isManagerEmail) {
+            await checkAndAutoPromoteManager();
+            return true;
+          }
+        }
         return false;
       }
 
@@ -2661,7 +2613,17 @@ class Repo {
             where: 'id = ?', whereArgs: [uid], limit: 1);
         final isMe = ex.isNotEmpty && (ex.first['is_me'] as int? ?? 0) == 1;
         final curRole = ex.isNotEmpty ? ex.first['role'] as String? ?? '' : '';
-        if (ex.isEmpty || isMe || curRole == UserRole.admin.code) {
+        final sharedWithOther = await txn.query(
+          'devices',
+          columns: ['id'],
+          where: 'user_id = ? AND id <> ?',
+          whereArgs: [uid, deviceId],
+          limit: 1,
+        );
+        if (ex.isEmpty ||
+            isMe ||
+            curRole == UserRole.admin.code ||
+            sharedWithOther.isNotEmpty) {
           uid = newGlobalId();
           userMap['id'] = uid;
           userMap['created_at'] = now;
@@ -6037,57 +5999,6 @@ class Repo {
     final db = await _db;
     final now = DateTime.now().toIso8601String();
     final ownId = requireDeviceId;
-
-    final st = await settings();
-    var email = (st['account.email'] ?? st['email'] ?? '').trim();
-    var hasGoogleAuth = false;
-    try {
-      final gaRows = await db.query('google_auth', limit: 1);
-      if (gaRows.isNotEmpty) {
-        hasGoogleAuth = true;
-        final gaEmail = '${gaRows.first['email'] ?? ''}'.trim();
-        if (email.isEmpty && gaEmail.isNotEmpty) email = gaEmail;
-      }
-    } catch (_) {}
-    final hasAccountUid = (st['account.uid'] ?? '').trim().isNotEmpty ||
-        (st['account.idToken'] ?? '').trim().isNotEmpty;
-    final isManagerEmail = email.isNotEmpty &&
-        !email.startsWith('cashier@') &&
-        !email.startsWith('member@');
-    final hasPendingJoin = (st['pendingJoin.ws'] ?? '').trim().isNotEmpty ||
-        (st['pendingJoin.token'] ?? '').trim().isNotEmpty;
-    final isAuthenticatedManager = hasGoogleAuth ||
-        hasAccountUid ||
-        (isManagerEmail && !hasPendingJoin);
-
-    // ══ حارس أمان صارم: منع استدعاء استرداد الملكية على جهاز عضو منضم لم يسجل دخولاً ببريد المدير ══
-    if (!isAuthenticatedManager) {
-      final mode = await workspaceMode();
-      if (mode == 'member') return;
-      final creator = (st['creatorDeviceId'] ?? '').trim();
-      if (creator.isNotEmpty && creator != ownId) {
-        await db.insert(
-          'sync_meta',
-          {'key': 'workspaceMode', 'value': 'member'},
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
-        await db.update(
-          'devices',
-          {'is_owner': 0, 'is_paired': 1},
-          where: 'id = ?',
-          whereArgs: [ownId],
-        );
-        return;
-      }
-      final otherOwners = await db.query(
-        'devices',
-        columns: ['id'],
-        where: 'is_owner = 1 AND id != ?',
-        whereArgs: [ownId],
-        limit: 1,
-      );
-      if (otherOwners.isNotEmpty) return;
-    }
 
     final prevOwnerRows = await db.query(
       'devices',

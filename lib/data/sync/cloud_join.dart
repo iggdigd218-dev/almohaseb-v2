@@ -187,15 +187,8 @@ class JoinRequestWatcher {
         req.headers.set('Cache-Control', 'no-cache');
         final resp = await req.close().timeout(const Duration(seconds: 20));
         if (resp.statusCode == 401 || resp.statusCode == 403) {
-          // توكن منتهٍ — جدّد وحاول مرة واحدة فوراً
-          final fresh = await FirebaseAuthRest.forceRefreshToken();
-          if (fresh != null && fresh != token) {
-            try {
-              _client?.close(force: true);
-            } catch (_) {}
-            _client = null;
-            continue; // حلقة جديدة بتوكن جديد
-          }
+          // توكن منتهٍ — جدّد ثم انتظر مهلة التراجع قبل المحاولة التالية منعاً للدوران اللانهائي
+          await FirebaseAuthRest.forceRefreshToken();
           throw StateError('join-sse-http-${resp.statusCode}');
         }
         if (resp.statusCode < 200 || resp.statusCode >= 300) {
@@ -2236,7 +2229,9 @@ class CloudJoin {
       }
     }
     if (!reuse) {
-      uid = await db.insert('users', {
+      final newUid = repo.newGlobalId();
+      await db.insert('users', {
+        'id': newUid,
         'name': effectiveName,
         'role': role.code,
         'pin': '',
@@ -2249,6 +2244,7 @@ class CloudJoin {
         'created_at': now,
         'updated_at': now,
       });
+      uid = newUid;
     } else {
       uid = existing.first['id'] as int;
     }
@@ -2586,16 +2582,8 @@ class CloudJoin {
   }) async {
     try {
       final devId = await ensureDeviceId(repo);
-      final st = await repo.settings();
-      final current = st['sync.workspaceId'] ?? '';
+      final current = (await repo.settings())['sync.workspaceId'] ?? '';
       final mode = await repo.workspaceMode();
-      final onboardingDone = (st['onboarding.done'] ?? '') == '1';
-      final hasLocalEmail = (st['account.email'] ?? '').trim().isNotEmpty;
-
-      // ══ حماية التثبيت الجديد: لا نربط الجهاز تلقائياً بأي مساحة سحابية قبل إتمام شاشة البداية ══
-      if (!onboardingDone && !hasLocalEmail && mode != 'member') {
-        return '';
-      }
 
       // ══ العضو المنضم مقيد حصرياً بمساحة المنشأة المعتمدة ولا يتنقل إطلاقاً ══
       if (mode == 'member' && current.trim().isNotEmpty && current.trim() != 'default') {
@@ -2914,31 +2902,7 @@ class CloudJoin {
         }
         continue;
       }
-      // على جهاز المدير المالك: إذا كان العضو مقترناً ونشطاً محلياً والـ roster السحابي
-      // يفتقر لعقدته (بسبب تأخر شبكة أو تنظيف سابق)، فإن المدير هو المرجع ويعيد
-      // رفع عقدة العضو للسحابة بدلاً من طرده محلياً بالخطأ!
-      final localActive = (r['is_paired'] as int? ?? 0) == 1 &&
-          '${r['revoked_at'] ?? ''}'.isEmpty &&
-          '${r['expelled_at'] ?? ''}'.isEmpty;
-      final isolatedByMember = entry is Map &&
-          '${entry['isolation_reason'] ?? ''}' == 'joined_another_workspace';
-      if (isOwnerDevice && localActive && !isolatedByMember) {
-        try {
-          final map = _safeDeviceRow(Map<String, Object?>.from(r));
-          map['workspace_id'] = workspaceId;
-          map['is_paired'] = 1;
-          map['is_owner'] = 0;
-          map['revoked_at'] = '';
-          map['expelled_at'] = '';
-          await _putJson(
-            '$root/roster/${Uri.encodeComponent(id)}.json',
-            map,
-            timeout: const Duration(seconds: 15),
-          );
-        } catch (_) {}
-        continue;
-      }
-      // بلا عضوية سحابية = شبح (أو مفصول من المدير) ⇒ وسمه مفصولاً.
+      // بلا عضوية سحابية = شبح (أو مفصول من جهاز آخر) ⇒ وسمه مفصولاً.
       if ('${r['expelled_at'] ?? ''}'.isEmpty ||
           (r['is_paired'] as int? ?? 0) == 1) {
         await db.update(

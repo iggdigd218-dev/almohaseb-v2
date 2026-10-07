@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/accounting.dart';
 import '../core/shell_nav.dart';
@@ -205,7 +204,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
     unawaited(_loadHandledJoinRequests());
     _refreshSync();
     _syncTimer = Timer.periodic(
-      const Duration(seconds: 10),
+      const Duration(seconds: 30),
       (_) => _refreshSync(),
     );
     _checkForUpdateOnStart();
@@ -229,7 +228,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
     // الشريط الجانبي والإعدادات يعكسان الصلاحيات الجديدة لحظياً.
     _activityBus = SyncActivityBus.instance.stream.listen((_) {
       _activityDebounce?.cancel();
-      _activityDebounce = Timer(const Duration(milliseconds: 400), () {
+      _activityDebounce = Timer(const Duration(milliseconds: 800), () {
         if (!mounted) return;
         // إبطال موجّه لمزودي الهوية/الصلاحيات فقط — لا bump شاملاً حتى
         // لا تُفرَّغ قوائم البيانات (العمليات/الحسابات) أثناء إعادة البناء.
@@ -272,22 +271,17 @@ class _HomeShellState extends ConsumerState<HomeShell>
       final user = await ref.read(repoProvider).currentUser();
       final effectiveRole = roleAsync?.role ?? user?.role;
 
-      if (effectiveRole == UserRole.viewer || effectiveRole == UserRole.cashier) {
+      if (effectiveRole == UserRole.cashier) {
         ref.read(navAppModeProvider.notifier).setMode(NavAppMode.pos);
         if (mounted) setState(() => _screen = AppScreen.pos);
         ref.read(itemsProvider);
         ref.read(itemCategoriesProvider);
       } else if (effectiveRole == UserRole.dataentry) {
-        ref.read(navAppModeProvider.notifier).setMode(NavAppMode.pos);
+        ref.read(navAppModeProvider.notifier).setMode(NavAppMode.accounting);
         if (mounted) setState(() => _screen = AppScreen.inventory);
       } else {
-        final sp = await SharedPreferences.getInstance();
-        final saved = sp.getString('app_nav_mode');
-        if (saved == 'pos') {
-          if (mounted) setState(() => _screen = AppScreen.pos);
-        } else {
-          if (mounted) setState(() => _screen = AppScreen.dashboard);
-        }
+        ref.read(navAppModeProvider.notifier).setMode(NavAppMode.accounting);
+        if (mounted) setState(() => _screen = AppScreen.dashboard);
       }
     } catch (_) {}
   }
@@ -1380,7 +1374,12 @@ class _HomeShellState extends ConsumerState<HomeShell>
       return;
     }
 
-    // 2) إغلاق أي حوار أو مسار فرعي مفتوح
+    // 2) إغلاق أي حوار أو مسار فرعي مفتوح (على الجذر أو الملاح المحلي)
+    final rootNav = Navigator.of(context, rootNavigator: true);
+    if (rootNav.canPop()) {
+      rootNav.pop();
+      return;
+    }
     final nav = Navigator.of(context);
     if (nav.canPop()) {
       nav.pop();
@@ -1388,12 +1387,16 @@ class _HomeShellState extends ConsumerState<HomeShell>
     }
 
     // 3) أي شاشة فرعية داخل القشرة تعود مباشرة إلى الرئيسية بضغطة واحدة فقط
-    // دون المرور على سجل كل النوافذ والأيقونات التي زارها المستخدم.
-    if (_screen != AppScreen.dashboard) {
+    // (أو للكاشير المقيد بنقطة البيع: عرض حوار تأكيد الخروج مباشرة).
+    final user = ref.read(currentUserProvider).valueOrNull;
+    final isCashierOnly = user?.role == UserRole.cashier;
+    final homeTarget = isCashierOnly ? AppScreen.pos : AppScreen.dashboard;
+
+    if (_screen != homeTarget) {
       _screenHistory
         ..clear()
-        ..add(AppScreen.dashboard);
-      setState(() => _screen = AppScreen.dashboard);
+        ..add(homeTarget);
+      setState(() => _screen = homeTarget);
       return;
     }
 
@@ -1885,83 +1888,81 @@ class _MarkedBottomBar extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final user = ref.watch(currentUserProvider).valueOrNull;
     final isCashier = user?.role == UserRole.cashier;
-    final navMode = ref.watch(navAppModeProvider);
 
-    if (isCashier || navMode == NavAppMode.pos) {
+    if (isCashier) {
       return const SizedBox.shrink();
     }
 
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final bottomPadding = MediaQuery.paddingOf(context).bottom;
 
-    return Container(
-      decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF0F172A) : Colors.white,
-        border: Border(
-          top: BorderSide(
-            color: isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0),
-            width: 1,
+    return SafeArea(
+      top: false,
+      child: Container(
+        decoration: BoxDecoration(
+          color: isDark ? const Color(0xFF0F172A) : Colors.white,
+          border: Border(
+            top: BorderSide(
+              color: isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0),
+              width: 1,
+            ),
           ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: isDark ? 0.3 : 0.05),
+              blurRadius: 10,
+              offset: const Offset(0, -2),
+            ),
+          ],
         ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: isDark ? 0.3 : 0.05),
-            blurRadius: 10,
-            offset: const Offset(0, -2),
-          ),
-        ],
-      ),
-      padding: EdgeInsets.only(
-        top: 6,
-        bottom: bottomPadding > 0 ? bottomPadding : 6,
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _BottomItem(
-            label: 'الرئيسية',
-            tone: AppTone.blue,
-            selected: currentScreen == AppScreen.dashboard,
-            icon: (sel, fg) => Icon(
-              Icons.dashboard_rounded,
-              color: fg,
-              size: 21,
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
+          children: [
+            _BottomItem(
+              label: 'الرئيسية',
+              tone: AppTone.blue,
+              selected: currentScreen == AppScreen.dashboard,
+              icon: (sel, fg) => Icon(
+                Icons.dashboard_rounded,
+                color: fg,
+                size: 21,
+              ),
+              onTap: () => onSelect(AppScreen.dashboard),
             ),
-            onTap: () => onSelect(AppScreen.dashboard),
-          ),
-          _BottomItem(
-            label: 'العملاء',
-            tone: AppTone.blue,
-            selected: currentScreen == AppScreen.accounts,
-            icon: (sel, fg) => Icon(
-              Icons.people_alt_rounded,
-              color: fg,
-              size: 21,
+            _BottomItem(
+              label: 'العملاء',
+              tone: AppTone.blue,
+              selected: currentScreen == AppScreen.accounts,
+              icon: (sel, fg) => Icon(
+                Icons.people_alt_rounded,
+                color: fg,
+                size: 21,
+              ),
+              onTap: () => onSelect(AppScreen.accounts),
             ),
-            onTap: () => onSelect(AppScreen.accounts),
-          ),
-          _BottomItem(
-            label: 'الحركات',
-            tone: AppTone.green,
-            selected: currentScreen == AppScreen.transactions,
-            icon: (sel, fg) => _MarkedReceiptIcon(selected: sel),
-            onTap: () => onSelect(AppScreen.transactions),
-          ),
-          _BottomItem(
-            label: 'التقارير',
-            tone: AppTone.violet,
-            selected: currentScreen == AppScreen.reports,
-            icon: (sel, fg) => _MarkedBarChartIcon(selected: sel),
-            onTap: () => onSelect(AppScreen.reports),
-          ),
-          _BottomItem(
-            label: 'الإعدادات',
-            tone: AppTone.teal,
-            selected: currentScreen == AppScreen.settings,
-            icon: (sel, fg) => _MarkedGearIcon(selected: sel),
-            onTap: () => onSelect(AppScreen.settings),
-          ),
-        ],
+            _BottomItem(
+              label: 'الحركات',
+              tone: AppTone.green,
+              selected: currentScreen == AppScreen.transactions,
+              icon: (sel, fg) => _MarkedReceiptIcon(selected: sel),
+              onTap: () => onSelect(AppScreen.transactions),
+            ),
+            _BottomItem(
+              label: 'التقارير',
+              tone: AppTone.violet,
+              selected: currentScreen == AppScreen.reports,
+              icon: (sel, fg) => _MarkedBarChartIcon(selected: sel),
+              onTap: () => onSelect(AppScreen.reports),
+            ),
+            _BottomItem(
+              label: 'الإعدادات',
+              tone: AppTone.teal,
+              selected: currentScreen == AppScreen.settings,
+              icon: (sel, fg) => _MarkedGearIcon(selected: sel),
+              onTap: () => onSelect(AppScreen.settings),
+            ),
+          ],
+        ),
       ),
     );
   }

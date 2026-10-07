@@ -174,9 +174,9 @@ export async function enqueueSyncOperation(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-store-id': queueItem.store_id,
-        'x-user-email': queueItem.user_email,
-        'x-device-id': queueItem.device_id,
+        'x-store-id': encodeURIComponent(queueItem.store_id || 'store-main'),
+        'x-user-email': encodeURIComponent(queueItem.user_email || ''),
+        'x-device-id': encodeURIComponent(queueItem.device_id || 'DEV-LOCAL'),
       },
       body: JSON.stringify([queueItem]),
     });
@@ -263,9 +263,9 @@ export async function processSyncBatch(): Promise<{ processed: number; remaining
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-store-id': session.store_id,
-        'x-user-email': session.user_email,
-        'x-device-id': session.device_id,
+        'x-store-id': encodeURIComponent(session.store_id || 'store-main'),
+        'x-user-email': encodeURIComponent(session.user_email || ''),
+        'x-device-id': encodeURIComponent(session.device_id || 'DEV-LOCAL'),
       },
       body: JSON.stringify({
         store_id: session.store_id,

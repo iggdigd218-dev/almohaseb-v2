@@ -334,13 +334,8 @@ class AccountWorkspace {
       return AccountLinkOutcome.failed;
     }
     try {
-      final stInit = await repo.settings();
-      final hasPendingJoin = (stInit['pendingJoin.ws'] ?? '').trim().isNotEmpty ||
-          (stInit['pendingJoin.token'] ?? '').trim().isNotEmpty;
-      // جهاز عضو منضم عبر رمز دعوة لا يُمَسّ، أما المدير المسجل ببريده فيُسمح له دائماً باسترداد إدارته.
-      if (await repo.workspaceMode() == 'member' &&
-          hasPendingJoin &&
-          account.email.trim().isEmpty) {
+      // جهاز عضو في مجموعة لا يُمَسّ ولا يُسمح له بتسجيل حساب Google أثناء ارتباطه بالمنشأة.
+      if (await repo.workspaceMode() == 'member') {
         return AccountLinkOutcome.memberUntouched;
       }
 

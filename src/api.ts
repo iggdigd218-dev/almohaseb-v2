@@ -5,13 +5,14 @@ const BASE_URL = '/api';
 
 async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const session = getAuthSession();
+  const safeHeader = (val?: string, fallback = '') => encodeURIComponent(val || fallback);
   const res = await fetch(`${BASE_URL}${endpoint}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
-      'x-store-id': session?.store_id || 'store-main',
-      'x-user-email': session?.user_email || '',
-      'x-device-id': session?.device_id || 'DEV-LOCAL',
+      'x-store-id': safeHeader(session?.store_id, 'store-main'),
+      'x-user-email': safeHeader(session?.user_email, ''),
+      'x-device-id': safeHeader(session?.device_id, 'DEV-LOCAL'),
       ...(options?.headers || {}),
     },
   });

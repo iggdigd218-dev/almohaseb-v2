@@ -698,7 +698,8 @@ extension ApplyRemoteOp on Repo {
       for (final entry in op.payload.entries)
         if (entry.key != 'items' &&
             columns.contains(entry.key) &&
-            entry.key != primaryKey)
+            entry.key != primaryKey &&
+            !(table == 'users' && entry.key == 'is_me'))
           entry.key: entry.value,
       if (columns.contains('workspace_id')) 'workspace_id': op.workspaceId,
       if (columns.contains('updated_at')) 'updated_at': now,

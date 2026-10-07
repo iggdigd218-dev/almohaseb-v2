@@ -5,7 +5,6 @@ import '../core/accounting.dart';
 import '../core/format.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
-import 'gemini_assistant_sheet.dart';
 import 'widgets.dart';
 import 'home_shell.dart' show AppScreen;
 
@@ -72,11 +71,6 @@ class DashboardScreen extends ConsumerWidget {
     final summary = ref.watch(summaryProvider);
     final currencies = ref.watch(currenciesProvider);
     final hidden = ref.watch(hideBalancesProvider);
-    // (إصلاح أندرويد 7) تحصين مزدوج: وضع host = مدير حتى لو تأخرت قراءة
-    // is_owner على الأجهزة البطيئة — لا تختفي «إدارة المجموعة» عن المالك.
-    final isOwner =
-        (ref.watch(isOwnerProvider).valueOrNull ?? true) ||
-        ref.watch(workspaceModeProvider).valueOrNull == 'host';
 
     return RefreshIndicator(
       onRefresh: () async => bump(ref),
@@ -128,7 +122,7 @@ class DashboardScreen extends ConsumerWidget {
                     physics: const NeverScrollableScrollPhysics(),
                     mainAxisSpacing: 12,
                     crossAxisSpacing: 12,
-                    childAspectRatio: 0.82,
+                    childAspectRatio: 0.88,
                     children: [
                       for (final t in _mainTiles)
                         _FeatureTile(
@@ -136,104 +130,6 @@ class DashboardScreen extends ConsumerWidget {
                           big: true,
                           onTap: () => onOpen?.call(t.target),
                         ),
-                    ],
-                  ),
-                  const SizedBox(height: 22),
-                  const SectionTitle('أقسام أخرى'),
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 10,
-                    runSpacing: 10,
-                    children: [
-                      _ChipSection(
-                        label: 'المساعد الذكي',
-                        icon: Icons.smart_toy_rounded,
-                        color: AppColors.greenOf(context),
-                        onTap: () => openGeminiAssistantSheet(context, ref),
-                      ),
-                      _ChipSection(
-                        label: 'العملات',
-                        icon: Icons.currency_exchange_rounded,
-                        color: AppColors.infoOf(context),
-                        onTap: () => onOpen?.call(AppScreen.currencies),
-                      ),
-                      _ChipSection(
-                        label: 'الدردشة',
-                        icon: Icons.forum_rounded,
-                        color: AppColors.primaryOf(context),
-                        onTap: () => onOpen?.call(AppScreen.chat),
-                      ),
-                      if (isOwner)
-                        _ChipSection(
-                          label: 'إدارة المجموعة',
-                          icon: Icons.groups_rounded,
-                          color: AppColors.violetOf(context),
-                          onTap: () => onOpen?.call(AppScreen.group),
-                        ),
-                      _ChipSection(
-                        label: 'سجل النشاط',
-                        icon: Icons.history_rounded,
-                        color: AppColors.text2Of(context),
-                        onTap: () => onOpen?.call(AppScreen.activity),
-                      ),
-                      _ChipSection(
-                        label: 'سلة المهملات',
-                        icon: Icons.delete_outline_rounded,
-                        color: AppColors.dangerOf(context),
-                        onTap: () => onOpen?.call(AppScreen.trash),
-                      ),
-                      _ChipSection(
-                        label: 'الإعدادات',
-                        icon: Icons.settings_rounded,
-                        color: AppColors.text3Of(context),
-                        onTap: () => onOpen?.call(AppScreen.settings),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 22),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: StatCard(
-                          title: 'الحسابات',
-                          value: '${s.accountsCount}',
-                          icon: Icons.people_alt_outlined,
-                          color: AppColors.infoOf(context),
-                          onTap: () => onOpen?.call(AppScreen.accounts),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: StatCard(
-                          title: 'العمليات',
-                          value: '${s.txCount}',
-                          icon: Icons.receipt_long_outlined,
-                          color: AppColors.violetOf(context),
-                          onTap: () => onOpen?.call(AppScreen.transactions),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: StatCard(
-                          title: 'الإيرادات والقبض',
-                          value: hidden ? '••••' : Fmt.money(s.inflow),
-                          icon: Icons.south_west,
-                          color: AppColors.greenOf(context),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: StatCard(
-                          title: 'المصروفات والصرف',
-                          value: hidden ? '••••' : Fmt.money(s.outflow),
-                          icon: Icons.north_east,
-                          color: AppColors.dangerOf(context),
-                        ),
-                      ),
                     ],
                   ),
                 ],
@@ -618,53 +514,6 @@ class _FeatureTile extends StatelessWidget {
                 style: TextStyle(
                   fontSize: big ? 13 : 12.5,
                   fontWeight: FontWeight.w800,
-                  color: AppColors.textOf(context),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ChipSection extends StatelessWidget {
-  final String label;
-  final IconData icon;
-  final Color color;
-  final VoidCallback onTap;
-  const _ChipSection({
-    required this.label,
-    required this.icon,
-    required this.color,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: AppColors.surfaceOf(context),
-      borderRadius: BorderRadius.circular(14),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(14),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: AppColors.borderOf(context)),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 18, color: color),
-              const SizedBox(width: 7),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
                   color: AppColors.textOf(context),
                 ),
               ),

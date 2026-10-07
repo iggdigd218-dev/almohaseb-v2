@@ -484,8 +484,7 @@ class CloudFirebaseTransport implements SyncTransport {
               whereArgs: [ourId],
               limit: 1);
           final myUid = own.isNotEmpty ? own.first['user_id'] : null;
-          final isOurUser = (myUid != null && op.entityId == '$myUid') ||
-              (await repo.workspaceMode()) == 'member';
+          final isOurUser = myUid != null && op.entityId == '$myUid';
           if (!isOurUser) continue;
 
           final roleCode = '${op.payload['role'] ?? ''}';
@@ -497,8 +496,6 @@ class CloudFirebaseTransport implements SyncTransport {
               'role': roleCode,
               'active': 1,
             }, where: 'id = ?', whereArgs: [opUid]);
-            await db.update('devices', {'user_id': opUid},
-                where: 'id = ?', whereArgs: [ourId]);
           }
 
           final roleLabel = switch (roleCode) {

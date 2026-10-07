@@ -311,6 +311,21 @@ async function startServer() {
   app.use(cors());
   app.use(express.json({ limit: '10mb' }));
 
+  // Decode URL-encoded custom headers (protects against non-ISO-8859-1 characters in browser fetch headers)
+  app.use((req, _res, next) => {
+    for (const h of ['x-store-id', 'x-user-email', 'x-device-id']) {
+      const val = req.headers[h];
+      if (typeof val === 'string' && val.includes('%')) {
+        try {
+          req.headers[h] = decodeURIComponent(val);
+        } catch {
+          // keep original if malformed
+        }
+      }
+    }
+    next();
+  });
+
   // -------------------------------------------------------------
   // Expulsion Guard Middleware: Prevent expelled devices/users from accessing group APIs
   // -------------------------------------------------------------

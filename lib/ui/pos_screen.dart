@@ -782,72 +782,84 @@ class _PosScreenState extends ConsumerState<PosScreen>
         filteredItems.sort((a, b) => a.name.compareTo(b.name));
     }
 
-    return Column(
-      children: [
-        // الشريط العلوي: تدرّج أزرق ملكي + بحث بيضاوي (Enter = PLU).
-        _buildPosHeader(),
-        // المستوى 1 — بوابة الأقسام (الوضع الافتراضي عند فتح الشاشة).
-        if (_atSectionsGate)
-          Expanded(
-            child: Consumer(
+    return PopScope(
+      canPop: _atSectionsGate,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && !_atSectionsGate) {
+          setState(() {
+            _atSectionsGate = true;
+            _selectedSectionId = null;
+            _selectedCategoryId = null;
+          });
+        }
+      },
+      child: Column(
+        children: [
+          // الشريط العلوي: تدرّج أزرق ملكي + بحث بيضاوي (Enter = PLU).
+          _buildPosHeader(),
+          // المستوى 1 — بوابة الأقسام (الوضع الافتراضي عند فتح الشاشة).
+          if (_atSectionsGate)
+            Expanded(
+              child: Consumer(
+                builder: (ctx, rref, _) {
+                  final sections =
+                      rref.watch(sectionsProvider).valueOrNull ?? const <Section>[];
+                  final roots =
+                      rref.watch(itemCategoryTreeProvider).valueOrNull ??
+                          const <ItemCategory>[];
+                  return PosSectionsGate(
+                    sections: sections,
+                    roots: roots,
+                    items: allItems,
+                    onOpen: (sid) => setState(() {
+                      _selectedSectionId = sid;
+                      _selectedCategoryId = null;
+                      _atSectionsGate = false;
+                    }),
+                  );
+                },
+              ),
+            )
+          // المستوى 2 — الفئات + شبكة الأصناف داخل القسم المختار.
+          else ...[
+            Consumer(
               builder: (ctx, rref, _) {
                 final sections =
                     rref.watch(sectionsProvider).valueOrNull ?? const <Section>[];
+                return _buildSectionBar(sections, categories);
+              },
+            ),
+            Consumer(
+              builder: (ctx, rref, _) {
                 final roots =
                     rref.watch(itemCategoryTreeProvider).valueOrNull ??
                         const <ItemCategory>[];
-                return PosSectionsGate(
-                  sections: sections,
-                  roots: roots,
-                  items: allItems,
-                  onOpen: (sid) => setState(() {
-                    _selectedSectionId = sid;
-                    _selectedCategoryId = null;
-                    _atSectionsGate = false;
-                  }),
+                return PosCategoryStrip(
+                  categories: _categoriesOfSection(roots, categories),
+                  selectedId: _selectedCategoryId,
+                  onPick: (cid) =>
+                      setState(() => _selectedCategoryId = cid),
                 );
               },
             ),
-          )
-        // المستوى 2 — الفئات + شبكة الأصناف داخل القسم المختار.
-        else ...[
-          Consumer(
-            builder: (ctx, rref, _) {
-              final sections =
-                  rref.watch(sectionsProvider).valueOrNull ?? const <Section>[];
-              return _buildSectionBar(sections, categories);
-            },
-          ),
-          Consumer(
-            builder: (ctx, rref, _) {
-              final roots =
-                  rref.watch(itemCategoryTreeProvider).valueOrNull ??
-                      const <ItemCategory>[];
-              return PosCategoryStrip(
-                categories: _categoriesOfSection(roots, categories),
-                selectedId: _selectedCategoryId,
-                onPick: (cid) =>
-                    setState(() => _selectedCategoryId = cid),
-              );
-            },
-          ),
-          Expanded(
-            child: filteredItems.isEmpty
-                ? const EmptyState(
-                    icon: Icons.inventory_2_outlined,
-                    title: 'لا توجد أصناف مطابقة',
-                    message: 'أضف أصنافاً من شاشة المخزون أو غيّر نص البحث.',
-                  )
-                : PosItemsGrid(
-                    items: filteredItems,
-                    symbol: cur.symbol,
-                    quantityInCart: (it) => _cart[it.id]?.quantity ?? 0,
-                    canAdd: (it) => it.quantity > 0 || _allowNegative,
-                    onAdd: (it) => _addItem(it),
-                  ),
-          ),
+            Expanded(
+              child: filteredItems.isEmpty
+                  ? const EmptyState(
+                      icon: Icons.inventory_2_outlined,
+                      title: 'لا توجد أصناف مطابقة',
+                      message: 'أضف أصنافاً من شاشة المخزون أو غيّر نص البحث.',
+                    )
+                  : PosItemsGrid(
+                      items: filteredItems,
+                      symbol: cur.symbol,
+                      quantityInCart: (it) => _cart[it.id]?.quantity ?? 0,
+                      canAdd: (it) => it.quantity > 0 || _allowNegative,
+                      onAdd: (it) => _addItem(it),
+                    ),
+            ),
+          ],
         ],
-      ],
+      ),
     );
   }
 

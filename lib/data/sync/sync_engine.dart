@@ -398,7 +398,7 @@ class SyncEngine {
     } catch (_) {}
     if (!_started || generation != _generation) return;
     _timer ??= Timer.periodic(
-      const Duration(seconds: 3),
+      const Duration(seconds: 12),
       (_) async {
         await processQueue();
         await _checkDangerState();
@@ -461,19 +461,15 @@ class SyncEngine {
         await repo.pruneIndividualOperations();
       } catch (_) {}
     });
-    // مصالحة دورية سريعة لقائمة الأجهزة/الملكية: تكتشف نقل الملكية إلينا أو
-    // تغيّر الأقران/الأدوار خلال ثوانٍ دون الحاجة للقطة كاملة.
-    _rosterTimer ??= Timer.periodic(
-      const Duration(seconds: 5),
-      (_) => _reconcileRoster(),
-    );
-    // سحب سحابي دوري عالي الاستجابة (كل 5 ثوانٍ): يضمن انعكاس عمليات
-    // الأجهزة الأخرى لحظياً حتى في حال انقطاع قناة SSE أو تبديل الشبكة.
+    // سحب سحابي دوري متوازن (كل 20 ثانية) كاحتياط لقناة SSE اللحظية:
+    // يمنع استنزاف المعالج والبطارية وارتفاع حرارة الجهاز مع بقاء SSE الفوري نشطاً.
     _cloudPullTimer ??= Timer.periodic(
-      const Duration(seconds: 5),
+      const Duration(seconds: 20),
       (_) => _periodicCloudPull(),
     );
   }
+
+  DateTime _lastHeavyMaintenanceCheck = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// (3.71.0) بصمة صلاحيات العضو المنتدب — أي تغيّر فيها يُخطر فوراً.
   String? _memberPermsSig;
@@ -596,16 +592,21 @@ class SyncEngine {
         }
       } catch (_) {}
 
-      // (2026-09-28) التحقق الصارم من تطابق الكتالوج (حسابات، أصناف، أقسام) عبر الأجهزة
-      try {
-        final t = _cloudTransport!;
-        await CatalogSyncGuard.verifyAndPublish(repo: repo, transport: t);
-      } catch (_) {}
+      // فحص تطابق الكتالوج وتطهير الإشعارات القديمة بفاصل زمني هادئ (كل 3 دقائق)
+      // منعاً لإغراق المعالج والشبكة في كل سحبة سحابية.
+      final now = DateTime.now();
+      if (now.difference(_lastHeavyMaintenanceCheck) >=
+          const Duration(minutes: 3)) {
+        _lastHeavyMaintenanceCheck = now;
+        try {
+          final t = _cloudTransport!;
+          await CatalogSyncGuard.verifyAndPublish(repo: repo, transport: t);
+        } catch (_) {}
 
-      // (2026-09-28) تطهير دوري للإشعارات المنتهية الأقدم من 6 ساعات
-      try {
-        await repo.purgeOldNotifications();
-      } catch (_) {}
+        try {
+          await repo.purgeOldNotifications();
+        } catch (_) {}
+      }
     } catch (e) {
       // شبكة غائبة/خادم بعيد — المحاولة القادمة بعد الدورة التالية.
       // (3.71.0) تشخيص: استثناء السحب يُصنَّف (كود/سحابة/شبكة) ويُعرض.
@@ -721,18 +722,6 @@ class SyncEngine {
           [cutoff],
         );
       });
-    } catch (_) {}
-  }
-
-  Future<void> _reconcileRoster() async {
-    try {
-      if (!_started) return;
-      // (دفعة 58) المصالحة سحابية حصرياً: سحب فوري يلتقط أي تغيّر في
-      // السجل/الملكية المدفوع من المدير، ثم معالجة الطابور دون تداخل مع دورة السحب.
-      if (!_cloudPulling) {
-        await _periodicCloudPull();
-      }
-      await processQueue();
     } catch (_) {}
   }
 

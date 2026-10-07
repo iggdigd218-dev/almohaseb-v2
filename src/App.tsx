@@ -95,12 +95,12 @@ export function App() {
   const [isChangelogModalOpen, setIsChangelogModalOpen] = useState(false);
   const [expulsionNotice, setExpulsionNotice] = useState<string | null>(null);
 
-  // Check and show version 3.85.1 changelog once
+  // Check and show version 3.87.0 changelog once
   useEffect(() => {
     const seen = localStorage.getItem('nexora_version_changelog_seen');
-    if (seen !== '3.85.1') {
+    if (seen !== '3.87.0') {
       setIsChangelogModalOpen(true);
-      localStorage.setItem('nexora_version_changelog_seen', '3.85.1');
+      localStorage.setItem('nexora_version_changelog_seen', '3.87.0');
     }
   }, []);
 

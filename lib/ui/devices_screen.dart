@@ -375,6 +375,10 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
                         },
                         onCloudLink: () =>
                             showCloudInviteDialog(context, ref),
+                        onPermissions: () async {
+                          await showDevicePermissionsDialog(context, ref, d);
+                          if (mounted) bump(ref);
+                        },
                       ),
                   ],
                 );
@@ -444,7 +448,6 @@ class DeviceCard extends StatelessWidget {
     final lastSeen = (data['last_seen_at'] ?? '') as String;
     final userName = data['user_name'] as String?;
     final userRole = data['user_role'] as String?;
-    final currentUserId = data['user_id'] as int?;
 
     // تحديد الأجهزة الخاملة لأكثر من شهر (للتنبيه البصري).
     final lastSeenDt = DateTime.tryParse(lastSeen);
@@ -627,53 +630,33 @@ class DeviceCard extends StatelessWidget {
               const SizedBox(height: 8),
               Row(
                 children: [
-                  // (دفعة 58 — متطلب 17) أُزيلت منسدلة الدور من ظاهر
-                  // البطاقة نهائياً — تعديل الدور حصراً من حوار «إدارة
-                  // صلاحيات الجهاز» عبر قائمة النقاط الثلاث.
+                  if (!isSelf && !isOwnerDevice && amITheOwner && onPermissions != null)
                     Expanded(
-                      child: DropdownButtonFormField<int?>(
-                        isExpanded: true,
-                        initialValue: (currentUserId != null &&
-                                users.any((u) =>
-                                    u.id == currentUserId &&
-                                    u.role != UserRole.admin &&
-                                    !u.isMe))
-                            ? currentUserId
-                            : null,
-                        decoration: const InputDecoration(
-                          labelText: 'الصلاحيات (المستخدم المرتبط)',
-                          isDense: true,
-                          border: OutlineInputBorder(),
-                          contentPadding: EdgeInsets.symmetric(
-                            horizontal: 10,
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
                             vertical: 8,
                           ),
+                          alignment: AlignmentDirectional.centerStart,
                         ),
-                        items: [
-                          const DropdownMenuItem<int?>(
-                            value: null,
-                            child: Text(
-                              '— بدون صلاحيات —',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
+                        onPressed: inactive ? null : onPermissions,
+                        icon: const Icon(Icons.verified_user_outlined, size: 18),
+                        label: Text(
+                          role != null
+                              ? 'تعيين الدور والصلاحيات (${role.label})'
+                              : 'تعيين الدور والصلاحيات',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
                           ),
-                          ...users
-                              .where((u) => u.role != UserRole.admin && !u.isMe)
-                              .map(
-                            (u) => DropdownMenuItem<int?>(
-                              value: u.id,
-                              child: Text(
-                                '${u.name} (${u.role.label})',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ),
-                        ],
-                        onChanged: inactive ? null : onAssign,
+                        ),
                       ),
-                    ),
+                    )
+                  else
+                    const Spacer(),
                   const SizedBox(width: 6),
                   // كل إجراءات الجهاز مجمّعة في قائمة ثلاث نقاط واحدة
                   // بدل صف الأيقونات الصغيرة المبعثرة.
@@ -866,4 +849,144 @@ class _RoleBadge extends StatelessWidget {
       ),
     );
   }
+}
+
+/// نافذة موحدة لتعيين دور وصلاحيات الجهاز المرتبط بشكل مستقل ومباشر لكل عضو.
+Future<void> showDevicePermissionsDialog(
+  BuildContext context,
+  WidgetRef ref,
+  Map<String, Object?> device,
+) async {
+  final users = ref.read(usersProvider).valueOrNull ?? const <AppUser>[];
+  final uid = device['user_id'] as int?;
+  AppUser? current;
+  if (uid != null) {
+    try {
+      current = users.firstWhere((u) => u.id == uid);
+    } catch (_) {
+      current = null;
+    }
+  }
+  final rawRoleCode = (device['user_role'] as String?) ?? '';
+  var role = current?.role ??
+      (rawRoleCode.isNotEmpty && rawRoleCode != UserRole.admin.code
+          ? UserRole.fromCode(rawRoleCode)
+          : UserRole.cashier);
+  if (role == UserRole.admin) {
+    role = UserRole.agent;
+  }
+  var perms = <String>{
+    if (current != null)
+      ...kPerms
+          .where((p) => (current!.permissions[p.key] ?? false))
+          .map((p) => p.key)
+    else
+      ...defaultPerms(role).entries.where((e) => e.value).map((e) => e.key),
+  };
+  final repo = ref.read(repoProvider);
+  final engine = ref.read(syncEngineProvider);
+
+  await showDialog<void>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setDlg) {
+        void setRole(UserRole r) {
+          setDlg(() {
+            role = r;
+            perms = defaultPerms(r)
+                .entries
+                .where((e) => e.value)
+                .map((e) => e.key)
+                .toSet();
+          });
+        }
+
+        final isAgent = role == UserRole.agent;
+        return AlertDialog(
+          title: Text('تعيين صلاحيات: ${device['name'] ?? 'الجهاز'}'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text('الدور الوظيفي',
+                      style: TextStyle(fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    children: [
+                      for (final r in UserRole.values)
+                        if (r != UserRole.admin)
+                          ChoiceChip(
+                            label: Text('${r.icon} ${r.label}'),
+                            selected: role == r,
+                            onSelected: (_) => setRole(r),
+                          ),
+                    ],
+                  ),
+                  if (isAgent)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        '🛡️ الوكيل يقوم بعمل المدير أثناء غيابه — يملك كل '
+                        'الصلاحيات، ويمكنك تعديلها بدقة أدناه.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          height: 1.5,
+                          color: AppColors.infoOf(ctx),
+                        ),
+                      ),
+                    ),
+                  const SizedBox(height: 14),
+                  const Text('الصلاحيات التفصيلية',
+                      style: TextStyle(fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 4),
+                  for (final p in kPerms)
+                    CheckboxListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      value: perms.contains(p.key),
+                      title: Text(p.label),
+                      onChanged: (v) => setDlg(() {
+                        if (v == true) {
+                          perms.add(p.key);
+                        } else {
+                          perms.remove(p.key);
+                        }
+                      }),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                try {
+                  await repo.setDevicePermissions(
+                      device['id'] as String, role, perms);
+                  await engine.broadcastRosterChange();
+                  if (ctx.mounted) Navigator.pop(ctx);
+                  Sfx.success();
+                } catch (e) {
+                  Sfx.error();
+                  if (ctx.mounted) {
+                    showSnack(ctx, 'تعذّر حفظ الصلاحيات: $e', error: true);
+                  }
+                }
+              },
+              child: const Text('حفظ الصلاحيات'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
 }
