@@ -323,10 +323,12 @@ void main() {
 
       // اختبار حسم التعارضات بالاعتماد الحصري على server_time بغض النظر عن ساعة الجهاز المحلية
       final resolver = ConflictResolver();
-      final incomingOp = SyncOperation(
+      const incomingOp = SyncOperation(
         id: 'OP-CONFLICT-1',
         deviceId: 'DEV-B',
         workspaceId: 'default',
+        userId: null,
+        parentOpId: '',
         entityType: EntityKind.account,
         entityId: '10',
         opType: OpKind.update,
@@ -334,19 +336,32 @@ void main() {
         // ساعة جهاز DEV-B متأخرة محلياً لكن وقت الخادم server_time أحدث!
         deviceTime: '2020-01-01T00:00:00.000Z',
         timestamp: '2020-01-01T00:00:00.000Z',
-        serverTime: '1760000099000',
+        serverTimeMs: 1760000099000,
         payload: {'id': 10, 'name': 'الاسم الأحدث حسب وقت الخادم'},
       );
-
-      final winner = resolver.resolve(
-        incoming: incomingOp,
-        localRow: {'id': 10, 'name': 'الاسم القديم'},
-        localVersion: 5, // حتى لو كان الإصدار المحلي أكبر
-        localUpdatedAt: '2026-01-01T00:00:00.000Z', // وساعة الجهاز المحلي متقدمة
-        localDeviceId: 'DEV-A',
-        localServerTimeMs: 1760000010000, // وقت الخادم المحلي أقدم
+      const localLatestOp = SyncOperation(
+        id: 'OP-LOCAL-1',
+        deviceId: 'DEV-A',
+        workspaceId: 'default',
+        userId: null,
+        parentOpId: '',
+        entityType: EntityKind.account,
+        entityId: '10',
+        opType: OpKind.update,
+        version: 5,
+        deviceTime: '2026-01-01T00:00:00.000Z',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        serverTimeMs: 1760000010000,
+        payload: {'id': 10, 'name': 'الاسم القديم'},
       );
-      expect(winner, ConflictWinner.remote,
+
+      final decision = resolver.decide(
+        incoming: incomingOp,
+        exists: true,
+        localVersion: 5, // حتى لو كان الإصدار المحلي أكبر
+        localLatest: localLatestOp, // ووقت الخادم المحلي أقدم
+      );
+      expect(decision.apply, isTrue,
           reason: 'يجب حسم التعارض لصالح العملية ذات وقت الخادم server_time الأحدث حصرياً');
 
       await db.close();
