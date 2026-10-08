@@ -21,34 +21,104 @@ import '../core/models.dart';
 import '../core/security.dart';
 import '../data/providers.dart';
 import '../data/repository.dart';
+import '../data/sync/cloud_join.dart';
 import '../data/sync/firebase_auth_service.dart';
 import '../data/sync/google_auth_service.dart';
 import '../data/sync/logout_requests.dart';
 import 'widgets.dart';
 
+void _invalidateAfterLogout(WidgetRef ref, ProviderContainer? container) {
+  if (container != null) {
+    try {
+      container.invalidate(googleLinkedProvider);
+      container.invalidate(currentUserProvider);
+      container.invalidate(currentUserRoleProvider);
+      container.invalidate(effectivePermissionsProvider);
+      container.invalidate(canManageGroupProvider);
+      container.invalidate(settingsProvider);
+      container.invalidate(drawerPhotoProvider);
+      container.invalidate(isOwnerProvider);
+      container.invalidate(workspaceModeProvider);
+      container.read(refreshProvider.notifier).state++;
+      return;
+    } catch (_) {}
+  }
+  try {
+    if (!ref.context.mounted) return;
+    ref.invalidate(googleLinkedProvider);
+    ref.invalidate(currentUserProvider);
+    ref.invalidate(currentUserRoleProvider);
+    ref.invalidate(effectivePermissionsProvider);
+    ref.invalidate(canManageGroupProvider);
+    ref.invalidate(settingsProvider);
+    ref.invalidate(drawerPhotoProvider);
+    ref.invalidate(isOwnerProvider);
+    ref.invalidate(workspaceModeProvider);
+    ref.read(refreshProvider.notifier).state++;
+  } catch (_) {}
+}
+
+class _DeputyCandidate {
+  final String label;
+  final String subtitle;
+  final String email;
+  final int? userId;
+  final String? deviceId;
+
+  const _DeputyCandidate({
+    required this.label,
+    required this.subtitle,
+    required this.email,
+    this.userId,
+    this.deviceId,
+  });
+}
+
 /// نقطة الدخول الوحيدة لزر «تسجيل الخروج» في القائمة الجانبية.
 Future<void> showSecuredLogout(WidgetRef ref) async {
-  final repo = ref.read(repoProvider);
+  ProviderContainer? container;
+  try {
+    container = ProviderScope.containerOf(ref.context, listen: false);
+  } catch (_) {}
+  final repo = container != null
+      ? container.read(repoProvider)
+      : ref.read(repoProvider);
   final st = await repo.settings();
   final individual = (st[Repo.accountModeKey] ?? '') == 'individual';
   final email = (st[Repo.accountEmailKey] ?? '').trim().toLowerCase();
   final me = await repo.currentUser();
   final isOwner = await repo.isWorkspaceOwner();
+  final canManage = await repo.canManageGroup();
   final adminSide = individual ||
       isOwner ||
+      canManage ||
       me?.role == UserRole.admin ||
       me?.role == UserRole.agent;
   if (adminSide) {
-    await _adminLogout(ref, repo,
-        individual: individual, isOwner: isOwner, me: me, email: email);
+    await _adminLogout(
+      ref,
+      repo,
+      container: container,
+      individual: individual,
+      isOwner: isOwner,
+      me: me,
+      email: email,
+    );
   } else {
-    await _employeeLogout(ref, repo, email: email, name: me?.name ?? '');
+    await _employeeLogout(
+      ref,
+      repo,
+      container: container,
+      email: email,
+      name: me?.name ?? '',
+    );
   }
 }
 
 Future<void> _adminLogout(
   WidgetRef ref,
   Repo repo, {
+  required ProviderContainer? container,
   required bool individual,
   required bool isOwner,
   AppUser? me,
@@ -70,26 +140,94 @@ Future<void> _adminLogout(
   //    والفردي لا أعضاء لديه).
   if (!individual && isOwner && me?.role != UserRole.agent) {
     final users = await repo.users();
-    final candidates = users
-        .where((u) =>
-            u.active &&
-            u.email.trim().isNotEmpty &&
-            u.email.toLowerCase() != email &&
-            u.role != UserRole.admin)
-        .toList();
+    final devices = await repo.devices();
+    final myDevId = repo.deviceId;
+    final candidates = <_DeputyCandidate>[];
+    final seenUserIds = <int>{};
+    final seenEmails = <String>{};
+
+    for (final d in devices) {
+      final devId = '${d['id'] ?? ''}';
+      final isDevOwner = ((d['is_owner'] ?? 0) as int) == 1;
+      final isRevoked = '${d['revoked_at'] ?? ''}'.isNotEmpty ||
+          '${d['expelled_at'] ?? ''}'.isNotEmpty;
+      if (devId.isEmpty || isDevOwner || isRevoked || devId == myDevId) {
+        continue;
+      }
+      final rawUid = d['user_id'];
+      final dUid = rawUid is int ? rawUid : int.tryParse('${rawUid ?? ''}');
+      final linkedUser = dUid != null
+          ? users.where((u) => u.id == dUid).firstOrNull
+          : null;
+      final uEmail = (linkedUser?.email ?? '').trim();
+      if (uEmail.isNotEmpty && uEmail.toLowerCase() == email) continue;
+      if (linkedUser?.id != null) seenUserIds.add(linkedUser!.id!);
+      if (uEmail.isNotEmpty) seenEmails.add(uEmail.toLowerCase());
+      final dName = '${d['name'] ?? ''}'.trim();
+      final dUserName = '${d['user_name'] ?? ''}'.trim();
+      final title = (linkedUser?.name ??
+              (dUserName.isNotEmpty ? dUserName : dName))
+          .trim();
+      final sub = uEmail.isNotEmpty ? '$uEmail • $dName' : dName;
+      candidates.add(_DeputyCandidate(
+        label: title.isEmpty ? dName : title,
+        subtitle: sub,
+        email: uEmail,
+        userId: linkedUser?.id ?? dUid,
+        deviceId: devId,
+      ));
+    }
+
+    for (final u in users) {
+      if (!u.active || u.isMe || u.role == UserRole.admin) continue;
+      if (me?.id != null && u.id == me?.id) continue;
+      final uEmail = u.email.trim();
+      if (uEmail.isNotEmpty && uEmail.toLowerCase() == email) continue;
+      if (u.id != null && seenUserIds.contains(u.id)) continue;
+      if (uEmail.isNotEmpty && seenEmails.contains(uEmail.toLowerCase())) {
+        continue;
+      }
+      if (uEmail.isEmpty && u.id == null) continue;
+      candidates.add(_DeputyCandidate(
+        label: u.name.trim().isEmpty
+            ? (uEmail.isEmpty ? 'عضو #${u.id}' : uEmail)
+            : u.name.trim(),
+        subtitle: uEmail.isEmpty ? u.role.label : uEmail,
+        email: uEmail,
+        userId: u.id,
+      ));
+    }
+
     if (candidates.isNotEmpty) {
       final c1 = rootNavigatorKey.currentContext;
       if (c1 == null || !c1.mounted) return;
       final picked = await _pickDeputy(c1, candidates);
       if (picked == null) return; // تراجع عن الخروج.
-      await repo.promoteToDeputy(picked.email);
+      await repo.promoteToDeputy(
+        picked.email,
+        userId: picked.userId,
+        deviceId: picked.deviceId,
+      );
+      try {
+        final st = await repo.settings();
+        final url = effectiveBackendUrl(st['cloudBackendUrl']);
+        if (url.isNotEmpty) {
+          final db = await repo.database;
+          await CloudJoin.syncRoster(
+            repo,
+            db,
+            backendUrl: url,
+            workspaceId: repo.requireWorkspaceId,
+          );
+        }
+      } catch (_) {}
     } else {
       final c2 = rootNavigatorKey.currentContext;
       if (c2 == null || !c2.mounted) return;
       final go = await confirmDialog(
         c2,
         title: 'لا يوجد أعضاء للوكالة',
-        message: 'لا يوجد عضو ببريد مسجَّل لتعيينه وكيلاً.\n'
+        message: 'لا يوجد عضو مسجَّل لتعيينه وكيلاً.\n'
             'النظام والمزامنة يستمران تلقائياً أثناء غيابك.\n\n'
             'هل تريد متابعة الخروج؟',
         confirmText: 'متابعة الخروج',
@@ -110,11 +248,14 @@ Future<void> _adminLogout(
     danger: true,
   );
   if (ok != true) return;
-  await _performSignOut(ref, repo);
+  await _performSignOut(ref, repo, container: container);
 }
 
-Future<AppUser?> _pickDeputy(BuildContext ctx, List<AppUser> candidates) {
-  return showDialog<AppUser>(
+Future<_DeputyCandidate?> _pickDeputy(
+  BuildContext ctx,
+  List<_DeputyCandidate> candidates,
+) {
+  return showDialog<_DeputyCandidate>(
     context: ctx,
     builder: (dctx) => AlertDialog(
       title: const Text('تعيين وكيل قبل الخروج'),
@@ -124,7 +265,7 @@ Future<AppUser?> _pickDeputy(BuildContext ctx, List<AppUser> candidates) {
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text(
-              'اختر العضو الذي سيدير العمليات ويعتمد طلبات الخروج أثناء غيابك:',
+              'اختر العضو الذي سيدير العمليات والأعضاء ويعتمد طلبات الخروج أثناء غيابك:',
               style: TextStyle(fontSize: 12.5, height: 1.6),
             ),
             const SizedBox(height: 8),
@@ -139,9 +280,9 @@ Future<AppUser?> _pickDeputy(BuildContext ctx, List<AppUser> candidates) {
                         Icons.radio_button_unchecked,
                         size: 20,
                       ),
-                      title: Text(u.name.isEmpty ? u.email : u.name,
+                      title: Text(u.label,
                           style: const TextStyle(fontSize: 13)),
-                      subtitle: Text(u.email,
+                      subtitle: Text(u.subtitle,
                           style: const TextStyle(fontSize: 11)),
                       onTap: () =>
                           Navigator.of(dctx).pop(u), // اختيار = تأكيد
@@ -162,7 +303,11 @@ Future<AppUser?> _pickDeputy(BuildContext ctx, List<AppUser> candidates) {
   );
 }
 
-Future<void> _performSignOut(WidgetRef ref, Repo repo) async {
+Future<void> _performSignOut(
+  WidgetRef ref,
+  Repo repo, {
+  ProviderContainer? container,
+}) async {
   try {
     final db = await repo.database;
     try {
@@ -190,13 +335,7 @@ Future<void> _performSignOut(WidgetRef ref, Repo repo) async {
     // جلسة مجهولة صامتة بديلة — المزامنة المحلية والسحابية تستمر
     // دون انقطاع أثناء غياب المدير (لا توقف للمحرك ولا لمسار الطابور).
     await FirebaseAuthRest.initSilentAuth(repo);
-    ref.invalidate(googleLinkedProvider);
-    ref.invalidate(currentUserProvider);
-    ref.invalidate(settingsProvider);
-    ref.invalidate(drawerPhotoProvider);
-    ref.invalidate(isOwnerProvider);
-    ref.invalidate(workspaceModeProvider);
-    ref.read(refreshProvider.notifier).state++;
+    _invalidateAfterLogout(ref, container);
     final c = rootNavigatorKey.currentContext;
     if (c != null && c.mounted) {
       showSnack(c, 'تم تسجيل الخروج رسمياً وبشكل كامل من الحساب ✅');
@@ -214,6 +353,7 @@ Future<void> _performSignOut(WidgetRef ref, Repo repo) async {
 Future<void> _employeeLogout(
   WidgetRef ref,
   Repo repo, {
+  required ProviderContainer? container,
   required String email,
   required String name,
 }) async {
@@ -231,7 +371,7 @@ Future<void> _employeeLogout(
       danger: true,
     );
     if (ok != true) return;
-    await _performSignOut(ref, repo);
+    await _performSignOut(ref, repo, container: container);
     return;
   }
   String reqId;
@@ -259,7 +399,7 @@ Future<void> _employeeLogout(
       requestId: reqId,
       onApproved: () async {
         if (dctx.mounted) Navigator.of(dctx).pop();
-        await _performSignOut(ref, repo);
+        await _performSignOut(ref, repo, container: container);
       },
     ),
   );

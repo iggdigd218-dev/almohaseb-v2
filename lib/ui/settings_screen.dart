@@ -931,15 +931,40 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                               children: [SubscriptionDetailsSection()],
                             ),
                           ],
-                          // (إدارة الموظفين) طلبات خروج الموظفين — للمدير والوكيل
+                          // (إدارة الموظفين) إدارة الأعضاء وطلبات الخروج — للمدير والوكيل
                           if (wsMode != 'standalone' &&
-                              (canEditOrg || userRole == UserRole.agent)) ...[
+                              (canEditOrg ||
+                                  userRole == UserRole.agent ||
+                                  (ref.watch(canManageGroupProvider).valueOrNull ??
+                                      false))) ...[
                             const SizedBox(height: 18),
                             _Collapsible(
                               title: 'إدارة الموظفين',
                               icon: Icons.badge_outlined,
                               color: const Color(0xFF0284C7),
                               children: [
+                                Card(
+                                  child: ListTile(
+                                    leading: const Icon(
+                                      Icons.groups_outlined,
+                                      color: Color(0xFF7C3AED),
+                                    ),
+                                    title: const Text('إدارة أعضاء المجموعة والصلاحيات'),
+                                    subtitle: const Text(
+                                      'إدارة الأجهزة، تحديد الأدوار والصلاحيات، الحظر أو الطرد، وربط أعضاء جدد.',
+                                      style: TextStyle(
+                                          fontSize: 11.5, height: 1.5),
+                                    ),
+                                    trailing: const Icon(Icons.chevron_left),
+                                    onTap: () => Navigator.of(context).push(
+                                      MaterialPageRoute(
+                                        builder: (_) =>
+                                            const GroupManagementScreen(),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
                                 Card(
                                   child: ListTile(
                                     leading: const Icon(

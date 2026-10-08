@@ -182,5 +182,82 @@ void main() {
       expect(visibleScreens.contains(AppScreen.trash), isTrue);
       expect(visibleScreens.contains(AppScreen.backup), isTrue);
     });
+
+    test('الوكيل (UserRole.agent) في وضع العضو يظهر له قسم إدارة المجموعة ويستطيع إدارة الأعضاء فعلياً', () async {
+      final deputy = AppUser(
+        id: 2,
+        name: 'وكيل المدير',
+        role: UserRole.agent,
+        permissions: {for (final p in kPerms) p.key: true},
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+
+      final visibleScreens = DrawerItems.of(
+        user: deputy,
+        isOwner: false,
+        workspaceMode: 'member',
+      );
+      expect(
+        visibleScreens.contains(AppScreen.group),
+        isTrue,
+        reason: 'الوكيل يجب أن تظهر له شاشة إدارة المجموعة حتى في وضع العضو',
+      );
+
+      // محاكاة جهاز عضو تم تعيينه وكيلاً
+      final myDevId = repo.requireDeviceId;
+      await db.update('devices', {'is_owner': 0}, where: 'id = ?', whereArgs: [myDevId]);
+      await repo.setSetting('workspaceMode', 'member');
+
+      // تسجيل جهاز عضو آخر ليقوم الوكيل بإدارته
+      final now = DateTime.now().toIso8601String();
+      await db.insert('devices', {
+        'id': 'DEV-MEMBER-2',
+        'workspace_id': repo.requireWorkspaceId,
+        'name': 'جهاز الكاشير الثاني',
+        'platform': 'android',
+        'is_paired': 1,
+        'is_owner': 0,
+        'revoked_at': '',
+        'expelled_at': '',
+        'created_at': now,
+        'updated_at': now,
+      });
+
+      // ترقية هذا الجهاز إلى وكيل
+      await repo.promoteToDeputy('', deviceId: myDevId);
+
+      expect(await repo.isWorkspaceOwner(), isFalse);
+      expect(await repo.canManageGroup(), isTrue);
+
+      // الوكيل يعدل دور وصلاحيات العضو الآخر
+      await repo.setDevicePermissions(
+        'DEV-MEMBER-2',
+        UserRole.accountant,
+        {'add_tx', 'edit_tx', 'view_reports'},
+      );
+      var list = await repo.devices();
+      var target = list.firstWhere((d) => d['id'] == 'DEV-MEMBER-2');
+      expect(target['user_role'], equals(UserRole.accountant.code));
+
+      // الوكيل يحظر العضو مؤقتاً ثم يعيد السماح له
+      await repo.revokeDevice('DEV-MEMBER-2');
+      list = await repo.devices();
+      target = list.firstWhere((d) => d['id'] == 'DEV-MEMBER-2');
+      expect('${target['revoked_at'] ?? ''}'.isNotEmpty, isTrue);
+
+      await repo.restoreDevice('DEV-MEMBER-2');
+      list = await repo.devices();
+      target = list.firstWhere((d) => d['id'] == 'DEV-MEMBER-2');
+      expect('${target['revoked_at'] ?? ''}'.isEmpty, isTrue);
+
+      // الوكيل يعيد تسمية جهاز العضو ويطرده من المجموعة
+      await repo.renameDevice('DEV-MEMBER-2', 'جهاز محاسب الفرع');
+      await repo.expelDevice('DEV-MEMBER-2');
+      list = await repo.devices();
+      target = list.firstWhere((d) => d['id'] == 'DEV-MEMBER-2');
+      expect(target['name'], equals('جهاز محاسب الفرع'));
+      expect('${target['expelled_at'] ?? ''}'.isNotEmpty, isTrue);
+    });
   });
 }

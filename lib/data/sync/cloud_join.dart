@@ -735,13 +735,12 @@ class CloudJoin {
 
   /// يرفع لقطة كاملة + رمز دعوة صالح 24 ساعة، ويعيد بيانات الدعوة للعرض.
   static Future<CloudInviteInfo> createInvite(Repo repo) async {
-    // الملكية الفعلية (is_owner) هي الحكم — لا وضع sync_meta وحده:
-    // خلل سابق كان ينسخ workspaceMode من جهاز عضو أثناء المصالحة فيقلب
-    // جهاز المدير إلى «member» زوراً. إن كنا المالك فعلاً نصلح الوضع ذاتياً.
+    // الملكية الفعلية (is_owner) أو وكالة المدير (canManageGroup) هي الحكم.
     final owner = await repo.isWorkspaceOwner();
-    if (!owner) {
+    final canManage = owner || await repo.canManageGroup();
+    if (!canManage) {
       throw const CloudJoinException(
-          'إنشاء دعوة سحابية متاح لجهاز المدير (المالك) فقط.');
+          'إنشاء دعوة سحابية متاح لجهاز المدير أو وكيله فقط.');
     }
     // 🔒 (التجربة) انتهاء الفترة يمنع ربط أجهزة جديدة.
     await _ensureSubscriptionAllows(repo);
@@ -765,7 +764,7 @@ class CloudJoin {
       rethrow;
     } catch (_) {}
     final mode = await repo.workspaceMode();
-    if (mode == 'member') {
+    if (owner && mode == 'member') {
       final db0 = await repo.database;
       await db0.insert(
           'sync_meta', {'key': 'workspaceMode', 'value': 'host'},
@@ -785,6 +784,11 @@ class CloudJoin {
     final db = await repo.database;
     final ws = await repo.activeWorkspaceId();
     final ourId = await ensureDeviceId(repo);
+    final ownerDevs = await db.query('devices',
+        columns: ['id'], where: 'is_owner = 1', limit: 1);
+    final hostDevId = ownerDevs.isNotEmpty
+        ? '${ownerDevs.first['id'] ?? ourId}'
+        : ourId;
 
     // لقطة بنفس بنية لقطة الاقتران المحلي (تُطبَّق بنفس الدالة عند العضو).
     final snapshot = <String, Object?>{};
@@ -833,7 +837,7 @@ class CloudJoin {
       }).toList();
     }
     snapshot['workspaceMode'] = 'member';
-    snapshot['hostDeviceId'] = ourId;
+    snapshot['hostDeviceId'] = hostDevId;
     // إعدادات المؤسسة (اسم/عنوان/تذييل السند...) تُنقل مع اللقطة لتحل
     // محل إعدادات الجهاز المنضم القديمة — «حذف كامل» يشمل هويته السابقة.
     try {
@@ -854,7 +858,7 @@ class CloudJoin {
       '$root/joinSnapshot.json',
       {
         'createdAt': now.toIso8601String(),
-        'hostDeviceId': ourId,
+        'hostDeviceId': hostDevId,
         // (دفعة 57) علامة الضغط: كل عمليات السحابة الأقدم من هذه اللحظة
         // أصبحت مادةً مجسّدة داخل هذه اللقطة — روتين الضغط الدوري يحذفها
         // بأمان (المنضمون الجدد يرتوون من اللقطة لا من إعادة تشغيل السجل).
@@ -1321,7 +1325,90 @@ class CloudJoin {
     final ourId = (await repo.settings())['sync.deviceId'] ?? '';
     if (ourId.isEmpty) return false;
     final isOwner = await repo.isWorkspaceOwner();
+    final canManage = isOwner || await repo.canManageGroup();
     var changed = false;
+
+    Future<void> syncUserFromRoster(
+      Map<String, Object?> r, {
+      required bool isSelf,
+      required String localWs,
+      required String fallbackUpd,
+    }) async {
+      final rawUid = r['user_id'];
+      final uid = rawUid is int ? rawUid : int.tryParse('${rawUid ?? ''}');
+      final roleCode = '${r['user_role'] ?? ''}'.trim();
+      if (uid == null || roleCode.isEmpty) return;
+      if (isOwner && isSelf) return;
+      final role = UserRole.values.firstWhere(
+        (x) => x.code == roleCode,
+        orElse: () => UserRole.cashier,
+      );
+      if (!isOwner && role == UserRole.admin) return;
+      final rawPerms = '${r['user_permissions'] ?? ''}'.trim();
+      final permStr = rawPerms.isNotEmpty
+          ? rawPerms
+          : defaultPerms(role)
+              .entries
+              .where((e) => e.value)
+              .map((e) => e.key)
+              .join(',');
+      final devName = '${r['name'] ?? 'عضو'}'.trim();
+      final upd = fallbackUpd.isNotEmpty
+          ? fallbackUpd
+          : DateTime.now().toIso8601String();
+      try {
+        final existing = await db.query('users',
+            where: 'id = ?', whereArgs: [uid], limit: 1);
+        if (existing.isEmpty) {
+          if (isSelf && !isOwner) {
+            await db.update('users', {'is_me': 0});
+          }
+          await db.insert(
+            'users',
+            {
+              'id': uid,
+              'name': devName.isEmpty ? 'عضو' : devName,
+              'role': role.code,
+              'pin': '',
+              'password': '',
+              'permissions': permStr,
+              'is_me': (isSelf && !isOwner) ? 1 : 0,
+              'active': 1,
+              'workspace_id': localWs,
+              'deleted_at': '',
+              'created_at': upd,
+              'updated_at': upd,
+            },
+            conflictAlgorithm: ConflictAlgorithm.ignore,
+          );
+          changed = true;
+        } else {
+          final curRole = '${existing.first['role'] ?? ''}';
+          final curUpd = '${existing.first['updated_at'] ?? ''}';
+          final isOwnerUser = isOwner &&
+              ((existing.first['is_me'] as int? ?? 0) == 1 ||
+                  curRole == UserRole.admin.code);
+          if (!isOwnerUser &&
+              (upd.compareTo(curUpd) > 0 || curRole != role.code)) {
+            final patch = <String, Object?>{
+              'role': role.code,
+              if (rawPerms.isNotEmpty || curRole != role.code)
+                'permissions': permStr,
+              'active': 1,
+              'deleted_at': '',
+              'updated_at': upd,
+            };
+            if (isSelf && !isOwner) {
+              await db.update('users', {'is_me': 0});
+              patch['is_me'] = 1;
+            }
+            await db.update('users', patch,
+                where: 'id = ?', whereArgs: [uid]);
+            changed = true;
+          }
+        }
+      } catch (_) {}
+    }
 
     // 1) الدمج من السحابة.
     Map<String, dynamic>? remote;
@@ -1352,6 +1439,14 @@ class CloudJoin {
           // المالك لا يُغيَّر اسمه أو دوره محلياً بروستير قادم من السحابة.
           if (local == null) continue;
           final localUpd = '${local['updated_at'] ?? ''}';
+          if (!isOwner) {
+            await syncUserFromRoster(
+              r,
+              isSelf: true,
+              localWs: localWs,
+              fallbackUpd: remoteUpd,
+            );
+          }
           if (remoteUpd.compareTo(localUpd) <= 0) continue;
           final patch = <String, Object?>{
             'revoked_at': r['revoked_at'] ?? '',
@@ -1372,11 +1467,18 @@ class CloudJoin {
           changed = true;
           continue;
         }
+        await syncUserFromRoster(
+          r,
+          isSelf: false,
+          localWs: localWs,
+          fallbackUpd: remoteUpd,
+        );
         if (local == null) {
           final row = _safeDeviceRow(r);
           // (دفعة 56) user_role حقل عرضي للشارات فقط — ليس عموداً في
           // جدول devices، وإبقاؤه يفشل الإدراج بصمت ويعطل مزامنة السجل.
           row.remove('user_role');
+          row.remove('user_permissions');
           row['id'] = id;
           row['workspace_id'] = localWs;
           row['created_at'] =
@@ -1410,6 +1512,7 @@ class CloudJoin {
           row.remove('created_at');
           // (دفعة 56) حقل عرضي — ليس عموداً في devices (انظر أعلاه).
           row.remove('user_role');
+          row.remove('user_permissions');
           // لا نلمس سرّ المصادقة المحلي (قد يكون تعلّمه عبر اقتران LAN).
           row.remove('auth_secret');
           row['workspace_id'] = localWs;
@@ -1451,28 +1554,32 @@ class CloudJoin {
           where: 'key = ?', whereArgs: [metaKey], limit: 1);
       final lastPush =
           metaRows.isEmpty ? '' : '${metaRows.first['value'] ?? ''}';
-      // (دفعة 56) ضمّ دور المستخدم المرتبط لكل جهاز — حتى تعرض بقية
-      // الأجهزة شارة الدور الصحيحة فور تغييرها من المدير.
-      final rows = isOwner
+      // (دفعة 56) ضمّ دور وصلاحيات المستخدم المرتبط لكل جهاز — حتى تعرض بقية
+      // الأجهزة شارة الدور الصحيحة فور تغييرها من المدير أو الوكيل.
+      final rows = canManage
           ? await db.rawQuery(
-              "SELECT d.*, u.role AS user_role "
+              "SELECT d.*, u.role AS user_role, u.permissions AS user_permissions "
               "FROM devices d LEFT JOIN users u ON u.id = d.user_id "
               "WHERE COALESCE(d.revoked_at,'') = '' AND COALESCE(d.expelled_at,'') = '' AND d.is_paired = 1")
           : await db.rawQuery(
-              "SELECT d.*, u.role AS user_role FROM devices d "
+              "SELECT d.*, u.role AS user_role, u.permissions AS user_permissions FROM devices d "
               "LEFT JOIN users u ON u.id = d.user_id "
               "WHERE d.id = ? AND COALESCE(d.revoked_at,'') = '' AND COALESCE(d.expelled_at,'') = ''",
               [ourId]);
       var maxUpd = lastPush;
       for (final d in rows) {
         final devIdStr = '${d['id'] ?? ''}';
+        final isTargetOwner = ((d['is_owner'] as int?) ?? 0) == 1;
+        // الوكيل لا يكتب فوق عقدة جهاز المالك الأساسي في السحابة.
+        if (!isOwner && isTargetOwner && devIdStr != ourId) continue;
         final upd = '${d['updated_at'] ?? ''}';
         final remoteEntry = remote?[devIdStr];
         final missingOrRevokedInCloud = remote == null ||
             remoteEntry is! Map ||
             '${remoteEntry['revoked_at'] ?? ''}'.isNotEmpty ||
             '${remoteEntry['expelled_at'] ?? ''}'.isNotEmpty ||
-            (remoteEntry['is_paired'] as int? ?? 0) != 1;
+            (remoteEntry['is_paired'] as int? ?? 0) != 1 ||
+            '${remoteEntry['user_role'] ?? ''}' != '${d['user_role'] ?? ''}';
         if (!missingOrRevokedInCloud && upd.compareTo(lastPush) <= 0) continue;
         final map = _safeDeviceRow(Map<String, Object?>.from(d));
         if (!isOwner) {
@@ -2143,9 +2250,9 @@ class CloudJoin {
     required String roleCode,
     String workspaceId = 'default',
   }) async {
-    final owner = await repo.isWorkspaceOwner();
-    if (!owner) {
-      throw const CloudJoinException('الموافقة لجهاز المدير فقط.');
+    final canManage = await repo.canManageGroup();
+    if (!canManage) {
+      throw const CloudJoinException('الموافقة لجهاز المدير أو وكيله فقط.');
     }
     final ourOwnDeviceId = await ensureDeviceId(repo);
     if (deviceId == ourOwnDeviceId) {
@@ -2862,6 +2969,7 @@ class CloudJoin {
         try {
           final row = _safeDeviceRow(Map<String, Object?>.from(cloudDev));
           row.remove('user_role');
+          row.remove('user_permissions');
           row['id'] = rId;
           row['workspace_id'] = workspaceId;
           row['created_at'] = '${cloudDev['created_at'] ?? now}';

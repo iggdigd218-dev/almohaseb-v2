@@ -22,19 +22,23 @@ Future<void> showCloudInviteDialog(BuildContext context, WidgetRef ref) async {
   // (3.70.0 — بوابة الأمان) نقطة خنق واحدة لكل مداخل إنشاء الدعوات:
   // لا رمز QR ولا PIN إلا بحساب Google موثق في جدول google_auth.
   try {
-    final db = await repo.database;
-    final r = await db.query('google_auth', where: 'id = 1', limit: 1);
-    final linked =
-        r.isNotEmpty && '${r.first['google_id'] ?? ''}'.trim().isNotEmpty;
-    if (!linked) {
-      if (context.mounted) {
-        showSnack(
-            context,
-            'بوابة الأمان: وثّق حساب Google أولاً (الإعدادات ← حساب المؤسسة) '
-            'قبل إنشاء رموز الدعوة',
-            error: true);
+    final isAuthorizedDeputy =
+        await repo.workspaceMode() == 'member' && await repo.canManageGroup();
+    if (!isAuthorizedDeputy) {
+      final db = await repo.database;
+      final r = await db.query('google_auth', where: 'id = 1', limit: 1);
+      final linked =
+          r.isNotEmpty && '${r.first['google_id'] ?? ''}'.trim().isNotEmpty;
+      if (!linked) {
+        if (context.mounted) {
+          showSnack(
+              context,
+              'بوابة الأمان: وثّق حساب Google أولاً (الإعدادات ← حساب المؤسسة) '
+              'قبل إنشاء رموز الدعوة',
+              error: true);
+        }
+        return;
       }
-      return;
     }
   } catch (_) {
     // تعذّر الفحص محلياً (قاعدة مقفلة): لا نمنع الإدارة — تكمل الدعوة

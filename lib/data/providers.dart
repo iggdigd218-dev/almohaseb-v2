@@ -801,6 +801,17 @@ final isOwnerProvider = FutureProvider<bool>((ref) async {
   }
 });
 
+/// هل يحق للمستخدم/الجهاز الحالي إدارة أعضاء المجموعة؟ (المدير العام أو الوكيل).
+final canManageGroupProvider = FutureProvider<bool>((ref) async {
+  ref.watch(refreshProvider);
+  final repo = ref.read(repoProvider);
+  try {
+    return await repo.canManageGroup().timeout(const Duration(seconds: 3));
+  } catch (_) {
+    return false;
+  }
+});
+
 /// (3.70.0 — التجديد البصري) هل يوجد حساب Google موثق (جدول google_auth)؟
 /// بوابة أمان: ربط الأعضاء/رموز الدعوة وعرض «إدارة المجموعة» في الدرج.
 final googleLinkedProvider = FutureProvider<bool>((ref) async {

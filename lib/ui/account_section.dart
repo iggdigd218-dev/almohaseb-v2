@@ -78,6 +78,10 @@ class _AccountSectionState extends ConsumerState<AccountSection> {
 Future<void> provisionCloudAfterSignIn(
     Repo repo, WidgetRef ref, String url) async {
   if (url.isEmpty) return;
+  ProviderContainer? container;
+  try {
+    container = ProviderScope.containerOf(ref.context, listen: false);
+  } catch (_) {}
   try {
     final ws = await repo.activeWorkspaceId();
     await CloudJoin.ensureOwnerMembership(repo,
@@ -86,7 +90,11 @@ Future<void> provisionCloudAfterSignIn(
         backendUrl: url, workspaceId: ws);
     await AccountWorkspace.syncWorkspaceMetaToCloud(repo, backendUrl: url);
     await AutoBackupService.silentWorkspaceBackup(repo, force: true);
-    ref.invalidate(subscriptionProvider);
+    if (container != null) {
+      container.invalidate(subscriptionProvider);
+    } else if (ref.context.mounted) {
+      ref.invalidate(subscriptionProvider);
+    }
   } catch (_) {
     // خلفية صامتة.
   }
@@ -95,10 +103,16 @@ Future<void> provisionCloudAfterSignIn(
   // كل بيانات الجهاز والمؤسسة مباشرة (دفع الطابور + سحب سحابي كامل) —
   // لا انتظار للدورة الدورية ولا استرجاع بصمة مجهول بعد اليوم.
   try {
-    final engine = ref.read(syncEngineProvider);
+    final engine = container != null
+        ? container.read(syncEngineProvider)
+        : (ref.context.mounted ? ref.read(syncEngineProvider) : repo.sync);
     engine.stop();
     await engine.start();
-    ref.invalidate(workspaceModeProvider);
+    if (container != null) {
+      container.invalidate(workspaceModeProvider);
+    } else if (ref.context.mounted) {
+      ref.invalidate(workspaceModeProvider);
+    }
     unawaited(engine.forceSyncNow());
   } catch (_) {
     // خلفية صامتة — الدورة الدورية تكمل لاحقاً.

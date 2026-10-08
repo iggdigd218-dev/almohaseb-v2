@@ -45,11 +45,20 @@ class _State extends ConsumerState<GroupManagementScreen> {
   Future<void> _reconcileRoster() async {
     try {
       final repo = ref.read(repoProvider);
-      if (!await repo.isWorkspaceOwner()) return;
+      if (!await repo.canManageGroup()) return;
       final st = await repo.settings();
       final url = effectiveBackendUrl(st['cloudBackendUrl']);
       if (url.isEmpty) return;
       final ws = await repo.activeWorkspaceId();
+      try {
+        final db = await repo.database;
+        await CloudJoin.syncRoster(
+          repo,
+          db,
+          backendUrl: url,
+          workspaceId: ws,
+        );
+      } catch (_) {}
       final fixed =
           await CloudJoin.reconcileRosterWithLocal(repo,
               backendUrl: url, workspaceId: ws);
@@ -59,8 +68,11 @@ class _State extends ConsumerState<GroupManagementScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // حارس صلاحيات: المدير فقط.
+    // حارس صلاحيات: المدير أو الوكيل.
     final isOwnerAsync = ref.watch(isOwnerProvider);
+    final canManageAsync = ref.watch(canManageGroupProvider);
+    final user = ref.watch(currentUserProvider).valueOrNull;
+    final devRole = ref.watch(deviceRoleProvider).valueOrNull?.role;
     return isOwnerAsync.when(
       loading: () =>
           const Scaffold(body: Center(child: CircularProgressIndicator())),
@@ -75,7 +87,16 @@ class _State extends ConsumerState<GroupManagementScreen> {
         ),
       ),
       data: (isOwner) {
-        if (!isOwner) {
+        final canManage = isOwner ||
+            (canManageAsync.valueOrNull ?? false) ||
+            user?.role == UserRole.agent ||
+            devRole == UserRole.agent;
+        if (!canManage) {
+          if (canManageAsync.isLoading) {
+            return const Scaffold(
+              body: Center(child: CircularProgressIndicator()),
+            );
+          }
           return Scaffold(
             appBar: widget.embedded
                 ? null
@@ -84,7 +105,7 @@ class _State extends ConsumerState<GroupManagementScreen> {
               icon: Icons.block,
               title: 'غير مصرّح',
               message:
-                  'هذه الشاشة للمدير (مالك المجموعة) فقط.\nاطلب من المدير منحك صلاحية إدارة المستخدمين.',
+                  'هذه الشاشة للمدير (مالك المجموعة) أو وكيل المدير فقط.\nاطلب من المدير منحك صلاحية إدارة المستخدمين.',
             ),
           );
         }
@@ -210,7 +231,12 @@ class _State extends ConsumerState<GroupManagementScreen> {
   /// تسجيل فوري من داخل البوابة نفسها.
   Future<bool> _ensureGoogleLinked(BuildContext context) async {
     try {
-      final db = await ref.read(repoProvider).database;
+      final repo = ref.read(repoProvider);
+      if (await repo.workspaceMode() == 'member' &&
+          await repo.canManageGroup()) {
+        return true;
+      }
+      final db = await repo.database;
       final r = await db.query('google_auth', where: 'id = 1', limit: 1);
       if (r.isNotEmpty && '${r.first['google_id'] ?? ''}'.trim().isNotEmpty) {
         return true;
@@ -318,6 +344,9 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
   Widget build(BuildContext context) {
     final devicesAsync = ref.watch(devicesProvider);
     final usersAsync = ref.watch(usersProvider);
+    final canManageAsync = ref.watch(canManageGroupProvider);
+    final currentUser = ref.watch(currentUserProvider).valueOrNull;
+    final devRole = ref.watch(deviceRoleProvider).valueOrNull?.role;
 
     return devicesAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
@@ -357,6 +386,10 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
             final ownId = (own?['id'] as String?) ?? myDevId ?? hostId;
             final amITheOwner =
                 own != null && ((own['is_owner'] ?? 0) as int) == 1;
+            final canManageMembers = amITheOwner ||
+                (canManageAsync.valueOrNull ?? false) ||
+                currentUser?.role == UserRole.agent ||
+                devRole == UserRole.agent;
             final memberDevices = list
                 .where((d) =>
                     d['id'] != ownId && ((d['is_owner'] ?? 0) as int) != 1)
@@ -370,7 +403,7 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
                   vertical: 10,
                 ),
                 children: [
-                  // بطاقة جهاز المدير الحالي
+                  // بطاقة جهاز المدير أو الوكيل الحالي
                   Card(
                     elevation: 1,
                     shape: RoundedRectangleBorder(
@@ -412,17 +445,21 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
                                     final name =
                                         (own?['name'] as String?)?.isNotEmpty == true
                                             ? own!['name'] as String
-                                            : 'جهاز المدير الأساسي';
+                                            : (amITheOwner
+                                                ? 'جهاز المدير الأساسي'
+                                                : 'جهاز وكيل المدير');
                                     final badge = Container(
                                       padding: const EdgeInsets.symmetric(
                                           horizontal: 8, vertical: 2),
                                       decoration: BoxDecoration(
-                                        color: Colors.amber.shade700,
+                                        color: amITheOwner
+                                            ? Colors.amber.shade700
+                                            : const Color(0xFF7C3AED),
                                         borderRadius: BorderRadius.circular(12),
                                       ),
-                                      child: const Text(
-                                        'المالك 👑',
-                                        style: TextStyle(
+                                      child: Text(
+                                        amITheOwner ? 'المالك 👑' : 'الوكيل 🛡️',
+                                        style: const TextStyle(
                                           color: Colors.white,
                                           fontSize: 11,
                                           fontWeight: FontWeight.bold,
@@ -472,7 +509,9 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
                                 ),
                                 const SizedBox(height: 4),
                                 Text(
-                                  'هذا الجهاز (الجهاز الرئيسي لإدارة المنشأة والمجموعة)',
+                                  amITheOwner
+                                      ? 'هذا الجهاز (الجهاز الرئيسي لإدارة المنشأة والمجموعة)'
+                                      : 'هذا الجهاز (مفوَّض بإدارة أعضاء المجموعة والعمليات)',
                                   style: TextStyle(
                                     fontSize: 12,
                                     color: Colors.grey.shade600,
@@ -548,7 +587,7 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
                             .cast<AppUser>(),
                         isSelf: d['id'] == ownId,
                         isOwnerDevice: d['id'] == hostId,
-                        amITheOwner: amITheOwner,
+                        amITheOwner: canManageMembers,
                         onAssign: (uid) async {
                           await repo.assignDeviceUser(d['id'] as String, uid);
                           await engine.broadcastRosterChange();
@@ -556,7 +595,7 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
                         },
                         // (دفعة 51) تعديل الدور مباشرة من البطاقة: يضبط دور
                         // مستخدم الجهاز وصلاحياته الافتراضية ويبثّها فوراً.
-                        onRoleChanged: amITheOwner
+                        onRoleChanged: canManageMembers
                             ? (role) async {
                                 await repo.setDevicePermissions(
                                   d['id'] as String,

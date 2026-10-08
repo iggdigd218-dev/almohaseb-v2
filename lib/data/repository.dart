@@ -599,6 +599,29 @@ class Repo {
     }
   }
 
+  /// هل يحق لهذا الجهاز إدارة المجموعة وأعضائها؟
+  /// نعم للمالك (المدير العام) وللوكيل (UserRole.agent) أو من يملك صلاحية manage_users.
+  Future<bool> canManageGroup() async {
+    if (await isWorkspaceOwner()) return true;
+    try {
+      final me = await currentUser();
+      if (me != null &&
+          me.active &&
+          (me.role == UserRole.agent ||
+              me.role == UserRole.admin ||
+              me.can('manage_users'))) {
+        return true;
+      }
+      final assigned = await deviceAssignedUser();
+      if (assigned != null &&
+          assigned.active &&
+          (assigned.role == UserRole.agent || assigned.can('manage_users'))) {
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
   /// الجهاز الذي نحن عليه الآن (سجلنا في جدول devices).
   Future<Map<String, Object?>?> ownDeviceRow() async {
     if (_deviceId == null) return null;
@@ -617,32 +640,33 @@ class Repo {
     final row = await ownDeviceRow();
     if (row == null) return null;
     final uid = row['user_id'] as int?;
-    if (uid == null) {
-      // ══ (2026-09-22) العضو بلا مستخدم مُعيَّن لا يُقفل بالكامل ══
-      // تعيين المدير يصل عبر عملية مستخدم (EntityKind.user) في مساحة
-      // المجموعة؛ إن كانت المساحة خاطئة أو العملية لم تصل بعد ظلّ العضو
-      // بلا أي صلاحية (fail-closed) فتبدو «الصلاحيات لا تُطبق». الجسر:
-      // الدور المحفوظ في سجل الجهاز (user_role/role) يمنح الصلاحيات
-      // الافتراضية لدوره فوراً — بلا انتظار الشبكة — وهي نفسها التي
-      // يرسلها المدير لاحقاً.
-      final code = '${row['user_role'] ?? row['role'] ?? ''}'.trim();
-      if (code.isEmpty) return null;
-      final role = UserRole.values.firstWhere(
-        (r) => r.code == code,
-        orElse: () => UserRole.viewer,
-      );
-      return AppUser(
-        id: null,
-        name: '${row['name'] ?? 'عضو'}',
-        role: role,
-        permissions: defaultPerms(role),
-        active: true,
-        isMe: true,
-        createdAt: DateTime.now(),
-        updatedAt: DateTime.now(),
-      );
+    if (uid != null) {
+      final u = await userById(uid);
+      if (u != null) return u;
     }
-    return userById(uid);
+    // ══ (2026-09-22) العضو بلا مستخدم مُعيَّن لا يُقفل بالكامل ══
+    // تعيين المدير يصل عبر عملية مستخدم (EntityKind.user) في مساحة
+    // المجموعة؛ إن كانت المساحة خاطئة أو العملية لم تصل بعد ظلّ العضو
+    // بلا أي صلاحية (fail-closed) فتبدو «الصلاحيات لا تُطبق». الجسر:
+    // الدور المحفوظ في سجل الجهاز (user_role/role) يمنح الصلاحيات
+    // الافتراضية لدوره فوراً — بلا انتظار الشبكة — وهي نفسها التي
+    // يرسلها المدير لاحقاً.
+    final code = '${row['user_role'] ?? row['role'] ?? ''}'.trim();
+    if (code.isEmpty) return null;
+    final role = UserRole.values.firstWhere(
+      (r) => r.code == code,
+      orElse: () => UserRole.viewer,
+    );
+    return AppUser(
+      id: uid,
+      name: '${row['name'] ?? 'عضو'}',
+      role: role,
+      permissions: defaultPerms(role),
+      active: true,
+      isMe: true,
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
   }
 
   Future<AppUser?> userById(int id) async {
@@ -1736,42 +1760,86 @@ class Repo {
   }
 
   /// ترقية عضو إلى «وكيل المدير» (Deputy) — أعلى دور يُمنح لعضو، يقوم
-  /// بعمل المدير أثناء غيابه ويعتمد طلبات خروج الموظفين (المرحلة 5).
-  Future<void> promoteToDeputy(String email) async {
+  /// بعمل المدير أثناء غيابه ويعتمد طلبات خروج الموظفين ويدير الأعضاء (المرحلة 5).
+  Future<void> promoteToDeputy(
+    String email, {
+    int? userId,
+    String? deviceId,
+  }) async {
     final em = email.trim().toLowerCase();
-    if (em.isEmpty) return;
+    final fullPerms = kPerms.map((p) => p.key).toSet();
+    final full = fullPerms.join(',');
     final db = await _db;
-    final rows = await db.query('users',
-        where: 'LOWER(email) = ?', whereArgs: [em], limit: 1);
+
+    if (deviceId != null && deviceId.trim().isNotEmpty) {
+      try {
+        await setDevicePermissions(
+          deviceId.trim(),
+          UserRole.agent,
+          fullPerms,
+        );
+      } catch (_) {}
+    }
+
+    List<Map<String, Object?>> rows = const [];
+    if (userId != null) {
+      rows = await db.query('users',
+          where: 'id = ?', whereArgs: [userId], limit: 1);
+    }
+    if (rows.isEmpty && em.isNotEmpty) {
+      rows = await db.query('users',
+          where: 'LOWER(email) = ?', whereArgs: [em], limit: 1);
+    }
+    int? resolvedUid = userId;
     if (rows.isNotEmpty) {
-      final uid = rows.first['id'];
-      final full = kPerms.map((p) => p.key).join(',');
+      final uid = rows.first['id'] as int?;
+      resolvedUid = uid ?? resolvedUid;
+      final now = DateTime.now().toIso8601String();
       await db.update(
           'users',
           {
             'role': UserRole.agent.code,
             'permissions': full,
-            'updated_at': DateTime.now().toIso8601String(),
+            'active': 1,
+            'updated_at': now,
           },
           where: 'id = ?',
           whereArgs: [uid]);
+      if (uid != null) {
+        await db.update(
+          'devices',
+          {'updated_at': now},
+          where: 'user_id = ?',
+          whereArgs: [uid],
+        );
+      }
       final urow =
           await db.query('users', where: 'id = ?', whereArgs: [uid], limit: 1);
-      await queueOperation(
-        entityType: EntityKind.user,
-        entityId: '$uid',
-        opType: OpKind.update,
-        payload: Map<String, Object?>.from(urow.first),
+      if (urow.isNotEmpty) {
+        await queueOperation(
+          entityType: EntityKind.user,
+          entityId: '$uid',
+          opType: OpKind.update,
+          payload: Map<String, Object?>.from(urow.first),
+        );
+      }
+    }
+    final permEmail = em.isNotEmpty
+        ? em
+        : (resolvedUid != null
+            ? 'user_${resolvedUid}@$requireWorkspaceId.local'
+            : '');
+    if (permEmail.isNotEmpty) {
+      await upsertUserPermission(
+        email: permEmail,
+        role: UserRole.agent.code,
+        userId: resolvedUid,
+        canDiscount: true,
+        canDeleteTx: true,
+        canViewReports: true,
+        canManageItems: true,
       );
     }
-    await upsertUserPermission(
-      email: em,
-      role: UserRole.agent.code,
-      canDiscount: true,
-      canDeleteTx: true,
-      canViewReports: true,
-      canManageItems: true,
-    );
   }
 
   // ==================== سجل النشاط ====================

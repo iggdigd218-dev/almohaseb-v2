@@ -938,7 +938,7 @@ class SyncEngine {
   Future<void> broadcastEviction(String targetDeviceId,
       {String reason = 'revoked_by_manager'}) async {
     try {
-      if (!await repo.isWorkspaceOwner()) return;
+      if (!await repo.canManageGroup()) return;
       final st = await repo.settings();
       final url = effectiveBackendUrl(st['cloudBackendUrl']);
       if (url.isEmpty) return;

@@ -837,7 +837,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
   Future<void> _startGlobalJoinWatcher() async {
     try {
       final repo = ref.read(repoProvider);
-      if (!await repo.isWorkspaceOwner()) return;
+      if (!await repo.canManageGroup()) return;
       final st = await repo.settings();
       final url = effectiveBackendUrl(st['cloudBackendUrl']);
       if (url.isEmpty || !mounted) return;
@@ -861,7 +861,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
     if (!mounted || _joinSheetShowing) return;
     try {
       final repo = ref.read(repoProvider);
-      if (!await repo.isWorkspaceOwner()) return;
+      if (!await repo.canManageGroup()) return;
       final reqs = await CloudJoin.fetchJoinRequests(
         repo,
         backendUrl: url,
@@ -1199,12 +1199,19 @@ class _HomeShellState extends ConsumerState<HomeShell>
 
   void _go(AppScreen s) {
     final user = ref.read(currentUserProvider).valueOrNull;
+    final devRole = ref.read(deviceRoleProvider).valueOrNull?.role;
+    final canManageGroup =
+        ref.read(canManageGroupProvider).valueOrNull ?? false;
     final wsMode = ref.read(workspaceModeProvider).valueOrNull ?? 'standalone';
     final isOwnerAsync = ref.read(isOwnerProvider).valueOrNull;
     final isOwner = (wsMode == 'member') ? false : (isOwnerAsync ?? true);
-    final isAdmin = (wsMode == 'member')
-        ? false
-        : (isOwner || user?.role == UserRole.admin || user?.role == UserRole.agent);
+    final isDeputy = user?.role == UserRole.agent ||
+        devRole == UserRole.agent ||
+        canManageGroup;
+    final isAdmin = isDeputy ||
+        ((wsMode == 'member')
+            ? false
+            : (isOwner || user?.role == UserRole.admin));
     final isAccountant = user?.role == UserRole.accountant;
     bool can(String p) => isAdmin || (user?.can(p) ?? false);
 
@@ -1237,8 +1244,8 @@ class _HomeShellState extends ConsumerState<HomeShell>
       showSnack(context, 'النسخ الاحتياطي متاح لمدير النظام فقط', error: true);
       return;
     }
-    if (s == AppScreen.group && !isAdmin) {
-      showSnack(context, 'إدارة المجموعة متاحة لمدير النظام فقط', error: true);
+    if (s == AppScreen.group && !isAdmin && !isDeputy) {
+      showSnack(context, 'إدارة المجموعة متاحة لمدير النظام أو الوكيل فقط', error: true);
       return;
     }
 
@@ -2515,21 +2522,49 @@ class _Drawer extends ConsumerWidget {
     final role = roleAsync.valueOrNull;
     final navMode = ref.watch(navAppModeProvider);
 
-    final rawRole = user?.role ?? role?.role;
+    final canManageGroup =
+        ref.watch(canManageGroupProvider).valueOrNull ?? false;
+    final rawRole = user?.role ??
+        role?.role ??
+        (canManageGroup && !isOwner ? UserRole.agent : null);
     // حماية سيادية: مالك المنشأة على جهازه هو دائماً وأبداً مدير النظام!
     final effectiveRole = isOwner
         ? UserRole.admin
         : ((rawRole == UserRole.admin)
-            ? UserRole.cashier
-            : (rawRole ?? UserRole.cashier));
+            ? (canManageGroup ? UserRole.agent : UserRole.cashier)
+            : (rawRole ?? (canManageGroup ? UserRole.agent : UserRole.cashier)));
     final isMasterAdmin = (wsMode == 'member')
-        ? false
+        ? (effectiveRole == UserRole.agent || canManageGroup)
         : (isOwner || effectiveRole == UserRole.admin || effectiveRole == UserRole.agent);
 
-    // (3.70.0) «إدارة المجموعة» مشروطة بحساب Google موثّق (جدول google_auth).
+    final effectiveUser = (user != null && user.role == effectiveRole)
+        ? user
+        : (user != null
+            ? user.copyWith(
+                role: effectiveRole,
+                permissions: effectiveRole == UserRole.agent
+                    ? {for (final p in kPerms) p.key: true}
+                    : user.permissions,
+              )
+            : (effectiveRole == UserRole.agent
+                ? AppUser(
+                    name: 'وكيل المدير',
+                    role: UserRole.agent,
+                    permissions: {for (final p in kPerms) p.key: true},
+                    createdAt: DateTime.now(),
+                    updatedAt: DateTime.now(),
+                  )
+                : null));
+
+    // (3.70.0) «إدارة المجموعة» متاحة للمالك المرتبط بـ Google أو للوكيل في مجموعة نشطة.
     final googleLinked = ref.watch(googleLinkedProvider).valueOrNull ?? false;
+    final allowGroupInDrawer = googleLinked ||
+        effectiveRole == UserRole.agent ||
+        canManageGroup ||
+        wsMode == 'host' ||
+        wsMode == 'lan';
     final items = _DrawerItems.of(
-      user: user,
+      user: effectiveUser,
       isOwner: isOwner,
       workspaceMode: (wsMode == 'standalone' && googleLinked) ? 'host' : wsMode,
     );
@@ -2960,7 +2995,7 @@ class _Drawer extends ConsumerWidget {
                         AppScreen.transactions,
                       ],
                       items,
-                      googleLinked,
+                      allowGroupInDrawer,
                       current,
                       dark,
                       onSelect,
@@ -2977,7 +3012,7 @@ class _Drawer extends ConsumerWidget {
                         AppScreen.reports,
                       ],
                       items,
-                      googleLinked,
+                      allowGroupInDrawer,
                       current,
                       dark,
                       onSelect,
@@ -2995,7 +3030,7 @@ class _Drawer extends ConsumerWidget {
                       AppScreen.settings,
                     ],
                     items,
-                    googleLinked,
+                    allowGroupInDrawer,
                     current,
                     dark,
                     onSelect,
@@ -3075,7 +3110,7 @@ class _Drawer extends ConsumerWidget {
                                   Text(
                                     hasUpdate
                                         ? 'يتوفر تحديث جديد: ${info?.latest}'
-                                        : 'الإصدار $appVersionLabel (محدث)',
+                                        : '$appVersionLabel (محدث)',
                                     style: TextStyle(
                                       fontSize: 11,
                                       color: hasUpdate
@@ -3237,9 +3272,10 @@ class DrawerItems {
         final isAccountant = user?.role == UserRole.accountant;
         bool can(String p) => isAdmin || (user?.can(p) ?? false);
 
-        // إدارة المجموعة للمنشآت (وضع المضيف) فقط وتُحجب عن الحساب الفردي المستقل
+        // إدارة المجموعة للمنشآت (للمدير أو الوكيل) وتُحجب عن الحساب الفردي المستقل
         if (s == AppScreen.group) {
           if (standalone) return false;
+          if (user?.role == UserRole.agent) return true;
           return isAdmin && (isOwner || workspaceMode == 'host');
         }
         // قسم العمليات والمزامنة يُفتح من أيقونة المزامنة أعلى الشاشة فقط.

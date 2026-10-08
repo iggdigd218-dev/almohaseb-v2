@@ -66,6 +66,9 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
   Widget build(BuildContext context) {
     final devicesAsync = ref.watch(devicesProvider);
     final usersAsync = ref.watch(usersProvider);
+    final canManageAsync = ref.watch(canManageGroupProvider);
+    final currentUser = ref.watch(currentUserProvider).valueOrNull;
+    final devRole = ref.watch(deviceRoleProvider).valueOrNull?.role;
 
     // (دفعة 58) سحب للأسفل = تحديث فوري للبيانات.
     return RefreshIndicator(
@@ -104,7 +107,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  'بصفتك مديراً يمكنك ربط أجهزة أخرى بهذه المساحة وتحديد صلاحيات كل جهاز (عبر تعيين مستخدم له). إلغاء الاقتران يمنع الجهاز من المزامنة فوراً.',
+                  'بصفتك مديراً أو وكيلاً يمكنك ربط أجهزة أخرى بهذه المساحة وتحديد صلاحيات كل جهاز (عبر تعيين مستخدم له). إلغاء الاقتران يمنع الجهاز من المزامنة فوراً.',
                   style: TextStyle(fontSize: 12, height: 1.5),
                 ),
               ],
@@ -148,6 +151,10 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
                 final ownId = own?['id'] as String?;
                 final amITheOwner =
                     own != null && ((own['is_owner'] ?? 0) as int) == 1;
+                final canManageMembers = amITheOwner ||
+                    (canManageAsync.valueOrNull ?? false) ||
+                    currentUser?.role == UserRole.agent ||
+                    devRole == UserRole.agent;
                 final hostRow = list
                     .where((r) => ((r['is_owner'] ?? 0) as int) == 1)
                     .toList();
@@ -162,11 +169,11 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
                             .cast<AppUser>(),
                         isSelf: d['id'] == ownId,
                         isOwnerDevice: d['id'] == hostId,
-                        amITheOwner: amITheOwner,
+                        amITheOwner: canManageMembers,
                         onAssign: (uid) => _assign(uid, d['id'] as String),
                         // (دفعة 56) تغيير الدور من البطاقة مباشرة —
                         // حفظ فوري محلياً + بث للسحابة + تحديث الواجهة.
-                        onRoleChanged: amITheOwner
+                        onRoleChanged: canManageMembers
                             ? (role) async {
                                 await repo.setDevicePermissions(
                                   d['id'] as String,
@@ -183,9 +190,13 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
                                       .broadcastRosterChange();
                                 } catch (_) {}
                                 Sfx.success();
-                                bump(ref);
+                                if (mounted) bump(ref);
                               }
                             : null,
+                        onPermissions: () async {
+                          await showDevicePermissionsDialog(context, ref, d);
+                          if (mounted) bump(ref);
+                        },
                         onRename: () => _rename(
                           d['id'] as String,
                           (d['name'] ?? '') as String,

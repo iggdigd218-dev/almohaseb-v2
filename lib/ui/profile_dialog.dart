@@ -219,6 +219,7 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
         await repo.renameSelfDevice(gu.displayName!.trim());
       }
       _emailCtrl.text = gu.email;
+      if (!mounted) return;
 
       ref.invalidate(googleLinkedProvider);
       ref.invalidate(drawerPhotoProvider);
@@ -228,7 +229,6 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
       ref.invalidate(workspaceModeProvider);
       bump(ref);
 
-      if (!mounted) return;
       setState(() => _linkedEmail = gu.email);
       Sfx.success();
 
@@ -343,6 +343,10 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
       );
       final savedWs = (await repo.settings())['pendingJoin.ws'] ?? targetWs;
       if (!mounted) return;
+      ProviderContainer? container;
+      try {
+        container = ProviderScope.containerOf(context, listen: false);
+      } catch (_) {}
       final nav = Navigator.of(context);
       nav.pop(); // إغلاق نافذة الحساب قبل فتح شاشة انتظار موافقة المدير
       await nav.push(
@@ -355,10 +359,19 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
           ),
         ),
       );
-      ref.invalidate(workspaceModeProvider);
-      ref.invalidate(isOwnerProvider);
-      ref.invalidate(currentUserProvider);
-      bump(ref);
+      if (container != null) {
+        container.invalidate(workspaceModeProvider);
+        container.invalidate(isOwnerProvider);
+        container.invalidate(canManageGroupProvider);
+        container.invalidate(currentUserProvider);
+        container.read(refreshProvider.notifier).state++;
+      } else if (mounted) {
+        ref.invalidate(workspaceModeProvider);
+        ref.invalidate(isOwnerProvider);
+        ref.invalidate(canManageGroupProvider);
+        ref.invalidate(currentUserProvider);
+        bump(ref);
+      }
     } on CloudJoinException catch (e) {
       Sfx.error();
       if (mounted) showSnack(context, e.message, error: true);
@@ -409,12 +422,11 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
       }
       final repo = ref.read(repoProvider);
       await repo.setSyncedSetting('org.icon.b64', b64);
+      if (!mounted) return;
       ref.invalidate(drawerPhotoProvider);
       bump(ref);
       Sfx.pop();
-      if (mounted) {
-        showSnack(context, '✅ تم تحديث الشعار بنجاح');
-      }
+      showSnack(context, '✅ تم تحديث الشعار بنجاح');
     } catch (e) {
       if (mounted) showSnack(context, 'تعذّر رفع الشعار: $e', error: true);
     } finally {
@@ -429,10 +441,11 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
     try {
       final repo = ref.read(repoProvider);
       await repo.setSyncedSetting('org.icon.b64', '');
+      if (!mounted) return;
       ref.invalidate(drawerPhotoProvider);
       bump(ref);
       Sfx.pop();
-      if (mounted) showSnack(context, 'تم حذف الشعار');
+      showSnack(context, 'تم حذف الشعار');
     } catch (e) {
       if (mounted) showSnack(context, 'تعذّر حذف الشعار: $e', error: true);
     } finally {
@@ -520,12 +533,11 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
         }
       }
 
+      if (!mounted) return;
       bump(ref);
       Sfx.success();
-      if (mounted) {
-        Navigator.pop(context);
-        showSnack(context, 'تم حفظ التعديلات بنجاح ✅');
-      }
+      Navigator.pop(context);
+      showSnack(context, 'تم حفظ التعديلات بنجاح ✅');
     } catch (e) {
       if (mounted) {
         setState(() => _saving = false);
@@ -545,7 +557,9 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
             _linkedEmail.isNotEmpty;
     final st = ref.watch(settingsProvider).valueOrNull ?? const {};
     final isIndividual = (st[Repo.accountModeKey] ?? '') == 'individual';
-    final canDirectLogout = isOwner || isIndividual;
+    final canManageGroup =
+        ref.watch(canManageGroupProvider).valueOrNull ?? isOwner;
+    final canDirectLogout = isOwner || isIndividual || canManageGroup;
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     const fallback = Icon(Icons.person, color: Colors.white, size: 34);
@@ -978,8 +992,9 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
             foregroundColor: AppColors.dangerOf(context),
           ),
           onPressed: () {
+            final future = showSecuredLogout(ref);
             Navigator.pop(context);
-            showSecuredLogout(ref);
+            unawaited(future);
           },
           icon: Icon(
             canDirectLogout ? Icons.logout_rounded : Icons.exit_to_app_rounded,
