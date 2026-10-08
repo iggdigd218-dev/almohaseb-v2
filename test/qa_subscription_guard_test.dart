@@ -668,21 +668,23 @@ void main() {
 
   group('تحصين المصادقة وقواعد فايربيس (Auth & Hardened Rules)', () {
     tearDown(() {
-      FirebaseAuthRest.setMockTokenForTest(null);
+      FirebaseAuthRest.clearMockForTest();
     });
 
     test('SubscriptionGuard يرفق ?auth=<idToken> مع طلبات RTDB عند توفر التوكن',
         () async {
-      FirebaseAuthRest.setMockTokenForTest('tok_guard_test_123',
-          uid: 'uid_guard_1');
+      FirebaseAuthRest.setMockTokenForTest(
+        token: 'tok_guard_test_123',
+        uid: 'uid_guard_1',
+      );
       expect(FirebaseAuthRest.currentUid, 'uid_guard_1');
 
+      final cloud = _FakeRtdb();
+      SubscriptionGuard.debugServerNowOverride = (_) async => cloud.serverClock;
       final observedAuthParams = <String?>[];
-      final innerClient = cloud.client;
+      final innerClient = cloud.client();
       final wrappedClient = MockClient((req) async {
-        if (req.url.host == 'fake.rtdb.local') {
-          observedAuthParams.add(req.url.queryParameters['auth']);
-        }
+        observedAuthParams.add(req.url.queryParameters['auth']);
         return innerClient.send(req).then(http.Response.fromStream);
       });
 
@@ -694,7 +696,7 @@ void main() {
           workspaceId: 'ws_auth_test',
           force: true,
         ),
-        wrappedClient,
+        () => wrappedClient,
       );
 
       expect(observedAuthParams, isNotEmpty);

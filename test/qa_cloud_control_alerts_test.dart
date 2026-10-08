@@ -135,29 +135,39 @@ void main() {
     });
 
     test('CTL-06 CloudControlService يرفق ?auth=<idToken> مع طلبات RTDB', () async {
-      FirebaseAuthRest.setMockTokenForTest('tok_ctl_999', uid: 'uid_ctl_999');
-      addTearDown(() => FirebaseAuthRest.setMockTokenForTest(null));
+      FirebaseAuthRest.setMockTokenForTest(
+        token: 'tok_ctl_999',
+        uid: 'uid_ctl_999',
+      );
+      addTearDown(FirebaseAuthRest.clearMockForTest);
 
       String? capturedAuth;
       final client = MockClient((req) async {
         capturedAuth = req.url.queryParameters['auth'];
         return http.Response.bytes(
           utf8.encode(jsonEncode({
-            'whatsapp': '+967777000000',
-            'email': 'support@nexora.app',
+            'm1': {
+              'sender': 'admin',
+              'text': 'مرحباً بك',
+              'timestamp': 1700000000000,
+            },
           })),
           200,
           headers: {'content-type': 'application/json; charset=utf-8'},
         );
       });
 
-      final info = await http.runWithClient(
-        () => CloudControlService.instance.fetchSupportInfo(),
+      final msgs = await http.runWithClient(
+        () => CloudControlService.instance.fetchSupportMessages(
+          'https://qa-trial.firebaseio.com',
+          'ws_ctl',
+        ),
         () => client,
       );
 
       expect(capturedAuth, 'tok_ctl_999');
-      expect(info['whatsapp'], '+967777000000');
+      expect(msgs, hasLength(1));
+      expect(msgs.first.text, 'مرحباً بك');
     });
 
     test('CTL-07 قواعد فايربيس محصنة وتحصر الحقول السيادية بالمدير حصراً', () {
