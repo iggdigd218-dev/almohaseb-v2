@@ -336,7 +336,7 @@ void main() {
         // ساعة جهاز DEV-B متأخرة محلياً لكن وقت الخادم server_time أحدث!
         deviceTime: '2020-01-01T00:00:00.000Z',
         timestamp: '2020-01-01T00:00:00.000Z',
-        serverTimeMs: 1760000099000,
+        serverTime: '1760000099000',
         payload: {'id': 10, 'name': 'الاسم الأحدث حسب وقت الخادم'},
       );
       const localLatestOp = SyncOperation(
@@ -351,7 +351,7 @@ void main() {
         version: 5,
         deviceTime: '2026-01-01T00:00:00.000Z',
         timestamp: '2026-01-01T00:00:00.000Z',
-        serverTimeMs: 1760000010000,
+        serverTime: '1760000010000',
         payload: {'id': 10, 'name': 'الاسم القديم'},
       );
 
