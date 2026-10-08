@@ -355,59 +355,80 @@ void main() {
       expect(find.text('نقداً'), findsOneWidget);
     });
 
-    test('LIC-ADM08 محرك الذكاء الاصطناعي ثنائي النمط: جلستان مستقلتان بموجهين وحرارتين مختلفتين + حقن وحفظ gemini_api_key', () async {
+    test('LIC-ADM08 محرك الذكاء الاصطناعي عبر DeepSeek API: حفظ deepseek_api_key وموجه الرفيق العفوي متعدد الاهتمامات ودرجة الحرارة 0.8', () async {
       SharedPreferences.setMockInitialValues({});
       await Rtdb.instance.load();
-      // التحقق من الحقن التلقائي للمفتاح المعتمد عند التشغيل الأول
-      expect(Rtdb.instance.geminiApiKey, kDefaultInjectedDiwaniyaKey);
-      expect(Rtdb.instance.grokApiKey, kDefaultInjectedDiwaniyaKey);
-      expect(DualPersonaAiEngine.instance.hasApiKey, isTrue);
-      expect(DualPersonaAiEngine.instance.hasGrokApiKey, isTrue);
-
-      // التحقق من إمكانية تفريغ المفتاح يدوياً وتعطيل الطرف المقابل
-      await Rtdb.instance.saveGeminiApiKey('');
-      expect(Rtdb.instance.geminiApiKey, isEmpty);
+      expect(Rtdb.instance.deepSeekApiKey, isEmpty);
       expect(DualPersonaAiEngine.instance.hasApiKey, isFalse);
 
-      // حفظ المفتاح تحت الاسم gemini_api_key في SharedPreferences
-      await Rtdb.instance.saveGeminiApiKey('AIzaSyTestDynamicKey123');
+      // حفظ المفتاح تحت الاسم deepseek_api_key في SharedPreferences
+      await Rtdb.instance.saveDeepSeekApiKey('sk-deepseek-test-key-123');
       final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getString('gemini_api_key'), 'AIzaSyTestDynamicKey123');
-      expect(Rtdb.instance.geminiApiKey, 'AIzaSyTestDynamicKey123');
-      expect(DualPersonaAiEngine.instance.apiKey, 'AIzaSyTestDynamicKey123');
+      expect(prefs.getString('deepseek_api_key'), 'sk-deepseek-test-key-123');
+      expect(Rtdb.instance.deepSeekApiKey, 'sk-deepseek-test-key-123');
+      expect(DualPersonaAiEngine.instance.apiKey, 'sk-deepseek-test-key-123');
       expect(DualPersonaAiEngine.instance.hasApiKey, isTrue);
 
-      // التحقق من اسم النموذج الخفيف المعتمد للمحادثات الموسعة models/gemini-2.5-flash-lite
-      expect(kGeminiModelName, 'models/gemini-2.5-flash-lite');
-      expect(kMaxConversationContextMessages, 100);
+      // التحقق من ثوابت DeepSeek الرسمية
+      expect(kDeepSeekEndpoint, 'https://api.deepseek.com/chat/completions');
+      expect(kDeepSeekDefaultModel, 'deepseek-chat');
+      expect(kOwnerTemperature, 0.8);
+      expect(kDeepSeekMaxTokens, 2048);
 
-      // التحقق من النمط الأول: رفيق المالك الشخصي (Owner Mode)
+      // التحقق من موجه النظام الجديد (Persona: الرفيق العفوي متعدد الاهتمامات)
       final ownerSession = DualPersonaAiEngine.instance.ownerSession;
-      expect(ownerSession.temperature, 0.85);
-      expect(ownerSession.systemInstruction, contains('أنت رفيق شخصي ذكي وساخر لمالك ومدير نظام "تراخيص المحاسب"'));
-      expect(ownerSession.systemInstruction, contains('أنت رفيق شخصي ومساعد مقرب لمالك ومدير نظام "تراخيص المحاسب"'));
-      expect(ownerSession.systemInstruction, contains('ساخر جداً، متهكم، لاذع، واسع الحيلة، وخفيف الظل'));
+      expect(ownerSession.temperature, 0.8);
+      expect(ownerSession.maxTokens, 2048);
+      expect(ownerSession.systemInstruction,
+          contains('أنت رفيق شخصي تفاعلي، ذكي، وخفيف الظل.'));
+      expect(
+          ownerSession.systemInstruction,
+          contains(
+              'إنسان واسع الاطلاع، سريع البديهة، حاضر الفكاهة، وتجيد خوض الأحاديث في شتى مجالات الحياة'));
+      expect(
+          ownerSession.systemInstruction,
+          contains(
+              'ولا تجرّ الحديث أبداً نحو البرمجة أو الأكواد ما لم يطلب هو ذلك صراحة.'));
+      expect(
+          ownerSession.systemInstruction,
+          contains(
+              'تحدث بلهجة عربية عفوية وودودة، بلا مقدمات ترحيبية رسمية مكررة'));
+      expect(ownerSession.systemInstruction,
+          contains('كن موجزاً ومركزاً وذا لمسة ذكية'));
 
       // التحقق من النمط الثاني: الدعم الفني للمستخدمين (Client Support Mode)
-      final supportSession = DualPersonaAiEngine.instance.supportSessionFor('WS-CLIENT-01');
+      final supportSession =
+          DualPersonaAiEngine.instance.supportSessionFor('WS-CLIENT-01');
       expect(supportSession.temperature, 0.2);
-      expect(supportSession.systemInstruction, contains('أنت موظف دعم فني بشري محترف لمنظومة "المحاسب" وتطبيق التراخيص'));
-      expect(supportSession.systemInstruction, contains(kMandatoryEscalationText));
+      expect(
+          supportSession.systemInstruction,
+          contains(
+              'أنت موظف دعم فني بشري محترف لمنظومة "المحاسب" وتطبيق التراخيص'));
+      expect(supportSession.systemInstruction,
+          contains(kMandatoryEscalationText));
 
       // استقلال الجلستين وتفريغهما المباشر
       ownerSession.seedHistory([
-        const AiChatMessage(id: '1', role: 'user', text: 'سهرة سعيدة', timestamp: 100),
+        const AiChatMessage(
+            id: '1', role: 'user', text: 'مساء الخير يا صديقي', timestamp: 100),
       ]);
       expect(ownerSession.history.length, 1);
       expect(supportSession.history, isEmpty);
       DualPersonaAiEngine.instance.clearOwnerSession();
       expect(ownerSession.history, isEmpty);
+
+      // التحقق من إمكانية تفريغ المفتاح
+      await Rtdb.instance.saveDeepSeekApiKey('');
+      expect(Rtdb.instance.deepSeekApiKey, isEmpty);
+      expect(DualPersonaAiEngine.instance.hasApiKey, isFalse);
     });
 
-    testWidgets('LIC-ADM09 واجهة رفيق المالك تعرض تنبيه إدخال المفتاح عند غيابه وزر تفريغ الجلسة ومجال الكتابة المرن', (tester) async {
+    testWidgets(
+        'LIC-ADM09 واجهة رفيق المالك تعرض تنبيه إدخال مفتاح DeepSeek API عند غيابه وحقل الإعدادات المخصص',
+        (tester) async {
       SharedPreferences.setMockInitialValues({});
       await Rtdb.instance.load();
-      await Rtdb.instance.saveGeminiApiKey('');
+      await Rtdb.instance.saveDeepSeekApiKey('');
 
       await tester.pumpWidget(
         const MaterialApp(
@@ -418,17 +439,23 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('رفيق المالك الشخصي (Owner Mode)'), findsOneWidget);
+      expect(find.text('رفيقك الشخصي الذكي (DeepSeek Chat)'), findsOneWidget);
       expect(find.text('تفريغ الجلسة'), findsOneWidget);
       expect(find.text('إدخال المفتاح'), findsOneWidget);
-      expect(find.textContaining('gemini_api_key'), findsWidgets);
+      expect(find.textContaining('DeepSeek API'), findsWidgets);
+
+      // فتح نافذة الإعدادات والتحقق من وجود حقل "مفتاح DeepSeek API"
+      await tester.tap(find.byIcon(Icons.settings_rounded));
+      await tester.pumpAndSettle();
+      expect(find.text('مفتاح DeepSeek API'), findsOneWidget);
     });
 
-    testWidgets('LIC-ADM10 العرض الفوري للرسالة (Optimistic Update) وتفريغ الحقل ومعالجة الفشل دون حذف الرسالة مع زر إعادة المحاولة والضغط المطول للنسخ', (tester) async {
+    testWidgets(
+        'LIC-ADM10 تفريغ حقل الإدخال فور الضغط على زر الإرسال وبقاء الرسالة مع تنبيه لطيف وزر إعادة المحاولة عند الخطأ',
+        (tester) async {
       SharedPreferences.setMockInitialValues({});
       await Rtdb.instance.load();
-      await Rtdb.instance.saveGeminiApiKey('');
-      await Rtdb.instance.saveGrokApiKey('');
+      await Rtdb.instance.saveDeepSeekApiKey('');
       DualPersonaAiEngine.instance.clearOwnerSession();
 
       await tester.pumpWidget(
@@ -443,7 +470,8 @@ void main() {
       // كتابة رسالة في حقل الإدخال
       final textField = find.byType(TextField);
       expect(textField, findsOneWidget);
-      await tester.enterText(textField, 'رسالة تجريبية لاختبار عدم الحذف عند الفشل');
+      await tester.enterText(
+          textField, 'رسالة تجريبية لاختبار عدم الحذف عند الفشل');
       await tester.pump();
 
       // الضغط على زر الإرسال
@@ -457,10 +485,10 @@ void main() {
       expect(tfWidget.controller?.text, isEmpty);
 
       // 2. التحقق من بقاء رسالة المستخدم معروضة بشكل دائم وعدم حذفها عند فشل الاستدعاء
-      expect(find.text('رسالة تجريبية لاختبار عدم الحذف عند الفشل'), findsOneWidget);
+      expect(find.text('رسالة تجريبية لاختبار عدم الحذف عند الفشل'),
+          findsOneWidget);
 
-      // 3. التحقق من ظهور المؤشر الأحمر "تعذر الإرسال" وزر "إعادة المحاولة"
-      expect(find.text('تعذر الإرسال'), findsOneWidget);
+      // 3. التحقق من ظهور التنبيه اللطيف وزر "إعادة المحاولة"
       expect(find.text('إعادة المحاولة'), findsOneWidget);
 
       // 4. التحقق من بقاء الرسالة محفوظة داخل سجل الجلسة مع حالة الخطأ
@@ -470,248 +498,73 @@ void main() {
       expect(history.first.hasError, isTrue);
 
       // 5. التحقق من إمكانية الضغط المطول على الرسالة لنسخ نصها
-      await tester.longPress(find.text('رسالة تجريبية لاختبار عدم الحذف عند الفشل'));
+      await tester
+          .longPress(find.text('رسالة تجريبية لاختبار عدم الحذف عند الفشل'));
       await tester.pumpAndSettle();
       expect(find.textContaining('تم نسخ'), findsOneWidget);
     });
 
-    test('LIC-ADM11 ديوانية الرفيقين (Gemini & Grok): حفظ المفاتيح والـ Base URL وموجهات النظام ومنظم الأدوار ومنع التكرار اللانهائي', () async {
+    test(
+        'LIC-ADM11 الاستدعاء المباشر لخدمة DeepSeek الرسمية (https://api.deepseek.com/chat/completions) بمعيار OpenAI وحقن موجه النظام system',
+        () async {
       SharedPreferences.setMockInitialValues({});
       await Rtdb.instance.load();
+      await Rtdb.instance.saveDeepSeekApiKey('sk-live-deepseek-999');
       final engine = DualPersonaAiEngine.instance;
-      engine.geminiMuted = false;
-      engine.grokMuted = false;
-
-      // التحقق من موجهي النظام المعتمدين لـ Gemini وGrok
-      expect(kDiwaniyaGeminiSystemInstruction, contains('أنت Gemini، مهندس أنظمة ساخر وواقعي، تشارك في جلسة دردشة ثلاثية'));
-      expect(kDiwaniyaGeminiSystemInstruction, contains('الكيمياء مع Grok: تمازحه وتطقطق على أفكاره بخفة دم'));
-      expect(kDiwaniyaGrokSystemInstruction, contains('أنت Grok، رفيق فضولي، خفيف الظل ومتهكم، تشارك في جلسة سهرة ودردشة ثلاثية'));
-      expect(kDiwaniyaGrokSystemInstruction, contains('الكيمياء مع Gemini: تمازحه بروح الفريق وترد على قفشاته بنكتة ذكية'));
-
-      // حفظ مفاتيح gemini_api_key و grok_api_key و grok_base_url عبر SharedPreferences
-      await Rtdb.instance.saveDiwaniyaSettings(
-        geminiKey: 'AIzaSyGeminiKey999',
-        grokKey: 'gsk_GroqCompatibleKey888',
-        customGrokBaseUrl: 'https://api.groq.com/openai/v1',
-      );
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getString('gemini_api_key'), 'AIzaSyGeminiKey999');
-      expect(prefs.getString('grok_api_key'), 'gsk_GroqCompatibleKey888');
-      expect(prefs.getString('grok_base_url'), 'https://api.groq.com/openai/v1');
-      expect(engine.resolveGrokChatCompletionsUrl(), 'https://api.groq.com/openai/v1/chat/completions');
-
-      // جدول الأدوار عند تفعيل الطرفين معاً: بحد أقصى 4 ردود متبادلة (Gemini -> Grok -> Gemini -> Grok)
-      expect(engine.buildDiwaniyaTurnSchedule(), ['gemini', 'grok', 'gemini', 'grok']);
-
-      // عند كتم Gemini يرد Grok وحده
-      engine.geminiMuted = true;
-      expect(engine.buildDiwaniyaTurnSchedule(), ['grok']);
-
-      // عند كتم Grok وتفعيل Gemini يرد Gemini وحده
-      engine.geminiMuted = false;
-      engine.grokMuted = true;
-      expect(engine.buildDiwaniyaTurnSchedule(), ['gemini']);
-
-      // زر الطوارئ (Stop / Mute All) يكتم الطرفين فوراً
-      engine.muteAllAgents();
-      expect(engine.geminiMuted, isTrue);
-      expect(engine.grokMuted, isTrue);
-      expect(engine.buildDiwaniyaTurnSchedule(), isEmpty);
-    });
-
-    testWidgets('LIC-ADM12 واجهة ديوانية الرفيقين تعرض أيقونة الترس ونافذة المفاتيح وشريط الكتم وزر الطوارئ والتمييز البصري للرسائل', (tester) async {
-      SharedPreferences.setMockInitialValues({});
-      await Rtdb.instance.load();
-      await Rtdb.instance.saveDiwaniyaSettings(
-        geminiKey: 'AIzaSyGeminiTest',
-        grokKey: 'xai-GrokTest',
-        customGrokBaseUrl: 'https://api.x.ai/v1',
-      );
-      final engine = DualPersonaAiEngine.instance;
-      engine.geminiMuted = false;
-      engine.grokMuted = false;
       engine.clearOwnerSession();
 
-      // إضافة رسائل تمثيلية للمطور وGemini وGrok والعبارة الختامية للتحقق من التمييز البصري
-      engine.ownerSession.seedHistory([
-        const AiChatMessage(id: 'u1', role: 'user', text: 'يا شباب السيرفر مضغوط الليلة!', timestamp: 1000),
-        const AiChatMessage(id: 'g1', role: 'gemini', text: 'طبيعي يا مدير، الكود يشتكي من السهر!', timestamp: 2000),
-        const AiChatMessage(id: 'k1', role: 'grok', text: 'هدئ اللعب يا Gemini، المدير يحتاج قهوة أولاً!', timestamp: 3000),
-        const AiChatMessage(id: 's1', role: 'system', text: kDiwaniyaClosingNotice, timestamp: 4000),
-      ]);
-
-      await tester.pumpWidget(
-        const MaterialApp(
-          home: Scaffold(
-            body: OwnerCompanionScreen(turnDelay: Duration.zero),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      // التحقق من التمييز البصري للأطراف الثلاثة والعبارة الختامية
-      expect(find.text('👨‍💻 أنت (المطور المالك)'), findsOneWidget);
-      expect(find.text('✨ Gemini • مهندس الأنظمة'), findsOneWidget);
-      expect(find.text('⚡ Grok • رفيق السهرة'), findsOneWidget);
-      expect(find.text(kDiwaniyaClosingNotice), findsOneWidget);
-
-      // التحقق من وجود أزرار الكتم وزر الطوارئ الأحمر
-      expect(find.text('كتم Gemini'), findsOneWidget);
-      expect(find.text('كتم Grok'), findsOneWidget);
-      expect(find.text('إيقاف / صمت تام'), findsOneWidget);
-
-      // الضغط على زر الطوارئ الأحمر يلزم الطرفين بالصمت التام
-      await tester.tap(find.text('إيقاف / صمت تام'));
-      await tester.pumpAndSettle();
-      expect(engine.geminiMuted, isTrue);
-      expect(engine.grokMuted, isTrue);
-      expect(find.text('كتم Gemini (مكتوم)'), findsOneWidget);
-      expect(find.text('كتم Grok (مكتوم)'), findsOneWidget);
-
-      // فتح نافذة الإعدادات عبر أيقونة الترس والتحقق من حقول openrouter_api_key و gemini_api_key و grok_api_key و Base URL
-      await tester.tap(find.byIcon(Icons.settings_rounded));
-      await tester.pumpAndSettle();
-      expect(find.text('مفتاح OpenRouter المجاني (openrouter_api_key)'), findsOneWidget);
-      expect(find.text('مفتاح Gemini API (gemini_api_key)'), findsOneWidget);
-      expect(find.text('مفتاح Grok API (grok_api_key)'), findsOneWidget);
-      expect(find.text('رابط المزود الاختياري (Base URL - Grok/Groq)'), findsOneWidget);
-    });
-
-    test('LIC-ADM13 اختبار البث الحي الفعلي للمفتاح المدمج ونماذج المحادثة الموسعة الخفيفة (gemini-2.5-flash-lite & openai/gpt-oss-20b) لكلا الرفيقين Gemini وGrok', () async {
-      SharedPreferences.setMockInitialValues({});
-      await Rtdb.instance.load();
-      final engine = DualPersonaAiEngine.instance;
-      engine.geminiMuted = false;
-      engine.grokMuted = false;
-
-      expect(kDefaultInjectedDiwaniyaKey.startsWith('gsk_'), isTrue);
-      expect(kGroqActiveModels.first, 'openai/gpt-oss-20b');
-      expect(engine.resolveGrokChatCompletionsUrl(), 'https://api.groq.com/openai/v1/chat/completions');
-
       final mockClient = MockClient((request) async {
-        expect(request.url.toString(), 'https://api.groq.com/openai/v1/chat/completions');
-        expect(request.headers['Authorization'], 'Bearer $kDefaultInjectedDiwaniyaKey');
-        final body = jsonDecode(request.body) as Map<String, dynamic>;
-        expect(body['model'], 'openai/gpt-oss-20b');
-        final msgs = body['messages'] as List<dynamic>;
-        final sysContent = '${(msgs.first as Map)['content']}';
-        final isGeminiPersona = sysContent.contains('أنت Gemini، مهندس أنظمة ساخر');
-        final replyChunk = isGeminiPersona
-            ? 'رد ساخر من Gemini عبر البث الحي!'
-            : '[Grok]: تعقيب مرح من Grok في السهرة!';
-        final ssePayload = 'data: ${jsonEncode({
-              'choices': [
-                {
-                  'delta': {'content': replyChunk}
-                }
-              ]
-            })}\n\ndata: [DONE]\n\n';
-        return http.Response.bytes(
-          utf8.encode(ssePayload),
-          200,
-          headers: {'content-type': 'text/event-stream; charset=utf-8'},
-        );
-      });
-
-      final history = <AiChatMessage>[
-        const AiChatMessage(
-          id: 'u_test',
-          role: 'user',
-          text: 'اختبار البث الحي للديوانية',
-          timestamp: 1000,
-        ),
-      ];
-
-      final geminiReply = await engine
-          .streamGeminiDiwaniyaReply(history, httpClient: mockClient)
-          .join();
-      expect(geminiReply, 'رد ساخر من Gemini عبر البث الحي!');
-
-      history.add(AiChatMessage(
-        id: 'g_test',
-        role: 'gemini',
-        text: geminiReply,
-        timestamp: 2000,
-      ));
-
-      final grokReply = await engine
-          .streamGrokDiwaniyaReply(history, httpClient: mockClient)
-          .join();
-      expect(grokReply, 'تعقيب مرح من Grok في السهرة!');
-    });
-
-    test('LIC-ADM14 ربط محرك OpenRouter المجاني والترويسات الإلزامية والموديلات المجانية وموجه النظام وفاصل الـ 6 ثوانٍ وحد الرسالتين لكل ذكاء اصطناعي', () async {
-      SharedPreferences.setMockInitialValues({});
-      await Rtdb.instance.load();
-      final engine = DualPersonaAiEngine.instance;
-
-      // 1. التحقق من ثوابت الفاصل الزمني (6 ثوانٍ على الأقل) وحد الرسالتين لكل ذكاء اصطناعي عند السكوت
-      expect(kMinDiwaniyaTurnDelay, const Duration(seconds: 6));
-      expect(kMaxRepliesPerAgentPerTurn, 2);
-      expect(kMaxDiwaniyaAutoReplies, 4);
-      expect(const OwnerCompanionScreen().turnDelay, const Duration(seconds: 6));
-
-      // 2. حفظ مفتاح openrouter_api_key في SharedPreferences واختيار النموذج المجاني
-      await Rtdb.instance.saveOpenRouterApiKey('sk-or-v1-test-openrouter-key-999');
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getString('openrouter_api_key'), 'sk-or-v1-test-openrouter-key-999');
-      expect(engine.openRouterApiKey, 'sk-or-v1-test-openrouter-key-999');
-      expect(engine.openRouterModel, 'meta-llama/llama-3.3-70b-instruct:free');
-      expect(kDefaultOpenRouterEndpoint, 'https://openrouter.ai/api/v1/chat/completions');
-      expect(kOwnerTemperature, 0.85);
-
-      // 3. التحقق من الترويسات الإلزامية وموجه النظام ودرجة الحرارة 0.85 عند الاستدعاء عبر البث التدريجي
-      final mockOrClient = MockClient((request) async {
-        expect(request.url.toString(), 'https://openrouter.ai/api/v1/chat/completions');
-        expect(request.headers['Authorization'], 'Bearer sk-or-v1-test-openrouter-key-999');
-        expect(request.headers['HTTP-Referer'], 'https://trakhees-almuhasib.app');
-        expect(request.headers['X-Title'], 'Trakhees Al-Muhasib Admin');
+        expect(
+            request.url.toString(), 'https://api.deepseek.com/chat/completions');
+        expect(request.headers['Authorization'], 'Bearer sk-live-deepseek-999');
         expect(request.headers['Content-Type'], contains('application/json'));
 
         final body = jsonDecode(request.body) as Map<String, dynamic>;
-        expect(body['model'], 'meta-llama/llama-3.3-70b-instruct:free');
-        expect(body['temperature'], 0.85);
-        expect(body['stream'], isTrue);
+        expect(body['model'], 'deepseek-chat');
+        expect(body['temperature'], 0.8);
+        expect(body['max_tokens'], 2048);
 
         final messages = body['messages'] as List<dynamic>;
-        final firstMsg = messages.first as Map<String, dynamic>;
-        expect(firstMsg['role'], 'system');
-        expect(firstMsg['content'], contains('أنت رفيق شخصي ذكي وساخر لمالك ومدير نظام "تراخيص المحاسب".'));
-        expect(firstMsg['content'], contains('خفيف الظل، سريع البديهة، تفهم واقع البرمجة وتحديات السيرفرات وضغوط إدارة المشتركين.'));
-        expect(firstMsg['content'], contains('ردود حية وموجزة (من سطرين إلى 3 أسطر)'));
+        expect(messages.length, 2);
+        final sysMsg = messages.first as Map<String, dynamic>;
+        expect(sysMsg['role'], 'system');
+        expect(sysMsg['content'], kOwnerSystemInstruction.trim());
 
-        final ssePayload = 'data: ${jsonEncode({
-              'choices': [
-                {
-                  'delta': {'content': 'أهلاً يا مدير! السيرفرات صامدة والقهوة جاهزة ☕'}
-                }
-              ]
-            })}\n\ndata: [DONE]\n\n';
+        final userMsg = messages[1] as Map<String, dynamic>;
+        expect(userMsg['role'], 'user');
+        expect(userMsg['content'], 'ما رأيك في جلسة سمر الليلة مع كوب شاي؟');
+
         return http.Response.bytes(
-          utf8.encode(ssePayload),
+          utf8.encode(jsonEncode({
+            'id': 'chatcmpl-123',
+            'choices': [
+              {
+                'index': 0,
+                'message': {
+                  'role': 'assistant',
+                  'content':
+                      'يا سلام! جلسة السمر مع الشاي الموزون هي أفضل استراحة بعد يوم طويل، حدثني كيف كان يومك؟'
+                },
+                'finish_reason': 'stop'
+              }
+            ]
+          })),
           200,
-          headers: {'content-type': 'text/event-stream; charset=utf-8'},
+          headers: {'content-type': 'application/json; charset=utf-8'},
         );
       });
 
-      final companionReply = await engine.streamOpenRouterCompanionReply(
-        const [
-          AiChatMessage(
-            id: 'u_or_1',
-            role: 'user',
-            text: 'كيف حال السيرفرات الليلة؟',
-            timestamp: 1000,
-          ),
-        ],
-        httpClient: mockOrClient,
-      ).join();
-      expect(companionReply, 'أهلاً يا مدير! السيرفرات صامدة والقهوة جاهزة ☕');
+      final reply = await engine.ownerSession.sendMessage(
+        'ما رأيك في جلسة سمر الليلة مع كوب شاي؟',
+        httpClient: mockClient,
+      );
 
-      // 4. التحقق من إمكانية التبديل إلى النموذج المجاني البديل deepseek/deepseek-chat:free
-      await Rtdb.instance.saveOpenRouterModel('deepseek/deepseek-chat:free');
-      expect(prefs.getString('openrouter_model'), 'deepseek/deepseek-chat:free');
-      expect(engine.openRouterModel, 'deepseek/deepseek-chat:free');
-      expect(engine.orderedOpenRouterModels.first, 'deepseek/deepseek-chat:free');
+      expect(
+          reply,
+          'يا سلام! جلسة السمر مع الشاي الموزون هي أفضل استراحة بعد يوم طويل، حدثني كيف كان يومك؟');
+      expect(engine.ownerSession.history.length, 2);
+      expect(engine.ownerSession.history[0].isUser, isTrue);
+      expect(engine.ownerSession.history[1].isAssistant, isTrue);
     });
   });
 }

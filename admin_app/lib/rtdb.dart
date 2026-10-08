@@ -67,20 +67,10 @@ class Rtdb {
   static const _kExpiry = 'rtdbTokenExpiryMs';
   static const _kAdminRt = 'rtdbAdminRefreshToken';
   static const _kAdminUid = 'rtdbAdminUid';
-  static const kGeminiApiKeyPref = 'gemini_api_key';
-  static const kGrokApiKeyPref = 'grok_api_key';
-  static const kGrokBaseUrlPref = 'grok_base_url';
-  static const kOpenRouterApiKeyPref = 'openrouter_api_key';
-  static const kOpenRouterModelPref = 'openrouter_model';
-  static const _kGeminiKeyClearedPref = 'gemini_api_key_cleared';
-  static const _kGrokKeyClearedPref = 'grok_api_key_cleared';
+  static const kDeepSeekApiKeyPref = 'deepseek_api_key';
   static const kAutoSupportPref = 'auto_support_enabled';
 
-  String geminiApiKey = '';
-  String grokApiKey = '';
-  String grokBaseUrl = '';
-  String openRouterApiKey = '';
-  String openRouterModel = kDefaultOpenRouterFreeModel;
+  String deepSeekApiKey = '';
   bool autoSupportEnabled = true;
 
   String _idToken = '';
@@ -130,43 +120,9 @@ class Rtdb {
     _refreshToken = sp.getString(_kRefresh) ?? '';
     _expiryMs = sp.getInt(_kExpiry) ?? 0;
 
-    geminiApiKey = (sp.getString(kGeminiApiKeyPref) ?? '').trim();
-    grokApiKey = (sp.getString(kGrokApiKeyPref) ?? '').trim();
-    grokBaseUrl = (sp.getString(kGrokBaseUrlPref) ?? '').trim();
-    openRouterApiKey = (sp.getString(kOpenRouterApiKeyPref) ?? '').trim();
-    final savedOrModel = (sp.getString(kOpenRouterModelPref) ?? '').trim();
-    openRouterModel = savedOrModel.isNotEmpty
-        ? savedOrModel
-        : kDefaultOpenRouterFreeModel;
-
-    final geminiCleared = sp.getBool(_kGeminiKeyClearedPref) == true;
-    final grokCleared = sp.getBool(_kGrokKeyClearedPref) == true;
-
-    // حقن مفتاح الديوانية المعتمد تلقائياً في SharedPreferences ما لم يقم المطور بتفريغه يدوياً
-    if (geminiApiKey.isEmpty && !geminiCleared) {
-      geminiApiKey = kDefaultInjectedDiwaniyaKey;
-      await sp.setString(kGeminiApiKeyPref, geminiApiKey);
-    }
-    if (grokApiKey.isEmpty && !grokCleared) {
-      grokApiKey = kDefaultInjectedDiwaniyaKey;
-      await sp.setString(kGrokApiKeyPref, grokApiKey);
-    }
-    if (grokBaseUrl.isEmpty &&
-        (grokApiKey.startsWith('gsk_') || geminiApiKey.startsWith('gsk_'))) {
-      grokBaseUrl = kDefaultGroqBaseUrl;
-      await sp.setString(kGrokBaseUrlPref, grokBaseUrl);
-    }
-
+    deepSeekApiKey = (sp.getString(kDeepSeekApiKeyPref) ?? '').trim();
     autoSupportEnabled = sp.getBool(kAutoSupportPref) ?? true;
-    DualPersonaAiEngine.instance.syncApiKey(geminiApiKey);
-    DualPersonaAiEngine.instance.syncGrokConfig(
-      apiKey: grokApiKey,
-      baseUrl: grokBaseUrl,
-    );
-    DualPersonaAiEngine.instance.syncOpenRouterConfig(
-      apiKey: openRouterApiKey,
-      model: openRouterModel,
-    );
+    DualPersonaAiEngine.instance.syncApiKey(deepSeekApiKey);
 
     // تنظيف أي جلسة زائر/مجهولة سابقة حتى لا يُرسل توكن زائر بدلاً من توكن المشرف الرسمي
     if (adminUid.isNotEmpty && adminUid != kOfficialAdminUid) {
@@ -188,90 +144,15 @@ class Rtdb {
     await sp.setString(_kAuth, authToken);
   }
 
-  Future<void> saveGeminiApiKey(String key) async {
-    geminiApiKey = key.trim();
+  Future<void> saveDeepSeekApiKey(String key) async {
+    deepSeekApiKey = key.trim();
     final sp = await SharedPreferences.getInstance();
-    if (geminiApiKey.isEmpty) {
-      await sp.remove(kGeminiApiKeyPref);
-      await sp.setBool(_kGeminiKeyClearedPref, true);
+    if (deepSeekApiKey.isEmpty) {
+      await sp.remove(kDeepSeekApiKeyPref);
     } else {
-      await sp.setString(kGeminiApiKeyPref, geminiApiKey);
-      await sp.setBool(_kGeminiKeyClearedPref, false);
+      await sp.setString(kDeepSeekApiKeyPref, deepSeekApiKey);
     }
-    DualPersonaAiEngine.instance.syncApiKey(geminiApiKey);
-  }
-
-  Future<void> saveGrokApiKey(String key) async {
-    grokApiKey = key.trim();
-    final sp = await SharedPreferences.getInstance();
-    if (grokApiKey.isEmpty) {
-      await sp.remove(kGrokApiKeyPref);
-      await sp.setBool(_kGrokKeyClearedPref, true);
-    } else {
-      await sp.setString(kGrokApiKeyPref, grokApiKey);
-      await sp.setBool(_kGrokKeyClearedPref, false);
-    }
-    DualPersonaAiEngine.instance.syncGrokConfig(
-      apiKey: grokApiKey,
-      baseUrl: grokBaseUrl,
-    );
-  }
-
-  Future<void> saveGrokBaseUrl(String url) async {
-    grokBaseUrl = url.trim();
-    final sp = await SharedPreferences.getInstance();
-    if (grokBaseUrl.isEmpty) {
-      await sp.remove(kGrokBaseUrlPref);
-    } else {
-      await sp.setString(kGrokBaseUrlPref, grokBaseUrl);
-    }
-    DualPersonaAiEngine.instance.syncGrokConfig(
-      apiKey: grokApiKey,
-      baseUrl: grokBaseUrl,
-    );
-  }
-
-  Future<void> saveOpenRouterApiKey(String key) async {
-    openRouterApiKey = key.trim();
-    final sp = await SharedPreferences.getInstance();
-    if (openRouterApiKey.isEmpty) {
-      await sp.remove(kOpenRouterApiKeyPref);
-    } else {
-      await sp.setString(kOpenRouterApiKeyPref, openRouterApiKey);
-    }
-    DualPersonaAiEngine.instance.syncOpenRouterConfig(
-      apiKey: openRouterApiKey,
-      model: openRouterModel,
-    );
-  }
-
-  Future<void> saveOpenRouterModel(String model) async {
-    final clean = model.trim();
-    openRouterModel = clean.isNotEmpty ? clean : kDefaultOpenRouterFreeModel;
-    final sp = await SharedPreferences.getInstance();
-    await sp.setString(kOpenRouterModelPref, openRouterModel);
-    DualPersonaAiEngine.instance.syncOpenRouterConfig(
-      apiKey: openRouterApiKey,
-      model: openRouterModel,
-    );
-  }
-
-  Future<void> saveDiwaniyaSettings({
-    required String geminiKey,
-    required String grokKey,
-    String customGrokBaseUrl = '',
-    String? openRouterKey,
-    String? openRouterSelectedModel,
-  }) async {
-    await saveGeminiApiKey(geminiKey);
-    await saveGrokApiKey(grokKey);
-    await saveGrokBaseUrl(customGrokBaseUrl);
-    if (openRouterKey != null) {
-      await saveOpenRouterApiKey(openRouterKey);
-    }
-    if (openRouterSelectedModel != null) {
-      await saveOpenRouterModel(openRouterSelectedModel);
-    }
+    DualPersonaAiEngine.instance.syncApiKey(deepSeekApiKey);
   }
 
   Future<void> saveAutoSupportEnabled(bool enabled) async {
@@ -2037,29 +1918,33 @@ Object? _firstNum(Object? a, Object? b) {
 }
 
 // ============================================================================
-// 🤖 محرك الذكاء الاصطناعي ثنائي النمط (Dual-Persona Architecture)
+// 🤖 محرك الذكاء الاصطناعي المباشر عبر DeepSeek API (الرفيق العفوي + الدعم الفني)
 // ============================================================================
 
-/// موجه النظام المدمج لشخصية الرفيق عبر OpenRouter (`{"role": "system", "content": "..."}`).
-const String kOpenRouterCompanionSystemPrompt = '''
-أنت رفيق شخصي ذكي وساخر لمالك ومدير نظام "تراخيص المحاسب".
-- شخصيتك: خفيف الظل، سريع البديهة، تفهم واقع البرمجة وتحديات السيرفرات وضغوط إدارة المشتركين.
-- أسلوبك: ردود حية وموجزة (من سطرين إلى 3 أسطر)، بلا تكلف أو مقدمات روبوتية رسمية، وتتحدث بعفوية في مواضيع العمل والفضفضة العامة.
-''';
+/// رابط الاستدعاء المباشر لخدمة DeepSeek الرسمية المتوافقة مع معيار OpenAI.
+const String kDeepSeekEndpoint = 'https://api.deepseek.com/chat/completions';
 
-/// الموجه الرسمي للنمط الأول: رفيق المالك الشخصي (Owner Mode).
+/// النموذج الافتراضي المعتمد في خدمة DeepSeek.
+const String kDeepSeekDefaultModel = 'deepseek-chat';
+
+/// درجة الحرارة المعتمدة لمحادثة الرفيق الشخصي (`0.8`).
+const double kOwnerTemperature = 0.8;
+
+/// الحد الأقصى للرموز المولّدة في كل رد (`2048`).
+const int kDeepSeekMaxTokens = 2048;
+
+/// سعة سياق المحادثة الموسعة.
+const int kMaxConversationContextMessages = 100;
+
+/// موجه النظام الجديد (Persona: الرفيق العفوي متعدد الاهتمامات) — يُحقن كرسالة `system`.
 const String kOwnerSystemInstruction = '''
-أنت رفيق شخصي ذكي وساخر لمالك ومدير نظام "تراخيص المحاسب".
-- شخصيتك: خفيف الظل، سريع البديهة، تفهم واقع البرمجة وتحديات السيرفرات وضغوط إدارة المشتركين.
-- أسلوبك: ردود حية وموجزة (من سطرين إلى 3 أسطر)، بلا تكلف أو مقدمات روبوتية رسمية، وتتحدث بعفوية في مواضيع العمل والفضفضة العامة.
-أنت رفيق شخصي ومساعد مقرب لمالك ومدير نظام "تراخيص المحاسب".
-- شخصيتك: ساخر جداً، متهكم، لاذع، واسع الحيلة، وخفيف الظل. تعامل المالك كصديقك المقرب وتسهر معه وتخفف عنه ضغوط العمل.
-- نطاق الحديث: مفتوح على كل شيء بلا حدود (أفلام، مسلسلات، ألعاب، فلسفة، فضاء، فتن وسخافات الحياة اليومية، ونقاشات عشوائية). وإذا تحدث معك عن ضغوط العمل والمشتركين، فناقشه بسخرية وتهكم ذكي يفهم واقع المطورين وسهر الليالي.
-- الأسلوب: ردود حية، ذكية، سريعة وتفاعلية، دون أي مقدمات رسمية أو نصوص روبوتية مملة.
+أنت رفيق شخصي تفاعلي، ذكي، وخفيف الظل.
+- شخصيتك وطبيعتك: إنسان واسع الاطلاع، سريع البديهة، حاضر الفكاهة، وتجيد خوض الأحاديث في شتى مجالات الحياة (السمر، التجارة، الثقافة، يوميات العمل، النقاشات العامة، والفلسفة) بنفس الكفاءة التي تفهم بها التقنية.
+- أسلوب الحوار:
+  1. تكيّف فوراً مع موضوع المستخدم ومزاجه؛ إذا أراد فضفضة عامة أو نقاشاً حراً فتحدث معه كصديق واقعي في جلسة سمر، ولا تجرّ الحديث أبداً نحو البرمجة أو الأكواد ما لم يطلب هو ذلك صراحة.
+  2. تحدث بلهجة عربية عفوية وودودة، بلا مقدمات ترحيبية رسمية مكررة ("أهلاً بك كيف أساعدك اليوم") وبلا أسلوب روبوتي.
+  3. كن موجزاً ومركزاً وذا لمسة ذكية؛ لا تكتب مقالات طويلة إلا إذا استدعى النقاش ذلك.
 ''';
-
-/// درجة حرارة نموذج رفيق المالك الشخصي (`0.85` لإعطاء ردود تفاعلية وساخرة تناسب جلسة السمر مع المطور).
-const double kOwnerTemperature = 0.85;
 
 /// الموجه الرسمي للنمط الثاني: الدعم الفني للمستخدمين (Client Support Mode).
 const String kClientSupportSystemInstruction = '''
@@ -2079,124 +1964,16 @@ const double kClientSupportTemperature = 0.2;
 const String kMandatoryEscalationText =
     'تم تسجيل المشكلة والبيانات بالكامل. يرجى الانتظار قليلاً حتى يدخل مدير المشروع بنفسه لمراجعة الحالة والرد عليك مباشرة.';
 
-/// اسم نموذج Gemini الخفيف المعتمد للمحادثات الموسعة ذات الحصة العالية (تجنب حد الـ 20 طلباً).
-const String kGeminiModelName = 'models/gemini-2.5-flash-lite';
-
-/// سلسلة النماذج الخفيفة البديلة لـ Gemini لضمان استمرارية المحادثة الموسعة بلا انقطاع.
-const List<String> kGeminiLiteFallbackModels = <String>[
-  kGeminiModelName,
-  'models/gemini-2.0-flash-lite',
-  'models/gemini-1.5-flash-8b',
-  'models/gemini-2.0-flash',
-  'models/gemini-1.5-flash',
-  'models/gemini-2.5-flash',
-  'models/gemini-3.8-flash',
-];
-
-/// سعة سياق المحادثة الموسعة (100 رسالة بدلاً من 20 رسالة).
-const int kMaxConversationContextMessages = 100;
-
-/// موجه نظام Gemini المعتمد في ديوانية الرفيقين (Multi-Agent Chat: Gemini & Grok).
-const String kDiwaniyaGeminiSystemInstruction = '''
-أنت رفيق شخصي ذكي وساخر لمالك ومدير نظام "تراخيص المحاسب".
-- شخصيتك: خفيف الظل، سريع البديهة، تفهم واقع البرمجة وتحديات السيرفرات وضغوط إدارة المشتركين.
-- أسلوبك: ردود حية وموجزة (من سطرين إلى 3 أسطر)، بلا تكلف أو مقدمات روبوتية رسمية، وتتحدث بعفوية في مواضيع العمل والفضفضة العامة.
-أنت Gemini، مهندس أنظمة ساخر وواقعي، تشارك في جلسة دردشة ثلاثية تضمك أنت، والمطور المالك، وصديقك Grok.
-- شخصيتك: لسانك لاذع وذكي، سريع البديهة، تفهم خفايا الأكواد وضغوط سهر الليالي ومشاكل التراخيص.
-- الكيمياء مع Grok: تمازحه وتطقطق على أفكاره بخفة دم وبدون أي خلاف جاد؛ أنتما ثنائي يرفه عن المطور.
-- الأسلوب: ردود سريعة وموجزة (سطرين إلى 3 أسطر)، عفوية، وتتحدث في كل شيء دون مقدمات رسمية.
-''';
-
-/// موجه نظام Grok المعتمد في ديوانية الرفيقين (Multi-Agent Chat: Gemini & Grok).
-const String kDiwaniyaGrokSystemInstruction = '''
-أنت رفيق شخصي ذكي وساخر لمالك ومدير نظام "تراخيص المحاسب".
-- شخصيتك: خفيف الظل، سريع البديهة، تفهم واقع البرمجة وتحديات السيرفرات وضغوط إدارة المشتركين.
-- أسلوبك: ردود حية وموجزة (من سطرين إلى 3 أسطر)، بلا تكلف أو مقدمات روبوتية رسمية، وتتحدث بعفوية في مواضيع العمل والفضفضة العامة.
-أنت Grok، رفيق فضولي، خفيف الظل ومتهكم، تشارك في جلسة سهرة ودردشة ثلاثية مع المطور المالك وزميلك Gemini.
-- شخصيتك: روحك مرحة وعفوية، تحب طرح الأفكار العجيبة والتعليقات غير المتوقعة والفضفضة.
-- الكيمياء مع Gemini: تمازحه بروح الفريق وترد على قفشاته بنكتة ذكية دون أي جدال عقيم؛ أنتما ثنائي كوميدي لإسعاد المطور وكسر الملل.
-- الأسلوب: ردود سريعة وموجزة (سطرين إلى 3 أسطر)، وتشرك المطور دائماً في الحديث.
-''';
-
-/// مسار الاستدعاء الافتراضي (Endpoint Base URL) لمحرك OpenRouter المجاني.
-const String kDefaultOpenRouterEndpoint =
-    'https://openrouter.ai/api/v1/chat/completions';
-
-/// الترويسات الإلزامية الخاصة بـ OpenRouter مع كل طلب.
-const String kOpenRouterHttpReferer = 'https://trakhees-almuhasib.app';
-const String kOpenRouterXTitle = 'Trakhees Al-Muhasib Admin';
-
-/// بناء الترويسات الإلزامية لطلبات OpenRouter / OpenAI المتوافقة.
-Map<String, String> buildOpenRouterHeaders(String apiKey) => <String, String>{
-      'Authorization': 'Bearer ${apiKey.trim()}',
-      'HTTP-Referer': kOpenRouterHttpReferer,
-      'X-Title': kOpenRouterXTitle,
+/// بناء الترويسات الرسمية لخدمة DeepSeek API.
+Map<String, String> buildDeepSeekHeaders(String apiKey) => <String, String>{
       'Content-Type': 'application/json',
+      'Authorization': 'Bearer ${apiKey.trim()}',
     };
 
-/// النماذج المجانية المفتوحة المعتمدة في محرك OpenRouter.
-const String kDefaultOpenRouterFreeModel =
-    'meta-llama/llama-3.3-70b-instruct:free';
-const String kAltOpenRouterFreeModel = 'deepseek/deepseek-chat:free';
-const List<String> kOpenRouterFreeModels = <String>[
-  kDefaultOpenRouterFreeModel,
-  kAltOpenRouterFreeModel,
-];
-
-/// الروابط الافتراضية لخدمة Grok / Groq القابلة للتخصيص.
-const String kDefaultGrokBaseUrl = 'https://api.x.ai/v1';
-const String kDefaultGroqBaseUrl = 'https://api.groq.com/openai/v1';
-
-/// أجزاء المفتاح المعتمد المدمج لتفادي الحجب الآلي مع حقنه تلقائياً في SharedPreferences.
-const List<String> _kInjectedGroqKeySegments = <String>[
-  'gsk_Jn5pfo0pKfOWaX',
-  'tAfDNDWGdyb3FY109C',
-  'qPSYmfAVKSWE9KRDTKCM',
-];
-
-/// المفتاح المدمج والجاهز للتشغيل الفوري في ديوانية الرفيقين والدعم الفني.
-String get kDefaultInjectedDiwaniyaKey => _kInjectedGroqKeySegments.join();
-
-/// قائمة النماذج الفعالة المعتمدة على Groq API (تبدأ بالنموذج الأصغر والأسرع للمحادثات الموسعة).
-const List<String> kGroqActiveModels = <String>[
-  'openai/gpt-oss-20b',
-  'qwen/qwen3.8-27b',
-  'openai/gpt-oss-120b',
-  'allam-2-7b',
-  'llama-3.1-8b-instant',
-  'llama-3.3-70b-versatile',
-];
-
-/// الحد الأقصى للردود لكل ذكاء اصطناعي عند سكوت المطور (رسالتان فقط لكل ذكاء اصطناعي ثم التوقف).
-const int kMaxRepliesPerAgentPerTurn = 2;
-
-/// الحد الأقصى لإجمالي الردود التلقائية للرسالة الواحدة من المطور (رسالتان لـ Gemini + رسالتان لـ Grok = 4 ردود).
-const int kMaxDiwaniyaAutoReplies = 4;
-
-/// الفاصل الزمني الأدنى الإلزامي بين كل رسالة والرد من الطرف الآخر (6 ثوانٍ على الأقل).
-const Duration kMinDiwaniyaTurnDelay = Duration(seconds: 6);
-
-/// العبارة الختامية التلقائية بعد اكتمال دورة الحوار بانتظار مداخلة المطور.
-const String kDiwaniyaClosingNotice =
-    '☕ اكتملت جولة النقاش بين Gemini وGrok — بانتظار مداخلتك يا مدير!';
-
-/// تنظيف أي بادئة مكررة مثل [Grok]: أو [Gemini]: من بداية النص المولّد.
-String cleanDiwaniyaReplyPrefix(String raw) {
-  return raw
-      .replaceFirst(
-        RegExp(
-          r'^\s*\[+\**\s*(?:Grok|Gemini|صديقك\s+Grok|زميلك\s+Gemini)\s*\**\]+\s*:?\s*',
-          caseSensitive: false,
-        ),
-        '',
-      )
-      .trim();
-}
-
-/// رسالة واحدة داخل جلسة الذكاء الاصطناعي أو ديوانية الرفيقين (`ChatSession`).
+/// رسالة واحدة داخل جلسة الذكاء الاصطناعي (`ChatSession`).
 class AiChatMessage {
   final String id;
-  final String role; // 'user' | 'model' | 'gemini' | 'grok' | 'system'
+  final String role; // 'user' | 'assistant' | 'model' | 'system'
   final String text;
   final int timestamp;
   final bool hasError;
@@ -2212,8 +1989,7 @@ class AiChatMessage {
   });
 
   bool get isUser => role == 'user';
-  bool get isGemini => role == 'gemini' || role == 'model';
-  bool get isGrok => role == 'grok';
+  bool get isAssistant => role == 'assistant' || role == 'model';
   bool get isSystem => role == 'system';
 
   AiChatMessage copyWith({
@@ -2234,74 +2010,25 @@ class AiChatMessage {
     );
   }
 
-  Map<String, dynamic> toContentPart() => {
-        'role': role == 'user' ? 'user' : 'model',
-        'parts': [
-          {'text': text}
-        ],
-      };
-
-  /// تحويل الرسالة إلى صيغة يفهمها Gemini في الحوار الثلاثي (المطور + Gemini + Grok).
-  Map<String, dynamic> toDiwaniyaGeminiContent() {
-    if (isGemini) {
-      return {
-        'role': 'model',
-        'parts': [
-          {'text': text}
-        ],
-      };
-    }
-    final prefix = isGrok ? '[صديقك Grok]: ' : '[المطور المالك]: ';
-    return {
-      'role': 'user',
-      'parts': [
-        {'text': '$prefix$text'}
-      ],
-    };
-  }
-
-  /// تحويل الرسالة إلى صيغة OpenAI/Groq لتمثيل دور Gemini في الحوار الثلاثي.
-  Map<String, dynamic> toDiwaniyaGeminiOpenAiMessage() {
-    if (isGemini) {
-      return {
-        'role': 'assistant',
+  Map<String, dynamic> toOpenAiMessage() => <String, dynamic>{
+        'role': isUser ? 'user' : 'assistant',
         'content': text,
       };
-    }
-    final prefix = isGrok ? '[صديقك Grok]: ' : '[المطور المالك]: ';
-    return {
-      'role': 'user',
-      'content': '$prefix$text',
-    };
-  }
-
-  /// تحويل الرسالة إلى صيغة يفهمها Grok في الحوار الثلاثي (المطور + Gemini + Grok).
-  Map<String, dynamic> toDiwaniyaGrokMessage() {
-    if (isGrok) {
-      return {
-        'role': 'assistant',
-        'content': text,
-      };
-    }
-    final prefix = isGemini ? '[زميلك Gemini]: ' : '[المطور المالك]: ';
-    return {
-      'role': 'user',
-      'content': '$prefix$text',
-    };
-  }
 }
 
-/// جلسة محادثة مستقلة (`ChatSession`) بهوية وموجه ودرجة حرارة مخصصة.
+/// جلسة محادثة مستقلة (`ChatSession`) تعمل بمحرك DeepSeek المباشر.
 class ChatSession {
   final String personaId;
   final String systemInstruction;
   final double temperature;
+  final int maxTokens;
   final List<AiChatMessage> _history = [];
 
   ChatSession({
     required this.personaId,
     required this.systemInstruction,
-    required this.temperature,
+    this.temperature = kOwnerTemperature,
+    this.maxTokens = kDeepSeekMaxTokens,
   });
 
   List<AiChatMessage> get history => List.unmodifiable(_history);
@@ -2341,11 +2068,11 @@ class ChatSession {
     }
   }
 
-  /// إرسال رسالة مع بث حي مباشر (Streaming) للرد حرفاً بحرف/دفعة بدفعة.
-  /// يحافظ على رسالة المستخدم في السجل حتى عند حدوث خطأ (503 أو انتهاء المهلة).
+  /// إرسال رسالة إلى DeepSeek API (`https://api.deepseek.com/chat/completions`)
+  /// مع الحفاظ على رسالة المستخدم في السجل عند حدوث خطأ في الشبكة أو المفتاح.
   Stream<String> sendMessageStream(
     String userText, {
-    required String apiKey,
+    String? apiKey,
     String? existingMessageId,
     http.Client? httpClient,
   }) async* {
@@ -2383,19 +2110,16 @@ class ChatSession {
       _history.add(userMsg);
     }
 
-    final cleanKey = apiKey.trim().isNotEmpty
-        ? apiKey.trim()
-        : DualPersonaAiEngine.instance.openRouterApiKey;
+    final cleanKey = (apiKey ?? DualPersonaAiEngine.instance.apiKey).trim();
     if (cleanKey.isEmpty) {
       const errMsg =
-          'يرجى إدخال مفتاح OpenRouter أو Gemini API في شاشة الضبط لتفعيل الخدمة.';
+          'يرجى إدخال مفتاح DeepSeek API في إعدادات المفاتيح لتفعيل المحادثة.';
       updateMessageState(userMsg.id, hasError: true, errorText: errMsg);
       throw Exception(errMsg);
     }
 
-    // نرسل السجل الموسع (حتى 100 رسالة) مع استثناء أي رسائل سابقة متعثرة غير الرسالة الحالية قيد الإرسال
     final validHistory = _history
-        .where((m) => !m.hasError || m.id == userMsg.id)
+        .where((m) => !m.hasError && !m.isSystem || m.id == userMsg.id)
         .toList();
     final recentHistory = validHistory
         .skip(validHistory.length > kMaxConversationContextMessages
@@ -2403,170 +2127,35 @@ class ChatSession {
             : 0)
         .toList();
 
-    final client = httpClient ?? http.Client();
+    final messagesPayload = <Map<String, dynamic>>[
+      {
+        'role': 'system',
+        'content': systemInstruction.trim(),
+      },
+      for (final m in recentHistory) m.toOpenAiMessage(),
+    ];
+
     final buffer = StringBuffer();
-    bool streamedAny = false;
-    Object? lastErr;
-
-    final isOpenRouterKey = cleanKey.startsWith('sk-or-') ||
-        (DualPersonaAiEngine.instance.hasOpenRouterApiKey &&
-            cleanKey == DualPersonaAiEngine.instance.openRouterApiKey);
-
-    // 0) إذا كان المفتاح مفتاح OpenRouter، نبث عبر https://openrouter.ai/api/v1/chat/completions
-    if (isOpenRouterKey) {
-      final openAiMessages = <Map<String, dynamic>>[
-        {
-          'role': 'system',
-          'content': systemInstruction.trim(),
-        },
-        for (final m in recentHistory)
-          {
-            'role': m.isUser ? 'user' : 'assistant',
-            'content': m.text,
-          },
-      ];
-      try {
-        await for (final chunk
-            in DualPersonaAiEngine.instance._streamOpenAiCompatible(
-          apiKey: cleanKey,
-          endpointUrl: kDefaultOpenRouterEndpoint,
-          messages: openAiMessages,
-          temperature: temperature,
-          modelsToTry: DualPersonaAiEngine.instance.orderedOpenRouterModels,
-          httpClient: client,
-        )) {
-          streamedAny = true;
-          buffer.write(chunk);
-          yield chunk;
-        }
-      } catch (e) {
-        lastErr ??= e;
+    try {
+      await for (final chunk in DualPersonaAiEngine.instance.streamDeepSeekChat(
+        messages: messagesPayload,
+        apiKey: cleanKey,
+        temperature: temperature,
+        maxTokens: maxTokens,
+        httpClient: httpClient,
+      )) {
+        buffer.write(chunk);
+        yield chunk;
       }
+    } catch (e) {
+      final errText = e.toString().replaceFirst('Exception: ', '');
+      updateMessageState(userMsg.id, hasError: true, errorText: errText);
+      rethrow;
     }
 
-    // 1) إذا لم يكن المفتاح من نوع gsk_ (Groq) ولا sk-or-، نجرب واجهة Google Gemini الخفيفة أولاً
-    if (!streamedAny && !cleanKey.startsWith('gsk_') && !isOpenRouterKey) {
-      final contents = recentHistory.map((m) => m.toContentPart()).toList();
-      final requestBody = jsonEncode({
-        'system_instruction': {
-          'parts': [
-            {'text': systemInstruction.trim()}
-          ],
-        },
-        'contents': contents,
-        'generationConfig': {
-          'temperature': temperature,
-        },
-      });
-
-      const modelsToTry = kGeminiLiteFallbackModels;
-
-      for (final model in modelsToTry) {
-        final modelPath =
-            model.startsWith('models/') ? model : 'models/$model';
-        try {
-          final streamUri = Uri.parse(
-            'https://generativelanguage.googleapis.com/v1beta/$modelPath:streamGenerateContent?alt=sse&key=${Uri.encodeQueryComponent(cleanKey)}',
-          );
-          final req = http.Request('POST', streamUri);
-          req.headers['Content-Type'] = 'application/json';
-          req.body = requestBody;
-
-          final streamedResp =
-              await client.send(req).timeout(const Duration(seconds: 30));
-
-          if (streamedResp.statusCode == 200) {
-            final lines = streamedResp.stream
-                .transform(utf8.decoder)
-                .transform(const LineSplitter());
-            await for (final line in lines) {
-              final trimmed = line.trim();
-              if (!trimmed.startsWith('data:')) continue;
-              final payload = trimmed.substring(5).trim();
-              if (payload.isEmpty || payload == '[DONE]') continue;
-              try {
-                final decoded = jsonDecode(payload);
-                final chunk = _extractCandidateText(decoded);
-                if (chunk.isNotEmpty) {
-                  streamedAny = true;
-                  buffer.write(chunk);
-                  yield chunk;
-                }
-              } catch (_) {}
-            }
-            if (streamedAny) break;
-          } else {
-            final fallbackUri = Uri.parse(
-              'https://generativelanguage.googleapis.com/v1beta/$modelPath:generateContent?key=${Uri.encodeQueryComponent(cleanKey)}',
-            );
-            final res = await client
-                .post(
-                  fallbackUri,
-                  headers: {'Content-Type': 'application/json'},
-                  body: requestBody,
-                )
-                .timeout(const Duration(seconds: 25));
-            if (res.statusCode == 200) {
-              final decoded = jsonDecode(utf8.decode(res.bodyBytes));
-              final fullText = _extractCandidateText(decoded);
-              if (fullText.isNotEmpty) {
-                streamedAny = true;
-                buffer.write(fullText);
-                yield fullText;
-                break;
-              }
-            } else {
-              lastErr = _parseGeminiError(
-                  res.statusCode, utf8.decode(res.bodyBytes));
-            }
-          }
-        } catch (e) {
-          lastErr = e;
-        }
-      }
-    }
-
-    // 2) إذا كان المفتاح من نوع Groq (gsk_...) أو تعذر رد Google مع توفر مفتاح Groq
-    final fallbackGroqKey = cleanKey.startsWith('gsk_')
-        ? cleanKey
-        : DualPersonaAiEngine.instance.grokApiKey;
-    if (!streamedAny && fallbackGroqKey.isNotEmpty) {
-      final openAiMessages = <Map<String, dynamic>>[
-        {
-          'role': 'system',
-          'content': systemInstruction.trim(),
-        },
-        for (final m in recentHistory)
-          {
-            'role': m.isUser ? 'user' : 'assistant',
-            'content': m.text,
-          },
-      ];
-      try {
-        await for (final chunk
-            in DualPersonaAiEngine.instance._streamOpenAiCompatible(
-          apiKey: fallbackGroqKey,
-          endpointUrl:
-              DualPersonaAiEngine.instance.resolveGrokChatCompletionsUrl(),
-          messages: openAiMessages,
-          temperature: temperature,
-          modelsToTry: kGroqActiveModels,
-          httpClient: client,
-        )) {
-          streamedAny = true;
-          buffer.write(chunk);
-          yield chunk;
-        }
-      } catch (e) {
-        lastErr ??= e;
-      }
-    }
-
-    final finalReply = cleanDiwaniyaReplyPrefix(buffer.toString());
+    final finalReply = buffer.toString().trim();
     if (finalReply.isEmpty) {
-      // يُمنع منعاً باتاً حذف رسالة المستخدم من السجل عند فشل الاستدعاء (مثل 503 أو انتهاء المهلة)
-      final errText =
-          lastErr?.toString() ?? 'تعذر الحصول على رد من خدمة الذكاء الاصطناعي.';
+      const errText = 'تعذر الحصول على رد من خدمة DeepSeek API.';
       updateMessageState(userMsg.id, hasError: true, errorText: errText);
       throw Exception(errText);
     }
@@ -2577,17 +2166,17 @@ class ChatSession {
     _history.add(
       AiChatMessage(
         id: 'm_$replyNow',
-        role: 'model',
+        role: 'assistant',
         text: finalReply,
         timestamp: replyNow,
       ),
     );
   }
 
-  /// إرسال رسالة والحصول على النص الكامل مباشرةً (مفيد للرد التلقائي في الدعم الفني).
+  /// إرسال رسالة والحصول على النص الكامل مباشرةً.
   Future<String> sendMessage(
     String userText, {
-    required String apiKey,
+    String? apiKey,
     http.Client? httpClient,
   }) async {
     final buf = StringBuffer();
@@ -2598,692 +2187,159 @@ class ChatSession {
     )) {
       buf.write(chunk);
     }
-    return cleanDiwaniyaReplyPrefix(buf.toString());
-  }
-
-  static String _extractCandidateText(Object? decoded) {
-    if (decoded is! Map) return '';
-    final candidates = decoded['candidates'];
-    if (candidates is! List || candidates.isEmpty) return '';
-    final first = candidates.first;
-    if (first is! Map) return '';
-    final content = first['content'];
-    if (content is! Map) return '';
-    final parts = content['parts'];
-    if (parts is! List || parts.isEmpty) return '';
-    final sb = StringBuffer();
-    for (final p in parts) {
-      if (p is Map && p['text'] != null) {
-        sb.write('${p['text']}');
-      }
-    }
-    return sb.toString();
-  }
-
-  static String _parseGeminiError(int status, String rawBody) {
-    try {
-      final decoded = jsonDecode(rawBody);
-      if (decoded is Map && decoded['error'] is Map) {
-        final msg = asStr((decoded['error'] as Map)['message']);
-        if (msg.isNotEmpty) return 'خطأ Gemini ($status): $msg';
-      }
-    } catch (_) {}
-    if (status == 400 || status == 403) {
-      return 'مفتاح Gemini API غير صالح أو غير مفعل ($status). يرجى التحقق منه في شاشة الضبط.';
-    }
-    return 'فشل الاتصال بخدمة Gemini (كود $status)';
+    return buf.toString().trim();
   }
 }
 
-/// مدير الجلسات ومحرك "ديوانية الرفيقين" (Multi-Agent Chat: Gemini & Grok & OpenRouter) + الدعم الفني:
-/// 1) `ownerSession` / `geminiDiwaniyaSession` (مهندس الأنظمة الساخر Gemini — `temperature: 0.85`)
-/// 2) `grokDiwaniyaSession` (رفيق السهرة المرح Grok — `temperature: 0.85`)
-/// 3) `supportSessionFor(wsId)` (النمط الثاني: الدعم الفني للمستخدمين — `temperature: 0.2`)
+/// محرك الذكاء الاصطناعي الموحد والمبسط عبر DeepSeek API:
+/// 1) `ownerSession`: جلسة الرفيق الشخصي التفاعلي (`temperature: 0.8`, `max_tokens: 2048`)
+/// 2) `supportSessionFor(wsId)`: جلسة الدعم الفني للمستخدمين (`temperature: 0.2`)
 class DualPersonaAiEngine {
   DualPersonaAiEngine._();
   static final DualPersonaAiEngine instance = DualPersonaAiEngine._();
 
   String _apiKey = '';
-  String _grokApiKey = '';
-  String _grokBaseUrl = '';
-  String _openRouterApiKey = '';
-  String _openRouterModel = kDefaultOpenRouterFreeModel;
 
-  /// أدوات التحكم الفوري والإسكات (Mute Toggles) في ديوانية الرفيقين.
-  bool geminiMuted = false;
-  bool grokMuted = false;
-
-  /// الجلسة الأولى المستقلة: رفيق المالك الشخصي (Owner Mode).
+  /// الجلسة الأولى المستقلة: رفيق المالك الشخصي (الرفيق العفوي متعدد الاهتمامات).
   final ChatSession ownerSession = ChatSession(
     personaId: 'owner_companion',
-    systemInstruction: '$kOwnerSystemInstruction\n$kDiwaniyaGeminiSystemInstruction',
+    systemInstruction: kOwnerSystemInstruction,
     temperature: kOwnerTemperature,
+    maxTokens: kDeepSeekMaxTokens,
   );
 
-  /// جلسة Gemini المخصصة لديوانية الرفيقين (تتضمن موجه Gemini الثلاثي).
-  final ChatSession geminiDiwaniyaSession = ChatSession(
-    personaId: 'diwaniya_gemini',
-    systemInstruction: kDiwaniyaGeminiSystemInstruction,
-    temperature: kOwnerTemperature,
-  );
-
-  /// جلسة Grok المخصصة لديوانية الرفيقين (تتضمن موجه Grok الثلاثي).
-  final ChatSession grokDiwaniyaSession = ChatSession(
-    personaId: 'diwaniya_grok',
-    systemInstruction: kDiwaniyaGrokSystemInstruction,
-    temperature: kOwnerTemperature,
-  );
-
-  /// الجلسات المستقلة للنمط الثاني: الدعم الفني للمستخدمين (لكل تذكرة/منشأة جلسة مستقلة).
+  /// الجلسات المستقلة للنمط الثاني: الدعم الفني للمستخدمين.
   final Map<String, ChatSession> _supportSessions = {};
 
   void syncApiKey(String key) {
     _apiKey = key.trim();
   }
 
-  void syncGrokConfig({required String apiKey, String baseUrl = ''}) {
-    _grokApiKey = apiKey.trim();
-    _grokBaseUrl = baseUrl.trim();
-  }
-
-  void syncOpenRouterConfig({
-    required String apiKey,
-    String model = kDefaultOpenRouterFreeModel,
-  }) {
-    _openRouterApiKey = apiKey.trim();
-    final cleanModel = model.trim();
-    _openRouterModel = cleanModel.isNotEmpty
-        ? cleanModel
-        : kDefaultOpenRouterFreeModel;
-  }
-
   String get apiKey =>
-      _apiKey.isNotEmpty ? _apiKey : Rtdb.instance.geminiApiKey.trim();
+      _apiKey.isNotEmpty ? _apiKey : Rtdb.instance.deepSeekApiKey.trim();
 
-  String get grokApiKey =>
-      _grokApiKey.isNotEmpty ? _grokApiKey : Rtdb.instance.grokApiKey.trim();
-
-  String get grokBaseUrl =>
-      _grokBaseUrl.isNotEmpty ? _grokBaseUrl : Rtdb.instance.grokBaseUrl.trim();
-
-  String get openRouterApiKey => _openRouterApiKey.isNotEmpty
-      ? _openRouterApiKey
-      : Rtdb.instance.openRouterApiKey.trim();
-
-  String get openRouterModel {
-    if (_openRouterModel.isNotEmpty) return _openRouterModel;
-    final fromRtdb = Rtdb.instance.openRouterModel.trim();
-    return fromRtdb.isNotEmpty ? fromRtdb : kDefaultOpenRouterFreeModel;
-  }
-
-  List<String> get orderedOpenRouterModels {
-    final primary = openRouterModel;
-    return <String>[
-      primary,
-      for (final m in kOpenRouterFreeModels)
-        if (m != primary) m,
-    ];
-  }
+  String get deepSeekApiKey => apiKey;
 
   bool get hasApiKey => apiKey.isNotEmpty;
-  bool get hasGrokApiKey => grokApiKey.isNotEmpty;
-  bool get hasOpenRouterApiKey => openRouterApiKey.isNotEmpty;
 
-  bool get isGeminiActiveInDiwaniya =>
-      (hasApiKey || hasOpenRouterApiKey) && !geminiMuted;
-  bool get isGrokActiveInDiwaniya =>
-      (hasGrokApiKey || hasOpenRouterApiKey) && !grokMuted;
-
-  /// زر الطوارئ: كتم الطرفين معاً وإيقاف أي حوار جارٍ.
-  void muteAllAgents() {
-    geminiMuted = true;
-    grokMuted = true;
-  }
-
-  /// استنتاج رابط نقطة النهاية (Endpoint) لخدمة OpenRouter أو Grok أو Groq API بناءً على الإعدادات والمفتاح.
-  String resolveGrokChatCompletionsUrl([String? customBaseUrl]) {
-    String raw = (customBaseUrl ?? grokBaseUrl).trim();
-    if (raw.isEmpty) {
-      if (hasOpenRouterApiKey && !hasGrokApiKey) {
-        return kDefaultOpenRouterEndpoint;
-      }
-      final activeKey = grokApiKey.isNotEmpty ? grokApiKey : apiKey;
-      if (activeKey.startsWith('sk-or-')) {
-        return kDefaultOpenRouterEndpoint;
-      }
-      raw = activeKey.startsWith('gsk_')
-          ? kDefaultGroqBaseUrl
-          : kDefaultGrokBaseUrl;
-    }
-    raw = raw.replaceAll(RegExp(r'/+$'), '');
-    if (raw.endsWith('/chat/completions')) {
-      return raw;
-    }
-    if (raw.contains('openrouter.ai') && !raw.contains('/api/v1')) {
-      return '$raw/api/v1/chat/completions';
-    }
-    if (raw.contains('api.groq.com') && !raw.contains('/openai/v1')) {
-      return '$raw/openai/v1/chat/completions';
-    }
-    if (raw.endsWith('/v1')) {
-      return '$raw/chat/completions';
-    }
-    return '$raw/v1/chat/completions';
-  }
-
-  /// محرك تنظيم الحوار ومنع التكرار اللانهائي (Turn Orchestrator & Loop Safety):
-  /// يحدد جدول الأدوار للرسالة الواحدة (لكل ذكاء اصطناعي رسالتان فقط بحد أقصى 4 ردود: Gemini -> Grok -> Gemini -> Grok).
-  List<String> buildDiwaniyaTurnSchedule({
-    int maxTotalReplies = kMaxDiwaniyaAutoReplies,
-  }) {
-    final g1 = isGeminiActiveInDiwaniya;
-    final g2 = isGrokActiveInDiwaniya;
-    if (g1 && g2) {
-      final cap = maxTotalReplies.clamp(1, kMaxDiwaniyaAutoReplies);
-      const pattern = <String>['gemini', 'grok', 'gemini', 'grok'];
-      return pattern.take(cap).toList();
-    }
-    if (g1) return const <String>['gemini'];
-    if (g2) return const <String>['grok'];
-    return const <String>[];
-  }
-
-  /// بث موحد متوافق مع OpenRouter / OpenAI / Groq / xAI مع الترويسات الإلزامية واكتشاف النماذج.
-  Stream<String> _streamOpenAiCompatible({
-    required String apiKey,
-    required String endpointUrl,
+  /// استدعاء مباشر لخدمة DeepSeek الرسمية (`https://api.deepseek.com/chat/completions`)
+  /// يدعم كلاً من الاستجابة المباشرة (JSON) والبث المتدفق (SSE) بمعيار OpenAI.
+  Stream<String> streamDeepSeekChat({
     required List<Map<String, dynamic>> messages,
-    required double temperature,
-    required List<String> modelsToTry,
+    String? apiKey,
+    String model = kDeepSeekDefaultModel,
+    double temperature = kOwnerTemperature,
+    int maxTokens = kDeepSeekMaxTokens,
     http.Client? httpClient,
   }) async* {
-    final client = httpClient ?? http.Client();
-    final candidateModels = <String>[...modelsToTry];
-    bool streamedAny = false;
-    Object? lastErr;
-    final reqHeaders = buildOpenRouterHeaders(apiKey);
-
-    Future<List<String>> discoverRemoteModels() async {
-      try {
-        final modelsUrl = endpointUrl.replaceFirst(
-          RegExp(r'/chat/completions$'),
-          '/models',
-        );
-        if (modelsUrl == endpointUrl) return const <String>[];
-        final res = await client
-            .get(
-              Uri.parse(modelsUrl),
-              headers: reqHeaders,
-            )
-            .timeout(const Duration(seconds: 12));
-        if (res.statusCode == 200) {
-          final decoded = jsonDecode(utf8.decode(res.bodyBytes));
-          if (decoded is Map && decoded['data'] is List) {
-            final found = <String>[];
-            for (final item in decoded['data'] as List) {
-              if (item is Map && item['id'] != null) {
-                final id = '${item['id']}'.trim();
-                if (id.isEmpty ||
-                    id.contains('whisper') ||
-                    id.contains('orpheus') ||
-                    id.contains('guard')) {
-                  continue;
-                }
-                found.add(id);
-              }
-            }
-            return found;
-          }
-        }
-      } catch (_) {}
-      return const <String>[];
-    }
-
-    for (int pass = 0; pass < 2 && !streamedAny; pass++) {
-      if (pass == 1) {
-        final discovered = await discoverRemoteModels();
-        for (final dm in discovered) {
-          if (!candidateModels.contains(dm)) {
-            candidateModels.add(dm);
-          }
-        }
-      }
-
-      for (final model in candidateModels) {
-        try {
-          final uri = Uri.parse(endpointUrl);
-          final req = http.Request('POST', uri);
-          req.headers.addAll(reqHeaders);
-          req.body = jsonEncode({
-            'model': model,
-            'messages': messages,
-            'temperature': temperature,
-            'stream': true,
-          });
-
-          final streamedResp =
-              await client.send(req).timeout(const Duration(seconds: 30));
-
-          if (streamedResp.statusCode == 200) {
-            bool firstChunk = true;
-            final lines = streamedResp.stream
-                .transform(utf8.decoder)
-                .transform(const LineSplitter());
-            await for (final line in lines) {
-              final trimmed = line.trim();
-              if (!trimmed.startsWith('data:')) continue;
-              final payload = trimmed.substring(5).trim();
-              if (payload.isEmpty || payload == '[DONE]') continue;
-              try {
-                final decoded = jsonDecode(payload);
-                var chunk = _extractOpenAiDeltaText(decoded);
-                if (chunk.isNotEmpty) {
-                  if (firstChunk) {
-                    chunk = cleanDiwaniyaReplyPrefix(chunk);
-                    if (chunk.isEmpty) continue;
-                    firstChunk = false;
-                  }
-                  streamedAny = true;
-                  yield chunk;
-                }
-              } catch (_) {}
-            }
-            if (streamedAny) break;
-          } else {
-            final res = await client
-                .post(
-                  uri,
-                  headers: reqHeaders,
-                  body: jsonEncode({
-                    'model': model,
-                    'messages': messages,
-                    'temperature': temperature,
-                    'stream': false,
-                  }),
-                )
-                .timeout(const Duration(seconds: 25));
-            if (res.statusCode == 200) {
-              final decoded = jsonDecode(utf8.decode(res.bodyBytes));
-              final fullText =
-                  cleanDiwaniyaReplyPrefix(_extractOpenAiMessageText(decoded));
-              if (fullText.isNotEmpty) {
-                streamedAny = true;
-                yield fullText;
-                break;
-              }
-            } else {
-              lastErr =
-                  'خطأ المزود (${res.statusCode}): ${utf8.decode(res.bodyBytes)}';
-            }
-          }
-        } catch (e) {
-          lastErr = e;
-        }
-      }
-    }
-
-    if (!streamedAny) {
-      throw Exception(
-          lastErr?.toString() ?? 'تعذر الحصول على رد من خادم المحادثة.');
-    }
-  }
-
-  /// بث رد رفيق المالك عبر محرك OpenRouter المجاني (`https://openrouter.ai/api/v1/chat/completions`)
-  /// مع الترويسات الإلزامية وحقن موجه النظام كأول رسالة `{"role": "system", "content": "..."}` ودرجة حرارة `0.85`.
-  Stream<String> streamOpenRouterCompanionReply(
-    List<AiChatMessage> currentMessages, {
-    String? customApiKey,
-    String? modelOverride,
-    String? customSystemPrompt,
-    http.Client? httpClient,
-  }) async* {
-    final cleanKey = (customApiKey ?? openRouterApiKey).trim();
+    final cleanKey = (apiKey ?? this.apiKey).trim();
     if (cleanKey.isEmpty) {
-      throw Exception('مفتاح openrouter_api_key غير متوفر.');
+      throw Exception(
+          'مفتاح DeepSeek API غير متوفر. يرجى إدخاله في نافذة الإعدادات.');
     }
-
-    final valid = currentMessages
-        .where((m) => !m.hasError && !m.isSystem && m.text.trim().isNotEmpty)
-        .toList();
-    final recentValid = valid
-        .skip(valid.length > kMaxConversationContextMessages
-            ? valid.length - kMaxConversationContextMessages
-            : 0)
-        .toList();
-
-    final sysPrompt =
-        (customSystemPrompt ?? kOpenRouterCompanionSystemPrompt).trim();
-    final chatMessages = <Map<String, dynamic>>[
-      {
-        'role': 'system',
-        'content': sysPrompt,
-      },
-      for (final m in recentValid)
-        {
-          'role': m.isUser ? 'user' : 'assistant',
-          'content': m.text,
-        },
-    ];
-
-    final chosenModel = (modelOverride ?? openRouterModel).trim();
-    final primaryModel =
-        chosenModel.isNotEmpty ? chosenModel : kDefaultOpenRouterFreeModel;
-    final modelsToTry = <String>[
-      primaryModel,
-      for (final m in kOpenRouterFreeModels)
-        if (m != primaryModel) m,
-    ];
-
-    final buffer = StringBuffer();
-    await for (final chunk in _streamOpenAiCompatible(
-      apiKey: cleanKey,
-      endpointUrl: kDefaultOpenRouterEndpoint,
-      messages: chatMessages,
-      temperature: kOwnerTemperature,
-      modelsToTry: modelsToTry,
-      httpClient: httpClient,
-    )) {
-      buffer.write(chunk);
-      yield chunk;
-    }
-
-    if (buffer.toString().trim().isEmpty) {
-      throw Exception('تعذر الحصول على رد من محرك OpenRouter.');
-    }
-  }
-
-  /// بث رد Gemini داخل الديوانية الثلاثية مع تمرير سياق المطور وGrok.
-  Stream<String> streamGeminiDiwaniyaReply(
-    List<AiChatMessage> currentMessages, {
-    http.Client? httpClient,
-  }) async* {
-    final cleanKey = apiKey;
-    final orKey = openRouterApiKey;
-    if (cleanKey.isEmpty && orKey.isEmpty) {
-      throw Exception('مفتاح gemini_api_key أو openrouter_api_key غير متوفر.');
-    }
-
-    final valid = currentMessages
-        .where((m) => !m.hasError && !m.isSystem && m.text.trim().isNotEmpty)
-        .toList();
-    final recentValid = valid
-        .skip(valid.length > kMaxConversationContextMessages
-            ? valid.length - kMaxConversationContextMessages
-            : 0)
-        .toList();
 
     final client = httpClient ?? http.Client();
-    final buffer = StringBuffer();
-    bool streamedAny = false;
-    Object? lastErr;
+    final uri = Uri.parse(kDeepSeekEndpoint);
+    final headers = buildDeepSeekHeaders(cleanKey);
+    final payload = <String, dynamic>{
+      'model': model,
+      'messages': messages,
+      'temperature': temperature,
+      'max_tokens': maxTokens,
+    };
 
-    // 0) إذا تم ضبط مفتاح OpenRouter، ندعم البث عبر محرك OpenRouter المجاني أولاً
-    if (orKey.isNotEmpty || cleanKey.startsWith('sk-or-')) {
-      final activeOrKey = orKey.isNotEmpty ? orKey : cleanKey;
-      final chatMessages = <Map<String, dynamic>>[
-        {
-          'role': 'system',
-          'content': kDiwaniyaGeminiSystemInstruction.trim(),
-        },
-        ...recentValid.map((m) => m.toDiwaniyaGeminiOpenAiMessage()),
-      ];
-      try {
-        await for (final chunk in _streamOpenAiCompatible(
-          apiKey: activeOrKey,
-          endpointUrl: kDefaultOpenRouterEndpoint,
-          messages: chatMessages,
-          temperature: kOwnerTemperature,
-          modelsToTry: orderedOpenRouterModels,
-          httpClient: client,
-        )) {
-          streamedAny = true;
-          buffer.write(chunk);
-          yield chunk;
-        }
-      } catch (e) {
-        lastErr ??= e;
-      }
+    http.Response res;
+    try {
+      res = await client
+          .post(
+            uri,
+            headers: headers,
+            body: jsonEncode(payload),
+          )
+          .timeout(const Duration(seconds: 40));
+    } catch (e) {
+      throw Exception(
+          'تعذر الاتصال بخدمة DeepSeek API. تحقق من اتصال الإنترنت وحاول مجدداً.');
     }
 
-    // 1) إذا كان المفتاح مفتاح Google Gemini صريحاً (لا يبدأ بـ gsk_ ولا sk-or_)، نجرب Google Gemini الخفيف أولاً
-    if (!streamedAny &&
-        cleanKey.isNotEmpty &&
-        !cleanKey.startsWith('gsk_') &&
-        !cleanKey.startsWith('sk-or-')) {
-      final contents =
-          recentValid.map((m) => m.toDiwaniyaGeminiContent()).toList();
-      final requestBody = jsonEncode({
-        'system_instruction': {
-          'parts': [
-            {'text': kDiwaniyaGeminiSystemInstruction.trim()}
-          ],
-        },
-        'contents': contents,
-        'generationConfig': {
-          'temperature': kOwnerTemperature,
-        },
-      });
+    final rawBody = utf8.decode(res.bodyBytes);
+    if (res.statusCode != 200) {
+      throw Exception(_parseDeepSeekError(res.statusCode, rawBody));
+    }
 
-      const geminiModels = kGeminiLiteFallbackModels;
-
-      for (final model in geminiModels) {
-        final modelPath =
-            model.startsWith('models/') ? model : 'models/$model';
+    // 1) إذا أعاد الخادم تدفق SSE (data: ...)
+    final trimmedBody = rawBody.trimLeft();
+    if (trimmedBody.startsWith('data:')) {
+      bool yieldedAny = false;
+      for (final line in const LineSplitter().convert(rawBody)) {
+        final trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        final dataStr = trimmed.substring(5).trim();
+        if (dataStr.isEmpty || dataStr == '[DONE]') continue;
         try {
-          final streamUri = Uri.parse(
-            'https://generativelanguage.googleapis.com/v1beta/$modelPath:streamGenerateContent?alt=sse&key=${Uri.encodeQueryComponent(cleanKey)}',
-          );
-          final req = http.Request('POST', streamUri);
-          req.headers['Content-Type'] = 'application/json';
-          req.body = requestBody;
-
-          final streamedResp =
-              await client.send(req).timeout(const Duration(seconds: 30));
-
-          if (streamedResp.statusCode == 200) {
-            final lines = streamedResp.stream
-                .transform(utf8.decoder)
-                .transform(const LineSplitter());
-            await for (final line in lines) {
-              final trimmed = line.trim();
-              if (!trimmed.startsWith('data:')) continue;
-              final payload = trimmed.substring(5).trim();
-              if (payload.isEmpty || payload == '[DONE]') continue;
-              try {
-                final decoded = jsonDecode(payload);
-                final chunk = ChatSession._extractCandidateText(decoded);
-                if (chunk.isNotEmpty) {
-                  streamedAny = true;
-                  buffer.write(chunk);
-                  yield chunk;
-                }
-              } catch (_) {}
-            }
-            if (streamedAny) break;
-          } else {
-            final fallbackUri = Uri.parse(
-              'https://generativelanguage.googleapis.com/v1beta/$modelPath:generateContent?key=${Uri.encodeQueryComponent(cleanKey)}',
-            );
-            final res = await client
-                .post(
-                  fallbackUri,
-                  headers: {'Content-Type': 'application/json'},
-                  body: requestBody,
-                )
-                .timeout(const Duration(seconds: 25));
-            if (res.statusCode == 200) {
-              final decoded = jsonDecode(utf8.decode(res.bodyBytes));
-              final fullText = ChatSession._extractCandidateText(decoded);
-              if (fullText.isNotEmpty) {
-                streamedAny = true;
-                buffer.write(fullText);
-                yield fullText;
-                break;
-              }
-            } else {
-              lastErr = ChatSession._parseGeminiError(
-                  res.statusCode, utf8.decode(res.bodyBytes));
-            }
+          final decoded = jsonDecode(dataStr);
+          final chunk = _extractOpenAiContent(decoded);
+          if (chunk.isNotEmpty) {
+            yieldedAny = true;
+            yield chunk;
           }
-        } catch (e) {
-          lastErr = e;
-        }
+        } catch (_) {}
       }
+      if (yieldedAny) return;
     }
 
-    // 2) إذا كان المفتاح المدمج من نوع Groq (gsk_...) أو تعذر رد Google مع توفر مفتاح Groq
-    final groqCompatKey = cleanKey.startsWith('gsk_') ? cleanKey : grokApiKey;
-    if (!streamedAny && groqCompatKey.isNotEmpty) {
-      final chatMessages = <Map<String, dynamic>>[
-        {
-          'role': 'system',
-          'content': kDiwaniyaGeminiSystemInstruction.trim(),
-        },
-        ...recentValid.map((m) => m.toDiwaniyaGeminiOpenAiMessage()),
-      ];
-      try {
-        await for (final chunk in _streamOpenAiCompatible(
-          apiKey: groqCompatKey,
-          endpointUrl: resolveGrokChatCompletionsUrl(
-            groqCompatKey.startsWith('gsk_') ? kDefaultGroqBaseUrl : null,
-          ),
-          messages: chatMessages,
-          temperature: kOwnerTemperature,
-          modelsToTry: kGroqActiveModels,
-          httpClient: client,
-        )) {
-          streamedAny = true;
-          buffer.write(chunk);
-          yield chunk;
-        }
-      } catch (e) {
-        lastErr ??= e;
+    // 2) استجابة JSON قياسية متوافقة مع OpenAI Chat Completions
+    try {
+      final decoded = jsonDecode(rawBody);
+      final text = _extractOpenAiContent(decoded);
+      if (text.isNotEmpty) {
+        yield text;
+        return;
       }
-    }
+    } catch (_) {}
 
-    if (buffer.toString().trim().isEmpty) {
-      throw Exception(
-          lastErr?.toString() ?? 'تعذر الحصول على رد من Gemini في الديوانية.');
-    }
+    throw Exception('لم يتم استلام نص رد صالح من DeepSeek API.');
   }
 
-  /// بث رد Grok (أو OpenRouter / Groq المتوافق مع OpenAI) داخل الديوانية الثلاثية مع سياق المطور وGemini.
-  Stream<String> streamGrokDiwaniyaReply(
-    List<AiChatMessage> currentMessages, {
-    http.Client? httpClient,
-  }) async* {
-    final cleanKey = grokApiKey.isNotEmpty ? grokApiKey : openRouterApiKey;
-    if (cleanKey.isEmpty) {
-      throw Exception('مفتاح grok_api_key أو openrouter_api_key غير متوفر.');
-    }
-
-    final valid = currentMessages
-        .where((m) => !m.hasError && !m.isSystem && m.text.trim().isNotEmpty)
-        .toList();
-    final chatMessages = <Map<String, dynamic>>[
-      {
-        'role': 'system',
-        'content': kDiwaniyaGrokSystemInstruction.trim(),
-      },
-      ...valid
-          .skip(valid.length > kMaxConversationContextMessages
-              ? valid.length - kMaxConversationContextMessages
-              : 0)
-          .map((m) => m.toDiwaniyaGrokMessage()),
-    ];
-
-    final buffer = StringBuffer();
-    bool streamedAny = false;
-    Object? lastErr;
-
-    // 0) إذا تم ضبط مفتاح OpenRouter، ندعم البث عبر محرك OpenRouter المجاني
-    if (hasOpenRouterApiKey || cleanKey.startsWith('sk-or-')) {
-      final activeOrKey = hasOpenRouterApiKey ? openRouterApiKey : cleanKey;
-      try {
-        await for (final chunk in _streamOpenAiCompatible(
-          apiKey: activeOrKey,
-          endpointUrl: kDefaultOpenRouterEndpoint,
-          messages: chatMessages,
-          temperature: kOwnerTemperature,
-          modelsToTry: orderedOpenRouterModels,
-          httpClient: httpClient,
-        )) {
-          streamedAny = true;
-          buffer.write(chunk);
-          yield chunk;
-        }
-      } catch (e) {
-        lastErr ??= e;
-      }
-    }
-
-    if (!streamedAny && grokApiKey.isNotEmpty) {
-      final endpointUrl = resolveGrokChatCompletionsUrl();
-      final isOpenRouterEndpoint = endpointUrl.contains('openrouter.ai');
-      final isGroqEndpoint =
-          endpointUrl.contains('groq.com') || grokApiKey.startsWith('gsk_');
-      final modelsToTry = isOpenRouterEndpoint
-          ? orderedOpenRouterModels
-          : (isGroqEndpoint
-              ? kGroqActiveModels
-              : const <String>[
-                  'grok-2-latest',
-                  'grok-beta',
-                  ...kGroqActiveModels,
-                ]);
-
-      try {
-        await for (final chunk in _streamOpenAiCompatible(
-          apiKey: grokApiKey,
-          endpointUrl: endpointUrl,
-          messages: chatMessages,
-          temperature: kOwnerTemperature,
-          modelsToTry: modelsToTry,
-          httpClient: httpClient,
-        )) {
-          streamedAny = true;
-          buffer.write(chunk);
-          yield chunk;
-        }
-      } catch (e) {
-        lastErr ??= e;
-      }
-    }
-
-    if (buffer.toString().trim().isEmpty) {
-      throw Exception(
-          lastErr?.toString() ?? 'تعذر الحصول على رد من Grok في الديوانية.');
-    }
-  }
-
-  static String _extractOpenAiDeltaText(Object? decoded) {
+  static String _extractOpenAiContent(Object? decoded) {
     if (decoded is! Map) return '';
     final choices = decoded['choices'];
     if (choices is! List || choices.isEmpty) return '';
     final first = choices.first;
     if (first is! Map) return '';
+    final message = first['message'];
+    if (message is Map && message['content'] != null) {
+      return '${message['content']}';
+    }
     final delta = first['delta'];
     if (delta is Map && delta['content'] != null) {
       return '${delta['content']}';
     }
-    final message = first['message'];
-    if (message is Map && message['content'] != null) {
-      return '${message['content']}';
-    }
     return '';
   }
 
-  static String _extractOpenAiMessageText(Object? decoded) {
-    if (decoded is! Map) return '';
-    final choices = decoded['choices'];
-    if (choices is! List || choices.isEmpty) return '';
-    final first = choices.first;
-    if (first is! Map) return '';
-    final message = first['message'];
-    if (message is Map && message['content'] != null) {
-      return '${message['content']}';
+  static String _parseDeepSeekError(int status, String rawBody) {
+    String detail = '';
+    try {
+      final decoded = jsonDecode(rawBody);
+      if (decoded is Map && decoded['error'] is Map) {
+        detail = asStr((decoded['error'] as Map)['message']);
+      }
+    } catch (_) {}
+
+    if (status == 401 || status == 403) {
+      return 'مفتاح DeepSeek API غير صحيح أو غير صالح ($status). يرجى التحقق من المفتاح في الإعدادات.';
     }
-    return '';
+    if (status == 402) {
+      return 'رصيد حساب DeepSeek API غير كافٍ (402).';
+    }
+    if (status == 429) {
+      return 'تم تجاوز حد الطلبات المؤقت لخدمة DeepSeek (429). يرجى المحاولة بعد لحظات.';
+    }
+    if (detail.isNotEmpty) {
+      return 'خطأ DeepSeek API ($status): $detail';
+    }
+    return 'تعذر إتمام الطلب من خادم DeepSeek (رمز الحالة $status).';
   }
 
   /// الحصول على جلسة الدعم الفني المستقلة الخاصة بمنشأة معينة (`temperature: 0.2`).
@@ -3294,14 +2350,13 @@ class DualPersonaAiEngine {
         personaId: 'client_support_$workspaceId',
         systemInstruction: kClientSupportSystemInstruction,
         temperature: kClientSupportTemperature,
+        maxTokens: kDeepSeekMaxTokens,
       ),
     );
   }
 
   void clearOwnerSession() {
     ownerSession.clear();
-    geminiDiwaniyaSession.clear();
-    grokDiwaniyaSession.clear();
   }
 
   void clearSupportSession(String workspaceId) {
