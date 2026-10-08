@@ -193,10 +193,6 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
                                 if (mounted) bump(ref);
                               }
                             : null,
-                        onPermissions: () async {
-                          await showDevicePermissionsDialog(context, ref, d);
-                          if (mounted) bump(ref);
-                        },
                         onRename: () => _rename(
                           d['id'] as String,
                           (d['name'] ?? '') as String,

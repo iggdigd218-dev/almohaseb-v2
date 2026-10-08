@@ -1827,7 +1827,7 @@ class Repo {
     final permEmail = em.isNotEmpty
         ? em
         : (resolvedUid != null
-            ? 'user_${resolvedUid}@$requireWorkspaceId.local'
+            ? 'user_$resolvedUid@$requireWorkspaceId.local'
             : '');
     if (permEmail.isNotEmpty) {
       await upsertUserPermission(

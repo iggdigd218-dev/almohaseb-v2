@@ -32,7 +32,7 @@ void _invalidateAfterLogout(WidgetRef ref, ProviderContainer? container) {
     try {
       container.invalidate(googleLinkedProvider);
       container.invalidate(currentUserProvider);
-      container.invalidate(currentUserRoleProvider);
+      container.invalidate(deviceRoleProvider);
       container.invalidate(effectivePermissionsProvider);
       container.invalidate(canManageGroupProvider);
       container.invalidate(settingsProvider);
@@ -47,7 +47,7 @@ void _invalidateAfterLogout(WidgetRef ref, ProviderContainer? container) {
     if (!ref.context.mounted) return;
     ref.invalidate(googleLinkedProvider);
     ref.invalidate(currentUserProvider);
-    ref.invalidate(currentUserRoleProvider);
+    ref.invalidate(deviceRoleProvider);
     ref.invalidate(effectivePermissionsProvider);
     ref.invalidate(canManageGroupProvider);
     ref.invalidate(settingsProvider);

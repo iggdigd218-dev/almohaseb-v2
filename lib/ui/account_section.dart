@@ -103,9 +103,10 @@ Future<void> provisionCloudAfterSignIn(
   // كل بيانات الجهاز والمؤسسة مباشرة (دفع الطابور + سحب سحابي كامل) —
   // لا انتظار للدورة الدورية ولا استرجاع بصمة مجهول بعد اليوم.
   try {
+    if (container == null && !ref.context.mounted) return;
     final engine = container != null
         ? container.read(syncEngineProvider)
-        : (ref.context.mounted ? ref.read(syncEngineProvider) : repo.sync);
+        : ref.read(syncEngineProvider);
     engine.stop();
     await engine.start();
     if (container != null) {
