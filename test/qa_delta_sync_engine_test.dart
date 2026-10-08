@@ -296,7 +296,7 @@ void main() {
           jsonDecode(rows.first['payload'] as String) as Map<String, Object?>;
       expect(storedPayload.containsKey('file_b64'), isFalse);
       expect(storedPayload.containsKey('photo_b64'), isFalse);
-      expect(storedPayload['image'], '',
+      expect(storedPayload['image'] ?? '', isEmpty,
           reason: 'يجب تجريد صور الفواتير المضمّنة من عقد operations');
       expect(storedPayload['details'], 'فاتورة مبيعات نقدية');
       expect(storedPayload['amount'], 500);
