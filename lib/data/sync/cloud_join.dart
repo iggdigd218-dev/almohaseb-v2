@@ -1241,8 +1241,8 @@ class CloudJoin {
     // تاريخ العمليات فوق اللقطة (idempotent) — الترطيب النظيف يبدأ من
     // إصدار اللقطة بالضبط قبل الاستماع للعمليات الجديدة.
     await db.delete('sync_meta',
-        where: "key LIKE 'lastCloudTs:%' OR key LIKE 'lastRosterPush:%' "
-            "OR key LIKE 'lastLanTs:%'");
+        where: "key LIKE 'last_synced_cursor%' OR key LIKE 'lastCloudTs:%' "
+            "OR key LIKE 'lastRosterPush:%' OR key LIKE 'lastLanTs:%'");
 
     // مضاد الأشباح: deviceId حتمي من بصمة العتاد — إعادة التثبيت تعيد
     // إنتاج نفس المعرف. إن وُجد سجلنا القديم في roster السحابي (بدوره

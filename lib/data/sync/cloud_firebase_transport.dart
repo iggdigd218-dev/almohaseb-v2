@@ -34,7 +34,6 @@ class CloudFirebaseTransport implements SyncTransport {
   final Future<Database> Function() _dbProvider;
   final Future<String?> Function() _idTokenProvider;
   static const int kPullPageSize = 500;
-  bool _serverIndexAvailable = true;
 
   CloudFirebaseTransport({
     required this.repo,
@@ -132,16 +131,139 @@ class CloudFirebaseTransport implements SyncTransport {
     return FirebaseAuthRest.cloudIdToken();
   }
 
+  /// رمز وقت الخادم في Firebase RTDB REST API (ServerValue.TIMESTAMP).
+  static const Map<String, String> kServerValueTimestamp = {'.sv': 'timestamp'};
+
+  /// يقرأ المؤشر الزمني المحلي الدائم `last_synced_cursor` (بالملي ثانية من `server_time`).
+  /// يدعم التوافق الخلفي مع المفتاح القديم `lastCloudTs:$workspaceId` وصيغ ISO.
+  Future<int> getLastSyncedCursor() async {
+    final db = await _db;
+    final rows = await db.query(
+      'sync_meta',
+      where: 'key IN (?, ?)',
+      whereArgs: [
+        'last_synced_cursor:$workspaceId',
+        'lastCloudTs:$workspaceId',
+      ],
+    );
+    int best = 0;
+    for (final r in rows) {
+      final raw = '${r['value'] ?? ''}'.trim();
+      final parsed = int.tryParse(raw) ??
+          (DateTime.tryParse(raw)?.millisecondsSinceEpoch ?? 0);
+      if (parsed > best) best = parsed;
+    }
+    if (best > 0) return best;
+    try {
+      final stRows = await db.query(
+        'settings',
+        columns: ['value'],
+        where: 'key = ?',
+        whereArgs: ['last_synced_cursor'],
+        limit: 1,
+      );
+      if (stRows.isNotEmpty) {
+        final raw = '${stRows.first['value'] ?? ''}'.trim();
+        final parsed = int.tryParse(raw) ??
+            (DateTime.tryParse(raw)?.millisecondsSinceEpoch ?? 0);
+        if (parsed > best) best = parsed;
+      }
+    } catch (_) {}
+    return best;
+  }
+
+  /// يحفظ المؤشر الزمني المحلي الدائم `last_synced_cursor` فوراً لمنع تكرار التنزيل.
+  Future<void> saveLastSyncedCursor(
+    int cursorMs, {
+    DatabaseExecutor? executor,
+  }) async {
+    if (cursorMs <= 0) return;
+    final target = executor ?? await _db;
+    await target.insert(
+      'sync_meta',
+      {
+        'key': 'last_synced_cursor:$workspaceId',
+        'value': '$cursorMs',
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    await target.insert(
+      'sync_meta',
+      {
+        'key': 'lastCloudTs:$workspaceId',
+        'value': '$cursorMs',
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    try {
+      await target.insert(
+        'settings',
+        {
+          'key': 'last_synced_cursor',
+          'value': '$cursorMs',
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    } catch (_) {}
+  }
+
+  /// يبني معاملات استعلام الاستئناف الحصري بالمؤشر الزمني:
+  /// `.orderByChild('server_time').startAfter(last_synced_cursor)`
+  /// في واجهة REST يقابل `orderBy="server_time"&startAt=${last_synced_cursor + 1}`.
+  static Map<String, String> buildCursorQueryParams({
+    required int lastSyncedCursor,
+    String indexField = 'server_time',
+    int limit = kPullPageSize,
+    bool forRealtimeStream = false,
+  }) {
+    final startAfterCursor = lastSyncedCursor > 0 ? lastSyncedCursor + 1 : 0;
+    return <String, String>{
+      'orderBy': jsonEncode(indexField),
+      'startAt': '$startAfterCursor',
+      if (forRealtimeStream)
+        'limitToLast': '1'
+      else
+        'limitToFirst': '$limit',
+    };
+  }
+
   @override
   Future<void> push(SyncOperation op) async {
+    final db = await _db;
+    // 1. حصر عمليات الرفع على السجلات التي تحمل الوسم `is_synced == 0` في SQLite.
+    try {
+      final existingRows = await db.query(
+        'operations',
+        columns: ['is_synced', 'synced'],
+        where: 'id = ?',
+        whereArgs: [op.id],
+        limit: 1,
+      );
+      if (existingRows.isNotEmpty) {
+        final isSynced = (existingRows.first['is_synced'] as int?) ?? 0;
+        final synced = (existingRows.first['synced'] as int?) ?? 0;
+        if (isSynced == 1 || synced == 1) {
+          return; // مرفوعة ومؤكدة مسبقاً — يُمنع إعادة إرسالها في أي دورة لاحقة.
+        }
+      }
+    } on DatabaseException catch (_) {}
+
     final uri = Uri.parse(_opPath(op.id));
-    // ختم وقت الخادم: فيربيس يستبدل {".sv":"timestamp"} بوقت خادمه (ملي
-    // ثانية) لحظة الكتابة — يقضي على ثغرة انحراف ساعات الأجهزة التي كانت
-    // تُسقط عمليات جهازٍ ساعتُه متأخرة عن مؤشر السحب لدى الآخرين.
-    final bodyMap = Map<String, Object?>.from(
-        jsonDecode(op.toJson()) as Map)
-      ..['server_ts'] = {'.sv': 'timestamp'};
-    final body = jsonEncode(bodyMap);
+    // 2. حظر تضمين الوسائط والبيانات الثقيلة (Base64 / صور الفواتير / وسائط الدردشة)
+    // داخل عقد operations، ورفع العملية كحركة إلحاقية مفردة (Atomic Append)
+    // مع وسم `server_time = ServerValue.TIMESTAMP`.
+    final sanitizedPayload = sanitizeOperationPayload(
+      op.payload,
+      entityType: op.entityType,
+      entityId: op.entityId,
+    );
+    final rawMap = Map<String, Object?>.from(jsonDecode(op.toJson()) as Map)
+      ..['payload'] = jsonEncode(sanitizedPayload)
+      ..['server_time'] = kServerValueTimestamp
+      ..['server_ts'] = kServerValueTimestamp
+      ..['is_synced'] = 1
+      ..['synced'] = 1;
+    final body = jsonEncode(rawMap);
     final token = await _idToken();
     final auth =
         token == null ? null : 'auth=${Uri.encodeQueryComponent(token)}';
@@ -170,13 +292,47 @@ class CloudFirebaseTransport implements SyncTransport {
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw StateError('cloud-http-${res.statusCode}');
     }
-    final db = await _db;
-    await db.update(
-      'operations',
-      {'server_time': DateTime.now().toIso8601String(), 'synced': 1},
-      where: 'id = ?',
-      whereArgs: [op.id],
-    );
+
+    // استخلاص وقت الخادم الفعلي المعاد من Firebase بعد حل ServerValue.TIMESTAMP
+    String resolvedServerTime = '${DateTime.now().millisecondsSinceEpoch}';
+    try {
+      final respDecoded = jsonDecode(res.body);
+      if (respDecoded is Map) {
+        final st = respDecoded['server_time'] ?? respDecoded['server_ts'];
+        if (st is int && st > 0) {
+          resolvedServerTime = '$st';
+        } else if (st is num && st > 0) {
+          resolvedServerTime = '${st.toInt()}';
+        }
+      }
+    } catch (_) {}
+
+    // 3. بمجرد استلام رد التأكيد بالنجاح، يتم تحديث السجل محلياً إلى `is_synced = 1`
+    // ومنع إعادة إرساله في أي دورة مزامنة لاحقة.
+    try {
+      await db.update(
+        'operations',
+        {
+          'server_time': resolvedServerTime,
+          'synced': 1,
+          'is_synced': 1,
+          'payload': jsonEncode(sanitizedPayload),
+        },
+        where: 'id = ?',
+        whereArgs: [op.id],
+      );
+    } on DatabaseException catch (_) {
+      await db.update(
+        'operations',
+        {
+          'server_time': resolvedServerTime,
+          'synced': 1,
+          'payload': jsonEncode(sanitizedPayload),
+        },
+        where: 'id = ?',
+        whereArgs: [op.id],
+      );
+    }
     await db.update(
       'devices',
       {'last_sync_at': DateTime.now().toIso8601String()},
@@ -197,7 +353,8 @@ class CloudFirebaseTransport implements SyncTransport {
           'deleted_at': op.deviceTime.isNotEmpty
               ? op.deviceTime
               : DateTime.now().toIso8601String(),
-          'server_ts': {'.sv': 'timestamp'},
+          'server_time': kServerValueTimestamp,
+          'server_ts': kServerValueTimestamp,
         });
         await http
             .put(targetTombUri, body: tombBody, headers: _authHeaders)
@@ -222,61 +379,35 @@ class CloudFirebaseTransport implements SyncTransport {
 
   Future<int> pull({ConflictResolver? resolver, bool forceFullSync = false}) async {
     final db = await _db;
-    // نستخدم timestamp-based cursor مع overlap للسماح بالوصول المتأخر.
-    final lastTsRow = await db.query(
-      'sync_meta',
-      where: 'key = ?',
-      whereArgs: ['lastCloudTs:$workspaceId'],
-      limit: 1,
-    );
-    int lastTsMs = 0;
-    if (lastTsRow.isNotEmpty && !forceFullSync) {
-      final v = '${lastTsRow.first['value']}';
-      // القيمة المخزّنة قد تكون ISO (الشكل الجديد) أو ميلي ثانية (قواعد قديمة).
-      lastTsMs = DateTime.tryParse(v)?.millisecondsSinceEpoch ??
-          (int.tryParse(v) ?? 0);
-    }
-    // overlap بثانيتين لالتقاط العمليات التي كُتبت أثناء سحبنا السابق.
-    // المؤشر و startAt كلاهما بتوقيت خادم فيربيس (server_ts) — لا اعتماد
-    // على ساعات الهواتف النصية (ISO) إطلاقاً، فجهاز ساعته متأخرة دقائق
-    // لن تسقط عملياته من سحب بقية الأجهزة (Clock Drift).
-    final startAtMs = forceFullSync ? 0 : (lastTsMs > 2000 ? lastTsMs - 2000 : 0);
+    // استهلاك السحب بالمؤشر الزمني حصراً (Cursor-Based Inbound Sync):
+    // نقرأ المؤشر المحلي الدائم `last_synced_cursor` المعتمد على `server_time`.
+    // يُمنع أي استعلام مفتوح يجلب كامل مسار العمليات `/workspaces/{ws}/operations`.
+    final int lastCursorMs = await getLastSyncedCursor();
     final r = resolver ?? ConflictResolver();
     int applied = 0;
-    int maxTsMs = lastTsMs;
-    // (2026-09-22) عمليات مُهمَلة لأنها من مساحة أخرى — كانت تُسقط بصمت.
+    int maxTsMs = lastCursorMs;
     int droppedOtherWs = 0;
     String droppedSample = '';
     final ourId = await ensureDeviceId(repo);
-    // رسائل دردشة وصلت في هذه السحبة — تُشعر بعد إغلاق المعاملة.
     final chatOps = <SyncOperation>[];
-    // (دفعة 58 — متطلب 18) عمليات user واردة: قد تحمل تغيير دور/صلاحيات
-    // هذا العضو من المدير — تُفحص بعد كل معاملة لإخطار العضو لحظياً.
     final roleOps = <SyncOperation>[];
-    // (إصلاح تسليم الإدارة) عمليات نقل ملكية واردة — إخطار فوري للمستلم.
     final ownershipOps = <SyncOperation>[];
 
     bool hasMore = true;
-    int currentStartAtMs = startAtMs;
-    var serverFiltered = _serverIndexAvailable;
+    int currentCursorMs = lastCursorMs;
+    String indexField = 'server_time';
     while (hasMore) {
-      final params = <String, String>{
-        // الترشيح بختم الخادم الرقمي (server_ts) وليس timestamp النصي:
-        // فيربيس يكتب server_ts بساعته هو عند الرفع، فالمؤشر محصّن ضد
-        // انحراف ساعات الأجهزة كلياً.
-        if (serverFiltered) ...{
-          'orderBy': jsonEncode('server_ts'),
-          'limitToFirst': '$kPullPageSize',
-          if (currentStartAtMs > 0) 'startAt': '$currentStartAtMs',
-        },
-      };
+      // حصر الاستعلام بالاستئناف فقط: .orderByChild('server_time').startAfter(last_synced_cursor)
+      final params = buildCursorQueryParams(
+        lastSyncedCursor: currentCursorMs,
+        indexField: indexField,
+        limit: kPullPageSize,
+      );
       final tok = await _idToken();
       if (tok != null) params['auth'] = tok;
-      final uri = Uri.parse(_opsPath).replace(
-          queryParameters: params.isEmpty ? null : params);
+      final uri = Uri.parse(_opsPath).replace(queryParameters: params);
       var res = await http.get(uri).timeout(const Duration(seconds: 15));
       if ((res.statusCode == 401 || res.statusCode == 403) && tok != null) {
-        // (المرحلة 2) لا محاولة بلا مصادقة — نجدّد التوكن ونعيد مرة واحدة.
         final fresh = await FirebaseAuthRest.forceRefreshToken();
         if (fresh != null && fresh != tok) {
           params['auth'] = fresh;
@@ -285,17 +416,19 @@ class CloudFirebaseTransport implements SyncTransport {
           res = await http.get(retried).timeout(const Duration(seconds: 15));
         }
       }
-      // قواعد RTDB بلا فهرس ".indexOn": "timestamp" → فيربيس يرفض orderBy
-      // بخطأ 400 فيفشل السحب للأبد رغم نجاح الدفع (البيانات تصعد ولا تنزل
-      // أبداً — أخطر عطل صامت). الحل: جلب كامل بلا orderBy والفرز/الترشيح
-      // محلياً. يعمل على القواعد الافتراضية دون أي إعداد من المستخدم.
-      if (res.statusCode == 400 && serverFiltered) {
-        _serverIndexAvailable = false;
-        serverFiltered = false;
-        final bareParams = <String, String>{if (tok != null) 'auth': tok};
-        final bareUri = Uri.parse(_opsPath).replace(
-            queryParameters: bareParams.isEmpty ? null : bareParams);
-        res = await http.get(bareUri).timeout(const Duration(seconds: 30));
+      // توافق خلفي إذا كانت القواعد السحابية مفهرسة على server_ts بدلاً من server_time:
+      // لا نسقط أبداً إلى جلب كامل مفتوح بدون مؤشر (No Full Dumps).
+      if (res.statusCode == 400 && indexField == 'server_time') {
+        indexField = 'server_ts';
+        final fallbackParams = buildCursorQueryParams(
+          lastSyncedCursor: currentCursorMs,
+          indexField: indexField,
+          limit: kPullPageSize,
+        );
+        if (tok != null) fallbackParams['auth'] = tok;
+        final fallbackUri =
+            Uri.parse(_opsPath).replace(queryParameters: fallbackParams);
+        res = await http.get(fallbackUri).timeout(const Duration(seconds: 15));
       }
       if (res.statusCode == 401 || res.statusCode == 403) {
         throw StateError('cloud-auth-failed');
@@ -313,25 +446,34 @@ class CloudFirebaseTransport implements SyncTransport {
         break;
       }
       var entries = decoded.entries.toList();
-      // وقت العملية للمؤشر/الترشيح: نفضّل server_ts (ختم خادم فيربيس،
-      // محصّن ضد انحراف ساعات الأجهزة) ونعود لـ timestamp للعمليات القديمة.
+      // وقت العملية للمؤشر/الترشيح: يعتمد حصرياً على وقت الخادم المرجعي `server_time`
+      // (مع توافق خلفي لـ `server_ts` و `timestamp` للسجلات القديمة).
       int entryMs(Object? v) {
         if (v is! Map) return 0;
-        final sv = v['server_ts'];
-        if (sv is int && sv > 0) return sv;
-        if (sv is num && sv > 0) return sv.toInt();
+        final st = v['server_time'] ?? v['server_ts'];
+        if (st is int && st > 0) return st;
+        if (st is num && st > 0) return st.toInt();
+        if (st is String && st.isNotEmpty) {
+          final parsed = int.tryParse(st) ??
+              (DateTime.tryParse(st)?.millisecondsSinceEpoch ?? 0);
+          if (parsed > 0) return parsed;
+        }
         return DateTime.tryParse('${v['timestamp'] ?? ''}')
                 ?.millisecondsSinceEpoch ??
             0;
       }
 
-      // في وضع الجلب الكامل (بلا فهرس خادم): رشّح محلياً بنفس شرط startAt
-      // حتى لا نعيد معالجة تاريخ كامل في كل دورة (idempotent على أي حال).
-      if (!serverFiltered && currentStartAtMs > 0) {
-        entries = entries.where((e) => entryMs(e.value) >= currentStartAtMs).toList();
+      // تصفية محلية إضافية صارمة: استئناف ما بعد `currentCursorMs` فقط (startAfter)
+      if (currentCursorMs > 0) {
+        entries =
+            entries.where((e) => entryMs(e.value) > currentCursorMs).toList();
       }
-      // فرز محلي حسب ختم الخادم (server_ts) ثم opId لضمان الترتيب —
-      // ساعة الخادم مصدر الحقيقة الوحيد، لا ساعات الأجهزة.
+      if (entries.isEmpty) {
+        hasMore = false;
+        break;
+      }
+
+      // فرز محلي حسب وقت الخادم (server_time) ثم opId لضمان الترتيب
       entries.sort((a, b) {
         final va = a.value;
         final vb = b.value;
@@ -339,10 +481,7 @@ class CloudFirebaseTransport implements SyncTransport {
         final c = entryMs(va).compareTo(entryMs(vb));
         return c != 0 ? c : (a.key as String).compareTo(b.key as String);
       });
-      // ══ (2026-09-22) فرز حسب التبعية قبل التطبيق ══
-      // الترتيب الزمني لا يراعي أن الفاتورة تحتاج حسابها وصنفها: وصولها
-      // أولاً يرفع FOREIGN KEY 787 فيتوقف السحب. نُقدّم الآباء على الأبناء
-      // (حسابات ← أصناف ← فواتير ← بنود) ونؤجّل الحذف للنهاية.
+      // فرز حسب التبعية قبل التطبيق (حسابات ← أصناف ← فواتير ← بنود)
       entries.sort((a, b) {
         final c = dependencyRankOfMap(a.value)
             .compareTo(dependencyRankOfMap(b.value));
@@ -350,9 +489,7 @@ class CloudFirebaseTransport implements SyncTransport {
         final t = entryMs(a.value).compareTo(entryMs(b.value));
         return t != 0 ? t : (a.key as String).compareTo(b.key as String);
       });
-      // ══ (2026-09-22) حزام الأمان الأخير ══
-      // PRAGMA لا يعمل داخل معاملة — لذلك يُضبط خارجها: يُعطّل فحص
-      // المفاتيح الأجنبية أثناء تطبيق الدفعة ويُعاد بعدها فوراً.
+
       await _setForeignKeys(false);
       try {
         const microBatchSize = 40;
@@ -361,6 +498,7 @@ class CloudFirebaseTransport implements SyncTransport {
               ? i + microBatchSize
               : entries.length;
           final chunk = entries.sublist(i, end);
+          int chunkMaxTs = maxTsMs;
           await db.transaction((txn) async {
             for (final entry in chunk) {
               final v = entry.value;
@@ -374,11 +512,8 @@ class CloudFirebaseTransport implements SyncTransport {
                 if (droppedSample.isEmpty) droppedSample = op.workspaceId;
                 continue;
               }
-              // المؤشر يتقدم دائماً بـ server_ts (ختم خادم فيربيس الموثوق) —
-              // في الحالتين (ترشيح خادمي بـ orderBy=server_ts أو جلب كامل).
-              // العمليات القديمة جداً بلا server_ts تسقط لـ timestamp كاحتياط.
               final opMs = entryMs(v);
-              if (opMs > maxTsMs) maxTsMs = opMs;
+              if (opMs > chunkMaxTs) chunkMaxTs = opMs;
               // idempotent: نفس opId موجود مسبقًا -> تجاهل.
               final idempotentQ = await txn.query(
                 'operations',
@@ -409,14 +544,11 @@ class CloudFirebaseTransport implements SyncTransport {
                   op.deviceId != ourId) {
                 chatOps.add(op);
               }
-              // (دفعة 58 — متطلب 18) تحديث user وارد من جهاز آخر — قد يكون
-              // المدير غيّر دور/صلاحيات هذا العضو: يُفحص بعد المعاملة.
               if (ok &&
                   op.entityType == EntityKind.user &&
                   op.deviceId != ourId) {
                 roleOps.add(op);
               }
-              // (إصلاح تسليم الإدارة) نقل ملكية وارد: إخطار المستلم فوراً فقط إذا تغيّر المدير فعلياً.
               if (ok &&
                   op.entityType == EntityKind.setting &&
                   op.entityId == 'ownershipTransfer' &&
@@ -436,23 +568,24 @@ class CloudFirebaseTransport implements SyncTransport {
                 }
               }
             }
+            // تحديث مؤشر `last_synced_cursor` فوراً داخل نفس معاملة الحفظ لمنع تكرار التنزيل نهائياً
+            if (chunkMaxTs > maxTsMs) {
+              maxTsMs = chunkMaxTs;
+              await saveLastSyncedCursor(maxTsMs, executor: txn);
+            }
           });
           if (end < entries.length) {
-            // إفساح المجال للاستعلامات والعمليات المحلية الفورية (الحسابات، الإضافة، الحفظ)
             await Future<void>.delayed(Duration.zero);
           }
         }
       } finally {
-        // إعادة فحص المفاتيح الأجنبية في كل الحالات (نجاح أو استثناء).
         await _setForeignKeys(true);
       }
-      // إشعار وصول رسائل دردشة جماعية عبر السحابة (نفس سلوك LAN):
-      // خارج المعاملة، وبعد نجاح التطبيق فقط.
+
       for (final op in chatOps) {
         try {
           final senderRows = await db.query('devices',
               where: 'id = ?', whereArgs: [op.deviceId], limit: 1);
-          // الاسم الموحد: الافتراضي «مستخدم جديد» حتى يسميه المدير.
           var senderName = senderRows.isNotEmpty
               ? ((senderRows.first['name'] as String?) ?? '')
               : '';
@@ -473,9 +606,7 @@ class CloudFirebaseTransport implements SyncTransport {
         } catch (_) {}
       }
       chatOps.clear();
-      // (دفعة 58 — متطلب 18) إخطار لحظي للعضو عند تغيير دوره/صلاحياته:
-      // إن كانت عملية user الواردة تخص المستخدم المرتبط بجهازنا نبثّ
-      // إشعاراً فورياً + نبضة تحديث حي للواجهة — لا حاجة لإعادة تشغيل.
+
       for (final op in roleOps) {
         try {
           final own = await db.query('devices',
@@ -515,16 +646,13 @@ class CloudFirebaseTransport implements SyncTransport {
         } catch (_) {}
       }
       roleOps.clear();
-      // (إصلاح تسليم الإدارة) بلاغ فوري بعد تطبيق نقل الملكية:
-      // المستلم يرى «أنت الآن مدير المجموعة» والبقية تُخطر بتغيّر المدير.
+
       for (final op in ownershipOps) {
         try {
           final decoded = jsonDecode('${op.payload['value'] ?? '{}'}');
           if (decoded is! Map) continue;
           final newOwnerDev = '${decoded['owner_device_id'] ?? ''}';
           if (newOwnerDev == ourId) {
-            // (استرداد طارئ) تمييز الإرجاع الطوعي: المستلم يعيد الإدارة
-            // للمالك السابق — إشعار «عادت إليك» بدل «سلّمك».
             if (decoded['handback'] == true) {
               ChatHooks.onMemberNotice?.call(
                 '👑 عادت إليك الإدارة',
@@ -562,75 +690,28 @@ class CloudFirebaseTransport implements SyncTransport {
         final ms = entryMs(entry.value);
         if (ms > pageMaxTs) pageMaxTs = ms;
       }
-      if (pageMaxTs > maxTsMs) maxTsMs = pageMaxTs;
+      if (pageMaxTs > maxTsMs) {
+        maxTsMs = pageMaxTs;
+        await saveLastSyncedCursor(maxTsMs);
+      }
 
-      // تقدم المؤشر للصفحة التالية (بزيادة ملي ثانية واحدة):
-      if (serverFiltered && entries.length >= kPullPageSize && pageMaxTs >= currentStartAtMs) {
-        currentStartAtMs = pageMaxTs + 1;
+      if (entries.length >= kPullPageSize && pageMaxTs > currentCursorMs) {
+        currentCursorMs = pageMaxTs;
         hasMore = true;
       } else {
         hasMore = false;
       }
 
-    // (2026-09-22) عمليات أُسقطت لأنها من مساحة أخرى: كانت تُهمَل بصمت
-    // فيبدو السحب ناجحاً ولا يصل شيء — نسجّلها لتظهر صراحةً.
-    if (droppedOtherWs > 0) {
-      try {
-        await repo.setSetting('sync.droppedOtherWs', '$droppedOtherWs');
-        await repo.setSetting('sync.droppedOtherWsSample', droppedSample);
-      } catch (_) {}
-    }
+      if (droppedOtherWs > 0) {
+        try {
+          await repo.setSetting('sync.droppedOtherWs', '$droppedOtherWs');
+          await repo.setSetting('sync.droppedOtherWsSample', droppedSample);
+        } catch (_) {}
+      }
     }
 
-    if (maxTsMs > lastTsMs) {
-      // المؤشر يُخزَّن كملي ثانية خادم (رقم) — الشكل القياسي الجديد.
-      // القارئ أعلاه يقبل الرقم و ISO القديم معاً (توافق خلفي).
-      await db.insert(
-          'sync_meta',
-          {
-            'key': 'lastCloudTs:$workspaceId',
-            'value': '$maxTsMs',
-          },
-          conflictAlgorithm: ConflictAlgorithm.replace);
-    }
-
-    // جلب شواهد القبور للأصناف الممسوحة (Tombstones / deleted_items) عند السحب الأولي فقط
-    if (startAtMs == 0) {
-      try {
-        final tombUri = Uri.parse('$_root/deleted_items.json');
-        final tok = await _idToken();
-        final targetTombUri =
-            tok == null ? tombUri : tombUri.replace(queryParameters: {'auth': tok});
-        final tombRes =
-            await http.get(targetTombUri).timeout(const Duration(seconds: 8));
-        if (tombRes.statusCode == 200 &&
-            tombRes.body.trim().isNotEmpty &&
-            tombRes.body.trim() != 'null') {
-          final tombData = jsonDecode(tombRes.body);
-          if (tombData is Map) {
-            await db.transaction((txn) async {
-              for (final entry in tombData.entries) {
-                final val = entry.value;
-                if (val is! Map) continue;
-                final rawId = val['id'] ?? entry.key;
-                final itemId = int.tryParse('$rawId') ?? rawId;
-                final delAt =
-                    '${val['deleted_at'] ?? DateTime.now().toIso8601String()}';
-                await txn.update(
-                  'items',
-                  {
-                    'is_deleted': 1,
-                    'is_active': 0,
-                    'deleted_at': delAt,
-                  },
-                  where: 'id = ?',
-                  whereArgs: [itemId],
-                );
-              }
-            });
-          }
-        }
-      } catch (_) {}
+    if (maxTsMs > lastCursorMs) {
+      await saveLastSyncedCursor(maxTsMs);
     }
 
     await repo.setSetting('lastCloudSync', DateTime.now().toLocal().toString());
@@ -648,20 +729,16 @@ class CloudFirebaseTransport implements SyncTransport {
 
   bool get isListening => _listening;
 
-  /// يفتح قناة SSE على مسار العمليات: فيربيس يرسل حدث `put`/`patch`
-  /// لحظة كتابة أي جهاز عملية جديدة، فنستدعي onCloudChanged (الذي يشغّل
-  /// pull تزايدياً). القناة تعيد الاتصال تلقائياً بتراجع أسّي عند الانقطاع.
+  /// يفتح قناة SSE على مسار العمليات مع حصر الاستعلام بالمؤشر الزمني `last_synced_cursor`
+  /// `.orderByChild('server_time').startAfter(last_synced_cursor)`.
   Future<void> startListening() async {
     if (_listening) return;
     _listening = true;
     _sseRetrySeconds = 2;
-    // (دفعة 52) اعتماد مضيف الواجهة الخلفية كموثوق لدى طبقة تشخيص TLS
-    // (يُقبل رغم فشل التحقق في شبكات تفتيش TLS — الباقي يُرفض دائماً).
     try {
       DesktopNet.trustedHost = Uri.parse(backendUrl).host;
     } catch (_) {}
     unawaited(_sseLoop());
-    // (دفعة 54) قناة ثانية خفيفة على شاهدة الطرد الخاصة بنا —
   }
 
   Future<void> stopListening() async {
@@ -675,25 +752,22 @@ class CloudFirebaseTransport implements SyncTransport {
   Future<void> _sseLoop() async {
     while (_listening) {
       try {
-        // (دفعة 52) فحص وصول سريع قبل فتح القناة: استعلام DNS للمضيف —
-        // يكشف انقطاع الإنترنت/حجب جدار الحماية فوراً برسالة دقيقة
-        // بدل تعليق ثم فشل صامت.
         final host = Uri.parse(backendUrl).host;
         final pre = await DesktopNet.preflight(host);
         if (pre != null) throw SocketException('preflight: $pre');
-        // ملاحظة: HttpClient هنا يرث DesktopHttpOverrides العالمية على
-        // سطح المكتب (بروكسي بيئة + مهلات + تشخيص شهادات TLS).
         final client = HttpClient()
           ..connectionTimeout = const Duration(seconds: 15);
         _sseClient = client;
         final tok = await _idToken();
-        // نستمع على مؤشر خفيف (limitToLast=1 مرتب بالمفتاح) — يكفي كجرس
-        // إنذار، والسحب الفعلي يمر عبر pull التزايدي المعتاد.
-        final params = <String, String>{
-          'orderBy': jsonEncode(r'$key'),
-          'limitToLast': '1',
-          if (tok != null) 'auth': tok,
-        };
+        final lastCursor = await getLastSyncedCursor();
+        // حصر الاستماع اللحظي (SSE) بالاستئناف بعد المؤشر الزمني حصراً:
+        // .orderByChild('server_time').startAfter(last_synced_cursor)
+        final params = buildCursorQueryParams(
+          lastSyncedCursor: lastCursor,
+          indexField: 'server_time',
+          forRealtimeStream: true,
+        );
+        if (tok != null) params['auth'] = tok;
         final uri = Uri.parse(_opsPath).replace(queryParameters: params);
         final req = await client.getUrl(uri);
         req.headers.set('Accept', 'text/event-stream');

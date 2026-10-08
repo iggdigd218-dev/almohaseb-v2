@@ -1,5 +1,6 @@
 // مسجّل العمليات: يُستدعى داخل معاملة الحفظ لإدخال Operation
 // وإدراجها في sync_queue atomically مع حفظ الكيان المحلي.
+import 'dart:convert';
 import 'package:sqflite/sqflite.dart';
 
 import 'operation.dart';
@@ -69,6 +70,22 @@ class SyncRecorder {
     final id = uuid();
     final now = DateTime.now();
     final v = version ?? await nextVersion(entityType, entityId);
+    // فحص صارم للحجم الخام قبل الإدراج: حمولة تتجاوز حد ناقل HTTP (8MB) لن
+    // تُسلَّم أبداً — نرفضها هنا فتفشل معاملة الحفظ كلها (ACID) بدل
+    // عملية عالقة pending للأبد تسد الطابور.
+    final rawPayloadStr = jsonEncode(payload);
+    if (rawPayloadStr.length > kMaxOperationPayloadBytes) {
+      throw StateError(
+        'حجم البيانات المرفقة يتجاوز الحد المسموح للمزامنة '
+        '(${(kMaxOperationPayloadBytes / (1024 * 1024)).toStringAsFixed(1)} MB) '
+        '— قلّل حجم المرفق وأعد المحاولة.',
+      );
+    }
+    final sanitizedPayload = sanitizeOperationPayload(
+      payload,
+      entityType: entityType,
+      entityId: entityId,
+    );
     final op = SyncOperation(
       id: id,
       deviceId: deviceId,
@@ -79,14 +96,12 @@ class SyncRecorder {
       opType: opType,
       version: v,
       parentOpId: parentOpId,
-      payload: payload,
+      payload: sanitizedPayload,
       deviceTime: now.toIso8601String(),
       timestamp: now.toIso8601String(),
+      isSynced: 0,
     );
     final opMap = op.toMap();
-    // فحص صارم للحجم قبل الإدراج: حمولة تتجاوز حد ناقل HTTP (8MB) لن
-    // تُسلَّم أبداً — نرفضها هنا فتفشل معاملة الحفظ كلها (ACID) بدل
-    // عملية عالقة pending للأبد تسد الطابور.
     final payloadStr = opMap['payload'] as String? ?? '';
     if (payloadStr.length > kMaxOperationPayloadBytes) {
       throw StateError(
@@ -95,7 +110,15 @@ class SyncRecorder {
         '— قلّل حجم المرفق وأعد المحاولة.',
       );
     }
-    await db.insert('operations', opMap);
+    try {
+      await db.insert('operations', opMap);
+    } on DatabaseException catch (e) {
+      if ('$e'.contains('is_synced')) {
+        await db.insert('operations', op.toMap(includeIsSynced: false));
+      } else {
+        rethrow;
+      }
+    }
 
     final qnow = now.toIso8601String();
     // لا نضيف هدف Cloud إلا إذا كان خادم سحابي مهيأ فعلاً — إضافته دائماً

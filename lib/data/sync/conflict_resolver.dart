@@ -45,18 +45,50 @@ class ConflictResolver {
       return ConflictDecision.ignore(reason: 'empty-payload-missing');
     }
 
-    // 3. الكيان موجود محلياً: الحسم الذكي وفق أحدث ختم زمني (Last-Write-Wins) ورقم الإصدار
+    // 3. الكيان موجود محلياً: الحسم الذكي وفق أحدث وقت خادم مرجعي `server_time`
+    // (Last-Write-Wins) مع الرجوع للطابع المحلي للعمليات القديمة غير المرفوعة بعد.
+    // إذا كان وقت الخادم `server_time` متوفراً في الطرفين، يُحسم التعارض حصرياً به.
+    final inServerMs = incoming.serverTimeMs;
+    final locServerMs = localLatest?.serverTimeMs ?? 0;
+    if (inServerMs > 0 && locServerMs > 0) {
+      if (inServerMs > locServerMs) {
+        return ConflictDecision.apply();
+      }
+      if (inServerMs < locServerMs) {
+        return ConflictDecision.ignore(reason: 'older-server-time-ignored');
+      }
+      // تساوٍ تام في وقت الخادم server_time -> كسر التعادل حتمياً بـ رقم الإصدار ثم device_id
+      if (incoming.version > localVersion) {
+        return ConflictDecision.apply();
+      }
+      if (incoming.version < localVersion) {
+        return ConflictDecision.ignore(reason: 'older-version-ignored');
+      }
+      if (localLatest != null && localLatest.deviceId == incoming.deviceId) {
+        return ConflictDecision.apply();
+      }
+      if (incoming.deviceId.compareTo(localLatest?.deviceId ?? '') <= 0) {
+        return ConflictDecision.apply();
+      }
+      return ConflictDecision.ignore(reason: 'tiebreak-deterministic');
+    }
+
     // إذا كان رقم الإصدار الوارد أكبر: تطبيق فوراً
     if (incoming.version > localVersion) {
       return ConflictDecision.apply();
     }
 
-    final tIn =
-        DateTime.tryParse(incoming.timestamp)?.millisecondsSinceEpoch ??
-        (DateTime.tryParse(incoming.deviceTime)?.millisecondsSinceEpoch ?? 0);
-    final tLocal =
-        DateTime.tryParse(localLatest?.timestamp ?? '')?.millisecondsSinceEpoch ??
-        (DateTime.tryParse(localLatest?.deviceTime ?? '')?.millisecondsSinceEpoch ?? 0);
+    final tIn = inServerMs > 0
+        ? inServerMs
+        : (DateTime.tryParse(incoming.timestamp)?.millisecondsSinceEpoch ??
+            (DateTime.tryParse(incoming.deviceTime)?.millisecondsSinceEpoch ?? 0));
+    final tLocal = locServerMs > 0
+        ? locServerMs
+        : (DateTime.tryParse(localLatest?.timestamp ?? '')
+                ?.millisecondsSinceEpoch ??
+            (DateTime.tryParse(localLatest?.deviceTime ?? '')
+                    ?.millisecondsSinceEpoch ??
+                0));
 
     // إذا كانت العملية الواردة أحدث زمنياً (Last-Write-Wins): تطبيق واعتماد الأحدث
     if (tIn > tLocal) {

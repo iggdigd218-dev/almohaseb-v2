@@ -439,6 +439,18 @@ class AppDatabase {
       // (2026-09-26) أعمدة حالة الحذف والنشاط للأصناف (is_deleted, is_active)
       await _addColumn(db, 'items', 'is_deleted', 'INTEGER NOT NULL DEFAULT 0');
       await _addColumn(db, 'items', 'is_active', 'INTEGER NOT NULL DEFAULT 1');
+      // عمود is_synced للمزامنة التراكمية الذكية (Delta-Sync)
+      await _addColumn(db, 'operations', 'is_synced', 'INTEGER NOT NULL DEFAULT 0');
+      try {
+        await db.execute(
+          'UPDATE operations SET is_synced = synced WHERE is_synced = 0 AND synced = 1',
+        );
+      } catch (_) {}
+      await _tryCreateIndex(
+        db,
+        'idx_ops_is_synced',
+        'CREATE INDEX IF NOT EXISTS idx_ops_is_synced ON operations(is_synced, timestamp)',
+      );
       // أعمدة الورديات وربط العمليات بالكاشير وصلاحية الخصم
       await _addColumn(db, 'transactions', 'created_by_user_id', 'INTEGER');
       await _addColumn(db, 'transactions', 'cashier_name', "TEXT DEFAULT ''");
@@ -727,11 +739,13 @@ class AppDatabase {
         device_time  TEXT NOT NULL,
         server_time  TEXT DEFAULT '',
         timestamp    TEXT NOT NULL,
-        synced       INTEGER NOT NULL DEFAULT 0
+        synced       INTEGER NOT NULL DEFAULT 0,
+        is_synced    INTEGER NOT NULL DEFAULT 0
       );
-      CREATE INDEX IF NOT EXISTS idx_ops_entity ON operations(entity_type, entity_id);
-      CREATE INDEX IF NOT EXISTS idx_ops_time   ON operations(timestamp);
-      CREATE INDEX IF NOT EXISTS idx_ops_sync   ON operations(synced, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_ops_entity    ON operations(entity_type, entity_id);
+      CREATE INDEX IF NOT EXISTS idx_ops_time      ON operations(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_ops_sync      ON operations(synced, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_ops_is_synced ON operations(is_synced, timestamp);
 
       CREATE TABLE IF NOT EXISTS sync_queue (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -902,8 +916,10 @@ class AppDatabase {
           op_type TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
           parent_op_id TEXT DEFAULT '', payload TEXT NOT NULL,
           device_time TEXT NOT NULL, server_time TEXT DEFAULT '',
-          timestamp TEXT NOT NULL, synced INTEGER NOT NULL DEFAULT 0
+          timestamp TEXT NOT NULL, synced INTEGER NOT NULL DEFAULT 0,
+          is_synced INTEGER NOT NULL DEFAULT 0
         )''');
+    await _addColumn(db, 'operations', 'is_synced', 'INTEGER NOT NULL DEFAULT 0');
     await _tryCreateTable(db, 'sync_queue', '''
         CREATE TABLE IF NOT EXISTS sync_queue (
           id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL,

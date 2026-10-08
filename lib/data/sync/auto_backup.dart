@@ -230,27 +230,21 @@ class AutoBackupService {
         }
       } catch (_) {}
     }
-    // السحابة الخاصة: فردي أثناء التجربة/الاشتراك فقط (البوابة داخل
-    // silentWorkspaceBackup — تُحجب تلقائياً بعد الانتهاء)، ومؤسسة حسب
-    // ضوابط التجربة المعتمدة دون تغيير.
-    try {
-      if (await silentBackupDue(repo)) await silentWorkspaceBackup(repo);
-    } catch (_) {}
+    // (4) إيقاف اللقطات الشاملة والفحص العشوائي (No Full Dumps):
+    // تم تعطيل رفع اللقطة الكاملة تلقائياً إلى Firebase RTDB في الخلفية
+    // للاعتماد التام على المزامنة الذكية التراكمية (Delta-Sync) ومنع هدر البيانات.
     await repo.setSetting(
         kLastScheduledKey, DateTime.now().toIso8601String());
   }
 
-  /// المدخل الموحّد للمحرك: المجدول إن حان (يشمل المحلي/Drive/السحابي)،
-  /// وإلا النسخة السحابية الصامتة القديمة إن استحقت.
+  /// المدخل الموحّد للمحرك: يشغّل الجدول المحلي/Drive إن حان،
+  /// مع إيقاف رفع اللقطة الكاملة الصامتة إلى Firebase RTDB (No Full Dumps).
   static Future<void> maybeRun(Repo repo) async {
     try {
       if (await scheduledDue(repo)) {
         await runScheduled(repo);
         return;
       }
-    } catch (_) {}
-    try {
-      if (await silentBackupDue(repo)) await silentWorkspaceBackup(repo);
     } catch (_) {}
   }
 }

@@ -27,6 +27,7 @@
         "operations": {
           ".write": "auth != null",
           ".indexOn": [
+            "server_time",
             "server_ts",
             "timestamp"
           ]

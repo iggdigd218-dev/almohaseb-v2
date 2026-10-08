@@ -53,6 +53,81 @@ class SyncTarget {
   static String deviceIdOf(String t) => t.replaceFirst('device:', '');
 }
 
+/// حظر تضمين الوسائط والبيانات الثقيلة (صور الفواتير، سلاسل Base64، وسائط الدردشة)
+/// داخل عقد operations في Firebase RTDB، والاكتفاء بالبيانات المحاسبية النصية الخفيفة.
+Map<String, Object?> sanitizeOperationPayload(
+  Map<String, Object?> payload, {
+  EntityKind? entityType,
+  String? entityId,
+}) {
+  if (payload.isEmpty) return const {};
+  const forbiddenMediaKeys = <String>{
+    'file_b64',
+    'image_b64',
+    'photo_b64',
+    'attachment_b64',
+    'media_b64',
+    'audio_b64',
+    'video_b64',
+    'receipt_b64',
+  };
+  const mediaPathOrBlobKeys = <String>{
+    'image',
+    'attachment',
+    'image_path',
+    'photo_url',
+    'receipt_image',
+  };
+  final cleaned = <String, Object?>{};
+  final hadFileB64 =
+      payload['file_b64'] is String && (payload['file_b64'] as String).isNotEmpty;
+
+  for (final entry in payload.entries) {
+    final k = entry.key;
+    final v = entry.value;
+    if (forbiddenMediaKeys.contains(k)) {
+      continue;
+    }
+    if (mediaPathOrBlobKeys.contains(k)) {
+      // منع إدراج صور الفواتير أو المرفقات أو سلاسل Base64 داخل عقد operations
+      continue;
+    }
+    if (v is String && _looksLikeBase64OrDataUri(v, key: k, entityType: entityType, entityId: entityId)) {
+      continue;
+    }
+    cleaned[k] = v;
+  }
+  if (hadFileB64) {
+    cleaned['file_pruned'] = 1;
+  }
+  return cleaned;
+}
+
+bool _looksLikeBase64OrDataUri(
+  String value, {
+  required String key,
+  EntityKind? entityType,
+  String? entityId,
+}) {
+  final trimmed = value.trim();
+  if (trimmed.isEmpty) return false;
+  if (trimmed.startsWith('data:') && trimmed.contains(';base64,')) {
+    return true;
+  }
+  // استثناء إعداد أيقونة المنشأة المصغرة في اختبارات الإعدادات المحليّة القصيرة
+  if (entityType == EntityKind.setting && entityId == 'org.icon.b64' && trimmed.length <= 512) {
+    return false;
+  }
+  if (key.endsWith('_b64') || key.endsWith('Base64')) {
+    return true;
+  }
+  // سلاسل Base64 الطويلة غير النصية (> 1024 حرفاً متصلاً بلا مسافات)
+  if (trimmed.length > 1024 && !trimmed.contains(' ') && RegExp(r'^[A-Za-z0-9+/=_-]+$').hasMatch(trimmed)) {
+    return true;
+  }
+  return false;
+}
+
 /// عملية مزامنة واحدة (سجل غير قابل للتعديل بعد الإنشاء).
 class SyncOperation {
   /// UUID عالمي فريد. أساس Idempotency: نفس الـ id لا يُطبّق مرتين.
@@ -67,8 +142,9 @@ class SyncOperation {
   final String parentOpId; // لعملية restore: عملية delete الأصلية.
   final Map<String, Object?> payload; // Snapshot كامل للكيان بعد العملية.
   final String deviceTime; // ISO 8601 وقت الجهاز.
-  final String? serverTime; // وقت السيرفر عند الـ sync (يملأه الـ transport).
+  final String? serverTime; // وقت السيرفر عند الـ sync (يملأه الـ transport أو ServerValue.TIMESTAMP).
   final String timestamp; // وقت إنشاء السجل محليًا.
+  final int isSynced; // 0 = غير متزامنة، 1 = متزامنة ومؤكدة مع السيرفر.
 
   const SyncOperation({
     required this.id,
@@ -84,9 +160,25 @@ class SyncOperation {
     required this.deviceTime,
     required this.timestamp,
     this.serverTime,
+    this.isSynced = 0,
   });
 
-  Map<String, Object?> toMap() => {
+  /// وقت الخادم بالملي ثانية (من server_time الرقمي أو النصي) للاعتماد الحصري عليه
+  /// في مؤشر السحب (last_synced_cursor) وفي حسم التعارضات (Conflict Resolution).
+  int get serverTimeMs {
+    final st = serverTime;
+    if (st != null && st.isNotEmpty) {
+      final asInt = int.tryParse(st);
+      if (asInt != null && asInt > 0) return asInt;
+      final asNum = num.tryParse(st);
+      if (asNum != null && asNum > 0) return asNum.toInt();
+      final asDate = DateTime.tryParse(st)?.millisecondsSinceEpoch;
+      if (asDate != null && asDate > 0) return asDate;
+    }
+    return 0;
+  }
+
+  Map<String, Object?> toMap({bool includeIsSynced = true}) => {
         'id': id,
         'device_id': deviceId,
         'workspace_id': workspaceId,
@@ -100,8 +192,32 @@ class SyncOperation {
         'device_time': deviceTime,
         'server_time': serverTime,
         'timestamp': timestamp,
-        'synced': 0,
+        'synced': isSynced,
+        if (includeIsSynced) 'is_synced': isSynced,
       };
+
+  static String? _parseServerTime(Object? primary, Object? fallbackTs) {
+    for (final raw in [primary, fallbackTs]) {
+      if (raw == null) continue;
+      if (raw is int && raw > 0) return '$raw';
+      if (raw is num && raw > 0) return '${raw.toInt()}';
+      if (raw is String && raw.trim().isNotEmpty) return raw.trim();
+    }
+    return null;
+  }
+
+  static int _parseSyncedFlag(Object? isSyncedVal, Object? syncedVal) {
+    for (final v in [isSyncedVal, syncedVal]) {
+      if (v is int) return v != 0 ? 1 : 0;
+      if (v is num) return v.toInt() != 0 ? 1 : 0;
+      if (v is bool) return v ? 1 : 0;
+      if (v is String) {
+        if (v == '1' || v.toLowerCase() == 'true') return 1;
+        if (v == '0' || v.toLowerCase() == 'false') return 0;
+      }
+    }
+    return 0;
+  }
 
   static SyncOperation fromMap(Map<String, Object?> m) => SyncOperation(
         id: m['id'] as String,
@@ -115,8 +231,9 @@ class SyncOperation {
         parentOpId: (m['parent_op_id'] as String?) ?? '',
         payload: _decodeJson(m['payload']),
         deviceTime: (m['device_time'] as String?) ?? '',
-        serverTime: m['server_time'] as String?,
+        serverTime: _parseServerTime(m['server_time'], m['server_ts']),
         timestamp: (m['timestamp'] as String?) ?? '',
+        isSynced: _parseSyncedFlag(m['is_synced'], m['synced']),
       );
 
   String toJson() => jsonEncode(toMap());

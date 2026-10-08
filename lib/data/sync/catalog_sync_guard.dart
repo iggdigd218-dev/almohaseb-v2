@@ -257,12 +257,11 @@ class CatalogSyncGuard {
       bool hasMismatch = true;
       String? mismatchDetail;
 
-      // (2026-09-28) معالجة ذكية حتمية: بدلاً من التوقف عاجزاً عند التفاوت،
-      // نقوم فوراً بإجراء سحب توفيقي كامل للأحدث (Last-Write-Wins) وحذف القديم تلقائياً.
+      // (Delta-Sync) معالجة ذكية بالمؤشر الزمني حصراً دون إسقاط المؤشر أو جلب الشجرة الكاملة.
       try {
         final applied = await transport.pull(
           resolver: ConflictResolver(),
-          forceFullSync: true,
+          forceFullSync: false,
         );
         if (applied > 0) {
           final reconciled = await computeLocalDigest(repo);

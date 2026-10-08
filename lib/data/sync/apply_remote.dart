@@ -679,8 +679,7 @@ extension ApplyRemoteOp on Repo {
         'entity_id': op.entityId,
         'created_at': DateTime.now().toIso8601String(),
       });
-      await txn.insert('operations', _storedOpMap(op),
-          conflictAlgorithm: ConflictAlgorithm.ignore);
+      await _insertStoredOperation(txn, op);
       return false;
     }
     if (!decision.apply) return false;
@@ -759,8 +758,11 @@ extension ApplyRemoteOp on Repo {
         await nullDanglingSection(txn, table, row);
         if (existing.isNotEmpty) {
           if (row.isNotEmpty) {
-            final opMs = DateTime.tryParse(op.timestamp)?.millisecondsSinceEpoch ??
-                (DateTime.tryParse(op.deviceTime)?.millisecondsSinceEpoch ?? 0);
+            final opMs = op.serverTimeMs > 0
+                ? op.serverTimeMs
+                : (DateTime.tryParse(op.timestamp)?.millisecondsSinceEpoch ??
+                    (DateTime.tryParse(op.deviceTime)?.millisecondsSinceEpoch ??
+                        0));
 
             if (table == 'items') {
               final isLocallyDeleted = existing.isNotEmpty &&
@@ -1006,9 +1008,31 @@ extension ApplyRemoteOp on Repo {
         op.entityId == 'ownershipTransfer') {
       await _applyOwnershipTransfer(txn, op);
     }
-    await txn.insert('operations', _storedOpMap(op),
-        conflictAlgorithm: ConflictAlgorithm.ignore);
+    await _insertStoredOperation(txn, op);
     return true;
+  }
+
+  Future<void> _insertStoredOperation(
+    DatabaseExecutor txn,
+    SyncOperation op,
+  ) async {
+    try {
+      await txn.insert(
+        'operations',
+        _storedOpMap(op, includeIsSynced: true),
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+    } on DatabaseException catch (e) {
+      if ('$e'.contains('is_synced')) {
+        await txn.insert(
+          'operations',
+          _storedOpMap(op, includeIsSynced: false),
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+      } else {
+        rethrow;
+      }
+    }
   }
 
   /// تطبيق نقل الملكية الوارد: تحقق سيادي (المرسل هو المالك المعروف
@@ -1157,14 +1181,20 @@ extension ApplyRemoteOp on Repo {
   /// صف العملية كما يُخزَّن محلياً: بعد فك مرفق الدردشة وحفظه على القرص
   /// نحذف حمولة base64 الضخمة من جدول operations (تبقى على السحابة/المرسل
   /// للأجهزة الأخرى) — تمنع تضخم القاعدة وتسريب الذاكرة عند قراءة العمليات.
-  Map<String, Object?> _storedOpMap(SyncOperation op) {
-    final m = op.toMap()..['synced'] = 1;
-    final b64 = op.payload['file_b64'];
-    if (b64 is String && b64.isNotEmpty) {
-      final slim = Map<String, Object?>.from(op.payload)
-        ..remove('file_b64')
-        ..['file_pruned'] = 1; // عُولج المرفق وحُفظ في chat_media.
-      m['payload'] = jsonEncode(slim);
+  Map<String, Object?> _storedOpMap(
+    SyncOperation op, {
+    bool includeIsSynced = true,
+  }) {
+    final sanitizedPayload = sanitizeOperationPayload(
+      op.payload,
+      entityType: op.entityType,
+      entityId: op.entityId,
+    );
+    final m = op.toMap(includeIsSynced: includeIsSynced)
+      ..['synced'] = 1
+      ..['payload'] = jsonEncode(sanitizedPayload);
+    if (includeIsSynced) {
+      m['is_synced'] = 1;
     }
     return m;
   }

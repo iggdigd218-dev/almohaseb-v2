@@ -133,10 +133,10 @@ void main() {
               requested = request.url;
               return http.Response('null', 200);
             }));
-    // منذ المرحلة 5: الترشيح بختم خادم فيربيس الرقمي حصراً — لا ISO من
-    // ساعات الهواتف (overlap ثانيتين كما كان).
-    expect(requested!.queryParameters['orderBy'], jsonEncode('server_ts'));
-    expect(requested!.queryParameters['startAt'], '${ms - 2000}');
+    // المزامنة التراكمية (Delta-Sync): الترشيح بختم خادم فيربيس الرقمي حصراً (server_time)
+    // واستئناف السحب حصراً لما بعد المؤشر (startAfter(cursor) => startAt: cursor + 1).
+    expect(requested!.queryParameters['orderBy'], jsonEncode('server_time'));
+    expect(requested!.queryParameters['startAt'], '${ms + 1}');
 
     // التوافق الخلفي: مؤشر قديم بصيغة ISO يُقرأ ويُحوَّل رقمياً.
     final iso = DateTime.fromMillisecondsSinceEpoch(ms).toIso8601String();
@@ -148,7 +148,7 @@ void main() {
               requested = request.url;
               return http.Response('null', 200);
             }));
-    expect(requested!.queryParameters['startAt'], '${ms - 2000}',
-        reason: 'قيمة ISO قديمة تُفهم وتتحول لملي ثانية');
+    expect(requested!.queryParameters['startAt'], '${ms + 1}',
+        reason: 'قيمة ISO قديمة تُفهم وتتحول لملي ثانية مع استئناف startAfter');
   });
 }

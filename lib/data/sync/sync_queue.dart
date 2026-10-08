@@ -87,6 +87,13 @@ class SyncQueueOps {
 
   Future<void> markSynced(int id) async {
     final now = DateTime.now().toIso8601String();
+    final rows = await db.query(
+      'sync_queue',
+      columns: ['operation_id'],
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
     await db.update(
       'sync_queue',
       {
@@ -98,6 +105,28 @@ class SyncQueueOps {
       where: 'id = ?',
       whereArgs: [id],
     );
+    if (rows.isNotEmpty) {
+      final opId = rows.first['operation_id'] as String?;
+      if (opId != null && opId.isNotEmpty) {
+        try {
+          await db.update(
+            'operations',
+            {'synced': 1, 'is_synced': 1},
+            where: 'id = ?',
+            whereArgs: [opId],
+          );
+        } on DatabaseException catch (_) {
+          try {
+            await db.update(
+              'operations',
+              {'synced': 1},
+              where: 'id = ?',
+              whereArgs: [opId],
+            );
+          } catch (_) {}
+        }
+      }
+    }
   }
 
   /// تسجيل فشل مؤقت: لا توجد حالة "فشل نهائي" إطلاقًا — أي عملية تبقى
@@ -208,32 +237,49 @@ class SyncQueueOps {
         whereArgs: [SyncStatus.pending.name, SyncStatus.failed.name]);
   }
 
-  /// Only scheduled pending rows are automatic retries; failed is terminal.
+  /// Only scheduled pending rows with `is_synced == 0` are automatic retries; failed is terminal.
   Future<List<Map<String, Object?>>> pickPending({
     int limit = 20,
     String? target,
   }) async {
     final now = DateTime.now().toIso8601String();
-    final where = StringBuffer(
-      "status = ? AND (next_try_at = '' OR next_try_at <= ?)",
-    );
-    final args = <Object?>[
+    final targetSql = target != null ? ' AND q.target = ?' : '';
+    final sqlArgs = <Object?>[
       SyncStatus.pending.name,
       now,
+      if (target != null) target,
     ];
-    if (target != null) {
-      where.write(' AND target = ?');
-      args.add(target);
+    try {
+      return await db.rawQuery(
+        'SELECT q.* FROM sync_queue q '
+        'LEFT JOIN operations o ON o.id = q.operation_id '
+        "WHERE q.status = ? AND (q.next_try_at = '' OR q.next_try_at <= ?)"
+        '$targetSql '
+        'AND COALESCE(o.is_synced, o.synced, 0) = 0 '
+        'ORDER BY q.attempts ASC, q.created_at ASC '
+        'LIMIT $limit',
+        sqlArgs,
+      );
+    } on DatabaseException catch (_) {
+      final where = StringBuffer(
+        "status = ? AND (next_try_at = '' OR next_try_at <= ?)",
+      );
+      final args = <Object?>[
+        SyncStatus.pending.name,
+        now,
+      ];
+      if (target != null) {
+        where.write(' AND target = ?');
+        args.add(target);
+      }
+      return db.query(
+        'sync_queue',
+        where: where.toString(),
+        whereArgs: args,
+        orderBy: 'attempts ASC, created_at ASC',
+        limit: limit,
+      );
     }
-    // attempts ASC أولاً: العمليات الجديدة (0 محاولات) تُرسل قبل العالقة
-    // المتكررة الفشل — يمنع «تجويع» العمليات الجديدة خلف طابور قديم معلّق.
-    return db.query(
-      'sync_queue',
-      where: where.toString(),
-      whereArgs: args,
-      orderBy: 'attempts ASC, created_at ASC',
-      limit: limit,
-    );
   }
 
   /// A process can terminate after marking a row syncing but before an ack.

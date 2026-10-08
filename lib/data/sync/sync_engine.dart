@@ -592,8 +592,8 @@ class SyncEngine {
         }
       } catch (_) {}
 
-      // فحص تطابق الكتالوج وتطهير الإشعارات القديمة بفاصل زمني هادئ (كل 3 دقائق)
-      // منعاً لإغراق المعالج والشبكة في كل سحبة سحابية.
+      // (1) فحص تطابق الكتالوج محلياً دون إسقاط المؤشر أو سحب الشجرة كاملة (No Full Dumps)
+      // وتطهير الإشعارات القديمة بفاصل زمني هادئ (كل 3 دقائق).
       final now = DateTime.now();
       if (now.difference(_lastHeavyMaintenanceCheck) >=
           const Duration(minutes: 3)) {
@@ -622,9 +622,8 @@ class SyncEngine {
   }
 
 
-  /// إنقاذ سحابي: كل عملية محلية لم يُدرج لها هدف cloud (سُجّلت قبل ضبط
-  /// السحابة أو أثناء تعطيلها) تُدرج pending الآن. idempotent بالكامل:
-  /// الدفع للسحابة PUT على نفس opId، والصف لا يتكرر (INSERT OR IGNORE).
+  /// إنقاذ سحابي: كل عملية محلية غير متزامنة (`is_synced == 0`) لم يُدرج لها هدف
+  /// cloud (سُجّلت قبل ضبط السحابة أو أثناء تعطيلها) تُدرج pending الآن.
   Future<void> _backfillMissedCloudOps() async {
     final db = await _db;
     final st = await repo.settings();
@@ -635,24 +634,40 @@ class SyncEngine {
     final ourId = st['sync.deviceId'] ?? '';
     if (ourId.isEmpty) return;
     final now = DateTime.now().toIso8601String();
-    await db.rawInsert('''
-      INSERT OR IGNORE INTO sync_queue
-        (operation_id, status, target, attempts, last_error, next_try_at,
-         created_at, updated_at)
-      SELECT o.id, 'pending', 'cloud', 0, '', '', ?, ?
-      FROM operations o
-      WHERE o.device_id = ?
-        AND NOT EXISTS (
-          SELECT 1 FROM sync_queue q
-          WHERE q.operation_id = o.id AND q.target = 'cloud'
-        )
-    ''', [now, now, ourId]);
+    try {
+      await db.rawInsert('''
+        INSERT OR IGNORE INTO sync_queue
+          (operation_id, status, target, attempts, last_error, next_try_at,
+           created_at, updated_at)
+        SELECT o.id, 'pending', 'cloud', 0, '', '', ?, ?
+        FROM operations o
+        WHERE o.device_id = ?
+          AND COALESCE(o.is_synced, o.synced, 0) = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM sync_queue q
+            WHERE q.operation_id = o.id AND q.target = 'cloud'
+          )
+      ''', [now, now, ourId]);
+    } catch (_) {
+      await db.rawInsert('''
+        INSERT OR IGNORE INTO sync_queue
+          (operation_id, status, target, attempts, last_error, next_try_at,
+           created_at, updated_at)
+        SELECT o.id, 'pending', 'cloud', 0, '', '', ?, ?
+        FROM operations o
+        WHERE o.device_id = ?
+          AND COALESCE(o.synced, 0) = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM sync_queue q
+            WHERE q.operation_id = o.id AND q.target = 'cloud'
+          )
+      ''', [now, now, ourId]);
+    }
   }
 
   /// صيانة تخزين جدول العمليات (تعمل عند الإقلاع وكل 6 ساعات):
-  /// 1) تجريد حمولات base64 الضخمة (مرفقات الدردشة) من العمليات التي
-  ///    وصلت لكل الأجهزة — الملف محفوظ على القرص، ولا حاجة لنسخة ثانية
-  ///    داخل SQLite تتضخم وتُبطئ كل قراءة.
+  /// 1) تجريد حمولات base64 الضخمة (مرفقات الدردشة/الفواتير) من العمليات المحليّة
+  ///    لضمان خلو عقد operations من أي وسائط ثقيلة.
   /// 2) حذف عمليات الدردشة القديمة (أقدم من 14 يوماً) المستلمة من الجميع
   ///    والمرفوعة للسحابة — الرسائل نفسها باقية في جدول messages.
   /// مدخل للاختبارات فقط — يشغّل صيانة تخزين العمليات مباشرة.
@@ -664,12 +679,11 @@ class SyncEngine {
     final db = await _db;
     final ourId = (await repo.settings())['sync.deviceId'] ?? '';
     if (ourId.isEmpty) return;
-    // (دفعة 58) المعيار السحابي الوحيد: synced=1 = العملية على السحابة
-    // ويستطيع أي قرين سحبها — لا op_deliveries بعد اليوم.
-    // (1) تجريد base64: عملياتنا المرفوعة للسحابة وحمولتها تتضمن file_b64.
+    // (1) تجريد base64 من أي عملية في جدول operations (حتى لو لم تُرفع بعد)
+    // التزاماً بحظر تضمين الوسائط والبيانات الثقيلة داخل RTDB.
     final fat = await db.rawQuery('''
       SELECT id, payload FROM operations
-      WHERE payload LIKE '%"file_b64"%' AND synced = 1
+      WHERE payload LIKE '%"file_b64"%'
       LIMIT 200
     ''');
     for (final r in fat) {

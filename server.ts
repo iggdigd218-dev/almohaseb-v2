@@ -7,14 +7,16 @@ import QRCode from 'qrcode';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
+function getGenAI() {
+  return new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY || 'missing-api-key',
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
     },
-  },
-});
+  });
+}
 
 const PORT = 3000;
 const dbPath = path.join(process.cwd(), 'nexora.db');
@@ -1818,6 +1820,7 @@ async function startServer() {
 
       let activeModel = targetModel;
       let replyText = '';
+      const ai = getGenAI();
 
       try {
         const chat = ai.chats.create({

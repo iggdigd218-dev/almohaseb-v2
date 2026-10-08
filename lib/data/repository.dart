@@ -850,7 +850,7 @@ class Repo {
       await txn.delete(
         'sync_meta',
         where:
-            "key LIKE 'lastCloudTs:%' OR key LIKE 'lastRosterPush:%' OR key LIKE 'lastLanTs:%' OR key = 'ownerDeviceId'",
+            "key LIKE 'last_synced_cursor%' OR key LIKE 'lastCloudTs:%' OR key LIKE 'lastRosterPush:%' OR key LIKE 'lastLanTs:%' OR key = 'ownerDeviceId'",
       );
       await txn.insert(
           'sync_meta',
@@ -3707,7 +3707,8 @@ class Repo {
     await db.insert('messages', row);
     await db.update('conversations', {'updated_at': now},
         where: 'id = ?', whereArgs: [groupConversationId]);
-    // الحمولة المزامنة تتضمن الملف نفسه base64 — يعيد الطرف الآخر بناءه.
+    // حظر تضمين الوسائط والبيانات الثقيلة (Base64) داخل عقد operations في RTDB:
+    // نكتفي بنقل البيانات النصية الصافية الخفيفة للمحادثة.
     await queueOperation(
       entityType: EntityKind.message,
       entityId: '$id',
@@ -3715,7 +3716,6 @@ class Repo {
       payload: {
         ...row,
         'conv_title': 'دردشة المجموعة',
-        'file_b64': base64Encode(bytes),
         'file_name': name,
       },
     );
@@ -4588,7 +4588,7 @@ class Repo {
           await txn.delete('sync_queue',
               where: 'status IN (?, ?)', whereArgs: ['pending', 'syncing']);
           await txn.delete('sync_meta',
-              where: "key LIKE 'lastCloudTs:%' OR key LIKE 'lastRosterPush:%'");
+              where: "key LIKE 'last_synced_cursor%' OR key LIKE 'lastCloudTs:%' OR key LIKE 'lastRosterPush:%'");
         } catch (_) {
           // قواعد قديمة بلا جداول مزامنة.
         }
@@ -6244,7 +6244,12 @@ class Repo {
     await db.delete('sync_queue');
     await db.delete('operations');
     await db.delete('sync_meta',
-        where: 'key = ?', whereArgs: ['lastCloudTs:$ws']);
+        where: 'key IN (?, ?, ?)',
+        whereArgs: [
+          'last_synced_cursor:$ws',
+          'last_synced_cursor',
+          'lastCloudTs:$ws',
+        ]);
 
     if (engine != null) {
       try {
