@@ -293,7 +293,7 @@ class _TxFormState extends ConsumerState<TxForm> {
       );
       slowWarning.cancel();
       if (mounted) bump(ref);
-      const stockFailed = false;
+
       var saved = tx.copyWith(id: savedId);
       try {
         saved = await repo
@@ -324,11 +324,8 @@ class _TxFormState extends ConsumerState<TxForm> {
       if (share == TxShareOutcome.failed) {
         message.write(' — تعذّر فتح المشاركة؛ الحفظ المحلي ناجح');
       }
-      if (stockFailed) {
-        message.write(' — تعذّر تحديث بعض المخزون، راجعه قبل المتابعة');
-      }
       showSnack(context, message.toString(),
-          error: stockFailed || share == TxShareOutcome.failed, silent: true);
+          error: share == TxShareOutcome.failed, silent: true);
       Navigator.pop(context, true);
       // إنشاء عملية جديدة: اهتزاز طويل (1.5 ث) + صوت مميز؛ التعديل: نجاح عادي.
       if (widget.existing == null || widget.isCopy) {

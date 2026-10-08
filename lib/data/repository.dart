@@ -1397,7 +1397,7 @@ class Repo {
                 StockMove(
                   itemId: oldLine.itemId!,
                   quantity: oldLine.quantity,
-                  kind: StockKind.returnIn,
+                  kind: StockKind.ret,
                   unitPrice: oldLine.unitPrice,
                   date: nowDt,
                   createdAt: nowDt,
@@ -1603,7 +1603,7 @@ class Repo {
               StockMove(
                 itemId: line.itemId!,
                 quantity: line.quantity,
-                kind: StockKind.returnIn,
+                kind: StockKind.ret,
                 unitPrice: line.unitPrice,
                 date: nowDt,
                 createdAt: nowDt,

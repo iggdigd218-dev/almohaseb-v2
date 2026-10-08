@@ -2031,6 +2031,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
             Fmt.parseAmount(ThousandsFormatter.strip(_paidCtrl.text));
         if (paidRaw == null || !paidRaw.isFinite || paidRaw < 0) {
           Sfx.reject();
+          if (!mounted) return;
           showSnack(
             context,
             'لا يمكن إدخال مبلغ مدفوع سالب أو غير صالح في الدفع الجزئي',
@@ -2041,6 +2042,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
         }
         if (paidRaw < 0.01) {
           Sfx.reject();
+          if (!mounted) return;
           showSnack(
             context,
             'في الدفع الجزئي يجب أن يكون المبلغ المدفوع 0.01 على الأقل (أو اختر البيع الآجل الكامل)',
@@ -2051,6 +2053,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
         }
         if (paidRaw > (_netTotal - 0.01) || paidRaw >= _netTotal) {
           Sfx.reject();
+          if (!mounted) return;
           showSnack(
             context,
             'المبلغ المدفوع يساوي أو يتجاوز إجمالي الفاتورة — اختر الدفع النقدي الكامل أو أدخل مبلغاً أقل من الإجمالي',
