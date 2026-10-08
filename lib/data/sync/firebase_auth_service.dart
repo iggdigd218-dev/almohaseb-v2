@@ -14,6 +14,7 @@ import 'package:http/http.dart' as http;
 import '../../core/auth_config.dart';
 import '../repository.dart';
 import 'device_id.dart';
+import 'google_auth_service.dart';
 
 class FirebaseAccount {
   final String uid; // localId — معرف المستخدم الرسمي في Firebase
@@ -57,6 +58,9 @@ class FirebaseAuthRest {
   static String? _accountRefreshToken;
   static int _accountExpiryMs = 0;
 
+  /// الهوية الفعّالة المطابقة للتوكن الأخير الذي أصدره `cloudIdToken()`.
+  static String? _activeTokenUid;
+
   /// هل توجد جلسة حساب Google مُستبدلة؟ (بلا انتظار شبكة)
   static bool get hasAccountSession =>
       _accountIdToken != null && _accountIdToken!.isNotEmpty;
@@ -68,46 +72,77 @@ class FirebaseAuthRest {
   /// الهوية المجهولة للجهاز (قبل/بلا ربط حساب Google).
   static String get anonymousUid => _anonUid ?? '';
 
-  /// تبادل idToken الخاص بـ Google مع Firebase للحصول على uid الرسمي.
-  /// يعيد null عند غياب المفاتيح أو فشل الشبكة/التبادل.
+  /// تبادل idToken الخاص بـ Google مع Firebase للحصول على uid الرسمي،
+  /// مع إعادة المحاولة تلقائياً إذا أعيد التوكن فارغاً أو تأخرت الشبكة.
   static Future<FirebaseAccount?> signInWithGoogleIdToken(
-      String googleIdToken) async {
+    String googleIdToken, {
+    Future<String?> Function()? onEmptyTokenRetry,
+  }) async {
     final key = effectiveFirebaseApiKey;
-    if (key.isEmpty || googleIdToken.isEmpty) return null;
-    try {
-      final uri = Uri.parse(
-          'https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp'
-          '?key=$key');
-      final res = await http
-          .post(
-            uri,
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'postBody':
-                  'id_token=$googleIdToken&providerId=google.com',
-              'requestUri': 'http://localhost',
-              'returnSecureToken': true,
-              'returnIdpCredential': true,
-            }),
-          )
-          .timeout(const Duration(seconds: 20));
-      if (res.statusCode < 200 || res.statusCode >= 300) return null;
-      final m = jsonDecode(utf8.decode(res.bodyBytes));
-      if (m is! Map) return null;
-      final uid = '${m['localId'] ?? ''}'.trim();
-      if (uid.isEmpty) return null;
-      return FirebaseAccount(
-        uid: uid,
-        email: '${m['email'] ?? ''}',
-        displayName: '${m['displayName'] ?? ''}',
-        // (401) التوكن هو ثمرة الاستبدال — به وحده تعترف قواعد RTDB.
-        idToken: '${m['idToken'] ?? ''}'.trim(),
-        refreshToken: '${m['refreshToken'] ?? ''}'.trim(),
-        expiresInSeconds: int.tryParse('${m['expiresIn'] ?? ''}') ?? 0,
-      );
-    } catch (_) {
-      return null;
+    if (key.isEmpty) return null;
+
+    var rawToken = googleIdToken.trim();
+    if (rawToken.isEmpty && onEmptyTokenRetry != null) {
+      for (var i = 0; i < 3 && rawToken.isEmpty; i++) {
+        if (i > 0) {
+          await Future<void>.delayed(Duration(milliseconds: 350 * i));
+        }
+        try {
+          rawToken = (await onEmptyTokenRetry())?.trim() ?? '';
+        } catch (_) {}
+      }
     }
+    if (rawToken.isEmpty && _repo != null) {
+      for (var i = 0; i < 2 && rawToken.isEmpty; i++) {
+        if (i > 0) {
+          await Future<void>.delayed(Duration(milliseconds: 350 * i));
+        }
+        try {
+          final db = await _repo!.database;
+          rawToken = (await GoogleAuthService(db).refreshIdToken())?.trim() ?? '';
+        } catch (_) {}
+      }
+    }
+    if (rawToken.isEmpty) return null;
+
+    final uri = Uri.parse(
+        'https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp'
+        '?key=$key');
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (attempt > 0) {
+          await Future<void>.delayed(Duration(milliseconds: 400 * attempt));
+        }
+        final res = await http
+            .post(
+              uri,
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'postBody': 'id_token=$rawToken&providerId=google.com',
+                'requestUri': 'http://localhost',
+                'returnSecureToken': true,
+                'returnIdpCredential': true,
+              }),
+            )
+            .timeout(const Duration(seconds: 20));
+        if (res.statusCode < 200 || res.statusCode >= 300) continue;
+        final m = jsonDecode(utf8.decode(res.bodyBytes));
+        if (m is! Map) return null;
+        final uid = '${m['localId'] ?? ''}'.trim();
+        final idTok = '${m['idToken'] ?? ''}'.trim();
+        if (uid.isEmpty || idTok.isEmpty) continue;
+        return FirebaseAccount(
+          uid: uid,
+          email: '${m['email'] ?? ''}',
+          displayName: '${m['displayName'] ?? ''}',
+          // (401) التوكن هو ثمرة الاستبدال — به وحده تعترف قواعد RTDB.
+          idToken: idTok,
+          refreshToken: '${m['refreshToken'] ?? ''}'.trim(),
+          expiresInSeconds: int.tryParse('${m['expiresIn'] ?? ''}') ?? 0,
+        );
+      } catch (_) {}
+    }
+    return null;
   }
 
   /// حفظ الجلسة محلياً — تبقى صالحة بلا إنترنت (لا انتهاء محلي).
@@ -127,7 +162,10 @@ class FirebaseAuthRest {
       _accountIdToken = a.idToken;
       _accountRefreshToken = a.refreshToken.isEmpty ? null : a.refreshToken;
       _accountExpiryMs = _computeExpiryMs(a.expiresInSeconds);
+      _activeTokenUid = a.uid;
       await _persistAccount();
+    } else if (a.uid.isNotEmpty && !hasValidToken) {
+      _accountUid = a.uid;
     }
     // تثبيت هوية وصفة المدير والمالك محلياً فوراً دون انتظار الشبكة
     await repo.checkAndAutoPromoteManager();
@@ -149,6 +187,7 @@ class FirebaseAuthRest {
     _accountIdToken = null;
     _accountRefreshToken = null;
     _accountExpiryMs = 0;
+    _activeTokenUid = _anonUid;
     await repo.setSetting(accountIdTokenKey, '');
     await repo.setSetting(accountRefreshKey, '');
     await repo.setSetting(accountExpiryKey, '0');
@@ -198,6 +237,9 @@ class FirebaseAuthRest {
     _anonExpiryMs = 0;
     _anonProviderDisabledUntilMs = 0;
     _anonStarted = false;
+    if (!_accountTokenValid) {
+      _activeTokenUid = null;
+    }
     _repo = repo;
   }
 
@@ -222,9 +264,23 @@ class FirebaseAuthRest {
     }
   }
 
-  /// uid الفعّال لهذا الجهاز: **حساب Google إن سُجّل**، وإلا الهوية المجهولة.
-  /// (401) هذا هو مفتاح عقدة `/members/{uid}` التي تستند إليها قواعد الأمان.
+  /// uid الفعّال لهذا الجهاز والمطابق تماماً للتوكن المعاد من `cloudIdToken()`.
+  /// (401) هذا هو مفتاح عقدة `/members/{uid}` التي تستند إليها قواعد الأمان:
+  /// يعيد `_accountUid` عندما يكون توكن الحساب صالحاً وفعّالاً، ويتحول تلقائياً
+  /// إلى `_anonUid` إذا تراجع `cloudIdToken()` إلى التوكن المجهول، فلا يحدث
+  /// تعارض أبداً بين `currentUid` وبين `auth.uid` داخل التوكن المرسل.
   static String get currentUid {
+    if (_accountTokenValid &&
+        _accountUid != null &&
+        _accountUid!.isNotEmpty) {
+      return _accountUid!;
+    }
+    if (hasValidToken && _anonUid != null && _anonUid!.isNotEmpty) {
+      return _anonUid!;
+    }
+    if (_activeTokenUid != null && _activeTokenUid!.isNotEmpty) {
+      return _activeTokenUid!;
+    }
     final au = _accountUid;
     if (au != null && au.isNotEmpty) return au;
     return _anonUid ?? '';
@@ -233,7 +289,11 @@ class FirebaseAuthRest {
   /// التوكن الجاهز في الذاكرة الآن (بلا انتظار شبكة) — جلسة الحساب أولاً ثم
   /// الهوية المجهولة. يُستخدم لتوقيع طلبات `cloud_join` المتزامنة مسارها.
   static String? get cachedIdToken {
-    if (_accountTokenValid) return _accountIdToken;
+    if (_accountTokenValid &&
+        _accountUid != null &&
+        _accountUid!.isNotEmpty) {
+      return _accountIdToken;
+    }
     if (hasValidToken) return _anonIdToken;
     return null;
   }
@@ -249,6 +309,7 @@ class FirebaseAuthRest {
     _anonIdToken = token ?? 'TOK-QA';
     _anonUid = uid ?? 'UID-QA';
     _anonExpiryMs = DateTime.now().millisecondsSinceEpoch + 86400000;
+    _activeTokenUid = _anonUid;
   }
 
   /// (للاختبارات) تنظيف التوكنات المحقونة.
@@ -259,27 +320,47 @@ class FirebaseAuthRest {
     _anonProviderDisabledUntilMs = 0;
     _accountIdToken = null;
     _accountUid = null;
+    _accountRefreshToken = null;
     _accountExpiryMs = 0;
+    _activeTokenUid = null;
     _anonStarted = false;
   }
 
   /// التوكن الصالح لإرفاقه بطلبات RTDB (`?auth=`) — يجدّده عند الحاجة.
-  /// يعيد null فقط إن تعذّرت الشبكة نهائياً ولا يوجد توكن محفوظ.
+  /// يضمن دائماً تطابق `currentUid` مع التوكن الفعلي المعاد.
   static Future<String?> cloudIdToken() async {
     // (401) الأولوية لجلسة الحساب: توكن Firebase الناتج عن استبدال توكن
     // Google هو الوحيد الذي يملك صلاحية المالك على مساحته.
     if (hasAccountSession) {
-      if (_accountTokenValid) return _accountIdToken;
+      if (_accountTokenValid &&
+          _accountUid != null &&
+          _accountUid!.isNotEmpty) {
+        _activeTokenUid = _accountUid;
+        return _accountIdToken;
+      }
       final fresh = await _refreshAccountToken();
-      if (fresh != null) return fresh;
-      // تعذّر التجديد → نُكمل بالهوية المجهولة كيلا يُرسل طلب بلا مصادقة.
+      if (fresh != null &&
+          _accountUid != null &&
+          _accountUid!.isNotEmpty) {
+        _activeTokenUid = _accountUid;
+        return fresh;
+      }
+      // تعذّر التجديد → نُكمل بالهوية المجهولة كيلا يُرسل طلب بلا مصادقة،
+      // مع تحويل الهوية النشطة إلى _anonUid لضمان تطابق currentUid مع التوكن.
     }
-    if (hasValidToken) return _anonIdToken;
+    if (hasValidToken) {
+      _activeTokenUid = _anonUid;
+      return _anonIdToken;
+    }
     if (DateTime.now().millisecondsSinceEpoch < _anonProviderDisabledUntilMs) {
       return null;
     }
     await _ensureFreshToken();
-    return hasValidToken ? _anonIdToken : null;
+    if (hasValidToken) {
+      _activeTokenUid = _anonUid;
+      return _anonIdToken;
+    }
+    return null;
   }
 
   /// (401/403) تحديث قسري للتوكن ثم إعادته — لإعادة محاولة واحدة فقط.
@@ -287,12 +368,21 @@ class FirebaseAuthRest {
     if (hasAccountSession) {
       _accountExpiryMs = 0;
       final fresh = await _refreshAccountToken();
-      if (fresh != null) return fresh;
+      if (fresh != null &&
+          _accountUid != null &&
+          _accountUid!.isNotEmpty) {
+        _activeTokenUid = _accountUid;
+        return fresh;
+      }
     }
     _anonExpiryMs = 0;
     _anonProviderDisabledUntilMs = 0;
     await _ensureFreshToken();
-    return hasValidToken ? _anonIdToken : null;
+    if (hasValidToken) {
+      _activeTokenUid = _anonUid;
+      return _anonIdToken;
+    }
+    return null;
   }
 
   /// تهيئة صامتة تماماً: بلا نافذة، بلا إذن، بلا تأخير مرئي.
@@ -364,19 +454,19 @@ class FirebaseAuthRest {
           .timeout(const Duration(seconds: 15));
       if (res.statusCode >= 200 && res.statusCode < 300) {
         final m = jsonDecode(utf8.decode(res.bodyBytes));
-        if (m is Map) {
-          final tok = '${m['idToken'] ?? ''}'.trim();
-          final uid = '${m['localId'] ?? ''}'.trim();
-          if (tok.isNotEmpty && uid.isNotEmpty) {
-            _anonIdToken = tok;
-            _anonUid = uid;
-            final refresh = '${m['refreshToken'] ?? ''}'.trim();
-            _anonRefreshToken = refresh.isEmpty ? null : refresh;
-            _setExpiry(int.tryParse('${m['expiresIn'] ?? ''}') ?? 3600);
-            await _persist();
-            return true;
-          }
+        if (m is! Map) return false;
+        final tok = '${m['idToken'] ?? ''}'.trim();
+        final uid = '${m['localId'] ?? ''}'.trim();
+        if (tok.isNotEmpty && uid.isNotEmpty) {
+          _anonIdToken = tok;
+          _anonUid = uid;
+          final refresh = '${m['refreshToken'] ?? ''}'.trim();
+          _anonRefreshToken = refresh.isEmpty ? null : refresh;
+          _setExpiry(int.tryParse('${m['expiresIn'] ?? ''}') ?? 3600);
+          await _persist();
+          return true;
         }
+        return false;
       }
     } catch (_) {}
 

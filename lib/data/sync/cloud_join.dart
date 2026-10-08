@@ -59,10 +59,9 @@ String _invitePinKey(String pin) => 'pin_${pin.trim().toUpperCase()}';
 
 String _inviteTokenKey(String token) => 'tok_${token.trim().toUpperCase()}';
 
-/// (توافق مؤقت) المسح القديم إن تعذّر الفهرس — يلزم فقط لأن مديراً على
-/// إصدار ≤ 3.62 ينشئ دعوة بلا فهرس، فيفشل اكتشافها من عضو محدَّث.
-/// يُقلب إلى false (ثم يُحذف المسح) بعد انتشار 3.63 بين المديرين.
-const bool legacyInviteScanFallback = true;
+/// (توافق مؤقت) المسح القديم إن تعذّر الفهرس — تم إيقافه نهائياً للاكتفاء
+/// بفهرس `/invite_index` السريع وتجنب مسح كامل عقدة `/workspaces`.
+const bool legacyInviteScanFallback = false;
 
 String _newToken([int len = 8]) {
   final rnd = Random.secure();

@@ -64,9 +64,9 @@ void main() {
 
   group('Version and Build Verification', () {
     test('Version is bumped to latest release version', () {
-      expect(kAppVersion, equals('3.88.0'));
-      expect(kAppBuild, equals(231));
-      expect(AppSemVer.current.toString(), equals('3.88.0+231'));
+      expect(kAppVersion, equals('3.89.0'));
+      expect(kAppBuild, equals(232));
+      expect(AppSemVer.current.toString(), equals('3.89.0+232'));
     });
   });
 }

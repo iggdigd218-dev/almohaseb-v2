@@ -12,6 +12,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nexora_app/core/database.dart';
 import 'package:nexora_app/data/repository.dart';
+import 'package:nexora_app/data/sync/firebase_auth_service.dart';
 import 'package:nexora_app/data/sync/subscription_guard.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -662,6 +663,46 @@ void main() {
     test('نص الختم ثابت ويحمل اسم التطبيق', () {
       expect(kWatermarkText, isNotEmpty);
       expect(kWatermarkText, contains('سجل الحسابات'));
+    });
+  });
+
+  group('تحصين المصادقة وقواعد فايربيس (Auth & Hardened Rules)', () {
+    tearDown(() {
+      FirebaseAuthRest.setMockTokenForTest(null);
+    });
+
+    test('SubscriptionGuard يرفق ?auth=<idToken> مع طلبات RTDB عند توفر التوكن',
+        () async {
+      FirebaseAuthRest.setMockTokenForTest('tok_guard_test_123',
+          uid: 'uid_guard_1');
+      expect(FirebaseAuthRest.currentUid, 'uid_guard_1');
+
+      final observedAuthParams = <String?>[];
+      final innerClient = cloud.client;
+      final wrappedClient = MockClient((req) async {
+        if (req.url.host == 'fake.rtdb.local') {
+          observedAuthParams.add(req.url.queryParameters['auth']);
+        }
+        return innerClient.send(req).then(http.Response.fromStream);
+      });
+
+      SubscriptionGuard.debugReset();
+      await http.runWithClient(
+        () => SubscriptionGuard.check(
+          repo,
+          backendUrl: url,
+          workspaceId: 'ws_auth_test',
+          force: true,
+        ),
+        wrappedClient,
+      );
+
+      expect(observedAuthParams, isNotEmpty);
+      expect(
+        observedAuthParams.every((a) => a == 'tok_guard_test_123'),
+        isTrue,
+        reason: 'كافة طلبات RTDB في SubscriptionGuard يجب أن تحمل ?auth=',
+      );
     });
   });
 }

@@ -1,7 +1,7 @@
 #!/bin/bash
 # سكريبت أتمتة رفع التعديلات إلى GitHub لبدء بناء الـ APK تلقائياً
 
-REPO_URL="${GITHUB_REPO_URL:-https://github.com/monerqaid950-debug/almohaseb.git}"
+REPO_URL="${GITHUB_REPO_URL:-https://github.com/iggdigd218-dev/almohaseb-v2.git}"
 
 echo "🔄 جاري إضافة التعديلات..."
 git add .

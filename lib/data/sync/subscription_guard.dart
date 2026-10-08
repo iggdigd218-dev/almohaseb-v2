@@ -20,6 +20,7 @@ import 'package:http/http.dart' as http;
 import '../repository.dart';
 import '../../core/license_model.dart';
 import 'device_id.dart';
+import 'firebase_auth_service.dart';
 import 'workspace_service.dart';
 
 /// مدة التجربة الحالية: شهر كامل (30 يوماً) — تُضبط
@@ -361,15 +362,27 @@ class SubscriptionGuard {
     final url = '$base/server_clock.json';
     http.Response res;
     try {
+      var token = await _ensureToken();
       res = await http
-          .put(Uri.parse(url),
+          .put(_withAuth(url, token),
               headers: {'Content-Type': 'application/json'},
               body: jsonEncode({'ts': {'.sv': 'timestamp'}}))
           .timeout(const Duration(seconds: 15));
       if (res.statusCode == 401 || res.statusCode == 403) {
+        final fresh = await FirebaseAuthRest.forceRefreshToken();
+        if (fresh != null && fresh.isNotEmpty) {
+          token = fresh;
+          res = await http
+              .put(_withAuth(url, token),
+                  headers: {'Content-Type': 'application/json'},
+                  body: jsonEncode({'ts': {'.sv': 'timestamp'}}))
+              .timeout(const Duration(seconds: 15));
+        }
+      }
+      if (res.statusCode == 401 || res.statusCode == 403) {
         final regUrl = '$base/workspaces/_registry/server_clock.json';
         res = await http
-            .put(Uri.parse(regUrl),
+            .put(_withAuth(regUrl, token),
                 headers: {'Content-Type': 'application/json'},
                 body: jsonEncode({'ts': {'.sv': 'timestamp'}}))
             .timeout(const Duration(seconds: 15));
@@ -401,8 +414,9 @@ class SubscriptionGuard {
 
   /// احتياط: وقت الخادم من ترويسة HTTP Date لطلب قراءة خفيف (لا كتابة).
   static Future<int> _serverNowFromDateHeader(String base) async {
+    final token = await _ensureToken();
     final res = await http
-        .get(Uri.parse('$base/server_clock.json'))
+        .get(_withAuth('$base/server_clock.json', token))
         .timeout(const Duration(seconds: 15));
     final ms = _parseHttpDate(res.headers['date']);
     if (ms > 0) return ms;
@@ -1021,14 +1035,42 @@ class SubscriptionGuard {
     return '${url.substring(0, idx)}/workspaces/_registry${url.substring(idx)}';
   }
 
+  static Future<String?> _ensureToken() async {
+    var t = FirebaseAuthRest.cachedIdToken;
+    if (t != null && t.isNotEmpty) return t;
+    try {
+      t = await FirebaseAuthRest.cloudIdToken();
+    } catch (_) {}
+    return t;
+  }
+
+  static Uri _withAuth(String url, String? token) {
+    final uri = Uri.parse(url);
+    if (token == null || token.isEmpty) return uri;
+    final q = Map<String, String>.from(uri.queryParameters)..['auth'] = token;
+    return uri.replace(queryParameters: q);
+  }
+
   static Future<Map<String, dynamic>?> _readJson(String url) async {
-    var res =
-        await http.get(Uri.parse(url)).timeout(const Duration(seconds: 20));
+    var token = await _ensureToken();
+    var res = await http
+        .get(_withAuth(url, token))
+        .timeout(const Duration(seconds: 20));
+    if (res.statusCode == 401 || res.statusCode == 403) {
+      final fresh = await FirebaseAuthRest.forceRefreshToken();
+      if (fresh != null && fresh.isNotEmpty) {
+        token = fresh;
+        res = await http
+            .get(_withAuth(url, token))
+            .timeout(const Duration(seconds: 20));
+      }
+    }
     if (res.statusCode == 401 || res.statusCode == 403) {
       final alt = _toRegistryTrialUrl(url);
       if (alt != null) {
-        res =
-            await http.get(Uri.parse(alt)).timeout(const Duration(seconds: 20));
+        res = await http
+            .get(_withAuth(alt, token))
+            .timeout(const Duration(seconds: 20));
       }
     }
     if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -1041,16 +1083,28 @@ class SubscriptionGuard {
   }
 
   static Future<void> _putJson(String url, Object body) async {
+    var token = await _ensureToken();
     var res = await http
-        .put(Uri.parse(url),
+        .put(_withAuth(url, token),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode(body))
         .timeout(const Duration(seconds: 20));
     if (res.statusCode == 401 || res.statusCode == 403) {
+      final fresh = await FirebaseAuthRest.forceRefreshToken();
+      if (fresh != null && fresh.isNotEmpty) {
+        token = fresh;
+        res = await http
+            .put(_withAuth(url, token),
+                headers: {'Content-Type': 'application/json'},
+                body: jsonEncode(body))
+            .timeout(const Duration(seconds: 20));
+      }
+    }
+    if (res.statusCode == 401 || res.statusCode == 403) {
       final alt = _toRegistryTrialUrl(url);
       if (alt != null) {
         res = await http
-            .put(Uri.parse(alt),
+            .put(_withAuth(alt, token),
                 headers: {'Content-Type': 'application/json'},
                 body: jsonEncode(body))
             .timeout(const Duration(seconds: 20));

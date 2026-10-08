@@ -1,16 +1,16 @@
 {
-  "version": "3.87.0+230",
+  "version": "3.89.0+232",
   "minSupported": "3.13.0",
-  "releaseUrl": "https://github.com/iggdigd218-dev/sijil-al-mabiat-wal-duyun/releases/tag/latest",
+  "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/latest",
   "downloads": {
-    "android": "https://github.com/iggdigd218-dev/sijil-al-mabiat-wal-duyun/releases/download/latest/nexora-universal.apk",
+    "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-universal.apk",
     "androidVariants": {
-      "arm64": "https://github.com/iggdigd218-dev/sijil-al-mabiat-wal-duyun/releases/download/latest/nexora-arm64.apk",
-      "armv7": "https://github.com/iggdigd218-dev/sijil-al-mabiat-wal-duyun/releases/download/latest/nexora-armv7.apk",
-      "x64": "https://github.com/iggdigd218-dev/sijil-al-mabiat-wal-duyun/releases/download/latest/nexora-x64.apk"
+      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-arm64.apk",
+      "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-armv7.apk",
+      "x64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-x64.apk"
     },
-    "windows": "https://github.com/iggdigd218-dev/sijil-al-mabiat-wal-duyun/releases/download/latest/NexoraSetup.exe"
+    "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe"
   },
-  "publishedAt": "2026-10-07T20:00:00Z",
-  "notes": "• دمج وتوحيد نافذة تعيين صلاحيات وأدوار الأجهزة ومنع تداخل صلاحيات عضو مع عضو آخر.\n• توحيد النمط البصري في الصفحة الرئيسية وإزالة الأيقونات السفلية المكررة وبطاقات الأرصدة المكررة في شاشة العملاء.\n• معالجة ظهور شريط التنقل السفلي وزر الرجوع على أجهزة Android 11+ ومنع حلقات المزامنة المتكررة واستنزاف المعالج."
+  "publishedAt": "2026-10-08T03:55:00Z",
+  "notes": "• تحصين أمني شامل لاتصالات قاعدة البيانات السحابية وإرفاق توكن المصادقة مع كافة طلبات الاشتراك ومركز التحكم.\n• مطابقة هوية المستخدم النشطة (currentUid) مع التوكن الفعلي وتحسين استقرار تسجيل الدخول عبر Google مع إعادة المحاولة التلقائية.\n• تحصين قواعد أمان Firebase لحصر الحقول السيادية بالمدير حصراً وإيقاف المسح القديم للدعوات للاكتفاء بفهرس الدعوات السريع."
 }

@@ -19,6 +19,7 @@ import '../../core/cloud_config.dart';
 import '../../core/license_model.dart';
 import '../repository.dart';
 import 'device_id.dart';
+import 'firebase_auth_service.dart';
 import 'subscription_guard.dart';
 
 class CloudControlService {
@@ -632,15 +633,42 @@ class CloudControlService {
     return null;
   }
 
+  static Future<String?> _ensureToken() async {
+    var t = FirebaseAuthRest.cachedIdToken;
+    if (t != null && t.isNotEmpty) return t;
+    try {
+      t = await FirebaseAuthRest.cloudIdToken();
+    } catch (_) {}
+    return t;
+  }
+
+  static Uri _withAuth(String url, String? token) {
+    final uri = Uri.parse(url);
+    if (token == null || token.isEmpty) return uri;
+    final q = Map<String, String>.from(uri.queryParameters)..['auth'] = token;
+    return uri.replace(queryParameters: q);
+  }
+
   static Future<dynamic> _getJson(String url) async {
     try {
-      var res =
-          await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
+      var token = await _ensureToken();
+      var res = await http
+          .get(_withAuth(url, token))
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        final fresh = await FirebaseAuthRest.forceRefreshToken();
+        if (fresh != null && fresh.isNotEmpty) {
+          token = fresh;
+          res = await http
+              .get(_withAuth(url, token))
+              .timeout(const Duration(seconds: 15));
+        }
+      }
       if (res.statusCode == 401 || res.statusCode == 403) {
         final alt = _toRegistryUrl(url);
         if (alt != null) {
           res = await http
-              .get(Uri.parse(alt))
+              .get(_withAuth(alt, token))
               .timeout(const Duration(seconds: 15));
         }
       }
@@ -655,16 +683,28 @@ class CloudControlService {
 
   static Future<void> _patchJson(String url, Map<String, dynamic> body) async {
     try {
-      final res = await http
-          .patch(Uri.parse(url),
+      var token = await _ensureToken();
+      var res = await http
+          .patch(_withAuth(url, token),
               headers: {'Content-Type': 'application/json'},
               body: jsonEncode(body))
           .timeout(const Duration(seconds: 15));
       if (res.statusCode == 401 || res.statusCode == 403) {
+        final fresh = await FirebaseAuthRest.forceRefreshToken();
+        if (fresh != null && fresh.isNotEmpty) {
+          token = fresh;
+          res = await http
+              .patch(_withAuth(url, token),
+                  headers: {'Content-Type': 'application/json'},
+                  body: jsonEncode(body))
+              .timeout(const Duration(seconds: 15));
+        }
+      }
+      if (res.statusCode == 401 || res.statusCode == 403) {
         final alt = _toRegistryUrl(url);
         if (alt != null) {
           await http
-              .patch(Uri.parse(alt),
+              .patch(_withAuth(alt, token),
                   headers: {'Content-Type': 'application/json'},
                   body: jsonEncode(body))
               .timeout(const Duration(seconds: 15));
@@ -675,16 +715,28 @@ class CloudControlService {
 
   static Future<void> _putJson(String url, Object body) async {
     try {
-      final res = await http
-          .put(Uri.parse(url),
+      var token = await _ensureToken();
+      var res = await http
+          .put(_withAuth(url, token),
               headers: {'Content-Type': 'application/json'},
               body: jsonEncode(body))
           .timeout(const Duration(seconds: 15));
       if (res.statusCode == 401 || res.statusCode == 403) {
+        final fresh = await FirebaseAuthRest.forceRefreshToken();
+        if (fresh != null && fresh.isNotEmpty) {
+          token = fresh;
+          res = await http
+              .put(_withAuth(url, token),
+                  headers: {'Content-Type': 'application/json'},
+                  body: jsonEncode(body))
+              .timeout(const Duration(seconds: 15));
+        }
+      }
+      if (res.statusCode == 401 || res.statusCode == 403) {
         final alt = _toRegistryUrl(url);
         if (alt != null) {
           await http
-              .put(Uri.parse(alt),
+              .put(_withAuth(alt, token),
                   headers: {'Content-Type': 'application/json'},
                   body: jsonEncode(body))
               .timeout(const Duration(seconds: 15));

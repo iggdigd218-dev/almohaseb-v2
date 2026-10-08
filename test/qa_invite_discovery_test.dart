@@ -22,25 +22,18 @@ void main() {
 
   http.Client fake() => MockClient((req) async {
         final p = req.url.path;
+        if (p == '/invite_index/pin_654321.json') {
+          return js({'ws': 'WS-BBBB3333', 'expiresAt': live});
+        }
+        if (p == '/invite_index/tok_TOKLIVE1.json') {
+          return js({'ws': 'WS-BBBB3333', 'expiresAt': live});
+        }
+        if (p == '/invite_index/pin_111222.json') {
+          return js({'ws': 'WS-AAAA2222', 'expiresAt': dead});
+        }
         if (p == '/workspaces.json') {
-          // shallow: المفاتيح فقط.
-          return js({'WS-AAAA2222': true, 'WS-BBBB3333': true});
-        }
-        if (p == '/workspaces/WS-AAAA2222/invites.json') {
-          return js({
-            'TOKOLD1': {'pin': '111222', 'expiresAt': dead},
-          });
-        }
-        if (p == '/workspaces/WS-BBBB3333/invites.json') {
-          return js({
-            'TOKLIVE1': {'pin': '654321', 'expiresAt': live},
-          });
-        }
-        if (p == '/workspaces/WS-AAAA2222/invites/TOKLIVE1.json') {
-          return js(null);
-        }
-        if (p == '/workspaces/WS-BBBB3333/invites/TOKLIVE1.json') {
-          return js({'pin': '654321', 'expiresAt': live});
+          // لو استُدعي المسح القديم بالخطأ سيفشل الاختبار، لأن legacyInviteScanFallback = false
+          throw StateError('Should not scan /workspaces.json when legacyInviteScanFallback is false');
         }
         return js(null);
       });

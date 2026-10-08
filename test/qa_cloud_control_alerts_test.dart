@@ -6,12 +6,18 @@
 //  CTL-03: تطابق إصدار وبناء التطبيق.
 //  CTL-04: حفظ حالة الإشعارات المقروءة في SharedPreferences وعدم عودة العداد بعد تصفيره.
 //  CTL-05: عرض أيقونة الجرس الذهبي الحقيقي (GoldenBellIcon) بأحجام مختلفة وبدون أخطاء.
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:nexora_app/core/app_version.dart';
 import 'package:nexora_app/core/license_model.dart';
 import 'package:nexora_app/data/sync/cloud_control_service.dart';
+import 'package:nexora_app/data/sync/firebase_auth_service.dart';
 import 'package:nexora_app/ui/widgets/golden_bell_icon.dart';
 
 void main() {
@@ -126,6 +132,59 @@ void main() {
       final size = tester.getSize(iconFinder);
       expect(size.width, 24.0);
       expect(size.height, 24.0);
+    });
+
+    test('CTL-06 CloudControlService يرفق ?auth=<idToken> مع طلبات RTDB', () async {
+      FirebaseAuthRest.setMockTokenForTest('tok_ctl_999', uid: 'uid_ctl_999');
+      addTearDown(() => FirebaseAuthRest.setMockTokenForTest(null));
+
+      String? capturedAuth;
+      final client = MockClient((req) async {
+        capturedAuth = req.url.queryParameters['auth'];
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'whatsapp': '+967777000000',
+            'email': 'support@nexora.app',
+          })),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      });
+
+      final info = await http.runWithClient(
+        () => CloudControlService.instance.fetchSupportInfo(),
+        () => client,
+      );
+
+      expect(capturedAuth, 'tok_ctl_999');
+      expect(info['whatsapp'], '+967777000000');
+    });
+
+    test('CTL-07 قواعد فايربيس محصنة وتحصر الحقول السيادية بالمدير حصراً', () {
+      final mainRulesFile = File('firebase/database.rules.json');
+      final adminRulesFile = File('admin_app/rules.license-hardened.json');
+      expect(mainRulesFile.existsSync(), isTrue);
+      expect(adminRulesFile.existsSync(), isTrue);
+
+      final mainRules =
+          jsonDecode(mainRulesFile.readAsStringSync()) as Map<String, dynamic>;
+      final adminRules =
+          jsonDecode(adminRulesFile.readAsStringSync()) as Map<String, dynamic>;
+
+      final rulesRoot = mainRules['rules'] as Map<String, dynamic>;
+      expect(rulesRoot['.read'], isNot(equals(true)));
+      expect(rulesRoot['.write'], isNot(equals(true)));
+
+      final subWrite =
+          (((rulesRoot['workspaces'] as Map)[r'$ws'] as Map)['subscription']
+              as Map)['.write'] as String;
+      expect(subWrite, contains('auth.token.admin === true'));
+      expect(subWrite, contains("newData.child('status').val() === 'trial'"));
+      expect(subWrite, contains("max_devices"));
+      expect(subWrite, contains("is_frozen"));
+      expect(subWrite, contains("expires_at"));
+
+      expect(jsonEncode(mainRules), jsonEncode(adminRules));
     });
   });
 }

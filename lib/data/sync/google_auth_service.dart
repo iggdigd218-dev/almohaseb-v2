@@ -123,7 +123,7 @@ class GoogleAuthService {
           ? 'تعذّر تهيئة خدمة Google على هذا الجهاز — حدّث خدمات Google Play ثم أعد المحاولة.'
           : 'تسجيل الدخول بـ Google غير متاح على هذه المنصة حاليًا');
     }
-    if (cached != null) {
+      if (cached != null) {
       // تحديث صامت بالخلفية دون تعليق إقلاع التطبيق إطلاقاً
       unawaited(() async {
         try {
@@ -132,9 +132,8 @@ class GoogleAuthService {
                   .signInSilently(suppressErrors: true)
                   .timeout(const Duration(seconds: 5), onTimeout: () => null);
           if (a != null) {
-            final auth =
-                await a.authentication.timeout(const Duration(seconds: 5));
-            final u = _mapAccount(a, auth.idToken);
+            final tok = await _extractIdTokenWithRetry(a);
+            final u = _mapAccount(a, tok ?? cached.idToken);
             await _persist(u);
           }
         } catch (_) {}
@@ -145,6 +144,53 @@ class GoogleAuthService {
     // لا نستدعي signInSilently تلقائياً عند إقلاع التطبيق لئلا يُسجَّل دخول المستخدم
     // بصمت وتُنشأ له مجموعة تلقائياً عند تثبيت التطبيق لأول مرة على جهاز جديد.
     return const GoogleAuthResult.ok(null);
+  }
+
+  /// استخراج `idToken` من حساب Google مع إعادة المحاولة تلقائياً وتنظيف الكاش
+  /// إذا أعيد بقيمة فارغة بسبب بطء الاتصال أو تأخر خدمات Google Play.
+  Future<String?> _extractIdTokenWithRetry(
+    GoogleSignInAccount a, {
+    int maxAttempts = 3,
+  }) async {
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        if (attempt > 0) {
+          await Future<void>.delayed(Duration(milliseconds: 350 * attempt));
+          try {
+            await a.clearAuthCache().timeout(const Duration(seconds: 2));
+          } catch (_) {}
+        }
+        final auth =
+            await a.authentication.timeout(const Duration(seconds: 6));
+        final tok = auth.idToken?.trim() ?? '';
+        if (tok.isNotEmpty) return tok;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /// إعادة محاولة جلب `idToken` لحساب Google النشط أو المحفوظ.
+  Future<String?> refreshIdToken() async {
+    try {
+      final gs = _ensureSignIn();
+      if (gs != null) {
+        final a = gs.currentUser ??
+            await gs
+                .signInSilently(suppressErrors: true)
+                .timeout(const Duration(seconds: 5), onTimeout: () => null);
+        if (a != null) {
+          final tok = await _extractIdTokenWithRetry(a, maxAttempts: 3);
+          if (tok != null && tok.isNotEmpty) {
+            final u = _mapAccount(a, tok);
+            await _persist(u);
+            return tok;
+          }
+        }
+      }
+    } catch (_) {}
+    final cached = await currentUserFromDb();
+    final saved = cached?.idToken?.trim() ?? '';
+    return saved.isNotEmpty ? saved : null;
   }
 
   /// تسجيل الدخول (يفتح نافذة Google للمستخدم) مع حماية صارمة ضد التعليق عند اختيار الحساب.
@@ -179,13 +225,8 @@ class GoogleAuthService {
       if (a == null) {
         return const GoogleAuthResult.fail('تم إلغاء تسجيل الدخول');
       }
-      GoogleSignInAuthentication? auth;
-      try {
-        auth = await a.authentication.timeout(const Duration(seconds: 5));
-      } catch (_) {
-        auth = null;
-      }
-      final u = _mapAccount(a, auth?.idToken);
+      final idTok = await _extractIdTokenWithRetry(a, maxAttempts: 3);
+      final u = _mapAccount(a, idTok);
       await _persist(u);
       return GoogleAuthResult.ok(u);
     } catch (e, st) {
