@@ -122,8 +122,11 @@ int opEffect(OpType type, AccountKind kind) {
     case OpType.credit:
       return -1;
     case OpType.revenue:
+      // المبيعات النقدية لا تزيد ولا تنقص من رصيد مديونية العميل/المورد (Net Impact = 0)
+      if (kind == AccountKind.customer || kind == AccountKind.supplier) return 0;
       return 1;
     case OpType.expense:
+      if (kind == AccountKind.customer || kind == AccountKind.supplier) return 0;
       return -1;
     case OpType.settle:
       return 0;

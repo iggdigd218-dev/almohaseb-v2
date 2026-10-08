@@ -17,6 +17,7 @@ import '../data/sync/subscription_guard.dart' show Feature;
 import 'barcode_scanner.dart';
 import 'pos_gate.dart';
 import 'pos_items_grid.dart';
+import 'transactions_screen.dart' show showTxDetails;
 import 'trial_ui.dart' show featureNeedsStamp;
 import 'tx_share.dart';
 import 'widgets.dart';
@@ -1310,44 +1311,53 @@ class _PosScreenState extends ConsumerState<PosScreen>
       ),
       builder: (ctx) {
         final kb = MediaQuery.viewInsetsOf(ctx).bottom;
+        final bottomSysPad = MediaQuery.of(ctx).viewPadding.bottom;
         final h = MediaQuery.sizeOf(ctx).height;
-        final maxH = (h - kb - 20).clamp(260.0, h * 0.74);
-        return Padding(
-          padding: EdgeInsets.only(bottom: kb),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: maxH),
-            child: StatefulBuilder(
-              builder: (context, setSheetState) {
-                final accounts =
-                    ref.watch(allAccountsProvider).valueOrNull ?? [];
-                final currencies =
-                    ref.watch(currenciesProvider).valueOrNull ??
-                        kDefaultCurrencies;
-                final cur = currencies.first;
-                final customers = accounts
-                    .where(
-                      (a) =>
-                          a.kind == AccountKind.customer ||
-                          a.kind == AccountKind.general,
-                    )
-                    .toList();
-                final needsAccount = _payment != _PosPayment.cash;
-                final accountMissing =
-                    needsAccount && _selectedCustomerId == null;
-                final paidNow = _payment == _PosPayment.partial
-                    ? (Fmt.parseAmount(
-                            ThousandsFormatter.strip(_paidCtrl.text)) ??
-                        0.0)
-                    : (_payment == _PosPayment.cash ? _netTotal : 0.0);
-                final remainingNow =
-                    (_netTotal - paidNow).clamp(0.0, double.infinity);
+        final maxH = (h - kb - 20).clamp(260.0, h * 0.78);
+        return SafeArea(
+          bottom: true,
+          child: Padding(
+            padding: EdgeInsets.only(bottom: kb + bottomSysPad),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: maxH),
+              child: StatefulBuilder(
+                builder: (context, setSheetState) {
+                  final accounts =
+                      ref.watch(allAccountsProvider).valueOrNull ?? [];
+                  final currencies =
+                      ref.watch(currenciesProvider).valueOrNull ??
+                          kDefaultCurrencies;
+                  final cur = currencies.first;
+                  final customers = accounts
+                      .where(
+                        (a) =>
+                            a.kind == AccountKind.customer ||
+                            a.kind == AccountKind.general,
+                      )
+                      .toList();
+                  final selectedAccount = customers
+                      .where((c) => c.id == _selectedCustomerId)
+                      .firstOrNull;
+                  final isGenericCashCustomer = selectedAccount != null &&
+                      (selectedAccount.name.trim() == 'عميل نقدي' ||
+                          selectedAccount.name.trim() == 'عميل نقدي عام');
+                  final needsAccount = _payment != _PosPayment.cash;
+                  final accountMissing = needsAccount &&
+                      (_selectedCustomerId == null || isGenericCashCustomer);
+                  final paidNow = _payment == _PosPayment.partial
+                      ? (Fmt.parseAmount(
+                              ThousandsFormatter.strip(_paidCtrl.text)) ??
+                          0.0)
+                      : (_payment == _PosPayment.cash ? _netTotal : 0.0);
+                  final remainingNow =
+                      (_netTotal - paidNow).clamp(0.0, double.infinity);
 
-                return Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
+                  return Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
@@ -1520,7 +1530,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                             Padding(
                               padding: const EdgeInsets.only(bottom: 6),
                               child: Text(
-                                '⚠️ البيع الآجل يتطلب اختيار حساب العميل',
+                                'يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل',
                                 style: TextStyle(
                                   color: AppColors.dangerOf(context),
                                   fontWeight: FontWeight.w700,
@@ -1876,12 +1886,14 @@ class _PosScreenState extends ConsumerState<PosScreen>
               ),
             ),
             const SizedBox(height: 8),
-            // زر تأكيد عريض مع قفل فوري ضد النقر المزدوج.
+            // زر تأكيد عريض مع قفل فوري ضد النقر المزدوج وحظر عند غياب العميل في الآجل/الجزئي.
             SizedBox(
               width: double.infinity,
               height: 46,
               child: FilledButton.icon(
-                onPressed: _saving ? null : () => _executeSale(ctx),
+                onPressed: (_saving || accountMissing)
+                    ? null
+                    : () => _executeSale(ctx),
                 icon: _saving
                     ? const SizedBox(
                         width: 18,
@@ -1906,6 +1918,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
       );
     },
   ),
+),
 ),
 );
       },
@@ -1968,20 +1981,34 @@ class _PosScreenState extends ConsumerState<PosScreen>
   Future<void> _executeSale(BuildContext? sheetCtx) async {
     if (_cart.isEmpty || _saving) return;
 
-    if ((_payment == _PosPayment.credit || _payment == _PosPayment.partial) &&
-        _selectedCustomerId == null) {
-      Sfx.reject();
-      showSnack(
-        context,
-        'البيع الآجل أو الجزئي يتطلب اختيار حساب العميل.',
-        error: true,
-        silent: true,
-      );
-      return;
+    final repo = ref.read(repoProvider);
+    if (_payment == _PosPayment.credit || _payment == _PosPayment.partial) {
+      if (_selectedCustomerId == null) {
+        Sfx.reject();
+        showSnack(
+          context,
+          'يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل',
+          error: true,
+          silent: true,
+        );
+        return;
+      }
+      final acc = await repo.account(_selectedCustomerId!);
+      final accName = acc?.name.trim() ?? '';
+      if (acc == null || accName == 'عميل نقدي' || accName == 'عميل نقدي عام') {
+        Sfx.reject();
+        if (!mounted) return;
+        showSnack(
+          context,
+          'يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل',
+          error: true,
+          silent: true,
+        );
+        return;
+      }
     }
 
     setState(() => _saving = true);
-    final repo = ref.read(repoProvider);
 
     try {
       final currencies = await repo.currencies();
@@ -2023,21 +2050,30 @@ class _PosScreenState extends ConsumerState<PosScreen>
       final user = ref.read(currentUserProvider).valueOrNull;
       final int? creatorId = user?.id;
       final cashierName = user?.name.trim().isNotEmpty == true ? user!.name : 'الكاشير';
+      final discountNote = _discount > 0
+          ? '\nالخصم: ${Fmt.money(_discount)} ${cur.symbol}'
+          : '';
       final supNote = _supervisorOverride
           ? '\n[تم اعتماد الخصم بواسطة المشرف]'
           : '';
+      final selectedAcc = _selectedCustomerId == null
+          ? null
+          : await repo.account(_selectedCustomerId!);
+      final selectedAccKind = selectedAcc?.kind ?? AccountKind.customer;
 
       if (_payment == _PosPayment.cash) {
-        // مبيعات نقدية: إيراد
+        // مبيعات نقدية: إيراد بصفر أثر على مديونية العميل (فاتورة نقدية مدفوعة)
         final tx = Tx(
           accountId: _selectedCustomerId,
+          accountKind: selectedAccKind,
           amount: _netTotal,
           currency: cur.code,
           type: OpType.revenue,
           date: now,
-          description: 'فاتورة مبيعات نقدية رقم #$refNum',
+          description: 'فاتورة نقدية مدفوعة رقم #$refNum',
           reference: refNum,
-          notes: 'طريقة الدفع: نقداً$supNote',
+          notes:
+              'طريقة الدفع: مدفوع نقداً\nالمبلغ المدفوع: ${Fmt.money(_netTotal)} ${cur.symbol}\nالمتبقي: 0.00 ر.ي$discountNote$supNote',
           createdByUserId: creatorId,
           cashierName: cashierName,
           createdAt: now,
@@ -2048,13 +2084,15 @@ class _PosScreenState extends ConsumerState<PosScreen>
         // مبيعات آجلة: قيد مدين على العميل (عليه)
         final tx = Tx(
           accountId: _selectedCustomerId!,
+          accountKind: selectedAccKind,
           amount: _netTotal,
           currency: cur.code,
           type: OpType.debit,
           date: now,
           description: 'فاتورة مبيعات آجلة رقم #$refNum',
           reference: refNum,
-          notes: 'طريقة الدفع: آجل (على الحساب)$supNote',
+          notes:
+              'طريقة الدفع: آجل (على الحساب)\nالمبلغ المدفوع: 0.00 ${cur.symbol}\nالمبلغ المتبقي: ${Fmt.money(_netTotal)} ${cur.symbol}$discountNote$supNote',
           createdByUserId: creatorId,
           cashierName: cashierName,
           createdAt: now,
@@ -2070,6 +2108,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
         // تسجيل المبلغ الكامل كمدين
         final debitTx = Tx(
           accountId: _selectedCustomerId!,
+          accountKind: selectedAccKind,
           amount: _netTotal,
           currency: cur.code,
           type: OpType.debit,
@@ -2078,7 +2117,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
               'فاتورة مبيعات جزئية رقم #$refNum (إجمالي ${Fmt.money(_netTotal)} ${cur.symbol} — مدفوع ${Fmt.money(paid)} ${cur.symbol} — متبقي ${Fmt.money(remainder)} ${cur.symbol})',
           reference: refNum,
           notes:
-              'طريقة الدفع: جزئي (مقدم + آجل)\nالمبلغ المدفوع: ${Fmt.money(paid)} ${cur.symbol}\nالمبلغ المتبقي: ${Fmt.money(remainder)} ${cur.symbol}$supNote',
+              'طريقة الدفع: جزئي (مقدم + آجل)\nالمبلغ المدفوع: ${Fmt.money(paid)} ${cur.symbol}\nالمبلغ المتبقي: ${Fmt.money(remainder)} ${cur.symbol}$discountNote$supNote',
           createdByUserId: creatorId,
           cashierName: cashierName,
           createdAt: now,
@@ -2090,6 +2129,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
         if (paid > 0) {
           final payTx = Tx(
             accountId: _selectedCustomerId!,
+            accountKind: selectedAccKind,
             amount: paid,
             currency: cur.code,
             type: OpType.inflow,
@@ -2128,30 +2168,6 @@ class _PosScreenState extends ConsumerState<PosScreen>
 
       // تحديث البيانات
       bump(ref);
-      if (mounted && (await repo.settings())['warnLowStock'] != '0') {
-        final low = <String>[];
-        for (final line in lines) {
-          if (line.itemId == null) continue;
-          final it = await repo.item(line.itemId!);
-          if (it != null &&
-              it.minQuantity > 0 &&
-              it.quantity <= it.minQuantity) {
-            low.add(
-              '${it.name} (${it.quantity.toStringAsFixed(0)} ${it.unit})',
-            );
-          }
-        }
-        if (low.isNotEmpty && mounted) {
-          Sfx.warning();
-          showSnack(
-            context,
-            '⚠️ أصناف وصلت حد إعادة الطلب: ${low.join('، ')}',
-            error: true,
-            silent: true,
-          );
-        }
-      }
-
       if (mounted && (await repo.settings())['warnLowStock'] != '0') {
         final low = <String>[];
         for (final line in lines) {
@@ -2418,36 +2434,79 @@ class _PosHistoryTab extends ConsumerWidget {
           itemBuilder: (context, i) {
             final tx = posTxs[i];
             final account = page.accounts[tx.accountId];
-            final isPartial = tx.notes.contains('المبلغ المدفوع:');
+            final isCash = tx.type == OpType.revenue;
+            final isPartial = !isCash && tx.notes.contains('طريقة الدفع: جزئي');
+            final customerName = account?.name.trim().isNotEmpty == true
+                ? account!.name
+                : (isCash ? 'عميل نقدي' : 'عميل مسجل');
+            final customerPhone = account?.phone.trim().isNotEmpty == true
+                ? ' • ${account!.phone}'
+                : '';
+            final badgeText = isCash
+                ? 'مدفوع نقداً'
+                : (isPartial ? 'جزئي (عليه)' : 'آجل (عليه)');
+            final badgeColor = isCash
+                ? AppColors.greenOf(context)
+                : (isPartial ? Colors.deepOrange : AppColors.dangerOf(context));
 
             return Card(
               child: ListTile(
                 leading: CircleAvatar(
-                  backgroundColor: isPartial
-                      ? Colors.orange.withValues(alpha: 0.14)
-                      : AppColors.primarySoftOf(context),
+                  backgroundColor: badgeColor.withValues(alpha: 0.14),
                   child: Icon(
-                    isPartial ? Icons.pie_chart_outline : Icons.receipt,
-                    color: isPartial ? Colors.deepOrange : AppColors.teal,
+                    isCash
+                        ? Icons.payments_outlined
+                        : (isPartial
+                            ? Icons.pie_chart_outline
+                            : Icons.receipt_long_outlined),
+                    color: badgeColor,
                   ),
                 ),
-                title: Text(
-                  tx.reference.isNotEmpty
-                      ? 'فاتورة #${tx.reference}'
-                      : tx.description,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
+                title: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        tx.reference.isNotEmpty
+                            ? 'فاتورة #${tx.reference}'
+                            : tx.description,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: badgeColor.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                            color: badgeColor.withValues(alpha: 0.35)),
+                      ),
+                      child: Text(
+                        badgeText,
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w800,
+                          color: badgeColor,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
                 subtitle: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    const SizedBox(height: 2),
                     Text(
-                      '${account?.name ?? 'عميل نقدي'} • ${Fmt.date(tx.date)}',
+                      '$customerName$customerPhone • ${Fmt.date(tx.date)}',
                       style: TextStyle(
                         fontSize: 12,
+                        fontWeight: FontWeight.w600,
                         color: AppColors.text2Of(context),
                       ),
                     ),
-                    if (isPartial && tx.notes.trim().isNotEmpty)
+                    if (tx.notes.trim().isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.only(top: 2),
                         child: Text(
@@ -2455,12 +2514,15 @@ class _PosHistoryTab extends ConsumerWidget {
                               .split('\n')
                               .where((l) =>
                                   l.contains('المبلغ المدفوع:') ||
-                                  l.contains('المبلغ المتبقي:'))
+                                  l.contains('المبلغ المتبقي:') ||
+                                  l.contains('المتبقي:'))
                               .join(' | '),
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 11.5,
                             fontWeight: FontWeight.w700,
-                            color: Colors.deepOrange,
+                            color: isCash
+                                ? AppColors.greenOf(context)
+                                : Colors.deepOrange,
                           ),
                         ),
                       ),
@@ -2474,71 +2536,12 @@ class _PosHistoryTab extends ConsumerWidget {
                     color: AppColors.primaryOf(context),
                   ),
                 ),
-                onTap: () async {
-                  final repo = ref.read(repoProvider);
-                  final items = await repo.transactionItems(tx.id!);
-                  if (context.mounted) {
-                    showDialog(
-                      context: context,
-                      builder: (_) => AlertDialog(
-                        title: Text('تفاصيل ${tx.reference}'),
-                        content: SizedBox(
-                          width: double.maxFinite,
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              if (tx.notes.trim().isNotEmpty) ...[
-                                Container(
-                                  width: double.infinity,
-                                  padding: const EdgeInsets.all(8),
-                                  margin: const EdgeInsets.only(bottom: 8),
-                                  decoration: BoxDecoration(
-                                    color: Colors.orange.withValues(alpha: 0.1),
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: Text(
-                                    tx.notes.trim(),
-                                    style: const TextStyle(
-                                      fontSize: 12.5,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                              if (items.isEmpty)
-                                const Text(
-                                    'لا توجد أصناف مسجلة لهذه الفاتورة.')
-                              else
-                                Flexible(
-                                  child: ListView.builder(
-                                    shrinkWrap: true,
-                                    itemCount: items.length,
-                                    itemBuilder: (_, idx) {
-                                      final it = items[idx];
-                                      return ListTile(
-                                        dense: true,
-                                        title: Text(it.name),
-                                        trailing: Text(
-                                          '${it.quantity} × ${Fmt.money(it.unitPrice)} = ${Fmt.money(it.total)}',
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.pop(context),
-                            child: const Text('إغلاق'),
-                          ),
-                        ],
-                      ),
-                    );
-                  }
-                },
+                onTap: () => showTxDetails(
+                  context,
+                  ref,
+                  tx: tx,
+                  account: account,
+                ),
               ),
             );
           },

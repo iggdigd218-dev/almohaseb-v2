@@ -968,7 +968,58 @@ class Repo {
   Future<Account?> account(int id) async {
     final db = await _db;
     final r = await db.query('accounts', where: 'id = ?', whereArgs: [id]);
-    return r.isEmpty ? null : Account.fromMap(r.first);
+    if (r.isEmpty) return null;
+    final acc = Account.fromMap(r.first);
+    final bal = await balanceOf(acc);
+    return acc.copyWith(balance: bal);
+  }
+
+  /// إعادة حساب وتصحيح رصيد العميل استناداً للعمليات الحقيقية مع استبعاد أي فواتير نقدية:
+  /// Customer Balance = OpeningBalance + SUM(حركات الآجل والمتبقي غير المسدد) - SUM(سندات القبض)
+  Future<double> recalculateCustomerBalance(int customerId) async {
+    final db = await _db;
+    final r = await db.query('accounts', where: 'id = ?', whereArgs: [customerId]);
+    if (r.isEmpty) return 0.0;
+    final acc = Account.fromMap(r.first);
+    final txs = await transactions(accountId: customerId);
+    double creditSalesAndDebits = 0.0;
+    double receiptsAndCredits = 0.0;
+    for (final t in txs) {
+      if (t.accountId == customerId) {
+        // استبعاد الفواتير النقدية تماماً (OpType.revenue / OpType.expense)
+        if (t.type == OpType.revenue || t.type == OpType.expense) {
+          continue;
+        }
+        if (t.type == OpType.debit || t.type == OpType.outflow) {
+          creditSalesAndDebits += t.amount;
+        } else if (t.type == OpType.credit || t.type == OpType.inflow) {
+          receiptsAndCredits += t.amount;
+        } else if (t.type == OpType.settle) {
+          if (t.sign == '-') {
+            receiptsAndCredits += t.amount;
+          } else {
+            creditSalesAndDebits += t.amount;
+          }
+        }
+      }
+      if (t.type == OpType.transfer) {
+        if (t.fromId == customerId) receiptsAndCredits += t.amount;
+        if (t.toId == customerId) creditSalesAndDebits += t.amount * t.rate;
+      }
+    }
+    return acc.openingBalance + creditSalesAndDebits - receiptsAndCredits;
+  }
+
+  /// تصحيح شامل لأرصدة جميع العملاء واستبعاد أي أثر للفواتير النقدية السابقة.
+  Future<Map<int, double>> sanitizeAllCustomerBalances() async {
+    final allAccs = await accounts(includeArchived: true);
+    final result = <int, double>{};
+    for (final a in allAccs) {
+      if (a.id != null && a.kind == AccountKind.customer) {
+        result[a.id!] = await recalculateCustomerBalance(a.id!);
+      }
+    }
+    return result;
   }
 
   Future<int> saveAccount(Account a) async {
@@ -1206,7 +1257,25 @@ class Repo {
         throw StateError('أدخل سعر صرف صحيحًا أكبر من صفر.');
       }
     } else if (t.accountId == null && !_allowsAnonymousAccount(t.type)) {
+      if (t.type == OpType.debit) {
+        throw StateError('يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل');
+      }
       throw StateError('اختر الحساب.');
+    }
+    // التحقق الصارم لمنع الديون المجهولة في البيع الآجل والجزئي:
+    // لا يجوز خروج أي مبلغ متبقٍّ غير مسدد أو مديونية مربوطة بحساب "عميل نقدي عام".
+    if (t.type == OpType.debit && t.accountId != null) {
+      final db = await _db;
+      final accRows = await db.query(
+        'accounts',
+        columns: const <String>['name'],
+        where: 'id = ?',
+        whereArgs: [t.accountId!],
+      );
+      final accName = accRows.isEmpty ? '' : ('${accRows.first['name'] ?? ''}').trim();
+      if (accRows.isEmpty || accName == 'عميل نقدي' || accName == 'عميل نقدي عام') {
+        throw StateError('يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل');
+      }
     }
     await _ensureCan(t.id == null ? 'add_tx' : 'edit_tx')
         .timeout(const Duration(seconds: 4));

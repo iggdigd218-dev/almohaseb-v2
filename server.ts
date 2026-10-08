@@ -919,13 +919,37 @@ async function startServer() {
   app.get('/api/accounts', (req, res) => {
     try {
       const { kind, search } = req.query;
-      let sql = `SELECT a.*, COALESCE(SUM(CASE WHEN t.type='debit' THEN t.amount WHEN t.type='credit' THEN -t.amount WHEN t.type='inflow' THEN -t.amount WHEN t.type='outflow' THEN t.amount ELSE 0 END),0) + a.opening_balance as balance, (SELECT MAX(date) FROM transactions WHERE account_id=a.id AND (deleted_at='' OR deleted_at IS NULL)) as last_tx FROM accounts a LEFT JOIN transactions t ON t.account_id = a.id AND (t.deleted_at='' OR t.deleted_at IS NULL) WHERE (a.deleted_at='' OR a.deleted_at IS NULL)`;
+      // Cash sales (type='revenue') have Net Impact = 0 on customer balance
+      let sql = `SELECT a.*, COALESCE(SUM(CASE WHEN t.type='debit' THEN t.amount WHEN t.type='credit' THEN -t.amount WHEN t.type='inflow' THEN -t.amount WHEN t.type='outflow' THEN t.amount ELSE 0 END),0) + a.opening_balance as balance, (SELECT MAX(date) FROM transactions WHERE account_id=a.id AND (deleted_at='' OR deleted_at IS NULL)) as last_tx FROM accounts a LEFT JOIN transactions t ON t.account_id = a.id AND (t.deleted_at='' OR t.deleted_at IS NULL) AND t.type != 'revenue' WHERE (a.deleted_at='' OR a.deleted_at IS NULL)`;
       const params: any[] = [];
       if (kind) { sql += ' AND a.kind=?'; params.push(kind); }
       if (search) { sql += ' AND a.name LIKE ?'; params.push(`%${search}%`); }
       sql += ' GROUP BY a.id ORDER BY a.created_at DESC';
       const rows = db.prepare(sql).all(...params);
       res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/accounts/recalculate-balances', (_req, res) => {
+    try {
+      const rows = db.prepare(`
+        SELECT a.id, a.name, a.opening_balance,
+          COALESCE(SUM(CASE
+            WHEN t.type='debit' THEN t.amount
+            WHEN t.type IN ('credit', 'inflow') THEN -t.amount
+            WHEN t.type='outflow' THEN t.amount
+            ELSE 0
+          END), 0) + a.opening_balance as balance
+        FROM accounts a
+        LEFT JOIN transactions t ON t.account_id = a.id
+          AND (t.deleted_at='' OR t.deleted_at IS NULL)
+          AND t.type != 'revenue'
+        WHERE (a.deleted_at='' OR a.deleted_at IS NULL)
+        GROUP BY a.id
+      `).all();
+      res.json({ ok: true, accounts: rows });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -970,12 +994,17 @@ async function startServer() {
   app.get('/api/transactions', (req, res) => {
     try {
       const { type, account_id } = req.query;
-      let sql = `SELECT t.*, a.name as account_name FROM transactions t LEFT JOIN accounts a ON a.id=t.account_id WHERE (t.deleted_at='' OR t.deleted_at IS NULL)`;
+      let sql = `SELECT t.*, a.name as account_name, a.phone as account_phone, a.whatsapp as account_whatsapp, a.kind as account_kind FROM transactions t LEFT JOIN accounts a ON a.id=t.account_id WHERE (t.deleted_at='' OR t.deleted_at IS NULL)`;
       const params: any[] = [];
       if (type) { sql += ' AND t.type=?'; params.push(type); }
       if (account_id) { sql += ' AND t.account_id=?'; params.push(account_id); }
       sql += ' ORDER BY t.date DESC, t.id DESC';
-      res.json(db.prepare(sql).all(...params));
+      const rows = db.prepare(sql).all(...params) as any[];
+      const itemStmt = db.prepare(`SELECT * FROM transaction_items WHERE tx_id = ?`);
+      for (const row of rows) {
+        row.items = itemStmt.all(row.id);
+      }
+      res.json(rows);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -985,6 +1014,17 @@ async function startServer() {
     try {
       const { account_id, type, amount, currency, from_id, to_id, description, reference, notes, date, items } = req.body;
       if (!amount || Number(amount) <= 0) return res.status(400).json({ error: 'المبلغ يجب أن يكون أكبر من صفر' });
+
+      if (type === 'debit') {
+        if (!account_id) {
+          return res.status(400).json({ error: 'يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل' });
+        }
+        const acc = db.prepare(`SELECT id, name FROM accounts WHERE id = ? AND (deleted_at='' OR deleted_at IS NULL)`).get(account_id) as any;
+        if (!acc || acc.name.trim() === 'عميل نقدي' || acc.name.trim() === 'عميل نقدي عام') {
+          return res.status(400).json({ error: 'يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل' });
+        }
+      }
+
       const now = new Date().toISOString();
       const result = db.prepare(`INSERT INTO transactions (account_id, type, amount, currency, from_id, to_id, description, reference, notes, date, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(account_id || null, type, amount, currency || 'YER', from_id || null, to_id || null, description || '', reference || '', notes || '', date || now, now, now);
       
@@ -993,8 +1033,8 @@ async function startServer() {
         for (const it of items) {
           stmt.run(result.lastInsertRowid, it.name, it.quantity || 1, it.unit_price || 0, it.total || 0);
         }
-        if (type === 'debit') {
-          const upd = db.prepare(`UPDATE items SET quantity = quantity - ? WHERE name=?`);
+        if (type === 'debit' || type === 'revenue' || type === 'inflow') {
+          const upd = db.prepare(`UPDATE items SET quantity = MAX(0, quantity - ?) WHERE name=?`);
           for (const it of items) {
             upd.run(it.quantity || 1, it.name);
           }

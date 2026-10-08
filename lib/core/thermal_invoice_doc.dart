@@ -14,6 +14,7 @@ import 'dart:typed_data';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
+import 'accounting.dart';
 import 'format.dart';
 import 'media_paths.dart';
 import 'models.dart';
@@ -135,7 +136,9 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                 mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                 children: [
                   pw.Text(
-                    'فاتورة مبيعات',
+                    tx.type == OpType.revenue
+                        ? 'فاتورة نقدية مدفوعة (مدفوع نقداً)'
+                        : 'فاتورة مبيعات',
                     style: pw.TextStyle(
                       font: fonts.bold,
                       fontWeight: pw.FontWeight.bold,
@@ -234,6 +237,29 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                     ),
                     pw.Text(
                       remainVal,
+                      style: pw.TextStyle(
+                        font: fonts.bold,
+                        fontWeight: pw.FontWeight.bold,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ] else if (tx.type == OpType.revenue) ...[
+                pw.SizedBox(height: 2),
+                pw.Row(
+                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                  children: [
+                    pw.Text(
+                      'المتبقي:',
+                      style: pw.TextStyle(
+                        font: fonts.bold,
+                        fontWeight: pw.FontWeight.bold,
+                        fontSize: 10,
+                      ),
+                    ),
+                    pw.Text(
+                      '0.00 ر.ي',
                       style: pw.TextStyle(
                         font: fonts.bold,
                         fontWeight: pw.FontWeight.bold,

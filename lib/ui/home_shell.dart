@@ -1292,17 +1292,8 @@ class _HomeShellState extends ConsumerState<HomeShell>
     final add = can('add_tx');
     if (!add) return null;
 
-    if (_screen == AppScreen.pos) {
-      return FloatingActionButton.extended(
-        heroTag: 'omni',
-        onPressed: () => PosScreen.openCheckoutBridge?.call(),
-        icon: const Icon(Icons.shopping_cart_checkout_rounded),
-        label: const Text('الدفع'),
-      );
-    }
-
     // (2026-09-22) زر الإضافة السريعة (+) يظهر في الشاشة الرئيسية فقط —
-    // بقية الشاشات بلا زر عائم إطلاقاً.
+    // بقية الشاشات (بما فيها نقطة البيع التي تحتوي شريط السلة الموحد) بلا زر عائم إطلاقاً.
     if (_screen != AppScreen.dashboard) return null;
 
     // (قانون 2026-09-19) الزر العائم «إجراء سريع» كما كان: يفتح ورقة

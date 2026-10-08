@@ -478,8 +478,11 @@ class _TxTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isCashSale = tx.type == OpType.revenue;
     final effect = tx.effectOn(accountId) ?? 0;
-    final color = effect > 0 ? AppColors.green : AppColors.red;
+    final color = isCashSale
+        ? AppColors.green
+        : (effect > 0 ? AppColors.red : AppColors.green);
 
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 13, vertical: 2),
@@ -494,7 +497,7 @@ class _TxTile extends StatelessWidget {
         child: Text(tx.type.icon, style: const TextStyle(fontSize: 16)),
       ),
       title: Text(
-        tx.type.label,
+        isCashSale ? 'فاتورة نقدية مدفوعة' : tx.type.label,
         style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700),
       ),
       // (دفعة 58 — متطلب 10) وقت التنفيذ HH:MM بجانب التاريخ.
@@ -505,14 +508,32 @@ class _TxTile extends StatelessWidget {
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(fontSize: 11.5),
       ),
-      trailing: Text(
-        '${effect > 0 ? '+' : '−'}${Fmt.money(effect.abs(), currency.decimal)} ${currency.symbol}',
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          fontSize: 13.5,
-          fontWeight: FontWeight.w800,
-          color: color,
-        ),
+      trailing: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Text(
+            isCashSale
+                ? '${Fmt.money(tx.amount, currency.decimal)} ${currency.symbol}'
+                : '${effect > 0 ? '+' : '−'}${Fmt.money(effect.abs(), currency.decimal)} ${currency.symbol}',
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 13.5,
+              fontWeight: FontWeight.w800,
+              color: color,
+            ),
+          ),
+          Text(
+            isCashSale
+                ? 'مدفوع نقداً'
+                : (effect > 0 ? 'عليه' : (effect < 0 ? 'له' : '')),
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w700,
+              color: color,
+            ),
+          ),
+        ],
       ),
     );
   }

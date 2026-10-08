@@ -87,16 +87,21 @@ class TxShare {
     String title;
     if (tx.type == OpType.debit && items.isNotEmpty) {
       title = '🧾 فاتورة مبيعات (آجل)';
-    } else if (tx.type == OpType.revenue || tx.type == OpType.inflow) {
-      title = '🧾 فاتورة مبيعات / سند قبض';
+    } else if (tx.type == OpType.revenue) {
+      title = '🧾 فاتورة نقدية مدفوعة (مدفوع نقداً)';
+    } else if (tx.type == OpType.inflow) {
+      title = '🧾 سند قبض وتوريد';
     } else {
       title = '${tx.type.icon} ${tx.type.label}';
     }
 
     String amountLine;
     switch (tx.type) {
-      case OpType.inflow:
       case OpType.revenue:
+        amountLine =
+            '✅ مدفوع نقداً: ${Fmt.money(tx.amount, cur.decimal)} ${cur.symbol}';
+        break;
+      case OpType.inflow:
       case OpType.credit:
         amountLine =
             '✅ المبلغ المستلَم (له): ${Fmt.money(tx.amount, cur.decimal)} ${cur.symbol}';
@@ -117,8 +122,9 @@ class TxShare {
       '━━━━━━━━━━━━━',
       title,
       '━━━━━━━━━━━━━',
-      'العميل: ${account?.name ?? '—'}',
+      'العميل: ${account?.name ?? 'عميل نقدي'}',
       amountLine,
+      if (tx.type == OpType.revenue) 'المتبقي: 0.00 ر.ي',
       'التاريخ: ${Fmt.date(tx.date)}',
       if (tx.reference.trim().isNotEmpty) 'رقم العملية: ${tx.reference.trim()}',
       if (tx.description.trim().isNotEmpty) 'البيان: ${tx.description.trim()}',

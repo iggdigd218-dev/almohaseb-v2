@@ -182,20 +182,44 @@ export const PosView: React.FC<PosViewProps> = ({
     setDiscount(val);
   };
 
+  const selectedAccount = useMemo(
+    () => accounts.find((a) => String(a.id) === selectedAccountId) || null,
+    [accounts, selectedAccountId]
+  );
+
+  const isValidDebtCustomer = useMemo(() => {
+    if (!selectedAccount) return false;
+    const name = selectedAccount.name.trim();
+    return name.length > 0 && name !== 'عميل نقدي' && name !== 'عميل نقدي عام';
+  }, [selectedAccount]);
+
+  const requiresCustomerForDebt = paymentMethod === 'credit' || paymentMethod === 'split';
+  const isBlockedByMissingCustomer = requiresCustomerForDebt && !isValidDebtCustomer;
+
+  const remainingDebtAmount = useMemo(() => {
+    if (paymentMethod === 'credit') return total;
+    if (paymentMethod === 'split') return Math.max(0, total - parsedReceived);
+    return 0;
+  }, [paymentMethod, total, parsedReceived]);
+
   const handleCheckout = async () => {
     if (cart.length === 0) {
       onShowToast('السلة فارغة، يرجى اختيار أصناف أولاً', 'error');
       return;
     }
 
-    if (paymentMethod === 'credit' && !selectedAccountId) {
-      onShowToast('يجب اختيار حساب العميل للبيع الآجل', 'error');
+    if (isBlockedByMissingCustomer) {
+      onShowToast('يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل', 'error');
+      return;
+    }
+
+    if (paymentMethod === 'split' && (parsedReceived <= 0 || parsedReceived >= total)) {
+      onShowToast('في الدفع الجزئي يجب إدخال المبلغ المدفوع بحيث يكون أقل من إجمالي الفاتورة وأكبر من صفر', 'error');
       return;
     }
 
     setIsCheckingOut(true);
     try {
-      const selectedAccount = accounts.find((a) => String(a.id) === selectedAccountId);
       const customerName = selectedAccount ? selectedAccount.name : 'عميل نقدي';
 
       const txItems = cart.map((c) => ({
@@ -205,41 +229,74 @@ export const PosView: React.FC<PosViewProps> = ({
         total: c.quantity * c.unitPrice,
       }));
 
-      const txType = paymentMethod === 'credit' ? 'debit' : 'inflow';
+      // Cash & Card sales use 'revenue' so Net Impact on customer balance = 0
+      const isCashOrCard = paymentMethod === 'cash' || paymentMethod === 'card';
+      const txType = isCashOrCard ? 'revenue' : 'debit';
+      const txAmount = paymentMethod === 'split' ? remainingDebtAmount : total;
+      const paidNow = isCashOrCard ? total : paymentMethod === 'split' ? parsedReceived : 0;
+
       const paymentLabel =
         paymentMethod === 'cash'
-          ? 'نقداً 💵'
+          ? 'مدفوع نقداً'
           : paymentMethod === 'card'
-          ? 'شبكة / بنك 💳'
+          ? 'مدفوع (شبكة / بنك)'
           : paymentMethod === 'credit'
-          ? 'آجل 📑'
-          : 'دفع جزئي ⚖️';
+          ? 'آجل (عليه)'
+          : 'دفع جزئي (عليه)';
+
+      const notesParts = [
+        `طريقة الدفع: ${paymentMethod === 'cash' ? 'نقداً' : paymentMethod === 'card' ? 'شبكة' : paymentMethod === 'credit' ? 'آجل' : 'جزئي'}`,
+        `إجمالي الفاتورة: ${total}`,
+        `الخصم: ${effectiveDiscount}`,
+        `المبلغ المدفوع: ${paidNow}`,
+        `المتبقي: ${remainingDebtAmount.toFixed(2)}`,
+      ];
+      if (orderNote) notesParts.push(`ملاحظة: ${orderNote}`);
 
       const res = await api.createTransaction({
         account_id: selectedAccount ? selectedAccount.id : undefined,
         type: txType,
-        amount: total,
+        amount: txAmount,
         currency: 'YER',
-        description: `فاتورة مبيعات (${paymentLabel}) - ${cart.length} أصناف${
-          orderNote ? ` — ملاحظة: ${orderNote}` : ''
-        }`,
+        description: isCashOrCard
+          ? `فاتورة نقدية مدفوعة (${paymentLabel}) - ${cart.length} أصناف`
+          : `فاتورة مبيعات (${paymentLabel}) - ${cart.length} أصناف`,
         reference: `POS-${Date.now().toString().slice(-6)}`,
+        notes: notesParts.join(' | '),
         items: txItems,
         date: new Date().toISOString(),
       });
+
+      if (paymentMethod === 'split' && paidNow > 0) {
+        await api.createTransaction({
+          account_id: selectedAccount ? selectedAccount.id : undefined,
+          type: 'revenue',
+          amount: paidNow,
+          currency: 'YER',
+          description: `الدفعة النقدية من فاتورة جزئية #${res.id} (مدفوع نقداً)`,
+          reference: `POS-CASH-${res.id}`,
+          notes: `دفعة مقدمة للفاتورة #${res.id} | المتبقي الآجل: ${remainingDebtAmount.toFixed(2)}`,
+          date: new Date().toISOString(),
+        });
+      }
 
       setLastReceipt({
         id: res.id,
         date: new Date().toLocaleString('ar-YE'),
         customerName,
         customerPhone: selectedAccount?.phone || selectedAccount?.whatsapp || '',
+        customerKind: selectedAccount ? (selectedAccount.kind === 'customer' ? 'حساب عميل مسجل' : 'حساب مورد') : 'عميل نقدي عام',
         paymentMode: paymentLabel,
+        isCash: isCashOrCard,
+        badgeLabel: isCashOrCard ? 'مدفوع نقداً' : 'عليه',
         items: [...cart],
         subtotal,
         discount: effectiveDiscount,
         total,
-        received: parsedReceived > 0 ? parsedReceived : total,
-        change: changeDue,
+        paid: paidNow,
+        remainingDebt: remainingDebtAmount,
+        received: isCashOrCard ? (parsedReceived > 0 ? parsedReceived : total) : paidNow,
+        change: isCashOrCard ? changeDue : 0,
         note: orderNote,
       });
 
@@ -318,13 +375,33 @@ ${lastReceipt.received ? `المستلم: ${lastReceipt.received.toLocaleString(
             </div>
 
             <div className="text-xs space-y-1.5 text-slate-600">
-              <div className="flex justify-between">
+              <div className="flex justify-between items-center">
                 <span>العميل:</span>
                 <span className="font-bold text-slate-900">{lastReceipt.customerName}</span>
               </div>
-              <div className="flex justify-between">
-                <span>طريقة الدفع:</span>
-                <span className="font-bold text-slate-900">{lastReceipt.paymentMode}</span>
+              {lastReceipt.customerPhone && (
+                <div className="flex justify-between items-center">
+                  <span>الهاتف:</span>
+                  <span className="font-mono text-slate-800">{lastReceipt.customerPhone}</span>
+                </div>
+              )}
+              {lastReceipt.customerKind && (
+                <div className="flex justify-between items-center">
+                  <span>نوع الحساب:</span>
+                  <span className="font-bold text-slate-700">{lastReceipt.customerKind}</span>
+                </div>
+              )}
+              <div className="flex justify-between items-center">
+                <span>حالة السند:</span>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[11px] font-extrabold border ${
+                    lastReceipt.isCash
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : 'bg-rose-50 text-rose-700 border-rose-200'
+                  }`}
+                >
+                  {lastReceipt.isCash ? 'مدفوع نقداً' : 'عليه'}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span>التاريخ:</span>
@@ -361,9 +438,27 @@ ${lastReceipt.received ? `المستلم: ${lastReceipt.received.toLocaleString(
                   {lastReceipt.total.toLocaleString()} ر.ي
                 </span>
               </div>
+              <div className="flex justify-between text-slate-700">
+                <span>المبلغ المدفوع:</span>
+                <span className="font-mono font-bold text-emerald-700">
+                  {(lastReceipt.paid ?? lastReceipt.total).toLocaleString()} ر.ي
+                </span>
+              </div>
+              <div className="flex justify-between text-slate-800 bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-200/80">
+                <span className="font-bold">المتبقي:</span>
+                <span
+                  className={`font-mono font-extrabold ${
+                    lastReceipt.isCash ? 'text-emerald-700' : 'text-rose-600'
+                  }`}
+                >
+                  {lastReceipt.isCash
+                    ? '0.00 ر.ي'
+                    : `${Number(lastReceipt.remainingDebt || 0).toFixed(2)} ر.ي`}
+                </span>
+              </div>
               {lastReceipt.change > 0 && (
                 <div className="flex justify-between text-sky-700 bg-sky-50 px-2 py-1 rounded-lg">
-                  <span>المتبقي للعميل:</span>
+                  <span>الباقي للعميل:</span>
                   <span className="font-mono font-bold">
                     {lastReceipt.change.toLocaleString()} ر.ي
                   </span>
@@ -822,42 +917,66 @@ ${lastReceipt.received ? `المستلم: ${lastReceipt.received.toLocaleString(
           </div>
 
           {/* Quick Cash Numpad / Tendered Amount */}
-          {paymentMethod === 'cash' && cart.length > 0 && (
+          {(paymentMethod === 'cash' || paymentMethod === 'split') && cart.length > 0 && (
             <div className="space-y-1.5 bg-slate-50 p-2.5 rounded-2xl border border-slate-200/80 text-xs">
               <div className="flex items-center justify-between text-slate-600 font-bold">
-                <span>المبلغ المستلم من العميل:</span>
+                <span>
+                  {paymentMethod === 'split'
+                    ? 'المبلغ المدفوع مقدماً:'
+                    : 'المبلغ المستلم من العميل:'}
+                </span>
                 <input
                   type="number"
                   value={receivedAmount}
                   onChange={(e) => setReceivedAmount(e.target.value)}
-                  placeholder={`${total}`}
+                  placeholder={paymentMethod === 'split' ? '0' : `${total}`}
                   className="w-28 text-left font-mono font-bold px-2 py-1 bg-white border border-slate-300 rounded-lg text-xs"
                 />
               </div>
 
-              {/* Quick Cash Presets */}
-              <div className="flex items-center gap-1 pt-1">
-                {[total, 1000, 2000, 5000, 10000, 20000]
-                  .filter((v, i, a) => v >= total && a.indexOf(v) === i)
-                  .slice(0, 4)
-                  .map((amount) => (
-                    <button
-                      key={amount}
-                      type="button"
-                      onClick={() => setReceivedAmount(String(amount))}
-                      className="flex-1 py-1 rounded-lg bg-white border border-slate-200 text-slate-700 font-mono font-bold text-[11px] hover:bg-slate-100"
-                    >
-                      {amount.toLocaleString()}
-                    </button>
-                  ))}
-              </div>
+              {paymentMethod === 'cash' && (
+                <>
+                  {/* Quick Cash Presets */}
+                  <div className="flex items-center gap-1 pt-1">
+                    {[total, 1000, 2000, 5000, 10000, 20000]
+                      .filter((v, i, a) => v >= total && a.indexOf(v) === i)
+                      .slice(0, 4)
+                      .map((amount) => (
+                        <button
+                          key={amount}
+                          type="button"
+                          onClick={() => setReceivedAmount(String(amount))}
+                          className="flex-1 py-1 rounded-lg bg-white border border-slate-200 text-slate-700 font-mono font-bold text-[11px] hover:bg-slate-100"
+                        >
+                          {amount.toLocaleString()}
+                        </button>
+                      ))}
+                  </div>
 
-              {changeDue > 0 && (
-                <div className="flex items-center justify-between pt-1 text-emerald-700 font-bold">
-                  <span>المتبقي للعميل (الباقي):</span>
-                  <span className="font-mono text-sm">{changeDue.toLocaleString()} ر.ي</span>
+                  {changeDue > 0 && (
+                    <div className="flex items-center justify-between pt-1 text-emerald-700 font-bold">
+                      <span>الباقي للعميل:</span>
+                      <span className="font-mono text-sm">{changeDue.toLocaleString()} ر.ي</span>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {paymentMethod === 'split' && (
+                <div className="flex items-center justify-between pt-1 text-rose-700 font-bold">
+                  <span>المتبقي كمديونية (عليه):</span>
+                  <span className="font-mono text-sm">
+                    {remainingDebtAmount.toLocaleString()} ر.ي
+                  </span>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Strict Customer Validation Banner for Credit/Partial Sales */}
+          {isBlockedByMissingCustomer && (
+            <div className="p-3 rounded-2xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold leading-relaxed">
+              ⚠️ يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل
             </div>
           )}
 
@@ -887,11 +1006,11 @@ ${lastReceipt.received ? `المستلم: ${lastReceipt.received.toLocaleString(
           <button
             id="btn-complete-pos-checkout"
             onClick={handleCheckout}
-            disabled={isCheckingOut || cart.length === 0}
+            disabled={isCheckingOut || cart.length === 0 || isBlockedByMissingCustomer}
             className={`w-full py-3.5 rounded-2xl text-white font-extrabold text-sm sm:text-base flex items-center justify-center gap-2 shadow-md transition-all active:scale-98 cursor-pointer ${
-              cart.length === 0
+              cart.length === 0 || isBlockedByMissingCustomer
                 ? 'bg-slate-300 cursor-not-allowed shadow-none'
-                : paymentMethod === 'credit'
+                : paymentMethod === 'credit' || paymentMethod === 'split'
                 ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-600/20'
                 : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20'
             }`}
@@ -901,7 +1020,7 @@ ${lastReceipt.received ? `المستلم: ${lastReceipt.received.toLocaleString(
             ) : (
               <>
                 <Check className="w-5 h-5 stroke-2" />
-                <span>إتمام البيع ({total.toLocaleString()} ر.ي)</span>
+                <span>تأكيد وإصدار الفاتورة ({total.toLocaleString()} ر.ي)</span>
               </>
             )}
           </button>

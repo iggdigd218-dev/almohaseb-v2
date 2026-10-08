@@ -31,6 +31,8 @@ class ReceiptData {
   final String logoBase64;
   final String footer;
   final List<InvoiceLine> items;
+  final bool isDebit;
+  final bool isCashSale;
 
   const ReceiptData({
     required this.title,
@@ -50,10 +52,8 @@ class ReceiptData {
     this.footer = '',
     this.items = const [],
     this.isDebit = true,
+    this.isCashSale = false,
   });
-
-  /// اتجاه المبلغ: true = عليه (مدين/صرف) يظهر بالأحمر؛ false = له (قبض/دائن) بالأخضر.
-  final bool isDebit;
 
   factory ReceiptData.fromTx({
     required Tx tx,
@@ -64,13 +64,15 @@ class ReceiptData {
     List<InvoiceLine> items = const [],
   }) =>
       ReceiptData(
-        title: tx.type == OpType.debit && items.isNotEmpty
-            ? (tx.notes.contains('المبلغ المدفوع:')
-                ? 'فاتورة مبيعات (دفع جزئي)'
-                : 'فاتورة مبيع آجل')
-            : tx.type.label,
+        title: tx.type == OpType.revenue
+            ? 'فاتورة نقدية مدفوعة'
+            : (tx.type == OpType.debit && items.isNotEmpty
+                ? (tx.notes.contains('المبلغ المدفوع:')
+                    ? 'فاتورة مبيعات (دفع جزئي)'
+                    : 'فاتورة مبيع آجل')
+                : tx.type.label),
         number: tx.reference,
-        accountName: account?.name ?? '—',
+        accountName: account?.name ?? 'عميل نقدي',
         accountPhone: account?.phone ?? '',
         amount: tx.amount,
         currency: currency,
@@ -89,10 +91,11 @@ class ReceiptData {
             (settings['org.icon.b64'] ?? settings['logoBase64'] ?? '').trim(),
         footer: settings['voucherFooter'] ?? '',
         items: items,
-        // المبلغ عليه (مدين/صرف/مصروف) = أحمر؛ له (قبض/دائن/إيراد) = أخضر.
+        // المبلغ عليه (مدين/صرف/مصروف) = أحمر؛ له (قبض/دائن) = أخضر.
         isDebit: tx.type == OpType.debit ||
             tx.type == OpType.outflow ||
             tx.type == OpType.expense,
+        isCashSale: tx.type == OpType.revenue,
       );
 
   factory ReceiptData.fromVoucher({
@@ -163,7 +166,7 @@ Future<String> buildReceiptImage(ReceiptData d) async {
       1; // التاريخ والوقت (يُرسم لاحقاً في قسم التفاصيل)
   final partialRows =
       (paidVal != null && paidVal.isNotEmpty ? 1 : 0) +
-      (remainVal != null && remainVal.isNotEmpty ? 1 : 0);
+      (remainVal != null && remainVal.isNotEmpty ? 1 : (d.isCashSale ? 1 : 0));
   final detailRows = (d.statement.isNotEmpty ? 1 : 0) + partialRows + 1;
   final itemsBlock =
       d.items.isEmpty ? 0.0 : (54.0 + d.items.length * 52.0 + 56.0 + 24.0);
@@ -274,16 +277,26 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   if (d.accountPhone.isNotEmpty) infoRow('رقم الهاتف', d.accountPhone);
   divider();
 
-  // ===== 4) كبسولة المبلغ الكبيرة: «عليه» أحمر / «له» أخضر =====
-  final amtColor = d.isDebit ? red : green;
-  final amtBg = d.isDebit ? const Color(0xFFFDECEC) : const Color(0xFFEAF7EF);
+  // ===== 4) كبسولة المبلغ الكبيرة: «مدفوع نقداً» أو «عليه» أحمر / «له» أخضر =====
+  final amtColor = d.isCashSale ? green : (d.isDebit ? red : green);
+  final amtBg = d.isCashSale
+      ? const Color(0xFFEAF7EF)
+      : (d.isDebit ? const Color(0xFFFDECEC) : const Color(0xFFEAF7EF));
   final amountBox = RRect.fromRectAndRadius(
     Rect.fromLTWH(pad, y, w - pad * 2, amountH),
     const Radius.circular(22),
   );
   canvas.drawRRect(amountBox, Paint()..color = amtBg);
-  _text(canvas, d.isDebit ? 'عليه' : 'له', w - pad - 28, y + 42, 30, amtColor,
-      bold: true, alignEnd: true);
+  _text(
+    canvas,
+    d.isCashSale ? 'مدفوع نقداً' : (d.isDebit ? 'عليه' : 'له'),
+    w - pad - 28,
+    y + 42,
+    d.isCashSale ? 26 : 30,
+    amtColor,
+    bold: true,
+    alignEnd: true,
+  );
   _text(
     canvas,
     '${Fmt.money(d.amount, d.currency.decimal)} ${d.currency.symbol}',
@@ -357,6 +370,8 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   }
   if (remainVal != null && remainVal.isNotEmpty) {
     infoRow('المبلغ المتبقي (آجل)', remainVal, valueColor: red, big: true);
+  } else if (d.isCashSale) {
+    infoRow('المتبقي', '0.00 ر.ي', valueColor: green, big: true);
   }
   if (d.statement.isNotEmpty) infoRow('التفاصيل', d.statement);
   infoRow('التاريخ والوقت', Fmt.dateTime(d.date));

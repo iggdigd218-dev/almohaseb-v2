@@ -8,6 +8,7 @@ class Account {
 
   /// موجب = مستحق لنا (عليه)، سالب = مستحق منا (له).
   final double openingBalance;
+  final double balance;
   final String currency;
   final String phone;
   final String whatsapp;
@@ -30,6 +31,7 @@ class Account {
     required this.name,
     this.kind = AccountKind.customer,
     this.openingBalance = 0,
+    this.balance = 0,
     this.currency = 'YER',
     this.phone = '',
     this.whatsapp = '',
@@ -60,6 +62,7 @@ class Account {
     String? name,
     AccountKind? kind,
     double? openingBalance,
+    double? balance,
     String? currency,
     String? phone,
     String? whatsapp,
@@ -78,6 +81,7 @@ class Account {
         name: name ?? this.name,
         kind: kind ?? this.kind,
         openingBalance: openingBalance ?? this.openingBalance,
+        balance: balance ?? this.balance,
         currency: currency ?? this.currency,
         phone: phone ?? this.phone,
         whatsapp: whatsapp ?? this.whatsapp,
@@ -116,11 +120,14 @@ class Account {
 
   factory Account.fromMap(Map<String, Object?> m) {
     final raw = (m['tags'] ?? '') as String;
+    final ob = ((m['opening_balance'] ?? 0) as num).toDouble();
+    final bal = ((m['balance'] ?? ob) as num).toDouble();
     return Account(
       id: m['id'] as int?,
       name: (m['name'] ?? '') as String,
       kind: AccountKind.fromCode((m['kind'] ?? 'customer') as String),
-      openingBalance: ((m['opening_balance'] ?? 0) as num).toDouble(),
+      openingBalance: ob,
+      balance: bal,
       currency: (m['currency'] ?? 'YER') as String,
       phone: (m['phone'] ?? '') as String,
       whatsapp: (m['whatsapp'] ?? '') as String,
