@@ -253,11 +253,13 @@ void main() {
 
       // الوكيل يعيد تسمية جهاز العضو ويطرده من المجموعة
       await repo.renameDevice('DEV-MEMBER-2', 'جهاز محاسب الفرع');
-      await repo.expelDevice('DEV-MEMBER-2');
       list = await repo.devices();
       target = list.firstWhere((d) => d['id'] == 'DEV-MEMBER-2');
       expect(target['name'], equals('جهاز محاسب الفرع'));
-      expect('${target['expelled_at'] ?? ''}'.isNotEmpty, isTrue);
+
+      await repo.expelDevice('DEV-MEMBER-2');
+      list = await repo.devices();
+      expect(list.any((d) => d['id'] == 'DEV-MEMBER-2'), isFalse);
     });
   });
 }
