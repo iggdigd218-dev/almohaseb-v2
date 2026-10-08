@@ -358,7 +358,7 @@ Future<void> openVoucherPreview(
                       child: FilledButton.icon(
                         onPressed: () async {
                           try {
-                            // يتطلب صلاحية approve_vouchers — تُفحص في Repo.
+                            // يتطلب صلاحية approve_vouchers — تُفحص في Repo، ويولّد القيد المالي المرتبط تلقائياً.
                             await repo.saveVoucher(
                               v.copyWith(status: 'approved'),
                             );
@@ -371,14 +371,44 @@ Future<void> openVoucherPreview(
                           bump(ref);
                           if (context.mounted) {
                             Navigator.pop(context);
-                            showSnack(context, 'تم اعتماد السند ✅');
+                            showSnack(
+                                context, 'تم اعتماد السند وترحيل الأثر المالي ✅');
                           }
                         },
                         icon: const Icon(Icons.verified_outlined),
                         label: const Text('اعتماد'),
                       ),
                     ),
-                  if (v.status != 'approved') const SizedBox(width: 10),
+                  if (v.status == 'approved' && canApprove)
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: AppColors.dangerOf(context),
+                          side: BorderSide(color: AppColors.dangerOf(context)),
+                        ),
+                        onPressed: () async {
+                          try {
+                            await repo.saveVoucher(
+                              v.copyWith(status: 'cancelled'),
+                            );
+                          } catch (e) {
+                            if (context.mounted) {
+                              showSnack(context, '$e', error: true);
+                            }
+                            return;
+                          }
+                          bump(ref);
+                          if (context.mounted) {
+                            Navigator.pop(context);
+                            showSnack(
+                                context, 'تم إلغاء السند وعكس القيد المالي المرتبط');
+                          }
+                        },
+                        icon: const Icon(Icons.cancel_outlined),
+                        label: const Text('إلغاء السند'),
+                      ),
+                    ),
+                  if (canApprove) const SizedBox(width: 10),
                   Expanded(
                     child: OutlinedButton.icon(
                       onPressed: () async {

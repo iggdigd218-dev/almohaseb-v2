@@ -1351,6 +1351,11 @@ class _PosScreenState extends ConsumerState<PosScreen>
                       : (_payment == _PosPayment.cash ? _netTotal : 0.0);
                   final remainingNow =
                       (_netTotal - paidNow).clamp(0.0, double.infinity);
+                  final partialInvalid = _payment == _PosPayment.partial &&
+                      (_netTotal <= 0.01 ||
+                          paidNow < 0.01 ||
+                          paidNow > (_netTotal - 0.01) ||
+                          paidNow >= _netTotal);
 
                   return Padding(
                     padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
@@ -1645,11 +1650,29 @@ class _PosScreenState extends ConsumerState<PosScreen>
 
                     if (_payment == _PosPayment.partial) ...[
                       const SizedBox(height: 12),
-                      TextField(
+                      TextFormField(
                         controller: _paidCtrl,
+                        autovalidateMode: AutovalidateMode.always,
                         keyboardType: const TextInputType.numberWithOptions(
                             decimal: true),
                         inputFormatters: const [ThousandsFormatter()],
+                        validator: (val) {
+                          final raw = ThousandsFormatter.strip(val ?? '').trim();
+                          final p = Fmt.parseAmount(raw);
+                          if (p == null || !p.isFinite) {
+                            return 'أدخل المبلغ المدفوع مقدماً (من 0.01 إلى ${Fmt.money((_netTotal - 0.01).clamp(0.01, double.infinity), 2)})';
+                          }
+                          if (p < 0) {
+                            return 'لا يُسمح بإدخال مبلغ مدفوع بالسالب';
+                          }
+                          if (p < 0.01) {
+                            return 'المبلغ المدفوع يجب أن يكون 0.01 على الأقل (أو اختر آجل كامل)';
+                          }
+                          if (p > (_netTotal - 0.01) || p >= _netTotal) {
+                            return 'المبلغ المدفوع يجب أن يكون أقل من الصافي (${Fmt.money((_netTotal - 0.01).clamp(0.01, double.infinity), 2)}) — أو اختر نقداً';
+                          }
+                          return null;
+                        },
                         decoration: InputDecoration(
                           labelText: 'المبلغ المدفوع مقدماً',
                           prefixIcon: const Icon(Icons.payments_outlined),
@@ -1886,12 +1909,12 @@ class _PosScreenState extends ConsumerState<PosScreen>
               ),
             ),
             const SizedBox(height: 8),
-            // زر تأكيد عريض مع قفل فوري ضد النقر المزدوج وحظر عند غياب العميل في الآجل/الجزئي.
+            // زر تأكيد عريض مع قفل فوري ضد النقر المزدوج وحظر عند غياب العميل أو عدم صحة الدفعة الجزئية.
             SizedBox(
               width: double.infinity,
               height: 46,
               child: FilledButton.icon(
-                onPressed: (_saving || accountMissing)
+                onPressed: (_saving || accountMissing || partialInvalid)
                     ? null
                     : () => _executeSale(ctx),
                 icon: _saving
@@ -1925,17 +1948,14 @@ class _PosScreenState extends ConsumerState<PosScreen>
     );
   }
 
-  /// أحدث 3 عملاء لهم مبيعات آجلة — للاختيار بنقرة واحدة.
+  /// أحدث 3 عملاء لهم مبيعات آجلة — للاختيار بنقرة واحدة بدون مسح جدول العمليات كاملاً.
   Future<List<Account>> _recentDebtors(List<Account> customers) async {
     try {
       final repo = ref.read(repoProvider);
-      final txs = await repo.transactions();
-      final seen = <int>{};
+      final ids = await repo.recentDebtorAccountIds(limit: 3);
       final out = <Account>[];
-      for (final t in txs) {
-        if (t.type != OpType.debit || t.accountId == null) continue;
-        if (!seen.add(t.accountId!)) continue;
-        final a = customers.where((c) => c.id == t.accountId).firstOrNull;
+      for (final id in ids) {
+        final a = customers.where((c) => c.id == id).firstOrNull;
         if (a != null) out.add(a);
         if (out.length >= 3) break;
       }
@@ -2006,6 +2026,40 @@ class _PosScreenState extends ConsumerState<PosScreen>
         );
         return;
       }
+      if (_payment == _PosPayment.partial) {
+        final paidRaw =
+            Fmt.parseAmount(ThousandsFormatter.strip(_paidCtrl.text));
+        if (paidRaw == null || !paidRaw.isFinite || paidRaw < 0) {
+          Sfx.reject();
+          showSnack(
+            context,
+            'لا يمكن إدخال مبلغ مدفوع سالب أو غير صالح في الدفع الجزئي',
+            error: true,
+            silent: true,
+          );
+          return;
+        }
+        if (paidRaw < 0.01) {
+          Sfx.reject();
+          showSnack(
+            context,
+            'في الدفع الجزئي يجب أن يكون المبلغ المدفوع 0.01 على الأقل (أو اختر البيع الآجل الكامل)',
+            error: true,
+            silent: true,
+          );
+          return;
+        }
+        if (paidRaw > (_netTotal - 0.01) || paidRaw >= _netTotal) {
+          Sfx.reject();
+          showSnack(
+            context,
+            'المبلغ المدفوع يساوي أو يتجاوز إجمالي الفاتورة — اختر الدفع النقدي الكامل أو أدخل مبلغاً أقل من الإجمالي',
+            error: true,
+            silent: true,
+          );
+          return;
+        }
+      }
     }
 
     setState(() => _saving = true);
@@ -2015,22 +2069,6 @@ class _PosScreenState extends ConsumerState<PosScreen>
       final cur = currencies.first;
       // رقم فاتورة تسلسلي رقمي بحت (بدون أحرف)
       final refNum = await repo.nextTxNumber();
-
-      // 0. تحقق نهائي من توفر المخزون (دفاع ضد بيانات تغيّرت أثناء الجلسة).
-      // إعداد «السماح بالبيع عند نفاد الرصيد» يتخطى الحظر مع تنبيه بصري.
-      if (!_allowNegative) {
-        for (final e in _cart.values) {
-          if (e.item.id == null) continue;
-          final fresh = await repo.item(e.item.id!);
-          final available = fresh?.quantity ?? e.item.quantity;
-          if (available < e.quantity) {
-            throw StateError(
-              'الكمية المطلوبة من «${e.item.name}» غير متوفرة. '
-              'المتاح: ${available.toStringAsFixed(0)} ${e.item.unit}.',
-            );
-          }
-        }
-      }
 
       // 1. تجهيز أسطر الفاتورة
       final lines = _cart.values.map((e) {
@@ -2044,7 +2082,8 @@ class _PosScreenState extends ConsumerState<PosScreen>
         );
       }).toList();
 
-      // 2. تحديد نوع وسجل العملية المالية
+      // 2. حفظ الفاتورة وخصم المخزون في معاملة ذرية موحدة (Single DB Transaction)
+      // إذا فشل خصم أي صنف (بسبب نفاد الكمية أو غيره)، يتم التراجع عن المعاملة بالكامل (Rollback) تلقائياً.
       late final int txId;
       final now = DateTime.now();
       final user = ref.read(currentUserProvider).valueOrNull;
@@ -2079,7 +2118,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
           createdAt: now,
           updatedAt: now,
         );
-        txId = await repo.saveTx(tx, items: lines);
+        txId = await repo.saveTx(tx, items: lines, deductStock: true);
       } else if (_payment == _PosPayment.credit) {
         // مبيعات آجلة: قيد مدين على العميل (عليه)
         final tx = Tx(
@@ -2098,14 +2137,13 @@ class _PosScreenState extends ConsumerState<PosScreen>
           createdAt: now,
           updatedAt: now,
         );
-        txId = await repo.saveTx(tx, items: lines);
+        txId = await repo.saveTx(tx, items: lines, deductStock: true);
       } else {
-        // مبيعات جزئية: قيد بالباقي + قبض بالمقدم
+        // مبيعات جزئية: قيد بالباقي + قبض بالمقدم + خصم المخزون في معاملة ذرية واحدة
         final paid =
             Fmt.parseAmount(ThousandsFormatter.strip(_paidCtrl.text)) ?? 0.0;
         final remainder = (_netTotal - paid).clamp(0.0, double.infinity);
 
-        // تسجيل المبلغ الكامل كمدين
         final debitTx = Tx(
           accountId: _selectedCustomerId!,
           accountKind: selectedAccKind,
@@ -2123,47 +2161,29 @@ class _PosScreenState extends ConsumerState<PosScreen>
           createdAt: now,
           updatedAt: now,
         );
-        txId = await repo.saveTx(debitTx, items: lines);
 
-        // تسجيل الدفعة المسددة كقبض إن وجدت
-        if (paid > 0) {
-          final payTx = Tx(
-            accountId: _selectedCustomerId!,
-            accountKind: selectedAccKind,
-            amount: paid,
-            currency: cur.code,
-            type: OpType.inflow,
-            date: now,
-            description:
-                'دفعة مقدمة من فاتورة #$refNum (المتبقي: ${Fmt.money(remainder)} ${cur.symbol})',
-            reference: '',
-            createdByUserId: creatorId,
-            cashierName: cashierName,
-            createdAt: now,
-            updatedAt: now,
-          );
-          await repo.saveTx(payTx);
-        }
-      }
+        final payTx = Tx(
+          accountId: _selectedCustomerId!,
+          accountKind: selectedAccKind,
+          amount: paid,
+          currency: cur.code,
+          type: OpType.inflow,
+          date: now,
+          description:
+              'دفعة مقدمة من فاتورة #$refNum (المتبقي: ${Fmt.money(remainder)} ${cur.symbol})',
+          reference: '',
+          createdByUserId: creatorId,
+          cashierName: cashierName,
+          createdAt: now,
+          updatedAt: now,
+        );
 
-      // 3. خصم الكميات تلقائياً من المخزون
-      for (final line in lines) {
-        if (line.itemId != null) {
-          try {
-            await repo.addStockMove(
-              StockMove(
-                itemId: line.itemId!,
-                quantity: line.quantity,
-                kind: StockKind.sale,
-                date: now,
-                createdAt: now,
-                notes: 'مبيع نقطة بيع #$refNum',
-              ),
-            );
-          } catch (e) {
-            debugPrint('Failed to reduce stock for ${line.name}: $e');
-          }
-        }
+        txId = await repo.saveTx(
+          debitTx,
+          items: lines,
+          deductStock: true,
+          companionTx: payTx,
+        );
       }
 
       // تحديث البيانات
@@ -2216,9 +2236,10 @@ class _PosScreenState extends ConsumerState<PosScreen>
     } catch (e) {
       if (mounted) {
         Sfx.error();
+        final msg = e is StateError ? e.message : 'تعذّر إتمام الفاتورة: $e';
         showSnack(
           context,
-          'تعذّر إتمام الفاتورة: $e',
+          msg,
           error: true,
           silent: true,
         );
@@ -2310,10 +2331,11 @@ class _PosScreenState extends ConsumerState<PosScreen>
               label: const Text('طباعة إيصال حراري (80mm)'),
               onPressed: () async {
                 final repo = ref.read(repoProvider);
-                final txs = await repo.transactions();
-                final tx = txs.firstWhere((t) => t.id == txId);
-                final accs = await repo.accounts(includeArchived: true);
-                final acc = accs.where((a) => a.id == tx.accountId).firstOrNull;
+                final tx = await repo.transactionById(txId);
+                if (tx == null) return;
+                final acc = tx.accountId == null
+                    ? null
+                    : await repo.account(tx.accountId!);
                 final stamp = await featureNeedsStamp(
                     ref, Feature.reportsExport);
                 if (context.mounted) {
@@ -2326,12 +2348,12 @@ class _PosScreenState extends ConsumerState<PosScreen>
               label: const Text('إرسال واتساب'),
               onPressed: () async {
                 final repo = ref.read(repoProvider);
-                final txs = await repo.transactions();
+                final tx = await repo.transactionById(txId);
+                if (!mounted || tx == null) return;
+                final acc = tx.accountId == null
+                    ? null
+                    : await repo.account(tx.accountId!);
                 if (!mounted) return;
-                final tx = txs.firstWhere((t) => t.id == txId);
-                final accs = await repo.accounts(includeArchived: true);
-                if (!mounted) return;
-                final acc = accs.where((a) => a.id == tx.accountId).firstOrNull;
                 if (acc == null || acc.phone.isEmpty) {
                   showSnack(
                     context,

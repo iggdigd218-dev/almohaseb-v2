@@ -55,7 +55,13 @@ class UiRepo extends Repo {
   @override
   Future<List<Tx>> findDuplicates(Tx tx) async => duplicates;
   @override
-  Future<int> saveTx(Tx tx, {List<InvoiceLine>? items}) async {
+  Future<int> saveTx(
+    Tx tx, {
+    List<InvoiceLine>? items,
+    bool deductStock = true,
+    List<StockMove>? stockMoves,
+    Tx? companionTx,
+  }) async {
     saveCalls++;
     if (saveError != null) throw saveError!;
     final id = await (saveGate?.future ?? Future.value(tx.id ?? saveCalls));

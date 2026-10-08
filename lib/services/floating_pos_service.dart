@@ -285,19 +285,7 @@ class RepoQuickPosSource implements QuickPosDataSource {
       createdAt: now,
       updatedAt: now,
     );
-    await repo.saveTx(tx, items: lines);
-    // خصم الكمية من المخزون (حركة بيع) مع إدراجها في طابور المزامنة.
-    await repo.addStockMove(
-      StockMove(
-        itemId: itemId,
-        quantity: qty,
-        kind: StockKind.sale,
-        unitPrice: it.sellPrice,
-        date: now,
-        createdAt: now,
-        notes: 'بيع سريع (زر عائم) #$ref',
-      ),
-    );
+    await repo.saveTx(tx, items: lines, deductStock: true);
     final fresh = await repo.item(itemId);
     // (2026-09-24) أبلغ الواجهة (نقطة البيع/المخزون) أن الأرصدة تغيّرت
     // خارجها فتُحدَّث فوراً بلا انتظار إعادة فتح.

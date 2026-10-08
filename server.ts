@@ -1026,32 +1026,68 @@ async function startServer() {
       }
 
       const now = new Date().toISOString();
-      const result = db.prepare(`INSERT INTO transactions (account_id, type, amount, currency, from_id, to_id, description, reference, notes, date, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(account_id || null, type, amount, currency || 'YER', from_id || null, to_id || null, description || '', reference || '', notes || '', date || now, now, now);
-      
-      if (items && Array.isArray(items) && items.length > 0) {
-        const stmt = db.prepare(`INSERT INTO transaction_items (tx_id, name, quantity, unit_price, total) VALUES (?, ?, ?, ?, ?)`);
-        for (const it of items) {
-          stmt.run(result.lastInsertRowid, it.name, it.quantity || 1, it.unit_price || 0, it.total || 0);
-        }
-        if (type === 'debit' || type === 'revenue' || type === 'inflow') {
-          const upd = db.prepare(`UPDATE items SET quantity = MAX(0, quantity - ?) WHERE name=?`);
+      const createTxAtomic = db.transaction(() => {
+        const isSaleType = type === 'debit' || type === 'revenue' || type === 'inflow';
+        if (items && Array.isArray(items) && items.length > 0 && isSaleType) {
+          const allowNegRow = db.prepare(`SELECT value FROM settings WHERE key='allowNegativeStock'`).get() as any;
+          const allowNeg = allowNegRow?.value === '1' || allowNegRow?.value === 'true';
           for (const it of items) {
-            upd.run(it.quantity || 1, it.name);
+            const qty = Number(it.quantity) || 1;
+            const itemRow = db.prepare(`SELECT id, name, quantity FROM items WHERE name=? AND (deleted_at='' OR deleted_at IS NULL)`).get(it.name) as any;
+            if (itemRow && !allowNeg && Number(itemRow.quantity) < qty) {
+              throw new Error(`الكمية المطلوبة من «${itemRow.name}» غير متوفرة. المتاح: ${itemRow.quantity}`);
+            }
           }
         }
-      }
-      db.prepare(`INSERT INTO activity (text, ref_type, ref_id, created_at) VALUES (?, ?, ?, ?)`).run(`عملية ${type}: ${amount}`, 'transaction', String(result.lastInsertRowid), now);
-      queueLocalMutation('transactions', result.lastInsertRowid, 'INSERT', req.body, req);
-      res.json({ id: result.lastInsertRowid });
+
+        const result = db.prepare(`INSERT INTO transactions (account_id, type, amount, currency, from_id, to_id, description, reference, notes, date, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(account_id || null, type, amount, currency || 'YER', from_id || null, to_id || null, description || '', reference || '', notes || '', date || now, now, now);
+
+        if (items && Array.isArray(items) && items.length > 0) {
+          const stmt = db.prepare(`INSERT INTO transaction_items (tx_id, name, quantity, unit_price, total) VALUES (?, ?, ?, ?, ?)`);
+          for (const it of items) {
+            stmt.run(result.lastInsertRowid, it.name, it.quantity || 1, it.unit_price || 0, it.total || 0);
+          }
+          if (isSaleType) {
+            const upd = db.prepare(`UPDATE items SET quantity = quantity - ? WHERE name=? AND (deleted_at='' OR deleted_at IS NULL)`);
+            for (const it of items) {
+              upd.run(it.quantity || 1, it.name);
+            }
+          }
+        }
+        db.prepare(`INSERT INTO activity (text, ref_type, ref_id, created_at) VALUES (?, ?, ?, ?)`).run(`عملية ${type}: ${amount}`, 'transaction', String(result.lastInsertRowid), now);
+        return result.lastInsertRowid;
+      });
+
+      const insertedId = createTxAtomic();
+      queueLocalMutation('transactions', insertedId, 'INSERT', req.body, req);
+      res.json({ id: insertedId });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(400).json({ error: e.message });
     }
   });
 
   app.delete('/api/transactions/:id', (req, res) => {
     try {
-      db.prepare(`UPDATE transactions SET deleted_at=? WHERE id=?`).run(new Date().toISOString(), req.params.id);
-      queueLocalMutation('transactions', req.params.id, 'DELETE', { id: req.params.id }, req);
+      const now = new Date().toISOString();
+      const txId = req.params.id;
+      const deleteTxAtomic = db.transaction(() => {
+        const txRow = db.prepare(`SELECT * FROM transactions WHERE id=?`).get(txId) as any;
+        if (txRow && (!txRow.deleted_at || txRow.deleted_at === '')) {
+          const isSaleType = txRow.type === 'debit' || txRow.type === 'revenue' || txRow.type === 'inflow';
+          const txItems = db.prepare(`SELECT * FROM transaction_items WHERE tx_id=?`).all(txId) as any[];
+          if (isSaleType && txItems.length > 0) {
+            const restoreStock = db.prepare(`UPDATE items SET quantity = quantity + ? WHERE name=? AND (deleted_at='' OR deleted_at IS NULL)`);
+            for (const line of txItems) {
+              if (Number(line.quantity) > 0) {
+                restoreStock.run(Number(line.quantity), line.name);
+              }
+            }
+          }
+        }
+        db.prepare(`UPDATE transactions SET deleted_at=? WHERE id=?`).run(now, txId);
+      });
+      deleteTxAtomic();
+      queueLocalMutation('transactions', txId, 'DELETE', { id: txId }, req);
       res.json({ ok: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -1647,7 +1683,14 @@ async function startServer() {
 
   app.delete('/api/vouchers/:id', (req, res) => {
     try {
-      db.prepare(`UPDATE vouchers SET deleted_at=? WHERE id=?`).run(new Date().toISOString(), req.params.id);
+      const now = new Date().toISOString();
+      const vRow = db.prepare(`SELECT * FROM vouchers WHERE id=?`).get(req.params.id) as any;
+      db.transaction(() => {
+        db.prepare(`UPDATE vouchers SET deleted_at=?, status='cancelled' WHERE id=?`).run(now, req.params.id);
+        if (vRow && vRow.number) {
+          db.prepare(`UPDATE transactions SET deleted_at=? WHERE reference=? AND (deleted_at='' OR deleted_at IS NULL)`).run(now, vRow.number);
+        }
+      })();
       queueLocalMutation('vouchers', req.params.id, 'DELETE', { id: req.params.id }, req);
       res.json({ ok: true });
     } catch (e: any) {

@@ -1155,8 +1155,29 @@ class Repo {
   Future<Tx?> transactionById(int id) async {
     final db = await _db;
     final rows = await db.query('transactions',
-        where: 'id = ?', whereArgs: [id], limit: 1);
+        where: "id = ? AND COALESCE(deleted_at,'') = ''",
+        whereArgs: [id],
+        limit: 1);
     return rows.isEmpty ? null : Tx.fromMap(rows.first);
+  }
+
+  /// يجلب أحدث معرّفات الحسابات ذات المبيعات الآجلة (debit) مباشرةً دون مسح الجدول كاملاً.
+  Future<List<int>> recentDebtorAccountIds({int limit = 3}) async {
+    final db = await _db;
+    final rows = await db.rawQuery('''
+      SELECT account_id
+      FROM transactions
+      WHERE type = 'debit'
+        AND account_id IS NOT NULL
+        AND COALESCE(deleted_at, '') = ''
+      GROUP BY account_id
+      ORDER BY MAX(date) DESC, MAX(id) DESC
+      LIMIT ?
+    ''', [limit]);
+    return rows
+        .map((r) => r['account_id'] as int?)
+        .whereType<int>()
+        .toList();
   }
 
   Future<void> updateTxImage(int id, String path) async {
@@ -1230,9 +1251,15 @@ class Repo {
     return rows.map(Tx.fromMap).toList();
   }
 
-  /// يحفظ العملية وسطور الفاتورة معًا. تمرير [items] (حتى لو كانت فارغة)
-  /// يستبدل السطور القديمة، أما null فيُبقيها كما هي عند تحديث الصورة.
-  Future<int> saveTx(Tx tx, {List<InvoiceLine>? items}) async {
+  /// يحفظ العملية وسطور الفاتورة وحركات خصم المخزون والدفعة المرافقة في معاملة ذرية موحدة.
+  /// تمرير [items] (حتى لو كانت فارغة) يستبدل السطور القديمة، أما null فيُبقيها كما هي عند تحديث الصورة.
+  Future<int> saveTx(
+    Tx tx, {
+    List<InvoiceLine>? items,
+    bool deductStock = true,
+    List<StockMove>? stockMoves,
+    Tx? companionTx,
+  }) async {
     // معرّف الحساب 0 يعني "بدون حساب" (بيع نقدي لعميل عابر). نخزّنه NULL
     // حتى لا يكسر قيد المفتاح الأجنبي (FOREIGN KEY 787).
     final t = (tx.accountId == 0 || tx.fromId == 0 || tx.toId == 0)
@@ -1304,6 +1331,11 @@ class Repo {
     final relAttachment = MediaPaths.toRelative(t.attachment);
     final relImage = MediaPaths.toRelative(t.image);
     late final int id;
+    final lowStockAlerts = <({int itemId, String name, double qty, double minQty})>[];
+    final isSaleType = t.type == OpType.revenue ||
+        t.type == OpType.debit ||
+        t.type == OpType.inflow;
+
     await db.transaction((txn) async {
       final rec = SyncRecorder(
         db: txn,
@@ -1311,14 +1343,16 @@ class Repo {
         workspaceId: requireWorkspaceId,
         userId: _currentUserId,
       );
-      final now = DateTime.now().toIso8601String();
+      final nowDt = DateTime.now();
+      final now = nowDt.toIso8601String();
+      var savedRef = t.reference.trim();
+
       if (t.id == null) {
-        var ref = t.reference.trim();
-        if (ref.isEmpty) {
-          ref = await _nextSequence(txn, 'counter_tx', table: 'transactions');
+        if (savedRef.isEmpty) {
+          savedRef = await _nextSequence(txn, 'counter_tx', table: 'transactions');
         }
         final toSave = t.copyWith(
-          reference: ref,
+          reference: savedRef,
           syncState: newSync,
           attachmentHash: attHash,
           attachment: relAttachment,
@@ -1351,6 +1385,28 @@ class Repo {
         );
       } else {
         id = t.id!;
+        if (items != null && deductStock && isSaleType) {
+          // إعادة كميات السطور القديمة قبل استبدالها وخصم الجديدة ذرياً
+          final oldRows = await _lineMaps(txn, id);
+          for (final oldMap in oldRows) {
+            final oldLine = InvoiceLine.fromMap(oldMap);
+            if (oldLine.itemId != null && oldLine.quantity > 0) {
+              await _applyStockMoveInTxn(
+                txn,
+                rec,
+                StockMove(
+                  itemId: oldLine.itemId!,
+                  quantity: oldLine.quantity,
+                  kind: StockKind.returnIn,
+                  unitPrice: oldLine.unitPrice,
+                  date: nowDt,
+                  createdAt: nowDt,
+                  notes: 'تعديل سطور فاتورة #$id',
+                ),
+              );
+            }
+          }
+        }
         final toSave = t.copyWith(
           syncState: newSync,
           attachmentHash: attHash,
@@ -1383,6 +1439,62 @@ class Repo {
           payload: saved..['items'] = await _lineMaps(txn, id),
         );
       }
+
+      // حفظ العملية المرافقة (مثل الدفعة المقدمة في البيع الجزئي) داخل نفس المعاملة الذرية
+      if (companionTx != null && companionTx.amount > 0) {
+        var compRef = companionTx.reference.trim();
+        if (compRef.isEmpty) {
+          compRef = await _nextSequence(txn, 'counter_tx', table: 'transactions');
+        }
+        final compToSave = companionTx.copyWith(
+          reference: compRef,
+          syncState: newSync,
+        );
+        final compMap = compToSave.toMap();
+        compMap['workspace_id'] = requireWorkspaceId;
+        compMap['id'] = newGlobalId();
+        compMap['updated_at'] = now;
+        final compId = await txn.insert('transactions', compMap);
+        final compSaved = Map<String, Object?>.from(compMap)..['id'] = compId;
+        await rec.record(
+          entityType: EntityKind.tx,
+          entityId: '$compId',
+          opType: OpKind.create,
+          payload: compSaved..['items'] = const <Map<String, Object?>>[],
+        );
+        await logActivityTx(
+          txn,
+          '${compToSave.type.label}: ${compToSave.amount}',
+          'tx',
+          '$compId',
+        );
+      }
+
+      // خصم المخزون ذرياً داخل نفس المعاملة (أي فشل يتراجع عن الفاتورة والدفعة بالكامل)
+      final effectiveMoves = stockMoves ??
+          ((deductStock && items != null && items.isNotEmpty && isSaleType)
+              ? [
+                  for (final line in items)
+                    if (line.itemId != null && line.quantity > 0)
+                      StockMove(
+                        itemId: line.itemId!,
+                        quantity: line.quantity,
+                        kind: StockKind.sale,
+                        unitPrice: line.unitPrice,
+                        date: t.date,
+                        createdAt: nowDt,
+                        notes: 'مبيع فاتورة #${savedRef.isEmpty ? id : savedRef}',
+                      ),
+                ]
+              : const <StockMove>[]);
+
+      for (final m in effectiveMoves) {
+        final res = await _applyStockMoveInTxn(txn, rec, m);
+        if (res.lowStock != null) {
+          lowStockAlerts.add(res.lowStock!);
+        }
+      }
+
       await logActivityTx(
         txn,
         t.id == null ? '${t.type.label}: ${t.amount}' : 'تعديل عملية',
@@ -1390,6 +1502,17 @@ class Repo {
         '$id',
       );
     });
+
+    for (final alert in lowStockAlerts) {
+      await notify(
+        title: 'مخزون منخفض: ${alert.name}',
+        body: 'الكمية المتبقية ${alert.qty.toStringAsFixed(0)} '
+            'وصلت حد التنبيه ${alert.minQty.toStringAsFixed(0)}',
+        kind: 'warning',
+        entityType: 'item',
+        entityId: '${alert.itemId}',
+      );
+    }
     return id;
   }
 
@@ -1446,7 +1569,8 @@ class Repo {
     await _ensureCan('delete_tx');
     await _ensureNotAuditLocked(id);
     final db = await _db;
-    final now = DateTime.now().toIso8601String();
+    final nowDt = DateTime.now();
+    final now = nowDt.toIso8601String();
     final rows = await db.query(
       'transactions',
       where: 'id = ?',
@@ -1454,6 +1578,50 @@ class Repo {
     );
     if (rows.isEmpty) return;
     await db.transaction((txn) async {
+      final rec = SyncRecorder(
+        db: txn,
+        deviceId: requireDeviceId,
+        workspaceId: requireWorkspaceId,
+        userId: _currentUserId,
+      );
+      // 1. قراءة بنود وأسطر الفاتورة الفعلية قبل الحذف لحفظها في سلة المهملات وعكس حركات مخزونها
+      final itemRows = await _lineMaps(txn, id);
+      final txType = OpType.fromCode('${rows.first['type'] ?? 'debit'}');
+      final isSaleType = txType == OpType.revenue ||
+          txType == OpType.debit ||
+          txType == OpType.inflow;
+
+      // 2. عكس حركة المخزون تلقائياً لإعادة الكميات المباعة إلى رصيد الأصناف بالمخزن
+      if (isSaleType && itemRows.isNotEmpty) {
+        final refLabel = '${rows.first['reference'] ?? ''}'.trim();
+        for (final row in itemRows) {
+          final line = InvoiceLine.fromMap(row);
+          if (line.itemId != null && line.quantity > 0) {
+            await _applyStockMoveInTxn(
+              txn,
+              rec,
+              StockMove(
+                itemId: line.itemId!,
+                quantity: line.quantity,
+                kind: StockKind.returnIn,
+                unitPrice: line.unitPrice,
+                date: nowDt,
+                createdAt: nowDt,
+                notes:
+                    'عكس حركة مخزون لحذف فاتورة #${refLabel.isEmpty ? id : refLabel}',
+              ),
+            );
+          }
+        }
+      }
+
+      // 3. حذف أسطر الفاتورة من الجدول النشط بعد حفظها في حمولة سلة المهملات
+      await txn.delete(
+        'transaction_items',
+        where: 'tx_id = ?',
+        whereArgs: [id],
+      );
+
       await txn.update(
         'transactions',
         {'deleted_at': now, 'deleted_by': _currentUserId, 'updated_at': now},
@@ -1467,12 +1635,7 @@ class Repo {
         limit: 1,
       ))
           .first;
-      await SyncRecorder(
-        db: txn,
-        deviceId: requireDeviceId,
-        workspaceId: requireWorkspaceId,
-        userId: _currentUserId,
-      ).record(
+      await rec.record(
         entityType: EntityKind.tx,
         entityId: '$id',
         opType: OpKind.delete_,
@@ -1482,7 +1645,7 @@ class Repo {
         'store': 'transactions',
         'payload': jsonEncode({
           'transaction': Map.from(rows.first),
-          'items': [],
+          'items': itemRows,
         }),
         'label':
             'عملية بمبلغ ${rows.first['amount']} ${rows.first['currency']}',
@@ -2056,63 +2219,279 @@ class Repo {
 
   Future<int> saveVoucher(Voucher v) async {
     final db = await _db;
-    // فحص الصلاحيات: إنشاء = add_tx، تعديل = edit_tx، وتغيير حالة
-    // الاعتماد/الإلغاء يتطلب صلاحية approve_vouchers صراحةً.
+    List<Map<String, Object?>> prev = const [];
     if (v.id == null) {
-      await _ensureCan('add_tx');
+      if (v.status == 'approved' || v.status == 'cancelled') {
+        await _ensureCan('approve_vouchers');
+      } else {
+        await _ensureCan('add_tx');
+      }
     } else {
-      final prev = await db.query('vouchers',
-          columns: ['status'], where: 'id = ?', whereArgs: [v.id], limit: 1);
+      prev = await db.query('vouchers',
+          columns: ['status', 'tx_id'],
+          where: 'id = ?',
+          whereArgs: [v.id],
+          limit: 1);
       final prevStatus =
           prev.isEmpty ? '' : ((prev.first['status'] as String?) ?? '');
       final statusChanged = prevStatus != v.status &&
           (v.status == 'approved' || v.status == 'cancelled');
       await _ensureCan(statusChanged ? 'approve_vouchers' : 'edit_tx');
     }
-    late final int id;
-    if (v.id == null) {
-      id = await db.insert('vouchers', v.toMap()..['id'] = newGlobalId());
-      await queueOperation(
-        entityType: EntityKind.voucher,
-        entityId: '$id',
-        opType: OpKind.create,
-        payload: v.toMap()..['id'] = id,
+
+    String mode;
+    try {
+      mode = await workspaceMode().timeout(
+        const Duration(seconds: 2),
+        onTimeout: () => 'standalone',
       );
-      await logActivity('${v.kind.label} ${v.number}', 'voucher', '$id');
-    } else {
-      id = v.id!;
-      await db.update('vouchers', v.toMap(), where: 'id = ?', whereArgs: [id]);
-      await queueOperation(
-        entityType: EntityKind.voucher,
-        entityId: '$id',
-        opType: OpKind.update,
-        payload: v.toMap(),
-      );
-      await logActivity('تعديل ${v.kind.label} ${v.number}', 'voucher', '$id');
+    } catch (_) {
+      mode = 'standalone';
     }
+    final newSync = mode == 'standalone' ? 'synced' : 'pending';
+    final nowDt = DateTime.now();
+    final nowIso = nowDt.toIso8601String();
+
+    late final int id;
+    await db.transaction((txn) async {
+      final rec = SyncRecorder(
+        db: txn,
+        deviceId: requireDeviceId,
+        workspaceId: requireWorkspaceId,
+        userId: _currentUserId,
+      );
+      int? linkedTxId =
+          v.txId ?? (prev.isNotEmpty ? prev.first['tx_id'] as int? : null);
+
+      if (v.status == 'approved' && v.amount > 0) {
+        final txType = switch (v.kind) {
+          VoucherKind.receipt => OpType.inflow,
+          VoucherKind.payment => OpType.outflow,
+          VoucherKind.debit => OpType.debit,
+          VoucherKind.credit => OpType.credit,
+          VoucherKind.transfer => OpType.inflow,
+        };
+        if (v.accountId != null || _allowsAnonymousAccount(txType)) {
+          var accKind = v.kind == VoucherKind.payment
+              ? AccountKind.supplier
+              : AccountKind.customer;
+          if (v.accountId != null) {
+            final accRows = await txn.query(
+              'accounts',
+              columns: const <String>['kind'],
+              where: 'id = ?',
+              whereArgs: [v.accountId],
+              limit: 1,
+            );
+            if (accRows.isNotEmpty) {
+              accKind = AccountKind.fromCode(
+                  '${accRows.first['kind'] ?? 'customer'}');
+            }
+          } else {
+            accKind = AccountKind.general;
+          }
+          final desc = v.statement.trim().isNotEmpty
+              ? '${v.kind.label} #${v.number}: ${v.statement.trim()}'
+              : '${v.kind.label} رقم #${v.number}';
+          final txNotes = v.notes.trim().isNotEmpty
+              ? 'مرتبط بالسند #${v.number}\n${v.notes.trim()}'
+              : 'مرتبط بالسند #${v.number}';
+
+          var updatedExisting = false;
+          if (linkedTxId != null) {
+            final existingTx = await txn.query(
+              'transactions',
+              where: 'id = ?',
+              whereArgs: [linkedTxId],
+              limit: 1,
+            );
+            if (existingTx.isNotEmpty) {
+              final patch = <String, Object?>{
+                'account_id': v.accountId,
+                'account_kind': accKind.code,
+                'type': txType.code,
+                'amount': v.amount,
+                'currency': v.currency,
+                'description': desc,
+                'reference': v.number,
+                'notes': txNotes,
+                'status': 'done',
+                'sync_state': newSync,
+                'deleted_at': '',
+                'date': v.date.toIso8601String(),
+                'updated_at': nowIso,
+              };
+              await txn.update(
+                'transactions',
+                patch,
+                where: 'id = ?',
+                whereArgs: [linkedTxId],
+              );
+              await rec.record(
+                entityType: EntityKind.tx,
+                entityId: '$linkedTxId',
+                opType: OpKind.update,
+                payload: {...existingTx.first, ...patch, 'id': linkedTxId},
+              );
+              updatedExisting = true;
+            }
+          }
+          if (!updatedExisting) {
+            linkedTxId = newGlobalId();
+            final newTx = Tx(
+              id: linkedTxId,
+              accountId: v.accountId,
+              accountKind: accKind,
+              type: txType,
+              amount: v.amount,
+              currency: v.currency,
+              description: desc,
+              reference: v.number,
+              notes: txNotes,
+              status: 'done',
+              syncState: newSync,
+              createdByUserId: v.createdByUserId ?? _currentUserId,
+              cashierName: v.cashierName,
+              date: v.date,
+              createdAt: v.createdAt,
+              updatedAt: nowDt,
+            );
+            final txMap = newTx.toMap()
+              ..['id'] = linkedTxId
+              ..['workspace_id'] = requireWorkspaceId
+              ..['updated_at'] = nowIso;
+            await txn.insert('transactions', txMap);
+            await rec.record(
+              entityType: EntityKind.tx,
+              entityId: '$linkedTxId',
+              opType: OpKind.create,
+              payload: Map<String, Object?>.from(txMap)
+                ..['items'] = const <Map<String, Object?>>[],
+            );
+          }
+        }
+      } else if ((v.status == 'cancelled' || v.status == 'draft') &&
+          linkedTxId != null) {
+        final existingTx = await txn.query(
+          'transactions',
+          where: 'id = ?',
+          whereArgs: [linkedTxId],
+          limit: 1,
+        );
+        if (existingTx.isNotEmpty) {
+          final patch = <String, Object?>{
+            'deleted_at': nowIso,
+            'deleted_by': _currentUserId,
+            'status': 'cancelled',
+            'updated_at': nowIso,
+          };
+          await txn.update(
+            'transactions',
+            patch,
+            where: 'id = ?',
+            whereArgs: [linkedTxId],
+          );
+          await rec.record(
+            entityType: EntityKind.tx,
+            entityId: '$linkedTxId',
+            opType: OpKind.delete_,
+            payload: {...existingTx.first, ...patch},
+          );
+        }
+      }
+
+      final voucherToSave = v.copyWith(txId: linkedTxId, updatedAt: nowDt);
+      if (v.id == null) {
+        id = newGlobalId();
+        final vMap = voucherToSave.toMap()
+          ..['id'] = id
+          ..['workspace_id'] = requireWorkspaceId;
+        await txn.insert('vouchers', vMap);
+        await rec.record(
+          entityType: EntityKind.voucher,
+          entityId: '$id',
+          opType: OpKind.create,
+          payload: vMap,
+        );
+        await logActivityTx(
+            txn, '${v.kind.label} ${v.number}', 'voucher', '$id');
+      } else {
+        id = v.id!;
+        final vMap = voucherToSave.toMap()
+          ..['id'] = id
+          ..['workspace_id'] = requireWorkspaceId;
+        await txn.update('vouchers', vMap, where: 'id = ?', whereArgs: [id]);
+        await rec.record(
+          entityType: EntityKind.voucher,
+          entityId: '$id',
+          opType: OpKind.update,
+          payload: vMap,
+        );
+        await logActivityTx(
+            txn, 'تعديل ${v.kind.label} ${v.number}', 'voucher', '$id');
+      }
+    });
     return id;
   }
 
   Future<void> deleteVoucher(int id) async {
     await _ensureCan('delete_tx');
     final db = await _db;
+    final nowIso = DateTime.now().toIso8601String();
     final r = await db.query('vouchers', where: 'id = ?', whereArgs: [id]);
-    if (r.isNotEmpty) {
-      await db.insert('trash', {
-        'store': 'vouchers',
-        'payload': jsonEncode(r.first),
-        'label': 'سند ${r.first['number']}',
-        'created_at': DateTime.now().toIso8601String(),
-      });
-    }
-    await db.delete('vouchers', where: 'id = ?', whereArgs: [id]);
-    await queueOperation(
-      entityType: EntityKind.voucher,
-      entityId: '$id',
-      opType: OpKind.delete_,
-      payload: {'id': id},
-    );
-    await logActivity('حذف سند', 'voucher', '$id');
+    await db.transaction((txn) async {
+      final rec = SyncRecorder(
+        db: txn,
+        deviceId: requireDeviceId,
+        workspaceId: requireWorkspaceId,
+        userId: _currentUserId,
+      );
+      if (r.isNotEmpty) {
+        final linkedTxId = r.first['tx_id'] as int?;
+        if (linkedTxId != null) {
+          final existingTx = await txn.query(
+            'transactions',
+            where: 'id = ?',
+            whereArgs: [linkedTxId],
+            limit: 1,
+          );
+          if (existingTx.isNotEmpty) {
+            final patch = <String, Object?>{
+              'deleted_at': nowIso,
+              'deleted_by': _currentUserId,
+              'status': 'cancelled',
+              'updated_at': nowIso,
+            };
+            await txn.update(
+              'transactions',
+              patch,
+              where: 'id = ?',
+              whereArgs: [linkedTxId],
+            );
+            await rec.record(
+              entityType: EntityKind.tx,
+              entityId: '$linkedTxId',
+              opType: OpKind.delete_,
+              payload: {...existingTx.first, ...patch},
+            );
+          }
+        }
+        await txn.insert('trash', {
+          'store': 'vouchers',
+          'payload': jsonEncode(r.first),
+          'label': 'سند ${r.first['number']}',
+          'created_at': nowIso,
+        });
+      }
+      await txn.delete('vouchers', where: 'id = ?', whereArgs: [id]);
+      await rec.record(
+        entityType: EntityKind.voucher,
+        entityId: '$id',
+        opType: OpKind.delete_,
+        payload: {'id': id},
+      );
+      await logActivityTx(txn, 'حذف سند', 'voucher', '$id');
+    });
   }
 
   // ==================== المستخدمون ====================
@@ -4253,13 +4632,72 @@ class Repo {
           tx,
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
-        final txId = tx['id'];
+        final txIdRaw = tx['id'];
+        final txId = txIdRaw is int ? txIdRaw : int.tryParse('$txIdRaw');
         if (txId != null) {
+          // استعادة أسطر وأصناف الفاتورة كاملة من حمولة المهملات
+          final rawItems = decoded['items'];
+          final restoredLines = <InvoiceLine>[];
+          if (rawItems is List && rawItems.isNotEmpty) {
+            await txn.delete(
+              'transaction_items',
+              where: 'tx_id = ?',
+              whereArgs: [txId],
+            );
+            for (final raw in rawItems) {
+              if (raw is Map) {
+                final lm = Map<String, Object?>.from(raw);
+                lm.removeWhere((k, _) => k.startsWith('__'));
+                lm['tx_id'] = txId;
+                lm['workspace_id'] = requireWorkspaceId;
+                lm['id'] ??= newGlobalId();
+                await txn.insert(
+                  'transaction_items',
+                  lm,
+                  conflictAlgorithm: ConflictAlgorithm.replace,
+                );
+                restoredLines.add(InvoiceLine.fromMap(lm));
+              }
+            }
+          } else {
+            final existingRows = await _lineMaps(txn, txId);
+            restoredLines.addAll(existingRows.map(InvoiceLine.fromMap));
+          }
+
+          // إعادة خصم كميات الأصناف المسترجعة من المخزون ذرياً
+          final txType = OpType.fromCode('${tx['type'] ?? 'debit'}');
+          final isSaleType = txType == OpType.revenue ||
+              txType == OpType.debit ||
+              txType == OpType.inflow;
+          if (isSaleType && restoredLines.isNotEmpty) {
+            final nowDt = DateTime.now();
+            final refLabel = '${tx['reference'] ?? ''}'.trim();
+            for (final line in restoredLines) {
+              if (line.itemId != null && line.quantity > 0) {
+                await _applyStockMoveInTxn(
+                  txn,
+                  rec,
+                  StockMove(
+                    itemId: line.itemId!,
+                    quantity: line.quantity,
+                    kind: StockKind.sale,
+                    unitPrice: line.unitPrice,
+                    date: nowDt,
+                    createdAt: nowDt,
+                    notes:
+                        'إعادة خصم مخزون لاسترجاع فاتورة #${refLabel.isEmpty ? txId : refLabel}',
+                  ),
+                );
+              }
+            }
+          }
+
           await rec.record(
             entityType: EntityKind.tx,
             entityId: '$txId',
             opType: OpKind.restore,
-            payload: tx,
+            payload: Map<String, Object?>.from(tx)
+              ..['items'] = await _lineMaps(txn, txId),
             parentOpId: '',
           );
         }
@@ -4321,6 +4759,21 @@ class Repo {
             payload,
             conflictAlgorithm: ConflictAlgorithm.replace,
           );
+          if (store == 'vouchers' &&
+              payload['status'] == 'approved' &&
+              payload['tx_id'] != null) {
+            final linkedTxId = payload['tx_id'];
+            await txn.update(
+              'transactions',
+              {
+                'deleted_at': '',
+                'status': 'done',
+                'updated_at': now,
+              },
+              where: 'id = ?',
+              whereArgs: [linkedTxId],
+            );
+          }
           await rec.record(
             entityType: _entityKindFor(store),
             entityId: '$id',
@@ -5743,89 +6196,101 @@ class Repo {
     return rows.map(StockMove.fromMap).toList();
   }
 
+  /// ينفّذ حركة مخزون واحدة داخل معاملة قاعدة بيانات نشطة [txn]،
+  /// ويرمي [StateError] عند تجاوز الرصيد المتاح لإجبار المعاملة على التراجع (Rollback).
+  Future<({int id, ({int itemId, String name, double qty, double minQty})? lowStock})>
+      _applyStockMoveInTxn(
+    Transaction txn,
+    SyncRecorder rec,
+    StockMove m,
+  ) async {
+    final id = await txn.insert('stock_moves', m.toMap()..['id'] = newGlobalId());
+    final r = await txn.query(
+      'items',
+      where: 'id = ?',
+      whereArgs: [m.itemId],
+      limit: 1,
+    );
+    ({int itemId, String name, double qty, double minQty})? lowStock;
+    if (r.isNotEmpty) {
+      final it = Item.fromMap(r.first);
+      final delta = m.kind == StockKind.adjust
+          ? m.quantity - it.quantity
+          : m.kind.qtySign * m.quantity;
+      final allowNegative = await _allowNegativeStock(txn);
+      final resultingQty = it.quantity + delta;
+      if (!allowNegative && Fmt.moneyGt(0, resultingQty)) {
+        throw StateError(
+          m.kind == StockKind.sale
+              ? 'الكمية المطلوبة من «${it.name}» غير متوفرة. '
+                  'المتاح: ${it.quantity.toStringAsFixed(0)} ${it.unit}.'
+              : 'لا يمكن أن يصير رصيد «${it.name}» سالباً '
+                  '(الناتج ${resultingQty.toStringAsFixed(0)} ${it.unit}). '
+                  'فعّل «السماح بالبيع عند نفاد الرصيد» من الإعدادات.',
+        );
+      }
+      final now = DateTime.now().toIso8601String();
+      await txn.update(
+        'items',
+        {'quantity': resultingQty, 'updated_at': now},
+        where: 'id = ?',
+        whereArgs: [m.itemId],
+      );
+      await rec.record(
+        entityType: EntityKind.stockMove,
+        entityId: '$id',
+        opType: OpKind.create,
+        payload: m.toMap()..['id'] = id,
+      );
+      await rec.record(
+        entityType: EntityKind.item,
+        entityId: '${m.itemId}',
+        opType: OpKind.update,
+        payload: {
+          'id': m.itemId,
+          'quantity': resultingQty,
+          'updated_at': now,
+        },
+      );
+      await logActivityTx(
+        txn,
+        '${m.kind.label}: ${it.name} × ${m.quantity}',
+        'stock',
+        '$id',
+      );
+      if (it.minQuantity > 0 && resultingQty <= it.minQuantity) {
+        lowStock = (
+          itemId: m.itemId,
+          name: it.name,
+          qty: resultingQty,
+          minQty: it.minQuantity,
+        );
+      }
+    }
+    return (id: id, lowStock: lowStock);
+  }
+
   /// يسجّل حركة مخزنية ويحدّث كمية الصنف تلقائيًا.
   Future<int> addStockMove(StockMove m) async {
     await _ensureCan('add_tx');
     final db = await _db;
     late final int id;
-    String? lowName;
-    var lowQty = 0.0;
-    var lowMin = 0.0;
+    ({int itemId, String name, double qty, double minQty})? lowStock;
     await db.transaction((txn) async {
-      id = await txn.insert('stock_moves', m.toMap()..['id'] = newGlobalId());
-      final r = await txn.query(
-        'items',
-        where: 'id = ?',
-        whereArgs: [m.itemId],
-        limit: 1,
-      );
-      if (r.isNotEmpty) {
-        final it = Item.fromMap(r.first);
-        final delta = m.kind == StockKind.adjust
-            ? m.quantity - it.quantity
-            : m.kind.qtySign * m.quantity;
-        // منع البيع/الخصم بما يتجاوز الرصيد المتاح (لا مخزون سالب).
-        // (سلامة الحساب) مقارنة بتسامح: كمية متاحة 0.29999999999999999
-        // كانت ترفض بيع 0.3 المتاح واقعيّاً.
-        // (2026-09-24) حكم صارم: الرصيد الناتج عن أي حركة (بيع/تسوية/
-        // مرتجع …) لا يصير سالباً إلا بتفعيل «السماح بالبيع عند نفاد الرصيد
-        // الدفتري» صراحةً في الإعدادات.
-        final allowNegative = await _allowNegativeStock(txn);
-        final resultingQty = it.quantity + delta;
-        if (!allowNegative && Fmt.moneyGt(0, resultingQty)) {
-          throw StateError(
-            m.kind == StockKind.sale
-                ? 'الكمية المطلوبة من «${it.name}» غير متوفرة. '
-                    'المتاح: ${it.quantity.toStringAsFixed(0)} ${it.unit}.'
-                : 'لا يمكن أن يصير رصيد «${it.name}» سالباً '
-                    '(الناتج ${resultingQty.toStringAsFixed(0)} ${it.unit}). '
-                    'فعّل «السماح بالبيع عند نفاد الرصيد» من الإعدادات.',
-          );
-        }
-        final now = DateTime.now().toIso8601String();
-        await txn.update(
-          'items',
-          {'quantity': it.quantity + delta, 'updated_at': now},
-          where: 'id = ?',
-          whereArgs: [m.itemId],
-        );
-        final rec = await newRecorder(txn);
-        await rec.record(
-          entityType: EntityKind.stockMove,
-          entityId: '$id',
-          opType: OpKind.create,
-          payload: m.toMap()..['id'] = id,
-        );
-        await rec.record(
-          entityType: EntityKind.item,
-          entityId: '${m.itemId}',
-          opType: OpKind.update,
-          payload: {
-            'id': m.itemId,
-            'quantity': it.quantity + delta,
-            'updated_at': now,
-          },
-        );
-        await logActivityTx(
-          txn,
-          '${m.kind.label}: ${it.name} × ${m.quantity}',
-          'stock',
-          '$id',
-        );
-        lowName = it.name;
-        lowQty = it.quantity + delta;
-        lowMin = it.minQuantity;
-      }
+      final rec = await newRecorder(txn);
+      final res = await _applyStockMoveInTxn(txn, rec, m);
+      id = res.id;
+      lowStock = res.lowStock;
     });
     // تنبيه داخلي عند انخفاض المخزون عن حد التنبيه (بعد التزام العملية).
-    if (lowName != null && lowMin > 0 && lowQty <= lowMin) {
+    if (lowStock != null) {
       await notify(
-        title: 'مخزون منخفض: $lowName',
-        body: 'الكمية المتبقية ${lowQty.toStringAsFixed(0)} '
-            'وصلت حد التنبيه ${lowMin.toStringAsFixed(0)}',
+        title: 'مخزون منخفض: ${lowStock!.name}',
+        body: 'الكمية المتبقية ${lowStock!.qty.toStringAsFixed(0)} '
+            'وصلت حد التنبيه ${lowStock!.minQty.toStringAsFixed(0)}',
         kind: 'warning',
         entityType: 'item',
-        entityId: '${m.itemId}',
+        entityId: '${lowStock!.itemId}',
       );
     }
     return id;

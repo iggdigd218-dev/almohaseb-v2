@@ -181,6 +181,7 @@ void main() {
           name: 'هاتف',
           unit: 'قطعة',
           sellPrice: 250,
+          quantity: 10,
           createdAt: _d(1),
           updatedAt: _d(1),
         ),
@@ -222,7 +223,7 @@ void main() {
     test('استرجاع عملية محذوفة يعيد معها تفاصيل الأصناف', () async {
       final accountId = await repo.saveAccount(_acc());
       final itemId = await repo.saveItem(
-        Item(name: 'دفتر', createdAt: _d(1), updatedAt: _d(1)),
+        Item(name: 'دفتر', quantity: 10, createdAt: _d(1), updatedAt: _d(1)),
       );
       final txId = await repo.saveTx(
         _tx(accountId: accountId, type: OpType.debit, amount: 20),
@@ -588,7 +589,7 @@ void main() {
     test('النسخة الاحتياطية تحفظ سطور الفاتورة وتعيدها', () async {
       final accountId = await repo.saveAccount(_acc());
       final itemId = await repo.saveItem(
-        Item(name: 'قلم', createdAt: _d(1), updatedAt: _d(1)),
+        Item(name: 'قلم', quantity: 10, createdAt: _d(1), updatedAt: _d(1)),
       );
       final txId = await repo.saveTx(
         _tx(accountId: accountId, type: OpType.debit, amount: 12),

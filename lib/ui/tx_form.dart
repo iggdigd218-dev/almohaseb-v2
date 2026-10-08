@@ -283,33 +283,17 @@ class _TxFormState extends ConsumerState<TxForm> {
       slowWarning = Timer(const Duration(seconds: 10), () {
         if (mounted) setState(() => _saveSlow = true);
       });
-      savedId = await repo.saveTx(tx, items: saleLines);
+      final shouldDeduct =
+          (_type == OpType.inflow || _type == OpType.debit) &&
+              saleLines.isNotEmpty;
+      savedId = await repo.saveTx(
+        tx,
+        items: saleLines,
+        deductStock: shouldDeduct,
+      );
       slowWarning.cancel();
       if (mounted) bump(ref);
-
-      // Existing stock workflow is separate from the financial transaction.
-      // Its atomicity is tracked explicitly as an outstanding QA issue.
-      var stockFailed = false;
-      if ((_type == OpType.inflow || _type == OpType.debit) &&
-          saleLines.isNotEmpty) {
-        for (final line in saleLines) {
-          if (line.itemId == null) continue;
-          try {
-            await repo
-                .addStockMove(StockMove(
-                  itemId: line.itemId!,
-                  quantity: line.quantity,
-                  kind: StockKind.sale,
-                  date: now,
-                  createdAt: now,
-                  notes: 'مبيع عملية #$savedId',
-                ))
-                .timeout(const Duration(seconds: 3));
-          } catch (_) {
-            stockFailed = true;
-          }
-        }
-      }
+      const stockFailed = false;
       var saved = tx.copyWith(id: savedId);
       try {
         saved = await repo
