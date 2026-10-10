@@ -894,7 +894,9 @@ class Repo {
             ? defaultWorkspaceId
             : generateWorkspaceId());
 
-    await _appDb.openForWorkspace(freshWs);
+    if (_databaseProvider == null) {
+      await AppDatabase.instance.openForWorkspace(freshWs);
+    }
     final db = await _db;
     final devName = await deviceName(this);
     final adminPerms = defaultPerms(UserRole.admin);
@@ -1008,7 +1010,6 @@ class Repo {
     if (savedLastUid.isNotEmpty) {
       await setSetting('account.lastOwnerUid', savedLastUid);
     }
-    await _seedDefaults();
     _currentUserId = null;
     final me = await currentUser();
     _currentUserId = me?.id;

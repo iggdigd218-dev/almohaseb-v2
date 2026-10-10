@@ -388,8 +388,8 @@ void main() {
           ConnectedDevice(
             deviceId: 'DEVICE-OWNER-01',
             deviceName: 'هاتف المالك',
-            lastSeenMs: 1700000100000,
-            isPrimary: true,
+            lastSeenAt: 1700000100000,
+            isOwner: true,
           ),
         ],
       );
@@ -413,7 +413,7 @@ void main() {
           ConnectedDevice(
             deviceId: 'DEVICE-CASHIER-02',
             deviceName: 'كاشير الفرع',
-            lastSeenMs: 1700000900000,
+            lastSeenAt: 1700000900000,
           ),
         ],
       );

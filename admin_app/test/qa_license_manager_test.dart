@@ -709,11 +709,13 @@ void main() {
     expect(res.workspaceId, 'ws_smart_01');
     expect(res.maxDevices, 5);
     expect(res.expiresAtMs, customExp);
-    expect(db.ws['ws_smart_01']!['sub']!['status'], 'active');
-    expect(db.ws['ws_smart_01']!['sub']!['max_devices'], 5);
-    expect(db.ws['ws_smart_01']!['sub']!['expires_at'], customExp);
-    expect(db.trials[fp]!['status'], 'active');
-    expect(db.trials[fp]!['max_devices'], 5);
-    expect(db.trials[fp]!['expires_at'], customExp);
+    final updatedSub = db.ws['ws_smart_01']!['sub'] as Map;
+    final updatedTrial = db.trials[fp] as Map;
+    expect(updatedSub['status'], 'active');
+    expect(updatedSub['max_devices'], 5);
+    expect(updatedSub['expires_at'], customExp);
+    expect(updatedTrial['status'], 'active');
+    expect(updatedTrial['max_devices'], 5);
+    expect(updatedTrial['expires_at'], customExp);
   });
 }

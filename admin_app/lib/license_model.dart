@@ -529,6 +529,7 @@ class ConnectedDevice {
           map['createdAt']),
       lastSeenAt: asMs(map['last_seen_at'] ??
           map['lastSeenAt'] ??
+          map['last_seen'] ??
           map['last_sync_at'] ??
           map['updated_at'] ??
           map['updatedAt']),

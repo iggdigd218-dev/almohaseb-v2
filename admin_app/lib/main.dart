@@ -485,11 +485,14 @@ class _ActivationScreenState extends State<ActivationScreen> {
     }
     if (q.length < 4) return;
     _debounce = Timer(const Duration(milliseconds: 420), () {
-      _lookupWorkspace(q, silentError: true);
+      _lookupWorkspace(q, true);
     });
   }
 
-  Future<void> _lookupWorkspace([String? rawQuery, bool silentError = false]) async {
+  Future<void> _lookupWorkspace([
+    String? rawQuery,
+    bool silentError = false,
+  ]) async {
     final q = (rawQuery ?? _searchCtrl.text).trim();
     if (q.isEmpty) return;
 
@@ -584,7 +587,7 @@ class _ActivationScreenState extends State<ActivationScreen> {
       }
     });
 
-    await _lookupWorkspace(queryToUse, silentError: true);
+    await _lookupWorkspace(queryToUse, true);
     if (!mounted) return;
     if (_preview != null &&
         ((parsedStore ?? '').isNotEmpty ||
@@ -686,7 +689,7 @@ class _ActivationScreenState extends State<ActivationScreen> {
         _maxDevices = seats;
       });
       adminRefreshTick.value++;
-      await _lookupWorkspace(res.workspaceId, silentError: true);
+      await _lookupWorkspace(res.workspaceId, true);
     } catch (e) {
       if (mounted) {
         setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
