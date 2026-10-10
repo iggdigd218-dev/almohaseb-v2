@@ -2,6 +2,7 @@
 // (2026-09-22) قانون الهوية: كل طلب لقاعدة البيانات يُوقَّع بهوية صالحة،
 // وسجل التفعيل يكتب داخل مساحة العمل لا في العقدة العامة المحجوبة.
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -145,6 +146,24 @@ void main() {
     expect(classify('active', now - 1, now), 'expired',
         reason: 'اشتراك مدفوع منتهي الصلاحية = فئة منتهية');
     expect(classify('', 0, now), 'expired');
+  });
+
+  test('ADMIN-08 (R1) إزالة الرمز الثابت واستخدام متغير البيئة مع رسالة خطأ محلية واضحة', () async {
+    final rtdbSrc = File('lib/rtdb.dart').existsSync()
+        ? File('lib/rtdb.dart').readAsStringSync()
+        : File('admin_app/lib/rtdb.dart').readAsStringSync();
+    expect(rtdbSrc.contains('kHardcodedAdminRefreshToken'), isFalse);
+    expect(rtdbSrc.contains('AMf-vBy0fav'), isFalse);
+    expect(rtdbSrc.contains("String.fromEnvironment(\n  'ADMIN_REFRESH_TOKEN'") ||
+        rtdbSrc.contains("String.fromEnvironment('ADMIN_REFRESH_TOKEN')"), isTrue);
+
+    SharedPreferences.setMockInitialValues({});
+    final rtdb = Rtdb.instance;
+    rtdb.authToken = '';
+    rtdb.adminRefreshToken = '';
+    await rtdb.load();
+    expect(rtdb.isAdminTokenMissing, isTrue);
+    expect(rtdb.lastAuthError, contains('ADMIN_REFRESH_TOKEN'));
   });
 }
 

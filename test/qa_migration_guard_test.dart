@@ -116,4 +116,25 @@ void main() {
       expect(heal.contains(idx), isTrue, reason: 'الفهرس $idx غير منشأ');
     }
   });
+
+  test(
+      'MIG-05 (R3) خطوة ترحيل الأرصدة القديمة migrateToV27 تحوّل عمليات revenue الآجلة والجزئية المرتبطة بعميل إلى debit',
+      () {
+    final v27Body = _functionBody(src, 'migrateToV27(Database db');
+    final helperBody =
+        _functionBody(src, 'migrateLegacyCreditRevenueToDebit(Database db');
+    expect(v27Body, isNotEmpty,
+        reason: 'يجب تعريف migrateToV27 في database.dart');
+    expect(v27Body.contains('migrateLegacyCreditRevenueToDebit'), isTrue);
+    expect(helperBody, isNotEmpty);
+    expect(helperBody.contains("SET type = 'debit'"), isTrue);
+    expect(helperBody.contains("WHERE type = 'revenue'"), isTrue);
+    expect(helperBody.contains('AND account_id IS NOT NULL'), isTrue);
+    expect(helperBody.contains("payment_method = 'credit'"), isTrue);
+    expect(helperBody.contains('طريقة الدفع: آجل'), isTrue);
+    expect(helperBody.contains('طريقة الدفع: جزئي'), isTrue);
+
+    // التحقق من وجود ملف التصدير المرجعي lib/data/database.dart
+    expect(File('lib/data/database.dart').existsSync(), isTrue);
+  });
 }

@@ -446,5 +446,68 @@ void main() {
       final recentIds = await repo.recentDebtorAccountIds(limit: 3);
       expect(recentIds, contains(custId));
     });
+
+    test('6. Data Migration (R3): historical credit/partial sales with type=revenue and account_id IS NOT NULL are upgraded to debit', () async {
+      final now = DateTime.now();
+      final custId = await repo.saveAccount(
+        Account(
+          name: 'عميل ترحيل تاريخي',
+          kind: AccountKind.customer,
+          openingBalance: 0,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+
+      // 1) إدراج فاتورة آجلة تاريخية كانت مسجلة خطأً بنوع revenue مع account_id
+      final creditTxId = await db.insert('transactions', {
+        'workspace_id': 'default',
+        'account_id': custId,
+        'account_kind': 'customer',
+        'type': 'revenue',
+        'amount': 1500.0,
+        'currency': 'YER',
+        'description': 'فاتورة مبيعات آجلة رقم #901',
+        'reference': '901',
+        'notes': 'طريقة الدفع: آجل (على الحساب)\nالمبلغ المدفوع: 0.00 ر.ي\nالمبلغ المتبقي: 1,500.00 ر.ي',
+        'status': 'done',
+        'sync_state': 'synced',
+        'date': now.toIso8601String(),
+        'created_at': now.toIso8601String(),
+        'updated_at': now.toIso8601String(),
+      });
+
+      // 2) إدراج فاتورة نقدية حقيقية مربوطة بالعميل (المتبقي 0.00) — يجب أن تبقى revenue
+      final cashTxId = await db.insert('transactions', {
+        'workspace_id': 'default',
+        'account_id': custId,
+        'account_kind': 'customer',
+        'type': 'revenue',
+        'amount': 800.0,
+        'currency': 'YER',
+        'description': 'فاتورة نقدية مدفوعة رقم #902',
+        'reference': '902',
+        'notes': 'طريقة الدفع: مدفوع نقداً\nالمبلغ المدفوع: 800.00 ر.ي\nالمتبقي: 0.00 ر.ي',
+        'status': 'done',
+        'sync_state': 'synced',
+        'date': now.toIso8601String(),
+        'created_at': now.toIso8601String(),
+        'updated_at': now.toIso8601String(),
+      });
+
+      // قبل الترحيل: الرصيد صفر لأن كلاهما revenue
+      expect(await repo.balanceOf((await repo.account(custId))!), equals(0.0));
+
+      // تشغيل خطوة الترحيل R3
+      await AppDatabase.migrateToV27(db);
+
+      final upgradedCredit = await repo.transactionById(creditTxId);
+      final untouchedCash = await repo.transactionById(cashTxId);
+      expect(upgradedCredit!.type, equals(OpType.debit));
+      expect(untouchedCash!.type, equals(OpType.revenue));
+
+      // بعد الترحيل: دين العميل من الفاتورة الآجلة التاريخية محفوظ (1500) والفاتورة النقدية لا تؤثر
+      expect(await repo.balanceOf((await repo.account(custId))!), equals(1500.0));
+    });
   });
 }

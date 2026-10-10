@@ -60,7 +60,11 @@ Future<void> startOneClickUpdate(
   await showDialog<void>(
     context: context,
     barrierDismissible: false,
-    builder: (_) => _OneClickUpdateDialog(installer: installer, url: url),
+    builder: (_) => _OneClickUpdateDialog(
+      installer: installer,
+      url: url,
+      sha256: info.sha256,
+    ),
   );
 }
 
@@ -68,7 +72,12 @@ Future<void> startOneClickUpdate(
 class _OneClickUpdateDialog extends StatefulWidget {
   final UpdateInstaller installer;
   final String url;
-  const _OneClickUpdateDialog({required this.installer, required this.url});
+  final String? sha256;
+  const _OneClickUpdateDialog({
+    required this.installer,
+    required this.url,
+    this.sha256,
+  });
 
   @override
   State<_OneClickUpdateDialog> createState() => _OneClickUpdateDialogState();
@@ -87,7 +96,9 @@ class _OneClickUpdateDialogState extends State<_OneClickUpdateDialog> {
   void _start() {
     _sub?.cancel();
     setState(() => _state = const InstallProgress(InstallPhase.downloading));
-    _sub = widget.installer.downloadAndInstall(widget.url).listen(
+    _sub = widget.installer
+        .downloadAndInstall(widget.url, expectedSha256: widget.sha256)
+        .listen(
       (p) {
         if (!mounted) return;
         setState(() => _state = p);

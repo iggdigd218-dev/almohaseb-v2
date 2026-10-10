@@ -51,6 +51,49 @@ String? pickAndroidApkUrl(Object? downloads, String? abiKey) {
   return (v is String && v.startsWith('https://')) ? v : null;
 }
 
+/// يتحقق من أن النص يمثل بصمة SHA-256 صالحة (64 محرفاً سداسياً عشرياً).
+bool isValidSha256(String? value) {
+  if (value == null) return false;
+  return RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(value.trim());
+}
+
+/// يستخرج بصمة SHA-256 المناسبة للمنصّة والمعالج من بيان التحديث.
+String? pickSha256(
+  Map<String, Object?> map,
+  UpdatePlatform platform,
+  String? abiKey,
+) {
+  final variants = map['sha256Variants'];
+  if (variants is Map) {
+    if (platform == UpdatePlatform.android && abiKey != null) {
+      final v = variants[abiKey]?.toString().trim();
+      if (isValidSha256(v)) return v!.toLowerCase();
+    }
+    if (platform == UpdatePlatform.windows) {
+      final v = variants['windows']?.toString().trim();
+      if (isValidSha256(v)) return v!.toLowerCase();
+    }
+    if (platform == UpdatePlatform.android) {
+      final v = (variants['android'] ?? variants['arm64'])?.toString().trim();
+      if (isValidSha256(v)) return v!.toLowerCase();
+    }
+  }
+  final raw = map['sha256'];
+  if (raw is String && isValidSha256(raw)) {
+    return raw.trim().toLowerCase();
+  }
+  if (raw is Map) {
+    if (platform == UpdatePlatform.android && abiKey != null) {
+      final v = raw[abiKey]?.toString().trim();
+      if (isValidSha256(v)) return v!.toLowerCase();
+    }
+    final key = platform == UpdatePlatform.windows ? 'windows' : 'android';
+    final v = (raw[key] ?? raw['arm64'] ?? raw['default'])?.toString().trim();
+    if (isValidSha256(v)) return v!.toLowerCase();
+  }
+  return null;
+}
+
 /// نتيجة فحص التحديث.
 enum UpdateStatus {
   /// التطبيق محدّث.
@@ -83,6 +126,9 @@ class UpdateInfo {
   /// رابط الملف المباشر للمنصّة الحالية إن وُجد.
   final String? downloadUrl;
 
+  /// بصمة التجزئة الرقمية الإلزامية (SHA-256) لملف التحديث.
+  final String? sha256;
+
   /// ملاحظات الإصدار بالعربية.
   final String notes;
 
@@ -99,6 +145,7 @@ class UpdateInfo {
     this.minSupported,
     this.releaseUrl,
     this.downloadUrl,
+    this.sha256,
     this.notes = '',
     this.publishedAt,
     this.error,
@@ -148,10 +195,10 @@ List<String> releaseNoteLines(String notes, {int maxLines = 3}) =>
         .toList();
 
 class UpdateService {
-  /// الرابط الافتراضي لبيان الإصدار (يُقرأ من قاعدة Firebase RTDB العامة الموثوقة
-  /// للمشروع المستقل ولا يتأثر بخصوصية مستودع الأكواد).
+  /// الرابط الافتراضي لبيان الإصدار (يُقرأ من العقدة السيادية المحصنة `/system/version_manifest`
+  /// في قاعدة Firebase RTDB والتي تقتصر كتابتها على حساب المشرف فقط).
   static const String kDefaultManifestUrl =
-      'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/version_manifest.json';
+      'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/version_manifest.json';
 
   /// رابط احتياطي على GitHub Releases للمستودع العام.
   static const String kFallbackManifestUrl =
@@ -300,6 +347,14 @@ class UpdateService {
         error: 'بيان التحديث لا يحتوي رقم إصدار صالح.',
       );
     }
+    final sha256 = pickSha256(map, platform, androidAbiKey());
+    if (sha256 == null || !isValidSha256(sha256)) {
+      return UpdateInfo(
+        status: UpdateStatus.unknown,
+        current: current,
+        error: 'بيان التحديث يفتقر إلى بصمة التحقق الرقمية الإلزامية (sha256).',
+      );
+    }
     final minSupported = AppSemVer.tryParse('${map['minSupported'] ?? ''}');
     final downloads = map['downloads'];
     String? downloadUrl;
@@ -349,6 +404,7 @@ class UpdateService {
       minSupported: minSupported,
       releaseUrl: releaseUrl,
       downloadUrl: downloadUrl,
+      sha256: sha256,
       // (2026-09-24) سجل التحديث مقتضب: أحدث إصدار فقط، ٣ أسطر كحد أقصى.
       notes: clampReleaseNotes('${map['notes'] ?? ''}'),
       publishedAt: DateTime.tryParse('${map['publishedAt'] ?? ''}'),

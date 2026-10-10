@@ -13,6 +13,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
@@ -48,6 +49,26 @@ class UpdateInstaller {
 
   UpdateInstaller({http.Client Function()? clientFactory})
       : _clientFactory = clientFactory ?? (() => http.Client());
+
+  /// يحسب بصمة التجزئة SHA-256 للملف المنزّل.
+  static Future<String> computeFileSha256(File file) async {
+    final digest = await crypto.sha256.bind(file.openRead()).first;
+    return digest.toString().toLowerCase();
+  }
+
+  /// يتحقق من تطابق بصمة التجزئة SHA-256 للملف المنزّل مع البصمة المرفقة في بيان التحديث.
+  static Future<bool> verifyFileSha256(
+    File file,
+    String? expectedSha256,
+  ) async {
+    final expected = expectedSha256?.trim().toLowerCase() ?? '';
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(expected)) {
+      return false;
+    }
+    if (!file.existsSync()) return false;
+    final actual = await computeFileSha256(file);
+    return actual == expected;
+  }
 
   /// هل منح المستخدم إذن «تثبيت التطبيقات غير المعروفة» لهذا التطبيق؟
   Future<bool> canInstall() async {
@@ -124,11 +145,24 @@ class UpdateInstaller {
     }
   }
 
-  /// ينزّل APK من [url] ويبث التقدم، ثم يفتح شاشة تثبيت النظام.
+  /// ينزّل APK/EXE من [url] ويبث التقدم، ثم يتحقق من بصمة SHA-256 ويفتح شاشة تثبيت النظام.
   /// لا يرمي استثناءً — يبث InstallPhase.failed مع سبب عربي مفهوم.
-  Stream<InstallProgress> downloadAndInstall(String url) async* {
+  Stream<InstallProgress> downloadAndInstall(
+    String url, {
+    String? expectedSha256,
+    String? sha256,
+  }) async* {
+    final targetSha256 = (expectedSha256 ?? sha256)?.trim();
+    if (targetSha256 == null ||
+        !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(targetSha256)) {
+      yield const InstallProgress(
+        InstallPhase.failed,
+        error: 'تعذّر بدء التحديث: بصمة التحقق الرقمية (sha256) مفقودة أو غير صالحة في البيان.',
+      );
+      return;
+    }
     if (PlatformInfo.isWindows) {
-      yield* _windowsDownloadAndInstall(url);
+      yield* _windowsDownloadAndInstall(url, expectedSha256: targetSha256);
       return;
     }
     if (!PlatformInfo.isAndroid) {
@@ -165,9 +199,9 @@ class UpdateInstaller {
       if (status == 'done' && '${st['path']}'.isNotEmpty) {
         final apk = File('${st['path']}');
         if (apk.existsSync() && apk.lengthSync() > 1024 * 1024) {
-          // اكتمل في الخلفية لنفس هذا الرابط — أشعر ثم ثبّت مباشرة
+          // اكتمل في الخلفية لنفس هذا الرابط — أشعر ثم ثبّت مباشرة بعد فحص البصمة
           _notifyDownloadComplete('${st['path']}');
-          yield* _install('${st['path']}');
+          yield* _install('${st['path']}', expectedSha256: targetSha256);
           return;
         }
       }
@@ -196,7 +230,7 @@ class UpdateInstaller {
 
     if (id == null) {
       // مسار احتياطي (أجهزة عطّل فيها مدير التنزيلات): تنزيل مباشر.
-      yield* _fallbackHttpDownload(url);
+      yield* _fallbackHttpDownload(url, expectedSha256: targetSha256);
       return;
     }
 
@@ -220,7 +254,7 @@ class UpdateInstaller {
           // (2026-09-22) إشعار نظام: اكتمل التنزيل — نقرة تفتح المجلد.
           await _saveDownload(null, null);
           _notifyDownloadComplete(path);
-          yield* _install(path);
+          yield* _install(path, expectedSha256: targetSha256);
           return;
         case 'failed':
           await _saveDownload(null, null);
@@ -278,13 +312,28 @@ class UpdateInstaller {
     return false;
   }
 
-  /// يتحقق من الملف ثم يطلق شاشة تثبيت النظام.
-  Stream<InstallProgress> _install(String path) async* {
+  /// يتحقق من الملف وبصمة SHA-256 ثم يطلق شاشة تثبيت النظام.
+  Stream<InstallProgress> _install(
+    String path, {
+    required String expectedSha256,
+  }) async* {
     final apk = File(path);
     if (!apk.existsSync() || apk.lengthSync() < 1024 * 1024) {
       await _saveDownload(null, null);
       yield const InstallProgress(InstallPhase.failed,
           error: 'الملف المنزَّل غير مكتمل. أعد المحاولة.');
+      return;
+    }
+    final validHash = await verifyFileSha256(apk, expectedSha256);
+    if (!validHash) {
+      try {
+        await apk.delete();
+      } catch (_) {}
+      await _saveDownload(null, null);
+      yield const InstallProgress(
+        InstallPhase.failed,
+        error: 'فشل التحقق من بصمة التجزئة (sha256) لملف التحديث. تم حظر التثبيت لحمايتك.',
+      );
       return;
     }
     yield const InstallProgress(InstallPhase.launchingInstaller, progress: 1);
@@ -312,8 +361,11 @@ class UpdateInstaller {
   // ------------------------- مسار ويندوز -------------------------
 
   /// ويندوز: ينزّل مُثبّت NexoraSetup.exe (أو الملف المتاح) داخل التطبيق
-  /// ثم يشغّله — معالج التثبيت يحدّث النسخة فوق الحالية مع بقاء البيانات.
-  Stream<InstallProgress> _windowsDownloadAndInstall(String url) async* {
+  /// ثم يتحقق من بصمة SHA-256 ويشغّله — معالج التثبيت يحدّث النسخة فوق الحالية مع بقاء البيانات.
+  Stream<InstallProgress> _windowsDownloadAndInstall(
+    String url, {
+    required String expectedSha256,
+  }) async* {
     yield const InstallProgress(InstallPhase.downloading, progress: 0);
     final segs = Uri.tryParse(url)?.pathSegments ?? const <String>[];
     final name = segs.isEmpty ? '' : segs.last;
@@ -323,6 +375,17 @@ class UpdateInstaller {
       if (file.lengthSync() < 512 * 1024) {
         yield const InstallProgress(InstallPhase.failed,
             error: 'الملف المنزَّل غير مكتمل. أعد المحاولة.');
+        return;
+      }
+      final validHash = await verifyFileSha256(file, expectedSha256);
+      if (!validHash) {
+        try {
+          await file.delete();
+        } catch (_) {}
+        yield const InstallProgress(
+          InstallPhase.failed,
+          error: 'فشل التحقق من بصمة التجزئة (sha256) لملف التحديث. تم حظر التثبيت لحمايتك.',
+        );
         return;
       }
       yield const InstallProgress(InstallPhase.launchingInstaller,
@@ -374,8 +437,15 @@ class UpdateInstaller {
 
   /// مسار احتياطي: تنزيل http داخل التطبيق (كما في السابق) إذا تعذّر
   /// استخدام مدير تنزيلات النظام.
-  Stream<InstallProgress> _fallbackHttpDownload(String url) async* {
-    yield* _httpDownload(url, 'nexora-update.apk', (f) => _install(f.path));
+  Stream<InstallProgress> _fallbackHttpDownload(
+    String url, {
+    required String expectedSha256,
+  }) async* {
+    yield* _httpDownload(
+      url,
+      'nexora-update.apk',
+      (f) => _install(f.path, expectedSha256: expectedSha256),
+    );
   }
 
   /// (2026-09-22) مجلد التنزيل: على أندرويد مجلد عام مخصص في الهاتف

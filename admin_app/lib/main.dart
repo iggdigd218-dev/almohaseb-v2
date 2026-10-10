@@ -217,15 +217,46 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      body: IndexedStack(
-        index: _tab,
-        children: const [
-          ActivationScreen(),
-          SubscribersScreen(),
-          VouchersScreen(),
-          SupportInboxScreen(),
-          OwnerCompanionScreen(),
-          SystemControlScreen(),
+      body: Column(
+        children: [
+          if (Rtdb.instance.isAdminTokenMissing)
+            MaterialBanner(
+              backgroundColor: const Color(0xFFFEF2F2),
+              leading: const Icon(Icons.error_outline, color: Color(0xFFDC2626)),
+              content: const Text(
+                kMissingAdminRefreshTokenError,
+                style: TextStyle(
+                  color: Color(0xFF991B1B),
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12.5,
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () async {
+                    await showDialog<void>(
+                      context: context,
+                      builder: (_) => const _ConfigDialog(),
+                    );
+                    if (mounted) setState(() {});
+                  },
+                  child: const Text('إدخال الرمز'),
+                ),
+              ],
+            ),
+          Expanded(
+            child: IndexedStack(
+              index: _tab,
+              children: const [
+                ActivationScreen(),
+                SubscribersScreen(),
+                VouchersScreen(),
+                SupportInboxScreen(),
+                OwnerCompanionScreen(),
+                SystemControlScreen(),
+              ],
+            ),
+          ),
         ],
       ),
       bottomNavigationBar: NavigationBar(

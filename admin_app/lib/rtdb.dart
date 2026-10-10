@@ -36,16 +36,18 @@ const String kFirebaseApiKey = String.fromEnvironment(
 
 const int kMaxWorkspaceScan = 40;
 const int kMaxSubscriberScan = 40;
-const String kHardcodedAdminRefreshToken =
-    'AMf-vBy0fav-UQVlyVGr4fVIz7H0VS-RlxLbzXMVDIwm7kGTfjxUeMAwe1tZkwKx_u8geyYdiETw6yW9i3hmja0oDP3wi_M47tVAS6qiASt88Uw73uQv7tANn3W60_WUodhrQTRxpdpCt4aBPN_vVyXra2jCbanZnWxlEcUTOvdSc9y3Ny2pQ6U';
 
 const String kOfficialAdminUid = 'mTMmR6MDBMZH8nKEbvCntRemkq73';
 
-/// رمز التحديث الدائم لهوية المشرف (Owner) عبر --dart-define وقت البناء مع تضمين الرمز الرسمي افتراضياً.
+/// رمز التحديث الدائم لهوية المشرف (Owner) يُقرأ حصرياً من متغير البناء الآمن وقت التشغيل/البناء.
 const String kAdminRefreshTokenDefault = String.fromEnvironment(
   'ADMIN_REFRESH_TOKEN',
-  defaultValue: kHardcodedAdminRefreshToken,
 );
+
+/// رسالة خطأ واضحة عند تشغيل تطبيق الإدارة محلياً دون تمرير متغير البناء ADMIN_REFRESH_TOKEN.
+const String kMissingAdminRefreshTokenError =
+    'خطأ في إعداد بيئة المشرف: لم يتم تمرير المتغير ADMIN_REFRESH_TOKEN عند تشغيل التطبيق محلياً. '
+    'يرجى التشغيل عبر --dart-define=ADMIN_REFRESH_TOKEN=<TOKEN> أو إدخال رمز المشرف في إعدادات الاتصال.';
 
 class Rtdb {
   Rtdb._();
@@ -96,7 +98,10 @@ class Rtdb {
 
   static bool _canFallbackToRegistry(String path) {
     final clean = path.replaceAll(RegExp(r'^/+'), '');
-    return clean != 'workspaces' && !clean.startsWith('workspaces/');
+    return clean != 'workspaces' &&
+        !clean.startsWith('workspaces/') &&
+        clean != 'system' &&
+        !clean.startsWith('system/');
   }
 
   static String _toRegistryPath(String path) {
@@ -104,9 +109,15 @@ class Rtdb {
     return 'workspaces/_registry/$clean';
   }
 
+  bool get isAdminTokenMissing =>
+      adminRefreshToken.trim().isEmpty &&
+      kAdminRefreshTokenDefault.trim().isEmpty &&
+      authToken.trim().isEmpty;
+
   Future<void> load() async {
     _useRegistryFallback = false;
     _anonAuthFailed = false;
+    _adminAuthFailed = false;
     final sp = await SharedPreferences.getInstance();
     baseUrl = (sp.getString(_kUrl) ?? '').trim();
     if (baseUrl.isEmpty) baseUrl = kOfficialRtdbUrl;
@@ -114,6 +125,11 @@ class Rtdb {
     adminRefreshToken = (sp.getString(_kAdminRt) ?? '').trim();
     if (adminRefreshToken.isEmpty || adminRefreshToken.startsWith('GUEST-')) {
       adminRefreshToken = kAdminRefreshTokenDefault.trim();
+    }
+    if (adminRefreshToken.isEmpty && authToken.isEmpty) {
+      lastAuthError = kMissingAdminRefreshTokenError;
+    } else {
+      lastAuthError = '';
     }
     adminUid = sp.getString(_kAdminUid) ?? '';
     _idToken = sp.getString(_kIdToken) ?? '';

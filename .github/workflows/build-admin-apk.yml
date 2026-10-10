@@ -86,7 +86,7 @@ jobs:
           flutter build apk --release --split-per-abi \
             --target-platform android-arm,android-arm64 \
             --obfuscate --split-debug-info=build/app/symbols \
-            --dart-define=ADMIN_REFRESH_TOKEN=AMf-vBy0fav-UQVlyVGr4fVIz7H0VS-RlxLbzXMVDIwm7kGTfjxUeMAwe1tZkwKx_u8geyYdiETw6yW9i3hmja0oDP3wi_M47tVAS6qiASt88Uw73uQv7tANn3W60_WUodhrQTRxpdpCt4aBPN_vVyXra2jCbanZnWxlEcUTOvdSc9y3Ny2pQ6U
+            --dart-define=ADMIN_REFRESH_TOKEN=${{ secrets.ADMIN_REFRESH_TOKEN }}
           cp build/app/outputs/apk/release/app-arm64-v8a-release.apk ../license-admin.apk
           cp build/app/outputs/apk/release/app-armeabi-v7a-release.apk ../license-admin-armv7.apk
           ls -lh ../license-admin.apk ../license-admin-armv7.apk
@@ -95,10 +95,17 @@ jobs:
         run: |
           VER=$(grep -E '^version:' pubspec.yaml | awk '{print $2}')
           NAME="${VER%%+*}"; BUILD="${VER##*+}"
+          SHA_ARM64=$(sha256sum ../license-admin.apk | awk '{print $1}')
+          SHA_ARMV7=$(sha256sum ../license-admin-armv7.apk | awk '{print $1}')
           NOTES=$(python3 -c "import json,os; p='release_notes.txt'; lines=[l.strip() for l in open(p,encoding='utf-8').read().splitlines() if l.strip()] if os.path.exists(p) else ['تحديث تطبيق تراخيص المحاسب']; lines=lines[:3]; t='\\n'.join(lines); print(json.dumps(t,ensure_ascii=False)[1:-1])")
           cat > ../admin_version.json <<EOF
           {
             "version": "$NAME+$BUILD",
+            "sha256": "$SHA_ARM64",
+            "sha256Variants": {
+              "arm64": "$SHA_ARM64",
+              "armv7": "$SHA_ARMV7"
+            },
             "releaseUrl": "https://github.com/${{ github.repository }}/releases/tag/admin-latest",
             "downloads": {
               "android": "https://github.com/${{ github.repository }}/releases/download/admin-latest/license-admin.apk",
@@ -112,7 +119,7 @@ jobs:
           }
           EOF
           cat ../admin_version.json
-          curl -s -X PUT -H "Content-Type: application/json; charset=utf-8" -d @../admin_version.json "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/admin_version_manifest.json" || true
+          curl -s -X PUT -H "Content-Type: application/json; charset=utf-8" -d @../admin_version.json "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/admin_version_manifest.json" || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

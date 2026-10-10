@@ -190,9 +190,39 @@ void main() {
               as Map)['.write'] as String;
       expect(subWrite, contains('auth.token.admin === true'));
       expect(subWrite, contains("newData.child('status').val() === 'trial'"));
+      expect(subWrite, contains("newData.child('expires_at').val() <= (now + 2592000000)"));
       expect(subWrite, contains("max_devices"));
       expect(subWrite, contains("is_frozen"));
       expect(subWrite, contains("expires_at"));
+
+      // التحقق من تقييد سجل التجربة في trials/$fp بـ 30 يوماً كحد أقصى
+      final trialWrite =
+          (((rulesRoot['trials'] as Map)[r'$fp'] as Map)['.write']) as String;
+      expect(
+        trialWrite,
+        contains("newData.child('expires_at').val() <= (now + 2592000000)"),
+      );
+
+      // التحقق من عزل المستأجرين في operations و roster على الأجهزة المسجلة في سجل المتجر
+      final wsNode = (rulesRoot['workspaces'] as Map)[r'$ws'] as Map;
+      final opsNode = wsNode['operations'] as Map;
+      final rosterNode = wsNode['roster'] as Map;
+      const expectedRosterCheck =
+          "root.child('workspaces/' + \$ws + '/roster/' + auth.uid).exists()";
+      expect(opsNode['.read'] as String, contains(expectedRosterCheck));
+      expect(opsNode['.write'] as String, contains(expectedRosterCheck));
+      expect(rosterNode['.read'] as String, contains(expectedRosterCheck));
+      expect(rosterNode['.write'] as String, contains(expectedRosterCheck));
+
+      // التحقق من تأمين عقدة التحديثات السيادية /system/version_manifest بحساب المشرف فقط
+      final sysNode = rulesRoot['system'] as Map;
+      final manifestNode = sysNode['version_manifest'] as Map;
+      expect(
+        manifestNode['.write'] as String,
+        contains(
+          "auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73'",
+        ),
+      );
 
       expect(jsonEncode(mainRules), jsonEncode(adminRules));
     });

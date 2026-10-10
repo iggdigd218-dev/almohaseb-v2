@@ -16,7 +16,7 @@ class AppDatabase {
 
   static Database? _db;
   static Future<Database>? _opening;
-  static const int _version = 26;
+  static const int _version = 27;
 
   static int get schemaVersion => _version;
 
@@ -434,6 +434,11 @@ class AppDatabase {
       // (2026-09-24) عمود الترقيم السريع (PLU): ترميم ذاتي عند كل فتح —
       // قاعدة مستوردة أو هجرة فاشلة تبقى عاملة، ويُرقّم ما بلا رقم فقط.
       await migrateToV26(db);
+    } catch (_) {}
+    try {
+      // (R3) ترحيل الأرصدة القديمة: ترقية فواتير البيع الآجل أو الجزئي المسجلة
+      // تاريخياً بنوع revenue ولديها account_id إلى نوع debit.
+      await migrateToV27(db);
     } catch (_) {}
     try {
       // (2026-09-26) أعمدة حالة الحذف والنشاط للأصناف (is_deleted, is_active)
@@ -1354,6 +1359,10 @@ class AppDatabase {
     if (from < 26) {
       await migrateToV26(db);
     }
+    // ====== v27 (R3): ترحيل فواتير الآجل والمديونيات التاريخية من revenue إلى debit ======
+    if (from < 27) {
+      await migrateToV27(db);
+    }
     // ====== v17: ضمان المخطط الكامل عند كل فتح (إصلاح قواعد ويندوز الناقصة) ======
     // أي جدول ناقص من بناء سابق يُنشأ، والبذرة idempotent. هذا يغلق نهائيًا
     // خطأ "table workspaces already exists" و"تعذّر تحميل الفئات/الإعدادات".
@@ -1554,6 +1563,114 @@ class AppDatabase {
     } catch (_) {
       return 1;
     }
+  }
+
+  /// Migration v26 → v27 (R3 — معالجة فجوة ترحيل الأرصدة القديمة):
+  /// فحص كافة السجلات في جدول `transactions` التي تحمل `type = 'revenue'`
+  /// ولديها `account_id IS NOT NULL` وكانت مسجلة كبيع آجل
+  /// (`payment_method == 'credit'` أو المتبقي منها دين)، وترقية نوعها
+  /// تلقائياً إلى `type = 'debit'` لضمان عدم تلاشي ديونها القديمة من أرصدة
+  /// العملاء بعد ضبط `opEffect`.
+  static Future<void> migrateToV27(Database db) async {
+    await migrateLegacyCreditRevenueToDebit(db);
+  }
+
+  static Future<int> migrateLegacyCreditRevenueToDebit(Database db) async {
+    var updatedCount = 0;
+    try {
+      final cols = await db.rawQuery('PRAGMA table_info(transactions)');
+      final colNames = cols.map((c) => '${c['name']}').toSet();
+
+      if (colNames.contains('payment_method')) {
+        updatedCount += await db.rawUpdate('''
+          UPDATE transactions
+          SET type = 'debit'
+          WHERE type = 'revenue'
+            AND account_id IS NOT NULL
+            AND LOWER(TRIM(COALESCE(payment_method, ''))) IN ('credit', 'partial', 'split', 'آجل', 'جزئي')
+        ''');
+      }
+
+      if (colNames.contains('remaining_amount')) {
+        updatedCount += await db.rawUpdate('''
+          UPDATE transactions
+          SET type = 'debit'
+          WHERE type = 'revenue'
+            AND account_id IS NOT NULL
+            AND COALESCE(remaining_amount, 0) > 0
+        ''');
+      }
+
+      final rows = await db.query(
+        'transactions',
+        where: "type = 'revenue' AND account_id IS NOT NULL",
+      );
+      for (final row in rows) {
+        final id = row['id'];
+        if (id == null) continue;
+        final desc = '${row['description'] ?? ''}';
+        final notes = '${row['notes'] ?? ''}';
+        final category = '${row['category'] ?? ''}';
+        final pm = '${row['payment_method'] ?? ''}'.trim().toLowerCase();
+        final combined = '$desc\n$notes\n$category';
+
+        var isCreditOrHasDebt = false;
+        if (pm == 'credit' ||
+            pm == 'partial' ||
+            pm == 'split' ||
+            pm.contains('آجل') ||
+            pm.contains('جزئي')) {
+          isCreditOrHasDebt = true;
+        } else if (combined.contains('طريقة الدفع: آجل') ||
+            combined.contains('طريقة الدفع: جزئي') ||
+            combined.contains('مبيعات آجلة') ||
+            combined.contains('مبيعات جزئية') ||
+            combined.contains('بيع آجل') ||
+            combined.contains('على الحساب') ||
+            RegExp(
+              r'payment_method\s*[:=]\s*["\x27]?(credit|partial|split)',
+              caseSensitive: false,
+            ).hasMatch(combined)) {
+          isCreditOrHasDebt = true;
+        } else {
+          final remMatches = RegExp(
+            r'(?:المبلغ المتبقي(?:\s*\(آجل\))?|المتبقي)\s*:\s*([^\n\r]+)',
+          ).allMatches(combined);
+          for (final m in remMatches) {
+            final rawVal = _normalizeDigits(m.group(1) ?? '')
+                .replaceAll(',', '')
+                .replaceAll('٬', '');
+            final numMatch = RegExp(r'[-+]?\d+(?:\.\d+)?').firstMatch(rawVal);
+            if (numMatch != null) {
+              final val = double.tryParse(numMatch.group(0)!) ?? 0.0;
+              if (val > 0.0001) {
+                isCreditOrHasDebt = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (isCreditOrHasDebt) {
+          updatedCount += await db.update(
+            'transactions',
+            {'type': 'debit'},
+            where: 'id = ?',
+            whereArgs: [id],
+          );
+        }
+      }
+    } catch (_) {}
+    return updatedCount;
+  }
+
+  static String _normalizeDigits(String input) {
+    const arabicIndic = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+    var out = input;
+    for (var i = 0; i < arabicIndic.length; i++) {
+      out = out.replaceAll(arabicIndic[i], '$i');
+    }
+    return out;
   }
 
 

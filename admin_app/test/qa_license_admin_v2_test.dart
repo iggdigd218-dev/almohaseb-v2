@@ -566,5 +566,18 @@ void main() {
       expect(engine.ownerSession.history[0].isUser, isTrue);
       expect(engine.ownerSession.history[1].isAssistant, isTrue);
     });
+
+    test(
+        'LIC-ADM12 (R1) تطهير تطبيق الإدارة من الرمز المضمن واستخدام String.fromEnvironment(ADMIN_REFRESH_TOKEN) مع رسالة خطأ واضحة محلياً',
+        () async {
+      SharedPreferences.setMockInitialValues({});
+      final rtdb = Rtdb.instance;
+      await rtdb.load();
+
+      // عند التشغيل محلياً بدون تمرير ADMIN_REFRESH_TOKEN يظهر التنبيه الواضح
+      expect(kAdminRefreshTokenDefault, isEmpty);
+      expect(rtdb.isAdminTokenMissing, isTrue);
+      expect(rtdb.lastAuthError, contains('ADMIN_REFRESH_TOKEN'));
+    });
   });
 }

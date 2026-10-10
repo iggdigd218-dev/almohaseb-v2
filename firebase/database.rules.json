@@ -6,6 +6,30 @@
       ".read": "auth != null",
       ".write": "auth != null"
     },
+    "system": {
+      ".read": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73')",
+      ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73')",
+      "version_manifest": {
+        ".read": true,
+        ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73')"
+      },
+      "admin_version_manifest": {
+        ".read": true,
+        ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73')"
+      },
+      "force_update": {
+        ".read": "auth != null",
+        ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73')"
+      },
+      "maintenance": {
+        ".read": "auth != null",
+        ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73')"
+      },
+      "maintenance_mode": {
+        ".read": "auth != null",
+        ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73')"
+      }
+    },
     "trials": {
       ".indexOn": [
         "status",
@@ -15,17 +39,19 @@
       ],
       "$fp": {
         ".read": "auth != null",
-        ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || (!data.exists() && newData.exists() && newData.child('status').val() === 'trial' && (!newData.child('is_frozen').exists() || newData.child('is_frozen').val() === false) && (!newData.child('max_devices').exists() || newData.child('max_devices').val() <= 2)) || (data.exists() && newData.exists() && newData.child('status').val() === data.child('status').val() && newData.child('expires_at').val() === data.child('expires_at').val() && (newData.child('is_frozen').val() === data.child('is_frozen').val() || (!data.child('is_frozen').exists() && newData.child('is_frozen').val() === false)) && (newData.child('max_devices').val() === data.child('max_devices').val() || (!data.child('max_devices').exists() && newData.child('max_devices').val() <= 2)) && newData.child('trial_started_at').val() === data.child('trial_started_at').val()))"
+        ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || (!data.exists() && newData.exists() && newData.child('status').val() === 'trial' && newData.child('expires_at').val() <= (now + 2592000000) && (!newData.child('is_frozen').exists() || newData.child('is_frozen').val() === false) && (!newData.child('max_devices').exists() || newData.child('max_devices').val() <= 2)) || (data.exists() && newData.exists() && newData.child('status').val() === data.child('status').val() && newData.child('expires_at').val() === data.child('expires_at').val() && (newData.child('is_frozen').val() === data.child('is_frozen').val() || (!data.child('is_frozen').exists() && newData.child('is_frozen').val() === false)) && (newData.child('max_devices').val() === data.child('max_devices').val() || (!data.child('max_devices').exists() && newData.child('max_devices').val() <= 2)) && newData.child('trial_started_at').val() === data.child('trial_started_at').val()))"
       }
     },
     "workspaces": {
       "$ws": {
-        ".read": "auth != null",
+        ".read": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || root.child('workspaces/' + $ws + '/roster/' + auth.uid).exists())",
         "subscription": {
-          ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || (!data.exists() && newData.exists() && newData.child('status').val() === 'trial' && (!newData.child('is_frozen').exists() || newData.child('is_frozen').val() === false) && (!newData.child('max_devices').exists() || newData.child('max_devices').val() <= 2)) || (data.exists() && newData.exists() && newData.child('status').val() === data.child('status').val() && (newData.child('expires_at').val() === data.child('expires_at').val() || (data.child('status').val() === 'trial' && newData.child('status').val() === 'trial' && newData.child('expires_at').val() <= data.child('expires_at').val())) && (newData.child('is_frozen').val() === data.child('is_frozen').val() || (!data.child('is_frozen').exists() && newData.child('is_frozen').val() === false)) && (newData.child('max_devices').val() === data.child('max_devices').val() || (!data.child('max_devices').exists() && newData.child('max_devices').val() <= 2)) && newData.child('plan').val() === data.child('plan').val()))"
+          ".read": "auth != null",
+          ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || (!data.exists() && newData.exists() && newData.child('status').val() === 'trial' && newData.child('expires_at').val() <= (now + 2592000000) && (!newData.child('is_frozen').exists() || newData.child('is_frozen').val() === false) && (!newData.child('max_devices').exists() || newData.child('max_devices').val() <= 2)) || (data.exists() && newData.exists() && newData.child('status').val() === data.child('status').val() && (newData.child('expires_at').val() === data.child('expires_at').val() || (data.child('status').val() === 'trial' && newData.child('status').val() === 'trial' && newData.child('expires_at').val() <= data.child('expires_at').val())) && (newData.child('is_frozen').val() === data.child('is_frozen').val() || (!data.child('is_frozen').exists() && newData.child('is_frozen').val() === false)) && (newData.child('max_devices').val() === data.child('max_devices').val() || (!data.child('max_devices').exists() && newData.child('max_devices').val() <= 2)) && newData.child('plan').val() === data.child('plan').val()))"
         },
         "operations": {
-          ".write": "auth != null",
+          ".read": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || root.child('workspaces/' + $ws + '/roster/' + auth.uid).exists())",
+          ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || root.child('workspaces/' + $ws + '/roster/' + auth.uid).exists())",
           ".indexOn": [
             "server_time",
             "server_ts",
@@ -33,12 +59,14 @@
           ]
         },
         "roster": {
-          ".write": "auth != null",
+          ".read": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || root.child('workspaces/' + $ws + '/roster/' + auth.uid).exists())",
+          ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || root.child('workspaces/' + $ws + '/roster/' + auth.uid).exists() || !data.exists())",
           ".indexOn": [
             "updated_at"
           ]
         },
         "invites": {
+          ".read": "auth != null",
           ".write": "auth != null",
           ".indexOn": [
             "expiresAt",
@@ -46,6 +74,7 @@
           ]
         },
         "joinRequests": {
+          ".read": "auth != null",
           ".write": "auth != null",
           ".indexOn": [
             "status",
@@ -53,6 +82,7 @@
           ]
         },
         "logout_requests": {
+          ".read": "auth != null",
           ".write": "auth != null",
           ".indexOn": [
             "status",
@@ -60,7 +90,8 @@
           ]
         },
         "$other": {
-          ".write": "auth != null"
+          ".read": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || root.child('workspaces/' + $ws + '/roster/' + auth.uid).exists())",
+          ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || root.child('workspaces/' + $ws + '/roster/' + auth.uid).exists())"
         }
       }
     },

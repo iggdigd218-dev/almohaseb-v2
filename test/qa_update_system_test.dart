@@ -2,11 +2,16 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nexora_app/core/app_version.dart';
+import 'package:nexora_app/data/update_installer.dart';
 import 'package:nexora_app/data/update_service.dart';
+
+const String kSampleSha256 =
+    'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
 
 UpdateService svcReturning(
   String body, {
@@ -29,11 +34,13 @@ UpdateService svcReturning(
 String manifest({
   String version = '3.13.0+21',
   String? minSupported,
+  String? sha256 = kSampleSha256,
   String notes = 'تحسينات',
 }) =>
     jsonEncode({
       'version': version,
       if (minSupported != null) 'minSupported': minSupported,
+      if (sha256 != null) 'sha256': sha256,
       'releaseUrl': 'https://github.com/x/y/releases/tag/latest',
       'downloads': {
         'android': 'https://github.com/x/y/releases/download/latest/app.apk',
@@ -195,11 +202,60 @@ void main() {
     test('يرفض رابط تنزيل غير https داخل البيان', () async {
       final body = jsonEncode({
         'version': '9.9.9',
+        'sha256': kSampleSha256,
         'downloads': {'android': 'http://evil.example/x.apk'},
       });
       final info = await svcReturning(body).check();
       expect(info.status, UpdateStatus.available);
       expect(info.downloadUrl, isNull, reason: 'لا نقبل روابط غير آمنة');
+    });
+
+    test('R2: يرفض البيان إذا غاب الحقل الإلزامي sha256 أو كان غير صالح', () async {
+      final missingSha = await svcReturning(manifest(sha256: null)).check();
+      expect(missingSha.status, UpdateStatus.unknown);
+      expect(missingSha.error, contains('sha256'));
+
+      final badSha = await svcReturning(manifest(sha256: 'not-a-valid-sha256')).check();
+      expect(badSha.status, UpdateStatus.unknown);
+      expect(badSha.error, contains('sha256'));
+    });
+
+    test('R2: مسار البيان الافتراضي يشير إلى العقدة السيادية /system/version_manifest', () {
+      expect(
+        UpdateService.kDefaultManifestUrl,
+        endsWith('/system/version_manifest.json'),
+      );
+      expect(
+        UpdateService.kDefaultManifestUrl,
+        isNot(contains('workspaces/_registry')),
+      );
+    });
+
+    test('R2: UpdateInstaller يحسب بصمة SHA-256 للملف المنزّل ويطابقها قبل التثبيت', () async {
+      final tmpDir = await Directory.systemTemp.createTemp('nexora_upd_test_');
+      addTearDown(() async {
+        if (tmpDir.existsSync()) await tmpDir.delete(recursive: true);
+      });
+      final fakeApk = File('${tmpDir.path}/sample.apk');
+      final bytes = List<int>.generate(2048, (i) => i % 256);
+      await fakeApk.writeAsBytes(bytes);
+
+      final expectedDigest = crypto.sha256.convert(bytes).toString();
+      final computed = await UpdateInstaller.computeFileSha256(fakeApk);
+      expect(computed, equals(expectedDigest));
+
+      expect(
+        await UpdateInstaller.verifyFileSha256(fakeApk, expectedDigest),
+        isTrue,
+      );
+      expect(
+        await UpdateInstaller.verifyFileSha256(fakeApk, '0' * 64),
+        isFalse,
+      );
+      expect(
+        await UpdateInstaller.verifyFileSha256(fakeApk, ''),
+        isFalse,
+      );
     });
   });
 

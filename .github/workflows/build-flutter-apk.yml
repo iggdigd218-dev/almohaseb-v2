@@ -120,12 +120,19 @@ jobs:
         run: |
           VER=$(grep -E '^version:' pubspec.yaml | awk '{print $2}')
           NAME="${VER%%+*}"; BUILD="${VER##*+}"
+          SHA_ARM64=$(sha256sum nexora-arm64.apk | awk '{print $1}')
+          SHA_ARMV7=$(sha256sum nexora-armv7.apk | awk '{print $1}')
           NOTES=$(python3 -c "import json; lines=[l.strip() for l in open('release_notes.txt',encoding='utf-8').read().splitlines() if l.strip()]; lines=lines[:3]; lines=[(l[:219].rstrip()+'…') if len(l)>220 else l for l in lines]; t='\\n'.join(lines); print(json.dumps(t,ensure_ascii=False)[1:-1])")
           echo "إصدار البناء: $NAME (build $BUILD)"
           cat > version.json <<EOF
           {
             "version": "$NAME+$BUILD",
             "minSupported": "3.13.0",
+            "sha256": "$SHA_ARM64",
+            "sha256Variants": {
+              "arm64": "$SHA_ARM64",
+              "armv7": "$SHA_ARMV7"
+            },
             "releaseUrl": "https://github.com/${{ github.repository }}/releases/tag/latest",
             "downloads": {
               "android": "https://github.com/${{ github.repository }}/releases/download/latest/nexora-arm64.apk",
@@ -140,8 +147,8 @@ jobs:
           }
           EOF
           cat version.json
-          curl -s -X PATCH -H "Content-Type: application/json; charset=utf-8" -d @version.json "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/force_update.json" || true
-          curl -s -X PUT -H "Content-Type: application/json; charset=utf-8" -d @version.json "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/version_manifest.json" || true
+          curl -s -X PATCH -H "Content-Type: application/json; charset=utf-8" -d @version.json "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/force_update.json" || true
+          curl -s -X PUT -H "Content-Type: application/json; charset=utf-8" -d @version.json "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/version_manifest.json" || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

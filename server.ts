@@ -22,6 +22,18 @@ const PORT = 3000;
 const dbPath = path.join(process.cwd(), 'nexora.db');
 const db = new DatabaseSync(dbPath);
 
+function runInTransaction<T>(fn: () => T): T {
+  db.exec('BEGIN');
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (err) {
+    try { db.exec('ROLLBACK'); } catch {}
+    throw err;
+  }
+}
+
 function initDB() {
   db.exec(`
     PRAGMA foreign_keys = ON;
@@ -194,6 +206,22 @@ function initDB() {
   try { db.exec(`ALTER TABLE users ADD COLUMN password TEXT DEFAULT ''`); } catch {}
   try { db.exec(`ALTER TABLE user_permissions ADD COLUMN is_deputy INTEGER DEFAULT 0`); } catch {}
   try { db.prepare(`UPDATE sync_queue SET status = 'pending' WHERE status = 'syncing'`).run(); } catch {}
+  // (R3) Upgrade historical credit/partial sales stored as type='revenue' with account_id IS NOT NULL to type='debit'
+  try {
+    db.prepare(`
+      UPDATE transactions
+      SET type = 'debit'
+      WHERE type = 'revenue'
+        AND account_id IS NOT NULL
+        AND (
+          notes LIKE '%طريقة الدفع: آجل%'
+          OR notes LIKE '%طريقة الدفع: جزئي%'
+          OR description LIKE '%مبيعات آجلة%'
+          OR description LIKE '%مبيعات جزئية%'
+          OR notes LIKE '%payment_method%credit%'
+        )
+    `).run();
+  } catch {}
 
   const countRow = db.prepare('SELECT COUNT(*) as c FROM accounts').get() as { c: number };
   if (countRow && countRow.c === 0) {
@@ -1026,7 +1054,7 @@ async function startServer() {
       }
 
       const now = new Date().toISOString();
-      const createTxAtomic = db.transaction(() => {
+      const insertedId = runInTransaction(() => {
         const isSaleType = type === 'debit' || type === 'revenue' || type === 'inflow';
         if (items && Array.isArray(items) && items.length > 0 && isSaleType) {
           const allowNegRow = db.prepare(`SELECT value FROM settings WHERE key='allowNegativeStock'`).get() as any;
@@ -1057,8 +1085,6 @@ async function startServer() {
         db.prepare(`INSERT INTO activity (text, ref_type, ref_id, created_at) VALUES (?, ?, ?, ?)`).run(`عملية ${type}: ${amount}`, 'transaction', String(result.lastInsertRowid), now);
         return result.lastInsertRowid;
       });
-
-      const insertedId = createTxAtomic();
       queueLocalMutation('transactions', insertedId, 'INSERT', req.body, req);
       res.json({ id: insertedId });
     } catch (e: any) {
@@ -1070,7 +1096,7 @@ async function startServer() {
     try {
       const now = new Date().toISOString();
       const txId = req.params.id;
-      const deleteTxAtomic = db.transaction(() => {
+      runInTransaction(() => {
         const txRow = db.prepare(`SELECT * FROM transactions WHERE id=?`).get(txId) as any;
         if (txRow && (!txRow.deleted_at || txRow.deleted_at === '')) {
           const isSaleType = txRow.type === 'debit' || txRow.type === 'revenue' || txRow.type === 'inflow';
@@ -1086,7 +1112,6 @@ async function startServer() {
         }
         db.prepare(`UPDATE transactions SET deleted_at=? WHERE id=?`).run(now, txId);
       });
-      deleteTxAtomic();
       queueLocalMutation('transactions', txId, 'DELETE', { id: txId }, req);
       res.json({ ok: true });
     } catch (e: any) {
@@ -1685,12 +1710,12 @@ async function startServer() {
     try {
       const now = new Date().toISOString();
       const vRow = db.prepare(`SELECT * FROM vouchers WHERE id=?`).get(req.params.id) as any;
-      db.transaction(() => {
+      runInTransaction(() => {
         db.prepare(`UPDATE vouchers SET deleted_at=?, status='cancelled' WHERE id=?`).run(now, req.params.id);
         if (vRow && vRow.number) {
           db.prepare(`UPDATE transactions SET deleted_at=? WHERE reference=? AND (deleted_at='' OR deleted_at IS NULL)`).run(now, vRow.number);
         }
-      })();
+      });
       queueLocalMutation('vouchers', req.params.id, 'DELETE', { id: req.params.id }, req);
       res.json({ ok: true });
     } catch (e: any) {
