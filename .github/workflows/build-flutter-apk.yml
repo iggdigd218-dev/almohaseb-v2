@@ -149,6 +149,8 @@ jobs:
           cat version.json
           curl -s -X PATCH -H "Content-Type: application/json; charset=utf-8" -d @version.json "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/force_update.json" || true
           curl -s -X PUT -H "Content-Type: application/json; charset=utf-8" -d @version.json "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/version_manifest.json" || true
+          curl -s -X PATCH -H "Content-Type: application/json; charset=utf-8" -d @version.json "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/force_update.json" || true
+          curl -s -X PUT -H "Content-Type: application/json; charset=utf-8" -d @version.json "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/version_manifest.json" || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

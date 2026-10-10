@@ -10,10 +10,10 @@ import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
 /// إصدار تطبيق مدير التراخيص الحالي (يطابق admin_app/pubspec.yaml).
-const String kAdminAppVersion = '1.7.0';
+const String kAdminAppVersion = '1.7.1';
 
 /// رقم بناء تطبيق مدير التراخيص (ما بعد + في admin_app/pubspec.yaml).
-const int kAdminAppBuild = 40;
+const int kAdminAppBuild = 41;
 
 String get adminFullVersion => '$kAdminAppVersion+$kAdminAppBuild';
 
@@ -25,7 +25,7 @@ class AdminSemVer implements Comparable<AdminSemVer> {
 
   const AdminSemVer(this.major, this.minor, this.patch, [this.build = 0]);
 
-  static const AdminSemVer current = AdminSemVer(1, 7, 0, kAdminAppBuild);
+  static const AdminSemVer current = AdminSemVer(1, 7, 1, kAdminAppBuild);
 
   static AdminSemVer? tryParse(String? raw) {
     if (raw == null) return null;
@@ -120,6 +120,9 @@ class AdminUpdateService {
   static const String kDefaultManifestUrl =
       'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/admin_version_manifest.json';
 
+  static const String kLegacyManifestUrl =
+      'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/admin_version_manifest.json';
+
   static const String kFallbackManifestUrl =
       'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/admin_version.json';
 
@@ -138,13 +141,21 @@ class AdminUpdateService {
   });
 
   Future<AdminUpdateInfo> check() async {
-    var info = await _fetchFromUrl(manifestUrl);
-    if (info.status == AdminUpdateStatus.unknown &&
-        manifestUrl == kDefaultManifestUrl) {
-      final fb = await _fetchFromUrl(kFallbackManifestUrl);
-      if (fb.status != AdminUpdateStatus.unknown) return fb;
+    var best = await _fetchFromUrl(manifestUrl);
+    if (manifestUrl == kDefaultManifestUrl) {
+      for (final url in const [kLegacyManifestUrl, kFallbackManifestUrl]) {
+        if (best.hasUpdate && url == kFallbackManifestUrl) break;
+        final candidate = await _fetchFromUrl(url);
+        if (candidate.status == AdminUpdateStatus.unknown) continue;
+        if (best.status == AdminUpdateStatus.unknown) {
+          best = candidate;
+        } else if (candidate.latest != null &&
+            (best.latest == null || candidate.latest! > best.latest!)) {
+          best = candidate;
+        }
+      }
     }
-    return info;
+    return best;
   }
 
   Future<AdminUpdateInfo> _fetchFromUrl(String targetUrl) async {
