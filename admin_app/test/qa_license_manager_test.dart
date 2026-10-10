@@ -569,4 +569,151 @@ void main() {
       reason: 'الطلب الناجح حمل الهوية الجديدة IDTOK-2');
     expect(rtdb.lastAuthError, isNot(contains('TOKEN_EXPIRED')));
   });
+
+  test('LIC-12 قائمة المشتركين تقتصر على المنشآت (/workspaces/{ws}/subscription) وتدمج الحسابات المكررة بنفس الهاتف مع أجهزتها الفرعية',
+      () async {
+    final db = _FakeDb(
+      ws: {
+        'ws_main_1': {
+          'sub': {
+            'status': 'active',
+            'plan_type': 'enterprise',
+            'max_devices': 3,
+            'expires_at': 1800000000000,
+            'activated_at': 1700000000000,
+            'store_name': 'سوبرماركت الأمانة',
+            'client_name': 'خالد الحكيمي',
+            'phone': '+967 771234567',
+            'device_id': 'DEVICE-OWNER-1',
+          },
+          'roster': {
+            'DEVICE-OWNER-1': {
+              'name': 'جهاز المدير',
+              'last_seen': 1700000500000,
+            },
+            'DEVICE-MEMBER-2': {
+              'name': 'كاشير المبيعات 2',
+              'last_seen': 1700000800000,
+            },
+          },
+        },
+        'ws_dup_phone': {
+          'sub': {
+            'status': 'active',
+            'plan_type': 'individual',
+            'max_devices': 1,
+            'expires_at': 1850000000000,
+            'activated_at': 1700000200000,
+            'store_name': 'سوبرماركت الأمانة',
+            'client_name': 'خالد الحكيمي',
+            'phone': '0771234567',
+            'device_id': 'DEVICE-BRANCH-3',
+          },
+          'roster': {
+            'DEVICE-BRANCH-3': {
+              'name': 'كاشير الفرع 3',
+              'last_seen': 1700000950000,
+            },
+          },
+        },
+        // مساحة عضو بدون عقدة subscription مستقلة — لا يجب أن تظهر كمشترك منفرد
+        'ws_member_only_no_sub': {
+          'roster': {
+            'DEVICE-LONE-MEMBER': {'name': 'جهاز موظف فرعي'},
+          },
+        },
+      },
+      trials: {
+        // سجل في /trials لجهاز عضو — لا يجب أن ينشئ بطاقة مشترك منفصلة
+        'fp_member_device': {
+          'device_id': 'DEVICE-MEMBER-2',
+          'workspace_id': 'ws_main_1',
+          'phone': '779999999',
+        },
+      },
+    );
+
+    final rtdb = await _rtdb(db);
+    final list = await rtdb.recentSubscribers();
+
+    // بطاقة واحدة موحدة فقط للمنشأة بعد دمج الهاتف المكرر واستبعاد الأجهزة الفرعية
+    expect(list.length, 1);
+    final org = list.first;
+    expect(org.storeName, 'سوبرماركت الأمانة');
+    expect(org.clientName, 'خالد الحكيمي');
+    expect(org.maxDevices, 3);
+    expect(org.activeDevices, 3);
+    expect(org.rosterDevices.length, 3);
+    expect(org.lastSeenAtMs, 1700000950000);
+    expect(org.expiresAtMs, 1850000000000);
+  });
+
+  test('LIC-13 التفعيل الذكي يبحث برقم الهاتف أو الجهاز ويحدث /workspaces/{ws}/subscription و /trials ذرياً',
+      () async {
+    const fp = 'fedcba9876543210fedcba9876543210';
+    final db = _FakeDb(
+      ws: {
+        'ws_smart_01': {
+          'sub': {
+            'status': 'trial',
+            'plan_type': 'trial',
+            'max_devices': 1,
+            'expires_at': 1710000000000,
+            'store_name': 'مؤسسة التوفيق',
+            'client_name': 'عادل الشرعبي',
+            'phone': '773334455',
+            'device_id': 'DEVICE-SMART-77',
+          },
+          'roster': {
+            'DEVICE-SMART-77': {
+              'name': 'هاتف المالك',
+              'last_seen': 1705000000000,
+            },
+          },
+        },
+      },
+      trials: {
+        fp: {
+          'device_id': 'DEVICE-SMART-77',
+          'workspace_id': 'ws_smart_01',
+          'store_name': 'مؤسسة التوفيق',
+          'client_name': 'عادل الشرعبي',
+          'phone': '773334455',
+          'status': 'trial',
+        },
+      },
+    );
+
+    final rtdb = await _rtdb(db);
+
+    // 1. الاستعلام الذكي برقم الهاتف
+    final preview = await rtdb.lookupWorkspacePreview('0773334455');
+    expect(preview.foundInCloud, isTrue);
+    expect(preview.workspaceId, 'ws_smart_01');
+    expect(preview.storeName, 'مؤسسة التوفيق');
+    expect(preview.ownerName, 'عادل الشرعبي');
+    expect(preview.deviceId, 'DEVICE-SMART-77');
+    expect(preview.activeDevices, 1);
+
+    // 2. التفعيل والترقية لـ 5 أجهزة وتحديث /workspaces و /trials معاً
+    final customExp = 1893456000000;
+    final res = await rtdb.activate(
+      rawInput: '773334455',
+      planType: 'enterprise',
+      duration: PlanDuration.year,
+      maxDevices: 5,
+      customExpiresAtMs: customExp,
+      respectMaxDevices: true,
+    );
+
+    expect(res.workspaceId, 'ws_smart_01');
+    expect(res.maxDevices, 5);
+    expect(res.expiresAtMs, customExp);
+    expect(db.ws['ws_smart_01']!['sub']!['status'], 'active');
+    expect(db.ws['ws_smart_01']!['sub']!['max_devices'], 5);
+    expect(db.ws['ws_smart_01']!['sub']!['expires_at'], customExp);
+    expect(db.trials[fp]!['status'], 'active');
+    expect(db.trials[fp]!['max_devices'], 5);
+    expect(db.trials[fp]!['expires_at'], customExp);
+  });
 }

@@ -12,6 +12,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../../core/auth_config.dart';
+import '../../core/database.dart';
 import '../repository.dart';
 import 'device_id.dart';
 import 'google_auth_service.dart';
@@ -43,6 +44,8 @@ class FirebaseAuthRest {
   static const uidKey = 'account.uid';
   static const emailKey = 'account.email';
   static const nameKey = 'account.name';
+  static const lastOwnerEmailKey = 'account.lastOwnerEmail';
+  static const lastOwnerUidKey = 'account.lastOwnerUid';
 
   // ══════ (401) جلسة الحساب: توكن Firebase بعد استبدال توكن Google ══════
   // قبل هذا الإصلاح كان الاستبدال يُستخرج `localId` فقط ويُهمل `idToken`،
@@ -156,6 +159,12 @@ class FirebaseAuthRest {
     await repo.setSetting(uidKey, a.uid);
     await repo.setSetting(emailKey, a.email);
     await repo.setSetting(nameKey, a.displayName);
+    if (a.email.trim().isNotEmpty) {
+      await repo.setSetting(lastOwnerEmailKey, a.email.trim().toLowerCase());
+    }
+    if (a.uid.trim().isNotEmpty) {
+      await repo.setSetting(lastOwnerUidKey, a.uid.trim());
+    }
     // (401) توكن الحساب هو الذي يمنح صلاحية المالك — يُحفظ ويُستخدم فوراً.
     if (a.idToken.isNotEmpty) {
       _accountUid = a.uid;
@@ -180,9 +189,21 @@ class FirebaseAuthRest {
       ((await repo.settings())[emailKey] ?? '').trim();
 
   static Future<void> clearSession(Repo repo) async {
+    try {
+      final st = await repo.settings();
+      final curEmail = (st[emailKey] ?? st['email'] ?? '').trim().toLowerCase();
+      final curUid = (st[uidKey] ?? '').trim();
+      if (curEmail.isNotEmpty) {
+        await repo.setSetting(lastOwnerEmailKey, curEmail);
+      }
+      if (curUid.isNotEmpty) {
+        await repo.setSetting(lastOwnerUidKey, curUid);
+      }
+    } catch (_) {}
     await repo.setSetting(uidKey, '');
     await repo.setSetting(emailKey, '');
     await repo.setSetting(nameKey, '');
+    await repo.setSetting('sync.workspaceId', '');
     _accountUid = null;
     _accountIdToken = null;
     _accountRefreshToken = null;
@@ -191,6 +212,8 @@ class FirebaseAuthRest {
     await repo.setSetting(accountIdTokenKey, '');
     await repo.setSetting(accountRefreshKey, '');
     await repo.setSetting(accountExpiryKey, '0');
+    repo.debugSetWorkspaceId(defaultWorkspaceIdConst);
+    await AppDatabase.instance.closeAndResetWorkspace();
   }
 
   // ══════ (المرحلة 2) مصادقة مجهولة صامتة — هوية جهاز دائمة ══════

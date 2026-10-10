@@ -333,7 +333,7 @@ void main() {
       expect(expiring7dList.map((e) => e.workspaceId), containsAll(['WS-TRIAL', 'WS-EXPIRING-7D']));
     });
 
-    testWidgets('LIC-ADM07 شاشة التفعيل الفردي تحتوي على حقول المبلغ المدفوع والعملة وطريقة الدفع', (tester) async {
+    testWidgets('LIC-ADM07 شاشة التفعيل الذكي تعرض البحث الذكي، بطاقة معاينة المنشأة، نوع الخطة، عدد الأجهزة، وتاريخ الانتهاء وزر التفعيل الموحد', (tester) async {
       await tester.pumpWidget(
         const MaterialApp(
           home: Scaffold(
@@ -343,16 +343,88 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // التحقق من وجود حقول الدفع
-      expect(find.text('💰 بيانات الدفع والإيرادات:'), findsOneWidget);
-      expect(find.text('المبلغ المدفوع / المحصل'), findsOneWidget);
-      expect(find.text('العملة'), findsOneWidget);
-      expect(find.text('طريقة الدفع'), findsOneWidget);
-      expect(find.text('ملاحظات الدفع (اختياري)'), findsOneWidget);
+      // التحقق من وجود حقل البحث الذكي
+      expect(
+        find.text('بحث ذكي (كود الجهاز device_id أو المساحة ws_id أو الهاتف)'),
+        findsOneWidget,
+      );
 
-      // التحقق من وجود خيارات العملات وطرق الدفع
-      expect(find.text('YER'), findsOneWidget);
-      expect(find.text('نقداً'), findsOneWidget);
+      // 1. بطاقة معاينة بيانات المنشأة المسترجعة تلقائياً
+      expect(find.text('معاينة بيانات المنشأة المسترجعة تلقائياً'), findsOneWidget);
+
+      // 2. اختيار نوع الخطة (سنوي / شهري / تجريبي)
+      expect(find.text('نوع الخطة:'), findsOneWidget);
+      expect(find.text('سنوي'), findsOneWidget);
+      expect(find.text('شهري'), findsOneWidget);
+      expect(find.text('تجريبي'), findsOneWidget);
+
+      // 3. عدد الأجهزة المسموحة (max_devices)
+      expect(find.text('عدد الأجهزة المسموحة (max_devices):'), findsOneWidget);
+
+      // 4. تاريخ الانتهاء (expires_at)
+      expect(find.text('تاريخ الانتهاء (expires_at)'), findsOneWidget);
+
+      // زر واحد للتنفيذ: «تفعيل وترقية الترخيص»
+      expect(find.text('تفعيل وترقية الترخيص'), findsOneWidget);
+    });
+
+    test('LIC-ADM13 تجميع سجلات المشتركين بنفس الهاتف أو معرف مساحة العمل وعرض الأجهزة المدمجة وآخر ظهور موحد', () {
+      final entry1 = SubscriberEntry(
+        workspaceId: 'ws_store_1',
+        clientName: 'محمد العريقي',
+        storeName: 'محلات العريقي التجارية',
+        phone: '+967 771-234-567',
+        deviceId: 'DEVICE-OWNER-01',
+        licenseKey: 'NX-1111-2222-3333',
+        deviceRef: 'DEVICE-OWNER-01',
+        planType: 'enterprise',
+        maxDevices: 3,
+        activeDevices: 1,
+        lastSeenAtMs: 1700000100000,
+        expiresAtMs: 1800000000000,
+        status: 'active',
+        activatedAtMs: 1700000000000,
+        rosterDevices: const [
+          ConnectedDevice(
+            deviceId: 'DEVICE-OWNER-01',
+            deviceName: 'هاتف المالك',
+            lastSeenMs: 1700000100000,
+            isPrimary: true,
+          ),
+        ],
+      );
+
+      final entry2 = SubscriberEntry(
+        workspaceId: 'ws_store_dup',
+        clientName: 'محمد العريقي',
+        storeName: 'محلات العريقي التجارية',
+        phone: '0771234567',
+        deviceId: 'DEVICE-CASHIER-02',
+        licenseKey: 'NX-4444-5555-6666',
+        deviceRef: 'DEVICE-CASHIER-02',
+        planType: 'enterprise',
+        maxDevices: 5,
+        activeDevices: 1,
+        lastSeenAtMs: 1700000900000,
+        expiresAtMs: 1850000000000,
+        status: 'active',
+        activatedAtMs: 1700000500000,
+        rosterDevices: const [
+          ConnectedDevice(
+            deviceId: 'DEVICE-CASHIER-02',
+            deviceName: 'كاشير الفرع',
+            lastSeenMs: 1700000900000,
+          ),
+        ],
+      );
+
+      expect(normalizeSubscriberPhone(entry1.phone), normalizeSubscriberPhone(entry2.phone));
+      final merged = entry1.mergeWith(entry2);
+      expect(merged.maxDevices, 5);
+      expect(merged.activeDevices, 2);
+      expect(merged.rosterDevices.length, 2);
+      expect(merged.lastSeenAtMs, 1700000900000);
+      expect(merged.expiresAtMs, 1850000000000);
     });
 
     test('LIC-ADM08 محرك الذكاء الاصطناعي عبر DeepSeek API: حفظ deepseek_api_key وموجه الرفيق العفوي متعدد الاهتمامات ودرجة الحرارة 0.8', () async {

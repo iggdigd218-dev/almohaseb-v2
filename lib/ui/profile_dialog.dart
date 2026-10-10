@@ -26,6 +26,7 @@ import '../data/sync/workspace_service.dart';
 import 'account_section.dart';
 import 'join_approval_flow.dart';
 import 'logout_flow.dart';
+import 'onboarding_screen.dart' show OnboardingScreen;
 import 'qr_pair_scanner.dart';
 import 'widgets.dart';
 
@@ -163,9 +164,6 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
       if ((gu.photoUrl ?? '').isNotEmpty) {
         await repo.setSetting('account.photoPath', gu.photoUrl!);
       }
-      await repo.setSetting(Repo.accountEmailKey, gu.email);
-      await repo.setSetting('email', gu.email);
-      await repo.setSetting('account.type', 'enterprise');
 
       final st = await repo.settings();
       final url = effectiveBackendUrl(st['cloudBackendUrl']);
@@ -178,9 +176,14 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
         onTimeout: () => AccountLinkOutcome.migrated,
       );
 
-      final activeWsId = await ensureWorkspace(db, repo: repo);
+      await repo.setSetting(Repo.accountEmailKey, gu.email);
+      await repo.setSetting('email', gu.email);
+      await repo.setSetting('account.type', 'enterprise');
+
+      final activeDb = await repo.database;
+      final activeWsId = await ensureWorkspace(activeDb, repo: repo);
       await linkWorkspaceToGoogle(
-        db,
+        activeDb,
         workspaceId: activeWsId,
         googleId: gu.id,
         email: gu.email,
@@ -195,20 +198,29 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
         unawaited(repo.restoreManagerOwnership());
       }
 
-      // تحديث حقول النافذة بالبيانات المسترجعة من المساحة السحابية
+      // تحديث حقول النافذة بالبيانات المسترجعة من المساحة السحابية أو تصفيرها للمساحة الجديدة
       final refreshedSt = await repo.settings();
-      if ((refreshedSt['businessName'] ?? '').trim().isNotEmpty) {
-        _bizNameCtrl.text = refreshedSt['businessName']!.trim();
-      }
-      if ((refreshedSt['businessActivity'] ?? '').trim().isNotEmpty) {
-        _bizActivityCtrl.text = refreshedSt['businessActivity']!.trim();
-      }
-      if ((refreshedSt['phone'] ?? refreshedSt['whatsapp'] ?? '').trim().isNotEmpty) {
-        _phoneCtrl.text =
-            (refreshedSt['phone'] ?? refreshedSt['whatsapp'] ?? '').trim();
-      }
-      if ((refreshedSt['address'] ?? '').trim().isNotEmpty) {
-        _addressCtrl.text = refreshedSt['address']!.trim();
+      if (outcome == AccountLinkOutcome.isolatedNewWorkspace) {
+        _bizNameCtrl.clear();
+        _bizActivityCtrl.clear();
+        _phoneCtrl.clear();
+        _addressCtrl.clear();
+      } else {
+        if ((refreshedSt['businessName'] ?? '').trim().isNotEmpty) {
+          _bizNameCtrl.text = refreshedSt['businessName']!.trim();
+        }
+        if ((refreshedSt['businessActivity'] ?? '').trim().isNotEmpty) {
+          _bizActivityCtrl.text = refreshedSt['businessActivity']!.trim();
+        }
+        if ((refreshedSt['phone'] ?? refreshedSt['whatsapp'] ?? '')
+            .trim()
+            .isNotEmpty) {
+          _phoneCtrl.text =
+              (refreshedSt['phone'] ?? refreshedSt['whatsapp'] ?? '').trim();
+        }
+        if ((refreshedSt['address'] ?? '').trim().isNotEmpty) {
+          _addressCtrl.text = refreshedSt['address']!.trim();
+        }
       }
       if ((refreshedSt['account.name'] ?? '').trim().isNotEmpty &&
           _userNameCtrl.text.trim().isEmpty) {
@@ -237,6 +249,20 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
           showSnack(context,
               '✅ تم استرداد مساحة عملك المرتبطة بحساب Google وتفعيل المزامنة');
           break;
+        case AccountLinkOutcome.isolatedNewWorkspace:
+          showSnack(context,
+              '✅ تم عزل بيانات المنشأة السابقة وفتح مساحة عمل جديدة لحسابك');
+          Navigator.of(context).pop();
+          rootNavigatorKey.currentState?.pushAndRemoveUntil(
+            MaterialPageRoute(
+              builder: (_) => const OnboardingScreen(
+                initialNotice:
+                    'تم تسجيل الدخول بحساب بريد إلكتروني جديد غير مرتبط بالمنشأة السابقة. قم بإعداد بيانات منشأتك الجديدة.',
+              ),
+            ),
+            (route) => false,
+          );
+          return;
         case AccountLinkOutcome.memberUntouched:
           showSnack(context, '✅ تم ربط حساب Google مع الحفاظ على عضوية مجموعتك');
           break;

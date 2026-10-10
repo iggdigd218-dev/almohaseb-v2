@@ -1,5 +1,7 @@
 // ignore_for_file: deprecated_member_use
 // تطبيق المدير المستقل — لوحة تفعيل تراخيص ومركز التحكم السحابي (مالك النظام فقط).
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/date_symbol_data_local.dart';
@@ -403,7 +405,7 @@ class _ConfigDialogState extends State<_ConfigDialog> {
   }
 }
 
-// ==================== شاشة التفعيل الفردي ====================
+// ==================== شاشة التفعيل الذكي (Smart Activation Flow) ====================
 
 class ActivationScreen extends StatefulWidget {
   const ActivationScreen({super.key});
@@ -412,160 +414,108 @@ class ActivationScreen extends StatefulWidget {
 }
 
 class _ActivationScreenState extends State<ActivationScreen> {
-  final _input = TextEditingController();
-  final _clientName = TextEditingController();
-  final _storeName = TextEditingController();
-  final _phone = TextEditingController();
-  final _licenseKey = TextEditingController();
-  final _amountCtrl = TextEditingController(text: '0');
-  final _notesCtrl = TextEditingController();
+  final _searchCtrl = TextEditingController();
+  final _maxDevicesCtrl = TextEditingController(text: '1');
+  Timer? _debounce;
 
-  PlanDuration _duration = PlanDuration.year;
-  String _planType = 'individual';
+  /// نوع الخطة المختارة: 'annual' (سنوي) | 'monthly' (شهري) | 'trial' (تجريبي)
+  String _selectedPlan = 'annual';
   int _maxDevices = 1;
-  String _currency = 'YER';
-  String _paymentMethod = 'نقداً';
+  DateTime _expiresAt = DateTime.now().add(const Duration(days: 365));
+
+  WorkspaceLookupPreview? _preview;
+  bool _searching = false;
   bool _busy = false;
   ActivationResult? _result;
   String? _error;
 
   @override
   void dispose() {
-    _input.dispose();
-    _clientName.dispose();
-    _storeName.dispose();
-    _phone.dispose();
-    _licenseKey.dispose();
-    _amountCtrl.dispose();
-    _notesCtrl.dispose();
+    _debounce?.cancel();
+    _searchCtrl.dispose();
+    _maxDevicesCtrl.dispose();
     super.dispose();
   }
 
-  void _showActivationReceipt(
-    ActivationResult r,
-    double amount,
-    String currency,
-    String method,
-  ) {
-    final expStr = fmtDate(r.expiresAtMs, lifetime: r.lifetime);
-    final phone = _phone.text.trim();
-    final receiptText = '''
-══════════════════════════════
- 🧾 سند تفعيل ترخيص نظام Nexora
-══════════════════════════════
-المنشأة: ${r.storeName.isNotEmpty ? r.storeName : (_storeName.text.trim().isNotEmpty ? _storeName.text.trim() : '—')}
-المسؤول: ${r.clientName.isNotEmpty ? r.clientName : (_clientName.text.trim().isNotEmpty ? _clientName.text.trim() : '—')}
-الهاتف: ${phone.isNotEmpty ? phone : '—'}
-كود الترخيص: ${r.licenseKey}
-تاريخ التفعيل: ${DateFormat('yyyy/MM/dd hh:mm a', 'ar').format(DateTime.now())}
-صالح حتى: $expStr
-المبلغ المدفوع: $amount $currency
-طريقة الدفع: $method
-══════════════════════════════
-شكراً لثقتكم بنظام Nexora Ledger
-''';
-
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.receipt_long, color: Color(0xFF7C3AED)),
-            SizedBox(width: 8),
-            Text('سند التفعيل الإلكتروني'),
-          ],
-        ),
-        content: SelectableText(
-          receiptText,
-          style: const TextStyle(
-              fontFamily: 'monospace', fontSize: 12, height: 1.45),
-        ),
-        actions: [
-          TextButton.icon(
-            onPressed: () {
-              copyText(context, 'سند التفعيل', receiptText);
-              Navigator.pop(ctx);
-            },
-            icon: const Icon(Icons.copy, size: 16),
-            label: const Text('نسخ السند'),
-          ),
-          if (phone.isNotEmpty)
-            FilledButton.icon(
-              style: FilledButton.styleFrom(
-                  backgroundColor: const Color(0xFF16A34A)),
-              onPressed: () {
-                Navigator.pop(ctx);
-                openWhatsApp(context, phone, msg: receiptText);
-              },
-              icon: const Icon(Icons.send, size: 16),
-              label: const Text('إرسال للعميل عبر واتساب'),
-            ),
-        ],
-      ),
-    );
+  PlanDuration get _durationForPlan {
+    switch (_selectedPlan) {
+      case 'monthly':
+        return PlanDuration.month;
+      case 'trial':
+        return PlanDuration.trial;
+      case 'annual':
+      default:
+        return PlanDuration.year;
+    }
   }
 
-  Future<void> _activate() async {
-    final raw = _input.text.trim();
-    if (raw.isEmpty) {
-      setState(() => _error = 'أدخل معرف الجهاز أو مساحة العمل أولاً');
-      return;
+  void _selectPlan(String plan) {
+    final now = DateTime.now();
+    DateTime nextExp;
+    if (plan == 'monthly') {
+      nextExp = now.add(const Duration(days: 30));
+    } else if (plan == 'trial') {
+      nextExp = now.add(const Duration(days: 14));
+    } else {
+      nextExp = now.add(const Duration(days: 365));
     }
     setState(() {
-      _busy = true;
-      _error = null;
-      _result = null;
+      _selectedPlan = plan;
+      _expiresAt = nextExp;
+    });
+  }
+
+  void _setMaxDevices(int count) {
+    final clamped = count < 1 ? 1 : (count > 999 ? 999 : count);
+    setState(() {
+      _maxDevices = clamped;
+      _maxDevicesCtrl.text = '$clamped';
+    });
+  }
+
+  void _onQueryChanged(String val) {
+    _debounce?.cancel();
+    final q = val.trim();
+    if (q.isEmpty) {
+      setState(() {
+        _preview = null;
+        _error = null;
+      });
+      return;
+    }
+    if (q.length < 4) return;
+    _debounce = Timer(const Duration(milliseconds: 420), () {
+      _lookupWorkspace(q, silentError: true);
+    });
+  }
+
+  Future<void> _lookupWorkspace([String? rawQuery, bool silentError = false]) async {
+    final q = (rawQuery ?? _searchCtrl.text).trim();
+    if (q.isEmpty) return;
+
+    setState(() {
+      _searching = true;
+      if (!silentError) _error = null;
     });
 
     try {
-      final res = await Rtdb.instance.activate(
-        rawInput: raw,
-        planType: _planType,
-        duration: _duration,
-        maxDevices: _planType == 'enterprise' ? _maxDevices : 1,
-        clientName: _clientName.text.trim(),
-        storeName: _storeName.text.trim(),
-        phone: _phone.text.trim(),
-        licenseKey: _licenseKey.text.trim().isNotEmpty
-            ? _licenseKey.text.trim()
-            : generateLicenseKey(raw),
-      );
-
-      final amount = double.tryParse(_amountCtrl.text.trim()) ?? 0.0;
-      if (amount > 0) {
-        final txId = 'bill_${DateTime.now().millisecondsSinceEpoch}';
-        final record = BillingRecord(
-          id: txId,
-          workspaceId: res.workspaceId,
-          clientName: res.clientName.isNotEmpty
-              ? res.clientName
-              : _clientName.text.trim(),
-          storeName: res.storeName.isNotEmpty
-              ? res.storeName
-              : _storeName.text.trim(),
-          amount: amount,
-          currency: _currency,
-          paymentMethod: _paymentMethod,
-          durationDays: _duration.span.inDays,
-          isLifetime: _duration == PlanDuration.lifetime,
-          notes: _notesCtrl.text.trim().isNotEmpty
-              ? _notesCtrl.text.trim()
-              : 'تفعيل ترخيص ${_planType == 'enterprise' ? 'مؤسسة' : 'فردي'} (${_duration.label})',
-          timestamp: DateTime.now().millisecondsSinceEpoch,
-        );
-        await Rtdb.instance.recordBillingPayment(record);
-      }
-
-      setState(() => _result = res);
-      adminRefreshTick.value++;
-
-      if (amount > 0 && mounted) {
-        _showActivationReceipt(res, amount, _currency, _paymentMethod);
-      }
+      final p = await Rtdb.instance.lookupWorkspacePreview(q);
+      if (!mounted) return;
+      setState(() {
+        _preview = p;
+        _error = null;
+        if (p.maxDevices > 0) {
+          _maxDevices = p.maxDevices;
+          _maxDevicesCtrl.text = '${p.maxDevices}';
+        }
+      });
     } catch (e) {
-      setState(() => _error = '$e');
+      if (!mounted) return;
+      if (!silentError) {
+        setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
+      }
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) setState(() => _searching = false);
     }
   }
 
@@ -580,7 +530,10 @@ class _ActivationScreenState extends State<ActivationScreen> {
         for (final k in keys) {
           final idx = clean.indexOf(k);
           if (idx >= 0) {
-            final after = clean.substring(idx + k.length).replaceFirst(RegExp(r'^[\s:：\-]+'), '').trim();
+            final after = clean
+                .substring(idx + k.length)
+                .replaceFirst(RegExp(r'^[\s:：\-]+'), '')
+                .trim();
             if (after.isNotEmpty) return after;
           }
         }
@@ -588,31 +541,164 @@ class _ActivationScreenState extends State<ActivationScreen> {
       return null;
     }
 
-    final parsedId = extractField(['معرف الجهاز', 'معرف مساحة العمل', 'المعرف', 'Device ID', 'Workspace']);
-    final parsedStore = extractField(['اسم المنشأة', 'المنشأة', 'المحل', 'المتجر']);
-    final parsedClient = extractField(['اسم العميل', 'العميل', 'المسؤول']);
-    final parsedPhone = extractField(['رقم الهاتف', 'الهاتف', 'الجوال', 'واتساب']);
-    final parsedKey = extractField(['كود الترخيص', 'الترخيص', 'License']);
+    final parsedId = extractField([
+      'معرف الجهاز',
+      'معرف مساحة العمل',
+      'المعرف',
+      'Device ID',
+      'Workspace',
+    ]);
+    final parsedStore =
+        extractField(['اسم المنشأة', 'المنشأة', 'المحل', 'المتجر']);
+    final parsedClient = extractField(['اسم العميل', 'العميل', 'المسؤول', 'المالك']);
+    final parsedPhone =
+        extractField(['رقم الهاتف', 'الهاتف', 'الجوال', 'واتساب']);
+
+    String queryToUse = text;
+    if (parsedId != null && parsedId.isNotEmpty) {
+      queryToUse = parsedId;
+    } else {
+      final devMatch =
+          RegExp(r'(DEVICE-[A-Za-z0-9]+|ws_[A-Za-z0-9_\-]+|[a-fA-F0-9]{32})')
+              .firstMatch(text);
+      if (devMatch != null) {
+        queryToUse = devMatch.group(0)!;
+      } else if (parsedPhone != null && parsedPhone.isNotEmpty) {
+        queryToUse = parsedPhone;
+      }
+    }
 
     setState(() {
-      if (parsedId != null && parsedId.isNotEmpty) {
-        _input.text = parsedId;
-      } else {
-        final devMatch = RegExp(r'(DEVICE-[A-Za-z0-9]+|[a-fA-F0-9]{24,64})').firstMatch(text);
-        _input.text = devMatch?.group(0) ?? text;
-      }
-      if (parsedStore != null && parsedStore.isNotEmpty) _storeName.text = parsedStore;
-      if (parsedClient != null && parsedClient.isNotEmpty) _clientName.text = parsedClient;
-      if (parsedPhone != null && parsedPhone.isNotEmpty) _phone.text = parsedPhone;
-      if (parsedKey != null && parsedKey.isNotEmpty) _licenseKey.text = parsedKey;
-      if (text.contains('مؤسسة') || text.toLowerCase().contains('enterprise')) {
-        _planType = 'enterprise';
+      _searchCtrl.text = queryToUse;
+      if (parsedStore != null || parsedClient != null || parsedPhone != null) {
+        _preview = WorkspaceLookupPreview(
+          workspaceId: _preview?.workspaceId ?? queryToUse,
+          storeName: parsedStore ?? _preview?.storeName ?? '',
+          ownerName: parsedClient ?? _preview?.ownerName ?? '',
+          phone: parsedPhone ?? _preview?.phone ?? '',
+          deviceId: parsedId ?? _preview?.deviceId ?? queryToUse,
+          activeDevices: _preview?.activeDevices ?? 1,
+          maxDevices: _maxDevices,
+          foundInCloud: true,
+        );
       }
     });
+
+    await _lookupWorkspace(queryToUse, silentError: true);
+    if (!mounted) return;
+    if (_preview != null &&
+        ((parsedStore ?? '').isNotEmpty ||
+            (parsedClient ?? '').isNotEmpty ||
+            (parsedPhone ?? '').isNotEmpty)) {
+      setState(() {
+        _preview = WorkspaceLookupPreview(
+          workspaceId: _preview!.workspaceId,
+          storeName: _preview!.storeName.isNotEmpty
+              ? _preview!.storeName
+              : (parsedStore ?? ''),
+          ownerName: _preview!.ownerName.isNotEmpty
+              ? _preview!.ownerName
+              : (parsedClient ?? ''),
+          phone: _preview!.phone.isNotEmpty
+              ? _preview!.phone
+              : (parsedPhone ?? ''),
+          deviceId: _preview!.deviceId,
+          fingerprint: _preview!.fingerprint,
+          activeDevices: _preview!.activeDevices,
+          maxDevices: _preview!.maxDevices,
+          planType: _preview!.planType,
+          status: _preview!.status,
+          expiresAtMs: _preview!.expiresAtMs,
+          rosterDevices: _preview!.rosterDevices,
+          foundInCloud: _preview!.foundInCloud,
+        );
+      });
+    }
+  }
+
+  Future<void> _pickExpiryDate() async {
+    final now = DateTime.now();
+    final initial = _expiresAt.isAfter(now)
+        ? _expiresAt
+        : now.add(const Duration(days: 30));
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: now.subtract(const Duration(days: 1)),
+      lastDate: DateTime(2099, 12, 31),
+    );
+    if (picked != null && mounted) {
+      setState(() {
+        _expiresAt = DateTime(
+          picked.year,
+          picked.month,
+          picked.day,
+          23,
+          59,
+          59,
+        );
+      });
+    }
+  }
+
+  Future<void> _activate() async {
+    final raw = (_preview?.workspaceId.isNotEmpty == true)
+        ? _preview!.workspaceId
+        : _searchCtrl.text.trim();
+    if (raw.isEmpty) {
+      setState(() => _error = 'أدخل كود الجهاز أو معرف المساحة أو رقم الهاتف أولاً');
+      return;
+    }
+
+    final parsedMax = int.tryParse(_maxDevicesCtrl.text.trim()) ?? _maxDevices;
+    final seats = parsedMax < 1 ? 1 : parsedMax;
+
+    setState(() {
+      _busy = true;
+      _error = null;
+      _result = null;
+    });
+
+    try {
+      final isTrial = _selectedPlan == 'trial';
+      final planType = seats > 1 ? 'enterprise' : 'individual';
+      final seedForKey = (_preview?.deviceId.isNotEmpty == true)
+          ? _preview!.deviceId
+          : raw;
+
+      final res = await Rtdb.instance.activate(
+        rawInput: raw,
+        planType: planType,
+        duration: _durationForPlan,
+        maxDevices: seats,
+        clientName: _preview?.ownerName ?? '',
+        storeName: _preview?.storeName ?? '',
+        phone: _preview?.phone ?? '',
+        licenseKey: generateLicenseKey(seedForKey),
+        customExpiresAtMs: _expiresAt.millisecondsSinceEpoch,
+        statusOverride: isTrial ? 'trial' : 'active',
+        respectMaxDevices: true,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _result = res;
+        _maxDevices = seats;
+      });
+      adminRefreshTick.value++;
+      await _lookupWorkspace(res.workspaceId, silentError: true);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final p = _preview;
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -625,9 +711,13 @@ class _ActivationScreenState extends State<ActivationScreen> {
                 Row(
                   children: [
                     const Expanded(
-                      child: Text('🔑 تفعيل أو تجديد ترخيص عميل',
-                          style: TextStyle(
-                              fontSize: 16, fontWeight: FontWeight.w800)),
+                      child: Text(
+                        '🔑 التفعيل الذكي وترقية التراخيص',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
                     ),
                     TextButton.icon(
                       onPressed: _pasteFromClipboard,
@@ -637,170 +727,280 @@ class _ActivationScreenState extends State<ActivationScreen> {
                   ],
                 ),
                 const SizedBox(height: 12),
+
+                // حقل البحث الذكي الموحد (device_id / ws_id / phone)
                 TextField(
-                  controller: _input,
-                  decoration: const InputDecoration(
-                    labelText: 'معرف الجهاز أو مساحة العمل *',
-                    hintText: 'مثال: DEVICE-ABC1234 أو بصمة 32 خانة',
-                    prefixIcon: Icon(Icons.phonelink),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _storeName,
-                  decoration: const InputDecoration(
-                    labelText: 'اسم المنشأة / المحل',
-                    hintText: 'سوبرماركت المدينة',
-                    prefixIcon: Icon(Icons.storefront_outlined),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _clientName,
-                  decoration: const InputDecoration(
-                    labelText: 'اسم العميل / المسؤول',
-                    hintText: 'محمد علي',
-                    prefixIcon: Icon(Icons.person_outline),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _phone,
-                  keyboardType: TextInputType.phone,
-                  decoration: const InputDecoration(
-                    labelText: 'رقم الهاتف / الواتساب',
-                    hintText: '771234567',
-                    prefixIcon: Icon(Icons.phone_outlined),
+                  controller: _searchCtrl,
+                  onChanged: _onQueryChanged,
+                  onSubmitted: (v) => _lookupWorkspace(v),
+                  decoration: InputDecoration(
+                    labelText:
+                        'بحث ذكي (كود الجهاز device_id أو المساحة ws_id أو الهاتف)',
+                    hintText: 'مثال: DEVICE-ABC1234 أو ws_... أو 771234567',
+                    prefixIcon: const Icon(Icons.manage_search_rounded),
+                    suffixIcon: _searching
+                        ? const Padding(
+                            padding: EdgeInsets.all(12),
+                            child: SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          )
+                        : Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (_searchCtrl.text.isNotEmpty)
+                                IconButton(
+                                  tooltip: 'مسح',
+                                  icon: const Icon(Icons.clear, size: 18),
+                                  onPressed: () {
+                                    _searchCtrl.clear();
+                                    setState(() {
+                                      _preview = null;
+                                      _error = null;
+                                      _result = null;
+                                    });
+                                  },
+                                ),
+                              IconButton(
+                                tooltip: 'استعلام فوري من السحابة',
+                                icon: const Icon(Icons.search_rounded,
+                                    color: Color(0xFF0284C7)),
+                                onPressed: () => _lookupWorkspace(),
+                              ),
+                            ],
+                          ),
                   ),
                 ),
                 const SizedBox(height: 14),
-                const Text('مدة الاشتراك:',
-                    style: TextStyle(fontWeight: FontWeight.w700)),
-                const SizedBox(height: 6),
-                DropdownButtonFormField<PlanDuration>(
-                  value: _duration,
-                  decoration: const InputDecoration(),
-                  items: PlanDuration.values
-                      .map((d) => DropdownMenuItem(
-                            value: d,
-                            child: Text(d.label),
-                          ))
-                      .toList(),
-                  onChanged: (v) => setState(() => _duration = v ?? _duration),
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: RadioListTile<String>(
-                        title: const Text('فردي'),
-                        value: 'individual',
-                        groupValue: _planType,
-                        onChanged: (v) =>
-                            setState(() => _planType = v ?? 'individual'),
-                      ),
+
+                // 1. بطاقة معاينة بيانات المنشأة المسترجعة تلقائياً
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: p != null
+                        ? const Color(0xFFF0F9FF)
+                        : const Color(0xFFF8FAFC),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: p != null
+                          ? const Color(0xFFBAE6FD)
+                          : const Color(0xFFE2E8F0),
                     ),
-                    Expanded(
-                      child: RadioListTile<String>(
-                        title: const Text('مؤسسة'),
-                        value: 'enterprise',
-                        groupValue: _planType,
-                        onChanged: (v) =>
-                            setState(() => _planType = v ?? 'enterprise'),
-                      ),
-                    ),
-                  ],
-                ),
-                if (_planType == 'enterprise') ...[
-                  const SizedBox(height: 8),
-                  Row(
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('عدد الأجهزة المصرحة:'),
-                      const SizedBox(width: 14),
-                      DropdownButton<int>(
-                        value: _maxDevices,
-                        items: [2, 3, 5, 10, 20]
-                            .map((n) => DropdownMenuItem(
-                                value: n, child: Text('$n أجهزة')))
-                            .toList(),
-                        onChanged: (v) =>
-                            setState(() => _maxDevices = v ?? 5),
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.storefront_rounded,
+                            color: p != null
+                                ? const Color(0xFF0284C7)
+                                : Colors.blueGrey,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text(
+                              'معاينة بيانات المنشأة المسترجعة تلقائياً',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w800,
+                                fontSize: 13.5,
+                              ),
+                            ),
+                          ),
+                          if (p != null)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: p.foundInCloud
+                                    ? const Color(0xFFDCFCE7)
+                                    : const Color(0xFFFEF3C7),
+                                borderRadius: BorderRadius.circular(99),
+                              ),
+                              child: Text(
+                                p.foundInCloud ? 'مسترجعة من السحابة ✓' : 'منشأة جديدة',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w800,
+                                  color: p.foundInCloud
+                                      ? const Color(0xFF15803D)
+                                      : const Color(0xFFB45309),
+                                ),
+                              ),
+                            ),
+                        ],
                       ),
+                      const SizedBox(height: 10),
+                      if (p == null)
+                        const Text(
+                          'أدخل كود الجهاز أو معرف مساحة العمل أو رقم الهاتف في حقل البحث أعلاه لجلب بيانات المنشأة تلقائياً من (/trials و /workspaces).',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.black54,
+                            height: 1.5,
+                          ),
+                        )
+                      else ...[
+                        _PreviewInfoRow(
+                          icon: Icons.store_mall_directory_outlined,
+                          label: 'اسم المتجر:',
+                          value: p.storeName.isNotEmpty
+                              ? p.storeName
+                              : 'غير مسمّى (${p.workspaceId})',
+                        ),
+                        const SizedBox(height: 6),
+                        _PreviewInfoRow(
+                          icon: Icons.person_outline,
+                          label: 'المالك:',
+                          value: p.ownerName.isNotEmpty ? p.ownerName : '—',
+                        ),
+                        const SizedBox(height: 6),
+                        _PreviewInfoRow(
+                          icon: Icons.phone_outlined,
+                          label: 'الهاتف:',
+                          value: p.phone.isNotEmpty ? p.phone : '—',
+                        ),
+                        const SizedBox(height: 6),
+                        _PreviewInfoRow(
+                          icon: Icons.devices_other_rounded,
+                          label: 'الأجهزة الحالية:',
+                          value:
+                              '${p.activeDevices} متصلة / ${p.maxDevices} مصرحة (${p.workspaceId})',
+                        ),
+                      ],
                     ],
                   ),
-                ],
-                const Divider(height: 28),
-                const Text('💰 بيانات الدفع والإيرادات:',
-                    style:
-                        TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
-                const SizedBox(height: 10),
+                ),
+                const SizedBox(height: 16),
+
+                // 2. اختيار نوع الخطة (سنوي / شهري / تجريبي)
+                const Text(
+                  'نوع الخطة:',
+                  style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13.5),
+                ),
+                const SizedBox(height: 8),
                 Row(
                   children: [
                     Expanded(
-                      flex: 3,
-                      child: TextField(
-                        controller: _amountCtrl,
-                        keyboardType:
-                            const TextInputType.numberWithOptions(decimal: true),
-                        decoration: const InputDecoration(
-                          labelText: 'المبلغ المدفوع / المحصل',
-                          hintText: '0',
-                          prefixIcon: Icon(Icons.attach_money_rounded),
-                        ),
+                      child: _PlanOptionTile(
+                        title: 'سنوي',
+                        subtitle: '365 يوماً',
+                        icon: Icons.workspace_premium_rounded,
+                        selected: _selectedPlan == 'annual',
+                        color: const Color(0xFF16A34A),
+                        onTap: () => _selectPlan('annual'),
                       ),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
-                      flex: 2,
-                      child: DropdownButtonFormField<String>(
-                        value: _currency,
-                        decoration: const InputDecoration(
-                          labelText: 'العملة',
-                        ),
-                        items: ['YER', 'SAR', 'USD']
-                            .map((c) =>
-                                DropdownMenuItem(value: c, child: Text(c)))
-                            .toList(),
-                        onChanged: (v) =>
-                            setState(() => _currency = v ?? _currency),
+                      child: _PlanOptionTile(
+                        title: 'شهري',
+                        subtitle: '30 يوماً',
+                        icon: Icons.calendar_month_rounded,
+                        selected: _selectedPlan == 'monthly',
+                        color: const Color(0xFF0284C7),
+                        onTap: () => _selectPlan('monthly'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _PlanOptionTile(
+                        title: 'تجريبي',
+                        subtitle: '14 يوماً',
+                        icon: Icons.hourglass_top_rounded,
+                        selected: _selectedPlan == 'trial',
+                        color: const Color(0xFFD97706),
+                        onTap: () => _selectPlan('trial'),
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 10),
-                DropdownButtonFormField<String>(
-                  value: _paymentMethod,
-                  decoration: const InputDecoration(
-                    labelText: 'طريقة الدفع',
-                    prefixIcon: Icon(Icons.payment_rounded),
-                  ),
-                  items: [
-                    'نقداً',
-                    'بنك الكريمي',
-                    'تحويل بنكي',
-                    'جيب',
-                    'ون كاش',
-                    'أخرى'
-                  ]
-                      .map((m) =>
-                          DropdownMenuItem(value: m, child: Text(m)))
-                      .toList(),
-                  onChanged: (v) =>
-                      setState(() => _paymentMethod = v ?? _paymentMethod),
+                const SizedBox(height: 16),
+
+                // 3. عدد الأجهزة المسموحة (max_devices)
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'عدد الأجهزة المسموحة (max_devices):',
+                        style: TextStyle(
+                            fontWeight: FontWeight.w800, fontSize: 13.5),
+                      ),
+                    ),
+                    IconButton.filledTonal(
+                      visualDensity: VisualDensity.compact,
+                      onPressed: _maxDevices > 1
+                          ? () => _setMaxDevices(_maxDevices - 1)
+                          : null,
+                      icon: const Icon(Icons.remove, size: 18),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 64,
+                      child: TextField(
+                        controller: _maxDevicesCtrl,
+                        textAlign: TextAlign.center,
+                        keyboardType: TextInputType.number,
+                        onChanged: (v) {
+                          final n = int.tryParse(v.trim());
+                          if (n != null && n > 0) {
+                            setState(() => _maxDevices = n);
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () => _setMaxDevices(_maxDevices + 1),
+                      icon: const Icon(Icons.add, size: 18),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _notesCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'ملاحظات الدفع (اختياري)',
-                    hintText: 'رقم الحوالة، اسم المودع، إلخ...',
-                    prefixIcon: Icon(Icons.note_alt_outlined),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [1, 2, 3, 5, 10, 20].map((n) {
+                    return ChoiceChip(
+                      label: Text(n == 1 ? 'جهاز واحد' : '$n أجهزة'),
+                      selected: _maxDevices == n,
+                      visualDensity: VisualDensity.compact,
+                      onSelected: (_) => _setMaxDevices(n),
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 16),
+
+                // 4. تاريخ الانتهاء (expires_at)
+                InkWell(
+                  onTap: _pickExpiryDate,
+                  borderRadius: BorderRadius.circular(12),
+                  child: InputDecorator(
+                    decoration: const InputDecoration(
+                      labelText: 'تاريخ الانتهاء (expires_at)',
+                      prefixIcon: Icon(Icons.event_available_rounded),
+                      suffixIcon: Icon(Icons.edit_calendar_rounded),
+                    ),
+                    child: Text(
+                      fmtDate(_expiresAt.millisecondsSinceEpoch),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 13.5,
+                      ),
+                    ),
                   ),
                 ),
-                const SizedBox(height: 18),
+                const SizedBox(height: 20),
+
+                // زر واحد للتنفيذ: «تفعيل وترقية الترخيص»
                 FilledButton.icon(
                   style: FilledButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    padding: const EdgeInsets.symmetric(vertical: 15),
                     backgroundColor: const Color(0xFF7C3AED),
                   ),
                   onPressed: _busy ? null : _activate,
@@ -809,12 +1009,17 @@ class _ActivationScreenState extends State<ActivationScreen> {
                           width: 18,
                           height: 18,
                           child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white))
-                      : const Icon(Icons.check_circle_outline),
-                  label: const Text('تفعيل الترخيص فوراً بالسحابة',
-                      style:
-                          TextStyle(fontSize: 14, fontWeight: FontWeight.w800)),
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.verified_rounded),
+                  label: const Text(
+                    'تفعيل وترقية الترخيص',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+                  ),
                 ),
+
                 if (_error != null) ...[
                   const SizedBox(height: 12),
                   Container(
@@ -823,10 +1028,13 @@ class _ActivationScreenState extends State<ActivationScreen> {
                       color: const Color(0xFFFEE2E2),
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: Text(_error!,
-                        style: const TextStyle(
-                            color: Color(0xFFDC2626),
-                            fontWeight: FontWeight.w700)),
+                    child: Text(
+                      _error!,
+                      style: const TextStyle(
+                        color: Color(0xFFDC2626),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
                   ),
                 ],
                 if (_result != null) ...[
@@ -836,6 +1044,9 @@ class _ActivationScreenState extends State<ActivationScreen> {
                     decoration: BoxDecoration(
                       color: const Color(0xFFE7F7EE),
                       borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: const Color(0xFF16A34A).withValues(alpha: 0.35),
+                      ),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -845,15 +1056,26 @@ class _ActivationScreenState extends State<ActivationScreen> {
                             Icon(Icons.verified,
                                 color: Color(0xFF16A34A), size: 20),
                             SizedBox(width: 6),
-                            Text('تم التفعيل بنجاح!',
-                                style: TextStyle(
-                                    fontWeight: FontWeight.w800,
-                                    color: Color(0xFF16A34A))),
+                            Text(
+                              'تم تفعيل وترقية الترخيص بنجاح!',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w800,
+                                color: Color(0xFF16A34A),
+                              ),
+                            ),
                           ],
                         ),
                         const SizedBox(height: 6),
                         Text(
-                            'المساحة: ${_result!.workspaceId}\nينتهي في: ${fmtDate(_result!.expiresAtMs, lifetime: _result!.lifetime)}'),
+                          'المساحة: ${_result!.workspaceId}\n'
+                          'الأجهزة المصرحة: ${_result!.maxDevices}\n'
+                          'ينتهي في: ${fmtDate(_result!.expiresAtMs, lifetime: _result!.lifetime)}',
+                          style: const TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                            height: 1.5,
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -863,6 +1085,108 @@ class _ActivationScreenState extends State<ActivationScreen> {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _PreviewInfoRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+
+  const _PreviewInfoRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 15, color: Colors.blueGrey),
+        const SizedBox(width: 6),
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            color: Colors.black54,
+          ),
+        ),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF0F172A),
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PlanOptionTile extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final bool selected;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _PlanOptionTile({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.selected,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+        decoration: BoxDecoration(
+          color: selected ? color.withValues(alpha: 0.12) : Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: selected ? color : const Color(0xFFE2E8F0),
+            width: selected ? 1.8 : 1.0,
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 20, color: selected ? color : Colors.blueGrey),
+            const SizedBox(height: 4),
+            Text(
+              title,
+              style: TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 13,
+                color: selected ? color : const Color(0xFF0F172A),
+              ),
+            ),
+            Text(
+              subtitle,
+              style: TextStyle(
+                fontSize: 11,
+                color: selected ? color : Colors.black54,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -1793,10 +2117,55 @@ class SubscriberCard extends StatelessWidget {
                 ),
               ],
             ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                InkWell(
+                  onTap: () => _showConnectedDevicesDialog(context),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0284C7).withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.devices_other_rounded,
+                            size: 13.5, color: Color(0xFF0284C7)),
+                        const SizedBox(width: 4),
+                        Text(
+                          'الأجهزة النشطة والمصرحة: ${s.activeDevices} / ${s.maxDevices}',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFF0284C7),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const Spacer(),
+                if (s.lastSeenAtMs > 0)
+                  Text(
+                    'آخر ظهور: ${fmtDate(s.lastSeenAtMs)}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.black54,
+                    ),
+                  ),
+              ],
+            ),
 
             const SizedBox(height: 10),
 
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
               children: [
                 OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(
@@ -1810,7 +2179,20 @@ class SubscriberCard extends StatelessWidget {
                       style: TextStyle(
                           fontSize: 12, fontWeight: FontWeight.w700)),
                 ),
-                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                  ),
+                  onPressed: () => _showConnectedDevicesDialog(context),
+                  icon: const Icon(Icons.groups_rounded, size: 16),
+                  label: Text(
+                    'أجهزة الموظفين (${s.activeDevices}/${s.maxDevices})',
+                    style: const TextStyle(
+                        fontSize: 12, fontWeight: FontWeight.w700),
+                  ),
+                ),
                 FilledButton.tonalIcon(
                   style: FilledButton.styleFrom(
                     visualDensity: VisualDensity.compact,
@@ -2070,23 +2452,42 @@ class SubscriberCard extends StatelessWidget {
       builder: (ctx) => FutureBuilder<List<ConnectedDevice>>(
         future: Rtdb.instance.getConnectedDevices(entry.workspaceId),
         builder: (ctx, snap) {
-          final devices = snap.data ?? [];
+          final fetched = snap.data ?? [];
+          final byId = <String, ConnectedDevice>{};
+          for (final d in [...entry.rosterDevices, ...fetched]) {
+            final k = d.deviceId.trim().toUpperCase();
+            if (k.isEmpty) continue;
+            final prev = byId[k];
+            if (prev == null || d.lastSeenAt > prev.lastSeenAt) {
+              byId[k] = d;
+            }
+          }
+          final devices = byId.values.toList()
+            ..sort((a, b) => b.lastSeenAt.compareTo(a.lastSeenAt));
+
           return AlertDialog(
-            title: const Row(
+            title: Row(
               children: [
-                Icon(Icons.devices, color: Color(0xFF2563EB)),
-                SizedBox(width: 8),
-                Text('أجهزة المنشأة المتصلة'),
+                const Icon(Icons.devices, color: Color(0xFF2563EB)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'تفاصيل المنشأة وأجهزة الموظفين (${devices.isEmpty ? entry.activeDevices : devices.length}/${entry.maxDevices})',
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+                  ),
+                ),
               ],
             ),
             content: SizedBox(
               width: double.maxFinite,
-              child: snap.connectionState == ConnectionState.waiting
+              child: snap.connectionState == ConnectionState.waiting &&
+                      entry.rosterDevices.isEmpty
                   ? const Center(child: CircularProgressIndicator())
                   : devices.isEmpty
                       ? const Padding(
                           padding: EdgeInsets.all(20),
-                          child: Text('لا توجد أجهزة متصلة مسجلة بعد', textAlign: TextAlign.center),
+                          child: Text('لا توجد أجهزة فرعية مسجلة في Roster Devices بعد',
+                              textAlign: TextAlign.center),
                         )
                       : ListView.separated(
                           shrinkWrap: true,
@@ -2095,17 +2496,31 @@ class SubscriberCard extends StatelessWidget {
                           itemBuilder: (ctx, i) {
                             final d = devices[i];
                             return ListTile(
-                              leading: const Icon(Icons.point_of_sale_rounded),
-                              title: Text(d.deviceName.isNotEmpty ? d.deviceName : d.deviceId),
+                              leading: Icon(
+                                d.isOwner
+                                    ? Icons.admin_panel_settings_rounded
+                                    : Icons.point_of_sale_rounded,
+                                color: d.isOwner
+                                    ? const Color(0xFF7C3AED)
+                                    : const Color(0xFF0284C7),
+                              ),
+                              title: Text(
+                                d.deviceName.isNotEmpty
+                                    ? d.deviceName
+                                    : d.deviceId,
+                                style: const TextStyle(fontWeight: FontWeight.w800),
+                              ),
                               subtitle: Text(
-                                'موديل: ${d.model} • نظام: ${d.platform}\nآخر ظهور: ${fmtDate(d.lastSeenAt)}',
+                                '${d.isOwner ? 'جهاز المالك' : 'جهاز عضو (Roster)'} • ${d.model} • ${d.platform}\nآخر ظهور: ${fmtDate(d.lastSeenAt)}',
                                 style: const TextStyle(fontSize: 11),
                               ),
                               trailing: IconButton(
                                 tooltip: 'طرد الجهاز (Kick)',
-                                icon: const Icon(Icons.delete_forever, color: Colors.red),
+                                icon: const Icon(Icons.delete_forever,
+                                    color: Colors.red),
                                 onPressed: () async {
-                                  await Rtdb.instance.kickDevice(entry.workspaceId, d.deviceId);
+                                  await Rtdb.instance.kickDevice(
+                                      entry.workspaceId, d.deviceId);
                                   if (ctx.mounted) Navigator.pop(ctx);
                                   onRefresh?.call();
                                 },
@@ -2115,7 +2530,9 @@ class SubscriberCard extends StatelessWidget {
                         ),
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إغلاق')),
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('إغلاق')),
             ],
           );
         },

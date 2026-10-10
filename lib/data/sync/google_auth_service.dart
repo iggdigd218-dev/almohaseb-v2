@@ -9,6 +9,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../../core/auth_config.dart';
+import '../../core/database.dart';
 import '../../core/token_cipher.dart';
 import '../../core/platform_info.dart';
 
@@ -267,7 +268,10 @@ class GoogleAuthService {
     try {
       await gs?.signOut().timeout(const Duration(seconds: 3));
     } catch (_) {}
-    await _clear();
+    try {
+      await _clear();
+    } catch (_) {}
+    await AppDatabase.instance.closeAndResetWorkspace();
   }
 
   GoogleUser _mapAccount(GoogleSignInAccount a, String? idToken) {

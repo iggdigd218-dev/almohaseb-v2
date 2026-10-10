@@ -668,10 +668,11 @@ class Rtdb {
   static int _msOf(Object? v) =>
       DateTime.tryParse(asStr(v))?.millisecondsSinceEpoch ?? asMs(v);
 
-  /// تحويل المدخل إلى معرف مساحة عمل — يقبل ثلاثة أشكال تلقائياً:
+  /// تحويل المدخل إلى معرف مساحة عمل — يقبل تلقائياً:
   ///  1) بصمة التفعيل (32 خانة hex) ⇒ فهرس trials/(fp).
-  ///  2) معرف الجهاز (DEVICE-XXXXXXXX) ⇒ بحث في roster كل المساحات.
-  ///  3) معرف مساحة العمل مباشرة ⇒ تحقق من وجود العقدة.
+  ///  2) رقم الهاتف ⇒ بحث في /trials و /workspaces/{ws}/subscription.
+  ///  3) معرف الجهاز (DEVICE-XXXXXXXX) ⇒ بحث في /trials و roster كل المساحات.
+  ///  4) معرف مساحة العمل مباشرة ⇒ تحقق من وجود العقدة أو الفهرس.
   Future<String> resolveWorkspaceId(String input) async {
     final id = input.trim();
     if (id.isEmpty) throw Exception('أدخل معرف الجهاز أو مساحة العمل أولاً');
@@ -682,6 +683,11 @@ class Rtdb {
       if (t is Map) {
         final ws = asStr(t['workspace_id'] ?? t['workspaceId']);
         if (ws.isNotEmpty) return ws;
+        final dev = asStr(t['device_id'] ?? t['deviceId']);
+        if (dev.isNotEmpty && clientOverride == null) {
+          final cleanDev = dev.toUpperCase().replaceAll(RegExp(r'[.#$\[\]/]'), '_');
+          return 'ws_$cleanDev';
+        }
       }
       if (clientOverride == null) {
         try {
@@ -758,11 +764,81 @@ class Rtdb {
       return await resolveWorkspaceId('DEVICE-$rawHex');
     }
 
+    // (1-د) إن كان الإدخال رقم هاتف، نبحث عنه في /trials ثم في /workspaces/{ws}/subscription
+    final normPhone = normalizeSubscriberPhone(id);
+    final looksLikePhone = normPhone.isNotEmpty &&
+        RegExp(r'^[\+\d\s\-\(\)]{7,18}$').hasMatch(id);
+    if (looksLikePhone) {
+      try {
+        final trials = await _get('trials');
+        if (trials is Map) {
+          String bestWs = '';
+          int bestTs = -1;
+          for (final v in trials.values) {
+            if (v is! Map) continue;
+            final p = normalizeSubscriberPhone(
+                asStr(v['phone'] ?? v['phone_number'] ?? v['whatsapp']));
+            final ws = asStr(v['workspace_id'] ?? v['workspaceId']);
+            if (p == normPhone && ws.isNotEmpty) {
+              final ts = asMs(v['updated_at'] ?? v['activated_at'] ?? v['expires_at']);
+              if (bestWs.isEmpty || ts >= bestTs) {
+                bestWs = ws;
+                bestTs = ts;
+              }
+            }
+          }
+          if (bestWs.isNotEmpty) return bestWs;
+        }
+      } catch (_) {}
+
+      try {
+        final keys = await _get('workspaces', {'shallow': 'true'});
+        final wsKeys = keys is Map
+            ? keys.keys
+                .map((k) => '$k')
+                .where((k) =>
+                    !k.startsWith('_') &&
+                    (clientOverride != null || k != 'default'))
+                .take(kMaxWorkspaceScan)
+                .toList()
+            : <String>[];
+        final matched = await _gather<MapEntry<String, int>>(
+          [
+            for (final ws in wsKeys)
+              () async {
+                final enc = Uri.encodeComponent(ws);
+                final sub = await _get('workspaces/$enc/subscription');
+                if (sub is Map) {
+                  final p = normalizeSubscriberPhone(asStr(
+                      sub['phone'] ?? sub['phone_number'] ?? sub['whatsapp']));
+                  if (p == normPhone) {
+                    return MapEntry(
+                      ws,
+                      asMs(sub['expires_at'] ?? sub['activated_at']),
+                    );
+                  }
+                }
+                if (clientOverride == null) {
+                  final req = await _get('workspaces/$enc/license_request');
+                  if (req is Map) {
+                    final p = normalizeSubscriberPhone(asStr(req['phone']));
+                    if (p == normPhone) {
+                      return MapEntry(ws, asMs(req['created_at']));
+                    }
+                  }
+                }
+                return null;
+              }
+          ],
+        );
+        if (matched.isNotEmpty) {
+          matched.sort((a, b) => b.value.compareTo(a.value));
+          return matched.first.key;
+        }
+      } catch (_) {}
+    }
+
     // (2) معرف جهاز DEVICE-… ⇒ بحث متعدد الطبقات + ربط تلقائي:
-    //     (أ) فهرس /trials (device_id)، (ب) مسح متوازٍ محدود لسجلات
-    //     التفعيل وroster كل مساحة، (ج) الربط التلقائي عند مرشح وحيد.
-    //     عند العثور عبر مسار غير مفهرس نكتب device_id في /trials
-    //     ليكون البحث القادم فورياً.
     if (RegExp(r'^DEVICE-', caseSensitive: false).hasMatch(id)) {
       final devId = id.toUpperCase();
 
@@ -770,11 +846,13 @@ class Rtdb {
       final trials = await _get('trials');
       final unlabeled = <String>{}; // مساحات بلا device_id في فهرسها.
       if (trials is Map) {
-        for (final v in trials.values) {
+        for (final e in trials.entries) {
+          final v = e.value;
           if (v is! Map) continue;
           final ws = asStr(v['workspace_id'] ?? v['workspaceId']);
           final entryDev = asStr(v['device_id'] ?? v['deviceId']).toUpperCase();
-          if (entryDev == devId && ws.isNotEmpty) {
+          if ((entryDev == devId || '${e.key}'.toUpperCase() == devId) &&
+              ws.isNotEmpty) {
             return ws;
           }
           if (ws.isNotEmpty && entryDev.isEmpty) {
@@ -784,17 +862,17 @@ class Rtdb {
       }
       if (clientOverride == null) {
         try {
-          final directIdx =
-              await _get('workspaces/_registry/device_index/${Uri.encodeComponent(devId)}');
+          final directIdx = await _get(
+              'workspaces/_registry/device_index/${Uri.encodeComponent(devId)}');
           if (directIdx is Map) {
-            final ws = asStr(directIdx['workspace_id'] ?? directIdx['workspaceId']);
+            final ws =
+                asStr(directIdx['workspace_id'] ?? directIdx['workspaceId']);
             if (ws.isNotEmpty) return ws;
           }
         } catch (_) {}
       }
 
-      // (ب) مسح المساحات — **طلب واحد** لمفاتيح المساحات (كان يُطلق مرتين
-      // في الشكل القديم) ثم مسح متوازٍ بسقف [kMaxWorkspaceScan].
+      // (ب) مسح المساحات — طلب واحد لمفاتيح المساحات ثم مسح متوازٍ بسقف [kMaxWorkspaceScan].
       final keys = await _get('workspaces', {'shallow': 'true'});
       final wsKeys = keys is Map
           ? keys.keys
@@ -834,10 +912,7 @@ class Rtdb {
             'رسالة العميل.');
       }
 
-      // (ج) الربط التلقائي — الجهاز الفردي لا يظهر في أي roster وسجله
-      // القديم في /trials بلا device_id بعد:
-      //   • مساحة وحيدة في القاعدة كلها ⇒ هي مساحة العميل حتماً.
-      //   • أو مرشح وحيد غير موسوم في الفهرس ⇒ نربطه به فوراً.
+      // (ج) الربط التلقائي
       if (wsKeys.length == 1) {
         await _linkDeviceToWorkspace(
             deviceId: devId, workspaceId: wsKeys.first);
@@ -849,9 +924,6 @@ class Rtdb {
         return ws;
       }
 
-      // في بيئة الإنتاج الحقيقية: إذا كان الجهاز جديداً ولم يسجل في السحابة بعد،
-      // نعتمد مساحة العمل الحتمية المشتقة من معرف الجهاز ليتم التفعيل فوراً
-      // ويلتقطها تطبيق العميل عبر مسار الترحيل التلقائي فور اتصاله بالإنترنت.
       if (clientOverride == null) {
         final cleanDev = devId.replaceAll(RegExp(r'[.#$\[\]/]'), '_');
         return 'ws_$cleanDev';
@@ -866,20 +938,191 @@ class Rtdb {
               'جرّب لصق «بصمة التفعيل» من رسالة العميل بدلاً منه.');
     }
 
-    // (3) معرف مساحة مباشر — نتحقق من وجود عقدة الاشتراك أو المساحة.
+    // (3) معرف مساحة مباشر — نتحقق من وجود عقدة الاشتراك أو المساحة أو سجل التجربة.
     final sub = await _get('workspaces/${Uri.encodeComponent(id)}/subscription');
     if (sub != null) return id;
     final ws =
         await _get('workspaces/${Uri.encodeComponent(id)}', {'shallow': 'true'});
     if (ws != null) return id;
+
+    // بحث في /trials عن مساحة تحمل نفس المعرف
+    try {
+      final trials = await _get('trials');
+      if (trials is Map) {
+        for (final e in trials.entries) {
+          final v = e.value;
+          if (v is! Map) continue;
+          final tWs = asStr(v['workspace_id'] ?? v['workspaceId']);
+          if (tWs.toLowerCase() == id.toLowerCase() && tWs.isNotEmpty) {
+            return tWs;
+          }
+        }
+      }
+    } catch (_) {}
+
     // إذا أدخل العميل أو المشرف الكود المختصر بدون بادئة DEVICE- (مثل FFNQXRJ3KDL9)
     if (clientOverride == null &&
-        RegExp(r'^[A-Z0-9]{8,20}$', caseSensitive: false).hasMatch(id)) {
+        RegExp(r'^[A-Z0-9]{6,24}$', caseSensitive: false).hasMatch(id) &&
+        !id.toLowerCase().startsWith('ws_') &&
+        !id.toLowerCase().startsWith('ws-')) {
       try {
         return await resolveWorkspaceId('DEVICE-${id.toUpperCase()}');
       } catch (_) {}
     }
+
+    // في بيئة الإنتاج: إذا أدخل المشرف معرف مساحة عمل يبدأ بـ ws_ أو WS- لم يُرفع بعد، نقبله فوراً
+    if (clientOverride == null &&
+        (id.startsWith('ws_') || id.toUpperCase().startsWith('WS-'))) {
+      return id;
+    }
+
     throw Exception('لا توجد مساحة عمل بهذا المعرف في قاعدة البيانات.');
+  }
+
+  /// استعلام ذكي فوري عن المنشأة عبر (device_id أو ws_id أو رقم الهاتف) من /trials و /workspaces.
+  Future<WorkspaceLookupPreview> lookupWorkspacePreview(String rawQuery) async {
+    final trimmed = rawQuery.trim();
+    if (trimmed.isEmpty) {
+      throw Exception('أدخل كود الجهاز أو معرف المساحة أو رقم الهاتف للبحث');
+    }
+
+    String ws = '';
+    try {
+      ws = await resolveWorkspaceId(trimmed);
+    } catch (_) {
+      if (RegExp(r'^DEVICE-', caseSensitive: false).hasMatch(trimmed)) {
+        final cleanDev =
+            trimmed.toUpperCase().replaceAll(RegExp(r'[.#$\[\]/]'), '_');
+        ws = 'ws_$cleanDev';
+      } else if (trimmed.startsWith('ws_') ||
+          trimmed.toUpperCase().startsWith('WS-')) {
+        ws = trimmed;
+      } else {
+        rethrow;
+      }
+    }
+
+    final enc = Uri.encodeComponent(ws);
+    Map? sub;
+    Map? trialEntry;
+    String trialFp = '';
+
+    try {
+      final s = await _get('workspaces/$enc/subscription');
+      if (s is Map) sub = s;
+    } catch (_) {}
+
+    try {
+      final trials = await _get('trials');
+      if (trials is Map) {
+        final normPhone = normalizeSubscriberPhone(trimmed);
+        for (final e in trials.entries) {
+          final v = e.value;
+          if (v is! Map) continue;
+          final vWs = asStr(v['workspace_id'] ?? v['workspaceId']);
+          final vDev = asStr(v['device_id'] ?? v['deviceId']);
+          final vPhone = normalizeSubscriberPhone(
+              asStr(v['phone'] ?? v['phone_number'] ?? v['whatsapp']));
+          if (vWs == ws ||
+              (vDev.isNotEmpty &&
+                  vDev.toUpperCase() == trimmed.toUpperCase()) ||
+              ('${e.key}'.toLowerCase() == trimmed.toLowerCase()) ||
+              (normPhone.isNotEmpty && vPhone == normPhone)) {
+            trialEntry = v;
+            trialFp = '${e.key}';
+            break;
+          }
+        }
+      }
+    } catch (_) {}
+
+    final rosterList = await getConnectedDevices(ws);
+
+    String storeName = asStr(sub?['storeName'] ??
+        sub?['store_name'] ??
+        sub?['businessName'] ??
+        trialEntry?['storeName'] ??
+        trialEntry?['store_name'] ??
+        trialEntry?['businessName']);
+    String ownerName = asStr(sub?['clientName'] ??
+        sub?['client_name'] ??
+        sub?['owner_name'] ??
+        sub?['userName'] ??
+        trialEntry?['clientName'] ??
+        trialEntry?['client_name'] ??
+        trialEntry?['owner_name'] ??
+        trialEntry?['userName']);
+    String phone = asStr(sub?['phone'] ??
+        sub?['phone_number'] ??
+        sub?['whatsapp'] ??
+        trialEntry?['phone'] ??
+        trialEntry?['phone_number'] ??
+        trialEntry?['whatsapp']);
+    String devId = asStr(sub?['deviceId'] ??
+        sub?['device_id'] ??
+        sub?['deviceRef'] ??
+        sub?['device_ref'] ??
+        trialEntry?['device_id'] ??
+        trialEntry?['deviceId']);
+
+    if (storeName.isEmpty || ownerName.isEmpty || phone.isEmpty || devId.isEmpty) {
+      try {
+        final req = await _get('workspaces/$enc/license_request');
+        if (req is Map) {
+          if (storeName.isEmpty) {
+            storeName = asStr(req['storeName'] ?? req['store_name']);
+          }
+          if (ownerName.isEmpty) {
+            ownerName = asStr(req['clientName'] ?? req['client_name']);
+          }
+          if (phone.isEmpty) phone = asStr(req['phone']);
+          if (devId.isEmpty) {
+            devId = asStr(req['deviceId'] ?? req['device_id']);
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (devId.isEmpty && rosterList.isNotEmpty) {
+      devId = rosterList.first.deviceId;
+    }
+    if (devId.isEmpty &&
+        RegExp(r'^DEVICE-', caseSensitive: false).hasMatch(trimmed)) {
+      devId = trimmed.toUpperCase();
+    }
+
+    final fp = asStr(sub?['device_fingerprint'] ?? trialFp);
+    final activeCount = rosterList.isNotEmpty
+        ? rosterList.length
+        : asInt(sub?['active_devices'] ?? trialEntry?['active_devices'], 1);
+    final maxDevs =
+        asInt(sub?['max_devices'] ?? trialEntry?['max_devices'], 1);
+    final status =
+        asStr(sub?['status'] ?? trialEntry?['status'] ?? 'trial');
+    final planType = asStr(sub?['plan_type'] ??
+        sub?['planType'] ??
+        trialEntry?['plan_type'] ??
+        (maxDevs > 1 ? 'enterprise' : 'individual'));
+    final expiresAt = asMs(sub?['expires_at'] ??
+        sub?['expiryDate'] ??
+        trialEntry?['expires_at'] ??
+        trialEntry?['expiryDate']);
+
+    return WorkspaceLookupPreview(
+      workspaceId: ws,
+      storeName: storeName,
+      ownerName: ownerName,
+      phone: phone,
+      deviceId: devId,
+      fingerprint: fp,
+      activeDevices: activeCount < 1 ? 1 : activeCount,
+      maxDevices: maxDevs < 1 ? 1 : maxDevs,
+      planType: planType,
+      status: status.isEmpty ? 'trial' : status,
+      expiresAtMs: expiresAt,
+      rosterDevices: rosterList,
+      foundInCloud: sub != null || trialEntry != null || rosterList.isNotEmpty,
+    );
   }
 
   /// (الربط التلقائي) وسم سجل /trials الخاص بالمساحة بمعرف الجهاز —
@@ -915,9 +1158,25 @@ class Rtdb {
     String storeName = '',
     String phone = '',
     String licenseKey = '',
+    int? customExpiresAtMs,
+    String? statusOverride,
+    bool respectMaxDevices = false,
   }) async {
-    final plan = planType == 'enterprise' ? 'enterprise' : 'individual';
-    final seats = plan == 'enterprise' ? (maxDevices < 2 ? 2 : maxDevices) : 1;
+    final int seats;
+    final String plan;
+    if (respectMaxDevices) {
+      seats = maxDevices < 1 ? 1 : maxDevices;
+      plan = (planType == 'enterprise' || seats > 1)
+          ? 'enterprise'
+          : 'individual';
+    } else {
+      plan = planType == 'enterprise' ? 'enterprise' : 'individual';
+      seats = plan == 'enterprise' ? (maxDevices < 2 ? 2 : maxDevices) : 1;
+    }
+    final effectiveStatus = (statusOverride != null && statusOverride.trim().isNotEmpty)
+        ? statusOverride.trim()
+        : (duration == PlanDuration.trial ? 'trial' : 'active');
+
     final ws = await resolveWorkspaceId(rawInput);
     final now = await serverNowMs();
     final lifetime = duration == PlanDuration.lifetime;
@@ -931,11 +1190,13 @@ class Rtdb {
         if (curExp > now) base = curExp;
       }
     }
-    final expires = base + duration.span.inMilliseconds;
+    final expires = (customExpiresAtMs != null && customExpiresAtMs > 0)
+        ? customExpiresAtMs
+        : (base + duration.span.inMilliseconds);
 
     final subPayload = <String, dynamic>{
-      'status': 'active',
-      'is_active': true,
+      'status': effectiveStatus,
+      'is_active': effectiveStatus == 'active',
       'is_frozen': false,
       'plan_type': plan,
       'max_devices': seats,
@@ -988,12 +1249,35 @@ class Rtdb {
     try {
       final cur = await _get('workspaces/$enc/subscription');
       final fp = cur is Map ? asStr(cur['device_fingerprint']) : '';
+      final trialPatch = <String, dynamic>{
+        'status': effectiveStatus,
+        'expires_at': expires,
+        'workspace_id': ws,
+        'plan_type': plan,
+        'max_devices': seats,
+        'updated_at': now,
+        if (clientName.trim().isNotEmpty) 'client_name': clientName.trim(),
+        if (storeName.trim().isNotEmpty) 'store_name': storeName.trim(),
+        if (phone.trim().isNotEmpty) 'phone': phone.trim(),
+      };
       if (fp.isNotEmpty) {
-        await _patch('trials/${Uri.encodeComponent(fp)}', {
-          'status': 'active',
-          'expires_at': expires,
-          'workspace_id': ws,
-        });
+        await _patch('trials/${Uri.encodeComponent(fp)}', trialPatch);
+      } else if (clientOverride == null) {
+        final trials = await _get('trials');
+        var patchedAny = false;
+        if (trials is Map) {
+          for (final e in trials.entries) {
+            final v = e.value;
+            if (v is Map && asStr(v['workspace_id'] ?? v['workspaceId']) == ws) {
+              await _patch(
+                  'trials/${Uri.encodeComponent('${e.key}')}', trialPatch);
+              patchedAny = true;
+            }
+          }
+        }
+        if (!patchedAny) {
+          await _patch('trials/${Uri.encodeComponent(ws)}', trialPatch);
+        }
       }
     } catch (_) {}
 
@@ -1043,8 +1327,38 @@ class Rtdb {
       [for (final ws in wsKeys) () => _readWorkspaceEntries(ws)],
     );
     final raw = rows.expand((r) => r).toList();
+
+    // استبعاد أي عقدة فرعية لجهاز عضو مسجل ضمن roster منشأة أخرى (Workspace-Level Licensing)
+    final memberDeviceIdsInRosters = <String>{};
+    for (final entry in raw) {
+      for (final d in entry.rosterDevices) {
+        final devKey = d.deviceId.trim().toUpperCase();
+        if (devKey.isEmpty) continue;
+        // إذا كان الجهاز عضواً داخل منشأة أخرى (ليس نفس معرف المساحة الفردية)
+        if (!d.isOwner || entry.rosterDevices.length > 1) {
+          final derivedWs =
+              'ws_${devKey.replaceAll(RegExp(r'[.#$\[\]/]'), '_')}';
+          if (entry.workspaceId.toUpperCase() != derivedWs.toUpperCase() &&
+              entry.workspaceId.toUpperCase() != devKey) {
+            memberDeviceIdsInRosters.add(devKey);
+          }
+        }
+      }
+    }
+
+    final orgOnly = raw.where((entry) {
+      final dev = entry.deviceId.trim().toUpperCase();
+      final wsUpper = entry.workspaceId.trim().toUpperCase();
+      if (dev.isNotEmpty &&
+          memberDeviceIdsInRosters.contains(dev) &&
+          (wsUpper == 'WS_$dev' || wsUpper == dev)) {
+        return false;
+      }
+      return true;
+    }).toList();
+
     // ترتيب: الحسابات الفعالة أولاً، ثم الأطول مدة والأحدث نشاطاً
-    raw.sort((a, b) {
+    orgOnly.sort((a, b) {
       final aActive = a.status == 'active' ? 1 : 0;
       final bActive = b.status == 'active' ? 1 : 0;
       final cmp = bActive.compareTo(aActive);
@@ -1054,31 +1368,40 @@ class Rtdb {
       return b.activatedAtMs.compareTo(a.activatedAtMs);
     });
 
-    // دمج التكرارات تلقائياً: إذا ظهر نفس المتجر بنفس الهاتف أو نفس الجهاز،
-    // نُبقي السجل الأحدث والفعال فقط ونستبعد النسخ الميتة الناتجة عن تكرار التثبيت.
-    final seenKeys = <String>{};
+    // تجميع ودمج سجلات المشتركين بمعرف المساحة (workspace_id) أو برقم الهاتف الموحّد (phone) أو الجهاز:
+    // لعرض بطاقة واحدة موحدة لكل مؤسسة/عميل مع دمج الأجهزة التابعة له وآخر ظهور وتاريخ الانتهاء.
     final out = <SubscriberEntry>[];
+    final indexByKey = <String, int>{};
 
-    for (final entry in raw) {
-      if (seenKeys.contains('ws:${entry.workspaceId}')) continue;
-
+    for (final entry in orgOnly) {
+      final wsKey = 'ws:${entry.workspaceId.trim().toLowerCase()}';
+      final normPhone = normalizeSubscriberPhone(entry.phone);
+      final phoneKey = normPhone.isNotEmpty ? 'phone:$normPhone' : '';
       final dev = entry.deviceId.trim().toUpperCase();
-      final storeName = entry.storeName.trim();
-      final phone = entry.phone.trim();
-      final storePhone = '${storeName}_$phone';
+      final devKey =
+          (dev.isNotEmpty && dev.startsWith('DEVICE-')) ? 'dev:$dev' : '';
 
-      if (dev.isNotEmpty && dev.startsWith('DEVICE-')) {
-        if (seenKeys.contains('dev:$dev')) continue;
-        seenKeys.add('dev:$dev');
+      int? existingIdx = indexByKey[wsKey];
+      if (existingIdx == null && phoneKey.isNotEmpty) {
+        existingIdx = indexByKey[phoneKey];
+      }
+      if (existingIdx == null && devKey.isNotEmpty) {
+        existingIdx = indexByKey[devKey];
       }
 
-      if (storeName.isNotEmpty && phone.isNotEmpty) {
-        if (seenKeys.contains('sp:$storePhone')) continue;
-        seenKeys.add('sp:$storePhone');
+      if (existingIdx != null) {
+        final merged = out[existingIdx].mergeWith(entry);
+        out[existingIdx] = merged;
+        indexByKey[wsKey] = existingIdx;
+        if (phoneKey.isNotEmpty) indexByKey[phoneKey] = existingIdx;
+        if (devKey.isNotEmpty) indexByKey[devKey] = existingIdx;
+      } else {
+        final newIdx = out.length;
+        out.add(entry);
+        indexByKey[wsKey] = newIdx;
+        if (phoneKey.isNotEmpty) indexByKey[phoneKey] = newIdx;
+        if (devKey.isNotEmpty) indexByKey[devKey] = newIdx;
       }
-
-      seenKeys.add('ws:${entry.workspaceId}');
-      out.add(entry);
     }
 
     return out.take(limit).toList();
@@ -1092,11 +1415,37 @@ class Rtdb {
       if (sub is Map) live = sub;
     } catch (_) {}
 
+    // حصر القائمة على المنشآت فقط: استبعاد أي عقدة تخص جهاز عضو منفرد
+    if (live != null) {
+      final role = asStr(
+              live['role'] ?? live['workspace_mode'] ?? live['device_role'])
+          .toLowerCase();
+      if (role == 'member' || live['is_member'] == true) {
+        return const [];
+      }
+    }
+
+    // قراءة أجهزة المنشأة (Roster Devices) كقائمة فرعية داخل تفاصيل المنشأة فقط
+    final rosterById = <String, ConnectedDevice>{};
+    try {
+      final roster = await _get('workspaces/$enc/roster');
+      if (roster is Map) {
+        for (final e in roster.entries) {
+          final id = '${e.key}'.trim();
+          if (id.isEmpty || e.value is! Map) continue;
+          final r = e.value as Map;
+          if (asInt(r['revoked']) == 1 || r['revoked'] == true) continue;
+          rosterById[id.toUpperCase()] = ConnectedDevice.fromJson(id, r);
+        }
+      }
+    } catch (_) {}
+
     String storeFallback = asStr(live?['storeName'] ??
         live?['store_name'] ??
         live?['businessName']);
     String clientFallback = asStr(live?['clientName'] ??
         live?['client_name'] ??
+        live?['owner_name'] ??
         live?['userName']);
     String phoneFallback = asStr(live?['phone'] ??
         live?['phone_number'] ??
@@ -1106,13 +1455,22 @@ class Rtdb {
         live?['deviceRef'] ??
         live?['device_ref']);
 
-    // استخراج تكميلي من الأجهزة المتصلة إن كانت بيانات المنشأة فارغة
-    if (storeFallback.isEmpty || clientFallback.isEmpty || phoneFallback.isEmpty || devIdFallback.isEmpty) {
+    if (clientOverride == null &&
+        (storeFallback.isEmpty ||
+            clientFallback.isEmpty ||
+            phoneFallback.isEmpty ||
+            devIdFallback.isEmpty ||
+            rosterById.isEmpty)) {
       try {
         final devs = await _get('workspaces/$enc/devices');
         if (devs is Map && devs.isNotEmpty) {
-          for (final dv in devs.values) {
+          for (final e in devs.entries) {
+            final id = '${e.key}'.trim();
+            final dv = e.value;
             if (dv is Map) {
+              if (id.isNotEmpty && !rosterById.containsKey(id.toUpperCase())) {
+                rosterById[id.toUpperCase()] = ConnectedDevice.fromJson(id, dv);
+              }
               if (storeFallback.isEmpty) {
                 storeFallback = asStr(dv['storeName'] ?? dv['store_name']);
               }
@@ -1126,7 +1484,7 @@ class Rtdb {
                 phoneFallback = asStr(dv['phone'] ?? dv['phone_number']);
               }
               if (devIdFallback.isEmpty) {
-                devIdFallback = asStr(dv['deviceId'] ?? dv['device_id']);
+                devIdFallback = asStr(dv['deviceId'] ?? dv['device_id'] ?? id);
               }
             }
           }
@@ -1134,8 +1492,11 @@ class Rtdb {
       } catch (_) {}
     }
 
-    // استخراج تكميلي من طلبات التفعيل إن كانت ما زالت فارغة
-    if (storeFallback.isEmpty || clientFallback.isEmpty || phoneFallback.isEmpty || devIdFallback.isEmpty) {
+    if (clientOverride == null &&
+        (storeFallback.isEmpty ||
+            clientFallback.isEmpty ||
+            phoneFallback.isEmpty ||
+            devIdFallback.isEmpty)) {
       try {
         final req = await _get('workspaces/$enc/license_request');
         if (req is Map) {
@@ -1155,86 +1516,130 @@ class Rtdb {
       } catch (_) {}
     }
 
+    // قراءة السجل الإداري كمرجع تكميلي وتجميعه في كيان منشأة واحد فقط (بدون تكرار بطاقات)
+    Map? latestLog;
+    int latestLogActivatedAt = 0;
     try {
       final logs = await _get('workspaces/$enc/admin_log');
       if (logs is Map) {
-        final out = <SubscriberEntry>[];
         for (final e in logs.entries) {
           final v = e.value;
           if (v is! Map) continue;
-          final devRef = asStr(v['device_ref'] ??
-              live?['device_id'] ??
-              live?['deviceId'] ??
-              devIdFallback);
-
-          final resolvedStore = asStr(live?['storeName'] ??
-              live?['store_name'] ??
-              v['store_name'] ??
-              v['storeName'] ??
-              storeFallback);
-          final resolvedClient = asStr(live?['clientName'] ??
-              live?['client_name'] ??
-              v['client_name'] ??
-              v['clientName'] ??
-              clientFallback);
-          final resolvedPhone = asStr(live?['phone'] ??
-              live?['phone_number'] ??
-              v['phone'] ??
-              v['phone_number'] ??
-              phoneFallback);
-
-          out.add(SubscriberEntry(
-            workspaceId: ws,
-            planType: _pick(live?['plan_type'], v['plan_type'], 'individual'),
-            status: _pick(live?['status'], null, 'active'),
-            maxDevices: asInt(
-                _firstNum(live?['max_devices'], v['max_devices']), 1),
-            expiresAtMs: asMs(
-                _firstNum(live?['expires_at'], v['expires_at'])),
-            activatedAtMs: asMs(v['activated_at']) > 0
-                ? asMs(v['activated_at'])
-                : asMs(e.key),
-            deviceRef: devRef,
-            clientName: resolvedClient,
-            storeName: resolvedStore,
-            phone: resolvedPhone,
-            deviceId: devRef,
-            licenseKey: asStr(live?['licenseKey'] ??
-                live?['license_key'] ??
-                v['license_key'] ??
-                v['licenseKey']),
-            isFrozen: live?['is_frozen'] == true || live?['frozen'] == true,
-            featureFlags: (live?['features'] is Map)
-                ? (live!['features'] as Map)
-                    .map((k, val) => MapEntry('$k', val == true))
-                : const {},
-          ));
+          final actAt = asMs(v['activated_at']) > 0
+              ? asMs(v['activated_at'])
+              : asMs(e.key);
+          if (latestLog == null || actAt >= latestLogActivatedAt) {
+            latestLog = v;
+            latestLogActivatedAt = actAt;
+          }
+          final logDev = asStr(v['device_ref']).trim();
+          if (logDev.isNotEmpty &&
+              !rosterById.containsKey(logDev.toUpperCase())) {
+            rosterById[logDev.toUpperCase()] = ConnectedDevice(
+              deviceId: logDev,
+              deviceName: logDev,
+              model: 'جهاز مسجل',
+              platform: 'Android',
+              lastSeenAt: actAt,
+            );
+          }
         }
-        return out;
       }
     } catch (_) {}
-    if (live != null) {
-      final baseEntry = SubscriberEntry.fromSubscriptionMap(ws, live);
-      return [
-        SubscriberEntry(
-          workspaceId: baseEntry.workspaceId,
-          planType: baseEntry.planType,
-          status: baseEntry.status,
-          maxDevices: baseEntry.maxDevices,
-          expiresAtMs: baseEntry.expiresAtMs,
-          activatedAtMs: baseEntry.activatedAtMs,
-          deviceRef: baseEntry.deviceRef.isNotEmpty ? baseEntry.deviceRef : devIdFallback,
-          clientName: baseEntry.clientName.isNotEmpty ? baseEntry.clientName : clientFallback,
-          storeName: baseEntry.storeName.isNotEmpty ? baseEntry.storeName : storeFallback,
-          phone: baseEntry.phone.isNotEmpty ? baseEntry.phone : phoneFallback,
-          deviceId: baseEntry.deviceId.isNotEmpty ? baseEntry.deviceId : devIdFallback,
-          licenseKey: baseEntry.licenseKey,
-          isFrozen: baseEntry.isFrozen,
-          featureFlags: baseEntry.featureFlags,
-        ),
-      ];
+
+    if (live == null && latestLog == null) {
+      return const [];
     }
-    return const [];
+
+    final devRef = asStr(live?['device_id'] ??
+        live?['deviceId'] ??
+        live?['device_ref'] ??
+        live?['deviceRef'] ??
+        latestLog?['device_ref'] ??
+        devIdFallback);
+    if (devRef.isNotEmpty && !rosterById.containsKey(devRef.toUpperCase())) {
+      rosterById[devRef.toUpperCase()] = ConnectedDevice(
+        deviceId: devRef,
+        deviceName: devRef,
+        model: 'جهاز المالك',
+        platform: 'Android',
+        lastSeenAt: asMs(live?['last_seen_at'] ??
+            live?['updated_at'] ??
+            live?['activated_at'] ??
+            latestLogActivatedAt),
+        isOwner: true,
+      );
+    }
+
+    final rosterList = rosterById.values.toList()
+      ..sort((a, b) => b.lastSeenAt.compareTo(a.lastSeenAt));
+
+    var maxLastSeen = asMs(live?['last_seen_at'] ??
+        live?['lastSeenAt'] ??
+        live?['updated_at'] ??
+        live?['activated_at'] ??
+        latestLogActivatedAt);
+    for (final d in rosterList) {
+      if (d.lastSeenAt > maxLastSeen) maxLastSeen = d.lastSeenAt;
+    }
+
+    final resolvedStore = asStr(live?['storeName'] ??
+        live?['store_name'] ??
+        latestLog?['store_name'] ??
+        latestLog?['storeName'] ??
+        storeFallback);
+    final resolvedClient = asStr(live?['clientName'] ??
+        live?['client_name'] ??
+        live?['owner_name'] ??
+        latestLog?['client_name'] ??
+        latestLog?['clientName'] ??
+        clientFallback);
+    final resolvedPhone = asStr(live?['phone'] ??
+        live?['phone_number'] ??
+        latestLog?['phone'] ??
+        latestLog?['phone_number'] ??
+        phoneFallback);
+
+    final rawKey = asStr(live?['licenseKey'] ??
+        live?['license_key'] ??
+        latestLog?['license_key'] ??
+        latestLog?['licenseKey']);
+    final resolvedKey = rawKey.isNotEmpty
+        ? rawKey
+        : generateLicenseKey(devRef.isNotEmpty ? devRef : ws);
+
+    final activeCount = rosterList.isNotEmpty
+        ? rosterList.length
+        : asInt(live?['active_devices'], 1);
+
+    return [
+      SubscriberEntry(
+        workspaceId: ws,
+        planType: _pick(live?['plan_type'], latestLog?['plan_type'], 'individual'),
+        status: _pick(live?['status'], null, 'active'),
+        maxDevices: asInt(
+            _firstNum(live?['max_devices'], latestLog?['max_devices']), 1),
+        activeDevices: activeCount < 1 ? 1 : activeCount,
+        expiresAtMs: asMs(
+            _firstNum(live?['expires_at'], latestLog?['expires_at'])),
+        activatedAtMs: asMs(live?['activated_at']) > 0
+            ? asMs(live?['activated_at'])
+            : latestLogActivatedAt,
+        lastSeenAtMs: maxLastSeen,
+        deviceRef: devRef,
+        clientName: resolvedClient,
+        storeName: resolvedStore,
+        phone: resolvedPhone,
+        deviceId: devRef,
+        licenseKey: resolvedKey,
+        isFrozen: live?['is_frozen'] == true || live?['frozen'] == true,
+        featureFlags: (live?['features'] is Map)
+            ? (live!['features'] as Map)
+                .map((k, val) => MapEntry('$k', val == true))
+            : const {},
+        rosterDevices: rosterList,
+      ),
+    ];
   }
 
   // ==================== أفعال التحكم عن بعد (Remote Actions) ====================
@@ -1275,47 +1680,38 @@ class Rtdb {
     await _patch('workspaces/$enc/subscription', payload);
   }
 
-  /// 4. الأجهزة المتصلة وطرد جهاز (Multi-Device Management)
+  /// 4. الأجهزة المتصلة وطرد جهاز (Multi-Device Management — Roster Devices)
   Future<List<ConnectedDevice>> getConnectedDevices(String wsId) async {
     final enc = Uri.encodeComponent(wsId);
-    final res = await _get('workspaces/$enc/devices');
     final byId = <String, ConnectedDevice>{};
-    if (res is Map) {
-      for (final e in res.entries) {
-        if (e.value is Map) {
-          final d = ConnectedDevice.fromJson('${e.key}', e.value as Map);
-          byId[d.deviceId] = d;
-        }
-      }
-    }
-    if (clientOverride == null) {
-      try {
-        final roster = await _get('workspaces/$enc/roster');
-        if (roster is Map) {
-          for (final e in roster.entries) {
-            final id = '${e.key}';
-            if (!byId.containsKey(id) && e.value is Map) {
-              final r = e.value as Map;
-              byId[id] = ConnectedDevice(
-                deviceId: id,
-                deviceName: asStr(r['device_name'] ?? r['name']).isNotEmpty
-                    ? asStr(r['device_name'] ?? r['name'])
-                    : id,
-                platform: asStr(r['platform']).isNotEmpty
-                    ? asStr(r['platform'])
-                    : 'Android',
-                model: asStr(r['model']).isNotEmpty
-                    ? asStr(r['model'])
-                    : (asInt(r['is_owner']) == 1 ? 'جهاز المدير' : 'جهاز عضو'),
-                lastSeenAt: _msOf(
-                    r['last_seen_at'] ?? r['last_sync_at'] ?? r['updated_at']),
-              );
-            }
+    try {
+      final res = await _get('workspaces/$enc/devices');
+      if (res is Map) {
+        for (final e in res.entries) {
+          if (e.value is Map) {
+            final d = ConnectedDevice.fromJson('${e.key}', e.value as Map);
+            byId[d.deviceId.toUpperCase()] = d;
           }
         }
-      } catch (_) {}
-    }
-    return byId.values.toList();
+      }
+    } catch (_) {}
+    try {
+      final roster = await _get('workspaces/$enc/roster');
+      if (roster is Map) {
+        for (final e in roster.entries) {
+          final id = '${e.key}'.trim();
+          if (id.isEmpty || e.value is! Map) continue;
+          final r = e.value as Map;
+          if (asInt(r['revoked']) == 1 || r['revoked'] == true) continue;
+          if (!byId.containsKey(id.toUpperCase())) {
+            byId[id.toUpperCase()] = ConnectedDevice.fromJson(id, r);
+          }
+        }
+      }
+    } catch (_) {}
+    final list = byId.values.toList()
+      ..sort((a, b) => b.lastSeenAt.compareTo(a.lastSeenAt));
+    return list;
   }
 
   Future<void> kickDevice(String wsId, String deviceId) async {

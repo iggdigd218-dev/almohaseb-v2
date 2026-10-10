@@ -30,6 +30,7 @@ enum LicenseStatus {
 
 /// مدد خطط الاشتراك المتاحة للتفعيل أو التمديد.
 enum PlanDuration {
+  trial('تجريبي (14 يوماً)', Duration(days: 14)),
   month('شهر واحد', Duration(days: 30)),
   quarter('3 أشهر', Duration(days: 90)),
   semi('6 أشهر', Duration(days: 180)),
@@ -48,9 +49,35 @@ int asInt(Object? v, [int dflt = 0]) {
   return dflt;
 }
 
-int asMs(Object? v) => asInt(v, 0);
+int asMs(Object? v) {
+  if (v == null) return 0;
+  final direct = asInt(v, 0);
+  if (direct > 0) return direct;
+  final str = asStr(v);
+  if (str.isEmpty) return 0;
+  return DateTime.tryParse(str)?.millisecondsSinceEpoch ?? 0;
+}
 
 String asStr(Object? v) => v == null ? '' : '$v'.trim();
+
+/// تطبيع رقم الهاتف لمنع تكرار الحسابات بنفس الرقم بغض النظر عن صيغة المفتاح الدولي أو المسافات.
+String normalizeSubscriberPhone(String raw) {
+  var digits = raw.replaceAll(RegExp(r'[^0-9]'), '');
+  if (digits.isEmpty) return '';
+  if (digits.startsWith('00967') && digits.length > 9) {
+    digits = digits.substring(5);
+  } else if (digits.startsWith('967') && digits.length > 9) {
+    digits = digits.substring(3);
+  } else if (digits.startsWith('00966') && digits.length > 9) {
+    digits = digits.substring(5);
+  } else if (digits.startsWith('966') && digits.length > 9) {
+    digits = digits.substring(3);
+  }
+  while (digits.startsWith('0') && digits.length > 9) {
+    digits = digits.substring(1);
+  }
+  return digits.length >= 7 ? digits : '';
+}
 
 /// توليد كود ترخيص قياسي منظم من معرف الجهاز أو البصمة.
 /// صيغة الكود: NX-XXXX-XXXX-XXXX
@@ -202,14 +229,16 @@ class ActivationResult {
   });
 }
 
-/// سجل مشترك للعرض في قائمة المشتركين.
+/// سجل مشترك موحّد على مستوى المنشأة للعرض في قائمة المشتركين.
 class SubscriberEntry {
   final String workspaceId;
   final String planType;
   final String status;
   final int maxDevices;
+  final int activeDevices;
   final int expiresAtMs;
   final int activatedAtMs;
+  final int lastSeenAtMs;
   final String deviceRef;
   final String clientName;
   final String storeName;
@@ -218,6 +247,7 @@ class SubscriberEntry {
   final String licenseKey;
   final bool isFrozen;
   final Map<String, bool> featureFlags;
+  final List<ConnectedDevice> rosterDevices;
 
   int get expiryDate => expiresAtMs;
 
@@ -229,6 +259,8 @@ class SubscriberEntry {
     required this.expiresAtMs,
     required this.activatedAtMs,
     required this.deviceRef,
+    this.activeDevices = 1,
+    this.lastSeenAtMs = 0,
     this.clientName = '',
     this.storeName = '',
     this.phone = '',
@@ -236,12 +268,134 @@ class SubscriberEntry {
     this.licenseKey = '',
     this.isFrozen = false,
     this.featureFlags = const {},
+    this.rosterDevices = const [],
   });
+
+  SubscriberEntry copyWith({
+    String? workspaceId,
+    String? planType,
+    String? status,
+    int? maxDevices,
+    int? activeDevices,
+    int? expiresAtMs,
+    int? activatedAtMs,
+    int? lastSeenAtMs,
+    String? deviceRef,
+    String? clientName,
+    String? storeName,
+    String? phone,
+    String? deviceId,
+    String? licenseKey,
+    bool? isFrozen,
+    Map<String, bool>? featureFlags,
+    List<ConnectedDevice>? rosterDevices,
+  }) {
+    return SubscriberEntry(
+      workspaceId: workspaceId ?? this.workspaceId,
+      planType: planType ?? this.planType,
+      status: status ?? this.status,
+      maxDevices: maxDevices ?? this.maxDevices,
+      activeDevices: activeDevices ?? this.activeDevices,
+      expiresAtMs: expiresAtMs ?? this.expiresAtMs,
+      activatedAtMs: activatedAtMs ?? this.activatedAtMs,
+      lastSeenAtMs: lastSeenAtMs ?? this.lastSeenAtMs,
+      deviceRef: deviceRef ?? this.deviceRef,
+      clientName: clientName ?? this.clientName,
+      storeName: storeName ?? this.storeName,
+      phone: phone ?? this.phone,
+      deviceId: deviceId ?? this.deviceId,
+      licenseKey: licenseKey ?? this.licenseKey,
+      isFrozen: isFrozen ?? this.isFrozen,
+      featureFlags: featureFlags ?? this.featureFlags,
+      rosterDevices: rosterDevices ?? this.rosterDevices,
+    );
+  }
+
+  /// دمج سجلين لنفس المنشأة أو نفس رقم الهاتف في بطاقة واحدة موحدة مع دمج الأجهزة وآخر ظهور وتاريخ الانتهاء.
+  SubscriberEntry mergeWith(SubscriberEntry other) {
+    final mergedById = <String, ConnectedDevice>{};
+    for (final d in [...rosterDevices, ...other.rosterDevices]) {
+      final k = d.deviceId.trim().toUpperCase();
+      if (k.isEmpty) continue;
+      final existing = mergedById[k];
+      if (existing == null || d.lastSeenAt > existing.lastSeenAt) {
+        mergedById[k] = d;
+      }
+    }
+    for (final rawDev in [
+      deviceId,
+      deviceRef,
+      other.deviceId,
+      other.deviceRef,
+    ]) {
+      final k = rawDev.trim().toUpperCase();
+      if (k.isNotEmpty && !mergedById.containsKey(k)) {
+        mergedById[k] = ConnectedDevice(
+          deviceId: rawDev.trim(),
+          deviceName: rawDev.trim(),
+          model: 'جهاز مرتبط',
+          platform: 'Android',
+          lastSeenAt: lastSeenAtMs > other.lastSeenAtMs
+              ? lastSeenAtMs
+              : other.lastSeenAtMs,
+        );
+      }
+    }
+    final mergedList = mergedById.values.toList()
+      ..sort((a, b) => b.lastSeenAt.compareTo(a.lastSeenAt));
+
+    final bestExpires =
+        expiresAtMs >= other.expiresAtMs ? expiresAtMs : other.expiresAtMs;
+    final bestActivated = activatedAtMs >= other.activatedAtMs
+        ? activatedAtMs
+        : other.activatedAtMs;
+    var bestLastSeen =
+        lastSeenAtMs >= other.lastSeenAtMs ? lastSeenAtMs : other.lastSeenAtMs;
+    for (final d in mergedList) {
+      if (d.lastSeenAt > bestLastSeen) bestLastSeen = d.lastSeenAt;
+    }
+
+    final bestStatus = (status == 'active' || other.status == 'active')
+        ? 'active'
+        : (status.isNotEmpty ? status : other.status);
+    final bestMaxDevices =
+        maxDevices >= other.maxDevices ? maxDevices : other.maxDevices;
+    final computedActive = mergedList.isNotEmpty
+        ? mergedList.length
+        : (activeDevices >= other.activeDevices
+            ? activeDevices
+            : other.activeDevices);
+    final bestPlan =
+        (planType == 'enterprise' || other.planType == 'enterprise' || bestMaxDevices > 1)
+            ? 'enterprise'
+            : (planType.isNotEmpty ? planType : other.planType);
+
+    return SubscriberEntry(
+      workspaceId: workspaceId.isNotEmpty ? workspaceId : other.workspaceId,
+      planType: bestPlan,
+      status: bestStatus,
+      maxDevices: bestMaxDevices,
+      activeDevices: computedActive < 1 ? 1 : computedActive,
+      expiresAtMs: bestExpires,
+      activatedAtMs: bestActivated,
+      lastSeenAtMs: bestLastSeen,
+      deviceRef: deviceRef.isNotEmpty ? deviceRef : other.deviceRef,
+      clientName: clientName.isNotEmpty ? clientName : other.clientName,
+      storeName: storeName.isNotEmpty ? storeName : other.storeName,
+      phone: phone.isNotEmpty ? phone : other.phone,
+      deviceId: deviceId.isNotEmpty ? deviceId : other.deviceId,
+      licenseKey: licenseKey.isNotEmpty ? licenseKey : other.licenseKey,
+      isFrozen: isFrozen && other.isFrozen,
+      featureFlags: {...other.featureFlags, ...featureFlags},
+      rosterDevices: mergedList,
+    );
+  }
 
   factory SubscriberEntry.fromSubscriptionMap(
     String wsId,
-    Map<dynamic, dynamic> map,
-  ) {
+    Map<dynamic, dynamic> map, {
+    List<ConnectedDevice> rosterDevices = const [],
+  }) {
     final devId = asStr(map['deviceId'] ??
         map['device_id'] ??
         map['deviceRef'] ??
@@ -266,17 +420,32 @@ class SubscriberEntry {
       flagsRaw.forEach((k, v) => flags['$k'] = v == true);
     }
 
+    final actAt = asMs(map['activated_at'] ?? map['activatedAt']);
+    final seenAt = asMs(map['last_seen_at'] ??
+        map['lastSeenAt'] ??
+        map['updated_at'] ??
+        map['updatedAt'] ??
+        actAt);
+    final activeCount = rosterDevices.isNotEmpty
+        ? rosterDevices.length
+        : asInt(map['active_devices'] ?? map['activeDevices'], 1);
+
     return SubscriberEntry(
       workspaceId: wsId,
       planType: asStr(map['plan_type'] ?? map['planType'] ?? 'individual'),
       status: asStr(map['status'] ?? 'active'),
       maxDevices: asInt(map['max_devices'] ?? map['maxDevices'], 1),
+      activeDevices: activeCount < 1 ? 1 : activeCount,
       expiresAtMs:
           asMs(map['expires_at'] ?? map['expiresAt'] ?? map['expiryDate']),
-      activatedAtMs: asMs(map['activated_at'] ?? map['activatedAt']),
+      activatedAtMs: actAt,
+      lastSeenAtMs: seenAt,
       deviceRef: devId,
-      clientName:
-          asStr(map['clientName'] ?? map['client_name'] ?? map['userName']),
+      clientName: asStr(map['clientName'] ??
+          map['client_name'] ??
+          map['owner_name'] ??
+          map['ownerName'] ??
+          map['userName']),
       storeName:
           asStr(map['storeName'] ?? map['store_name'] ?? map['businessName']),
       phone: asStr(map['phone'] ?? map['phone_number'] ?? map['whatsapp']),
@@ -284,11 +453,45 @@ class SubscriberEntry {
       licenseKey: key,
       isFrozen: map['is_frozen'] == true || map['frozen'] == true,
       featureFlags: flags,
+      rosterDevices: rosterDevices,
     );
   }
 }
 
-/// جهاز مسجل ضمن ترخيص المنشأة.
+/// معاينة بيانات المنشأة المسترجعة تلقائياً في شاشة التفعيل الذكي.
+class WorkspaceLookupPreview {
+  final String workspaceId;
+  final String storeName;
+  final String ownerName;
+  final String phone;
+  final String deviceId;
+  final String fingerprint;
+  final int activeDevices;
+  final int maxDevices;
+  final String planType;
+  final String status;
+  final int expiresAtMs;
+  final List<ConnectedDevice> rosterDevices;
+  final bool foundInCloud;
+
+  const WorkspaceLookupPreview({
+    required this.workspaceId,
+    this.storeName = '',
+    this.ownerName = '',
+    this.phone = '',
+    this.deviceId = '',
+    this.fingerprint = '',
+    this.activeDevices = 1,
+    this.maxDevices = 1,
+    this.planType = 'individual',
+    this.status = 'trial',
+    this.expiresAtMs = 0,
+    this.rosterDevices = const [],
+    this.foundInCloud = true,
+  });
+}
+
+/// جهاز مسجل ضمن ترخيص المنشأة (Roster / Connected Device).
 class ConnectedDevice {
   final String deviceId;
   final String deviceName;
@@ -296,6 +499,7 @@ class ConnectedDevice {
   final String platform;
   final int linkedAt;
   final int lastSeenAt;
+  final bool isOwner;
 
   const ConnectedDevice({
     required this.deviceId,
@@ -304,22 +508,31 @@ class ConnectedDevice {
     this.platform = '',
     this.linkedAt = 0,
     this.lastSeenAt = 0,
+    this.isOwner = false,
   });
 
   factory ConnectedDevice.fromJson(String id, Map<dynamic, dynamic> map) {
+    final ownerFlag = asInt(map['is_owner'] ?? map['isOwner']) == 1 ||
+        map['is_owner'] == true ||
+        asStr(map['role']).toLowerCase() == 'owner' ||
+        asStr(map['role']).toLowerCase() == 'admin';
     return ConnectedDevice(
       deviceId: id,
-      deviceName: asStr(map['device_name'] ?? map['deviceName'] ?? id),
-      model: asStr(map['model'] ?? map['device_model']),
-      platform: asStr(map['platform'] ?? map['os']),
+      deviceName: asStr(map['device_name'] ?? map['deviceName'] ?? map['name'] ?? id),
+      model: asStr(map['model'] ??
+          map['device_model'] ??
+          (ownerFlag ? 'جهاز المالك' : 'جهاز موظف')),
+      platform: asStr(map['platform'] ?? map['os'] ?? 'Android'),
       linkedAt: asMs(map['linked_at'] ??
           map['linkedAt'] ??
           map['created_at'] ??
           map['createdAt']),
       lastSeenAt: asMs(map['last_seen_at'] ??
           map['lastSeenAt'] ??
+          map['last_sync_at'] ??
           map['updated_at'] ??
           map['updatedAt']),
+      isOwner: ownerFlag,
     );
   }
 }

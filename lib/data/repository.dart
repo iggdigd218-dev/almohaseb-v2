@@ -869,6 +869,152 @@ class Repo {
     _currentUserId = me?.id;
   }
 
+  /// عزل مساحة العمل وتصفير البيانات المحلية عند تسجيل الخروج أو تبديل البريد الإلكتروني
+  /// إلى حساب جديد غير عضو في المنشأة السابقة، مع ربط قاعدة البيانات المحلية بالمساحة الجديدة.
+  Future<String> isolateForWorkspaceSwitch({
+    String? targetWorkspaceId,
+    bool resetOnboarding = true,
+  }) async {
+    final prevSt = await settings();
+    final savedBackendUrl = (prevSt['cloudBackendUrl'] ?? '').trim();
+    final savedLastEmail = (prevSt['account.lastOwnerEmail'] ??
+            prevSt['account.email'] ??
+            prevSt['email'] ??
+            '')
+        .trim()
+        .toLowerCase();
+    final savedLastUid =
+        (prevSt['account.lastOwnerUid'] ?? prevSt['account.uid'] ?? '').trim();
+
+    final freshWs = (targetWorkspaceId != null &&
+            targetWorkspaceId.trim().isNotEmpty &&
+            targetWorkspaceId.trim() != defaultWorkspaceId)
+        ? targetWorkspaceId.trim()
+        : (debugForceLegacyWorkspaceId
+            ? defaultWorkspaceId
+            : generateWorkspaceId());
+
+    await _appDb.openForWorkspace(freshWs);
+    final db = await _db;
+    final devName = await deviceName(this);
+    final adminPerms = defaultPerms(UserRole.admin);
+    final permStr =
+        adminPerms.entries.where((e) => e.value).map((e) => e.key).join(',');
+    final newSecret = await SecretStore.protect(generateDeviceSecret());
+
+    await db.transaction((txn) async {
+      const tables = [
+        'accounts',
+        'transactions',
+        'transaction_items',
+        'vouchers',
+        'currencies',
+        'categories',
+        'item_categories',
+        'sections',
+        'items',
+        'stock_moves',
+        'conversations',
+        'messages',
+        'users',
+        'notifications',
+        'templates',
+        'trash',
+        'activity',
+        'operations',
+        'sync_queue',
+      ];
+      for (final t in tables) {
+        try {
+          await txn.delete(t);
+        } catch (_) {}
+      }
+      await txn.delete('devices');
+      await txn.delete('workspaces');
+      final now = DateTime.now().toIso8601String();
+      await txn.insert('workspaces', {
+        'id': freshWs,
+        'name': 'متجري',
+        'owner_google_id': '',
+        'owner_email': '',
+        'owner_name': '',
+        'created_at': now,
+        'updated_at': now,
+      });
+      if (_deviceId != null && _deviceId!.isNotEmpty) {
+        await txn.insert('devices', {
+          'id': _deviceId,
+          'workspace_id': freshWs,
+          'name': devName,
+          'platform': Platform.operatingSystem,
+          'is_paired': 1,
+          'is_owner': 1,
+          'auth_secret': newSecret,
+          'revoked_at': '',
+          'expelled_at': '',
+          'last_seen_at': now,
+          'last_sync_at': '',
+          'created_at': now,
+          'updated_at': now,
+        });
+      }
+      await txn.insert('users', {
+        'name': 'المدير',
+        'role': 'admin',
+        'pin': '',
+        'password': '',
+        'permissions': permStr,
+        'is_me': 1,
+        'active': 1,
+        'workspace_id': freshWs,
+        'deleted_at': '',
+        'created_at': now,
+        'updated_at': now,
+      });
+      await txn.delete(
+        'sync_meta',
+        where:
+            "key LIKE 'last_synced_cursor%' OR key LIKE 'lastCloudTs:%' OR key LIKE 'lastRosterPush:%' OR key LIKE 'lastLanTs:%' OR key = 'ownerDeviceId'",
+      );
+      await txn.insert(
+        'sync_meta',
+        {
+          'key': 'workspaceMode',
+          'value': 'standalone',
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.delete(
+        'settings',
+        where:
+            "key IN ('businessName','businessActivity','address','phone','whatsapp','user.phone','account.name','account.email','email','user.email','company.email','account.photoPath','org.icon.b64','sync.workspaceId','creatorDeviceId') OR key LIKE 'pendingJoin.%'",
+      );
+      if (resetOnboarding) {
+        await txn.delete(
+          'settings',
+          where: "key IN ('has_completed_onboarding','onboarding.done')",
+        );
+      }
+    });
+
+    _workspaceId = freshWs;
+    await setSetting('sync.workspaceId', freshWs);
+    if (savedBackendUrl.isNotEmpty) {
+      await setSetting('cloudBackendUrl', savedBackendUrl);
+    }
+    if (savedLastEmail.isNotEmpty) {
+      await setSetting('account.lastOwnerEmail', savedLastEmail);
+    }
+    if (savedLastUid.isNotEmpty) {
+      await setSetting('account.lastOwnerUid', savedLastUid);
+    }
+    await _seedDefaults();
+    _currentUserId = null;
+    final me = await currentUser();
+    _currentUserId = me?.id;
+    return freshWs;
+  }
+
   /// مسح كل البيانات المحلية على العضو الجديد ليستبدلها بنسخة المضيف.
   /// العملية داخل transaction لضمان النزاهة.
   Future<void> wipeLocalDataForJoin() async {

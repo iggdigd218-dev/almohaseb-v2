@@ -14,6 +14,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:sqflite/sqflite.dart';
 
+import '../../core/database.dart';
 import '../../core/factory_reset.dart';
 import 'auto_backup.dart';
 import '../repository.dart';
@@ -23,6 +24,7 @@ import 'workspace_recovery.dart';
 import 'device_id.dart';
 import 'device_registry.dart';
 import 'firebase_auth_service.dart';
+import 'workspace_service.dart';
 
 /// نتيجة تبنّي/استرداد مساحة الحساب بعد تسجيل الدخول.
 enum AccountLinkOutcome {
@@ -40,6 +42,10 @@ enum AccountLinkOutcome {
   /// (دفعة 65) الحساب مرتبط بمساحة **أخرى**: حُظر الدمج، وأُخذت نسخة
   /// احتياطية، وفُرّغت الجداول، ونُزّلت بيانات المساحة الجديدة.
   switched,
+
+  /// حساب بريد جديد غير عضو في المنشأة السابقة وليس له مساحة سحابية سابقة:
+  /// تم عزل وتصفير بيانات المنشأة السابقة وفتح قاعدة بيانات ومساحة عمل جديدة له.
+  isolatedNewWorkspace,
 
   /// (دفعة 65) الحساب مرتبط بمساحة أخرى لكن **لا نسخة سحابية** لتلك
   /// المساحة — لم يُفرَّغ شيء، وتعذّر إتمام التبديل.
@@ -339,6 +345,44 @@ class AccountWorkspace {
         return AccountLinkOutcome.memberUntouched;
       }
 
+      // فحص الهوية السابقة للمنشأة المحلية قبل أي تعديل لمنع تداخل بيانات الحسابات
+      final stBefore = await repo.settings();
+      String wsOwnerEmail = '';
+      String wsOwnerUid = '';
+      try {
+        final db0 = await repo.database;
+        final wsRows = await db0.query(
+          'workspaces',
+          where: 'id = ?',
+          whereArgs: [repo.requireWorkspaceId],
+          limit: 1,
+        );
+        if (wsRows.isNotEmpty) {
+          wsOwnerEmail = '${wsRows.first['owner_email'] ?? ''}'.trim();
+          wsOwnerUid = '${wsRows.first['owner_google_id'] ?? ''}'.trim();
+        }
+      } catch (_) {}
+
+      final prevEmail = (stBefore['account.email'] ??
+              stBefore['email'] ??
+              stBefore[FirebaseAuthRest.lastOwnerEmailKey] ??
+              wsOwnerEmail)
+          .trim()
+          .toLowerCase();
+      final prevUid = (stBefore['account.uid'] ??
+              stBefore[FirebaseAuthRest.lastOwnerUidKey] ??
+              wsOwnerUid)
+          .trim();
+      final incomingEmail = account.email.trim().toLowerCase();
+      final incomingUid = account.uid.trim();
+      final isDifferentAccount = (prevEmail.isNotEmpty &&
+              incomingEmail.isNotEmpty &&
+              prevEmail != incomingEmail) ||
+          (prevUid.isNotEmpty &&
+              incomingUid.isNotEmpty &&
+              prevUid != incomingUid &&
+              (prevEmail.isEmpty || prevEmail != incomingEmail));
+
       // ══ (حارس الربط بالبريد والهاتف والمساحة الواحدة) ══
       // الفهرس السحابي للبريد (emails_index) ثم الحساب (accounts_index) ثم الهاتف (phones_index):
       // كل بريد/هاتف لديه مساحة واحدة فقط في السحابة وتُسترجع بكامل بياناتها فور تسجيل الدخول.
@@ -355,10 +399,16 @@ class AccountWorkspace {
             remoteWs = await lookup(backendUrl: backendUrl, uid: account.uid)
                 .timeout(const Duration(seconds: 6), onTimeout: () => '');
           }
-          if (remoteWs.isEmpty) {
-            final st0 = await repo.settings();
+          // لا يُفحص رقم الهاتف المحلي إلا إذا لم يكن الجهاز مملوكاً لبريد سابق مختلف
+          if (remoteWs.isEmpty &&
+              !isDifferentAccount &&
+              prevEmail.isEmpty &&
+              prevUid.isEmpty) {
             final savedPhone =
-                (st0['phone'] ?? st0['whatsapp'] ?? st0['user.phone'] ?? '')
+                (stBefore['phone'] ??
+                        stBefore['whatsapp'] ??
+                        stBefore['user.phone'] ??
+                        '')
                     .trim();
             if (savedPhone.isNotEmpty) {
               remoteWs = await lookupByPhone(
@@ -370,7 +420,7 @@ class AccountWorkspace {
 
         if (remoteWs.isNotEmpty &&
             remoteWs != 'default' &&
-            remoteWs != localWs) {
+            (remoteWs != localWs || isDifferentAccount)) {
           final outcome = await _switchWorkspace(
             repo,
             backendUrl: backendUrl,
@@ -398,7 +448,45 @@ class AccountWorkspace {
         }
       }
 
+      // إذا كان الحساب المسجل لبريد جديد يختلف عن مالك المنشأة السابقة على الجهاز
+      // ولم يُعثر له على مساحة سحابية، يتم عزل قاعدة البيانات المحلية وتصفير بيانات المنشأة السابقة.
+      if (isDifferentAccount) {
+        try {
+          final oldData =
+              await repo.exportAll(withImages: false, localOnly: true);
+          await FactoryReset.silentBackup(oldData,
+              fileName: FactoryReset.kBackupBeforeSwitch);
+        } catch (_) {}
+        final newWsId = generateWorkspaceId();
+        await repo.isolateForWorkspaceSwitch(
+          targetWorkspaceId: newWsId,
+          resetOnboarding: true,
+        );
+        await FirebaseAuthRest.resetAnonymousSession(repo);
+        await FirebaseAuthRest.ensureScopedAnonymous(repo, newWsId);
+        await FirebaseAuthRest.initSilentAuth(repo);
+        await FirebaseAuthRest.saveSession(repo, account);
+        if (account.email.trim().isNotEmpty) {
+          await repo.setSetting('account.email', account.email.trim());
+          await repo.setSetting('email', account.email.trim());
+        }
+        if (account.displayName.trim().isNotEmpty) {
+          await repo.setSetting('account.name', account.displayName.trim());
+        }
+        await repo.setSetting('account.type', 'enterprise');
+        await repo.checkAndAutoPromoteManager();
+        await repo.ensureSelfPermissionRow(roleCode: 'admin');
+        await repo.restoreManagerOwnership();
+        if (backendUrl.isNotEmpty) {
+          await _afterLink(repo, backendUrl, account, newWsId)
+              .timeout(const Duration(seconds: 6), onTimeout: () {})
+              .catchError((_) {});
+        }
+        return AccountLinkOutcome.isolatedNewWorkspace;
+      }
+
       // (Offline-First) الجلسة تُحفظ أولاً — نجاح الربط لا يعتمد على الشبكة.
+      await AppDatabase.instance.openForWorkspace(repo.requireWorkspaceId);
       await FirebaseAuthRest.saveSession(repo, account);
       if (account.email.trim().isNotEmpty) {
         await repo.setSetting('account.email', account.email.trim());
@@ -535,7 +623,8 @@ class AccountWorkspace {
 
     var swapped = false;
     try {
-      // 3) تفريغ الجداول المحاسبية.
+      // 3) فتح قاعدة البيانات الخاصة بالمساحة المستهدفة وتفريغ أي بقايا قديمة.
+      await AppDatabase.instance.openForWorkspace(toWorkspaceId);
       final db = await repo.database;
       await FactoryReset.wipeAccountingTables(db);
 

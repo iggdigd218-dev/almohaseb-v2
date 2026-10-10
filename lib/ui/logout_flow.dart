@@ -17,6 +17,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/cloud_config.dart';
+import '../core/database.dart';
+import '../core/factory_reset.dart';
 import '../core/models.dart';
 import '../core/security.dart';
 import '../data/providers.dart';
@@ -309,12 +311,22 @@ Future<void> _performSignOut(
   ProviderContainer? container,
 }) async {
   try {
+    try {
+      final backup = await repo.exportAll(withImages: false, localOnly: true);
+      await FactoryReset.silentBackup(
+        backup,
+        fileName: FactoryReset.kBackupBeforeSwitch,
+      );
+    } catch (_) {}
     final db = await repo.database;
     try {
       await GoogleAuthService(db).signOut();
     } catch (_) {}
     await FirebaseAuthRest.clearSession(repo);
+    // عزل وتصفير بيانات المنشأة السابقة ومعرف مساحة العمل عند تسجيل الخروج
+    await repo.isolateForWorkspaceSwitch(resetOnboarding: true);
     // مسح صريح وشامل للبريد السابق من كافة الإعدادات والجداول المحلية حتى لا يظهر في أي مكان بعد الخروج
+    final freshDb = await repo.database;
     for (final k in const [
       'account.email',
       'email',
@@ -327,18 +339,19 @@ Future<void> _performSignOut(
       } catch (_) {}
     }
     try {
-      await db.update('users', {'email': ''}, where: 'is_owner = 1 OR id = 1');
+      await freshDb.update('users', {'email': ''}, where: 'is_owner = 1 OR id = 1');
     } catch (_) {}
     try {
-      await db.update('workspaces', {'owner_email': '', 'owner_google_id': ''});
+      await freshDb.update('workspaces', {'owner_email': '', 'owner_google_id': ''});
     } catch (_) {}
+    await AppDatabase.instance.closeAndResetWorkspace();
     // جلسة مجهولة صامتة بديلة — المزامنة المحلية والسحابية تستمر
     // دون انقطاع أثناء غياب المدير (لا توقف للمحرك ولا لمسار الطابور).
     await FirebaseAuthRest.initSilentAuth(repo);
     _invalidateAfterLogout(ref, container);
     final c = rootNavigatorKey.currentContext;
     if (c != null && c.mounted) {
-      showSnack(c, 'تم تسجيل الخروج رسمياً وبشكل كامل من الحساب ✅');
+      showSnack(c, 'تم تسجيل الخروج رسمياً وعزل بيانات المنشأة بنجاح ✅');
     }
   } catch (e) {
     final c = rootNavigatorKey.currentContext;

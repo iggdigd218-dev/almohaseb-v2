@@ -28,39 +28,17 @@ Future<bool> openAccountForm(
     useSafeArea: true,
     backgroundColor: Colors.transparent,
     builder: (ctx) {
-      final kb = MediaQuery.viewInsetsOf(ctx).bottom;
-      final h = MediaQuery.sizeOf(ctx).height;
-      final maxH = (h - kb - 20).clamp(260.0, h * 0.76);
       return Padding(
-        padding: EdgeInsets.only(bottom: kb),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: maxH),
+        padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(ctx).bottom),
+        child: SafeArea(
           child: Container(
             decoration: BoxDecoration(
               color: AppColors.surfaceOf(ctx),
               borderRadius: AppRadius.sheetTop,
             ),
-            child: SafeArea(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const SizedBox(height: 8),
-                  Container(
-                    width: 44,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: AppColors.borderOf(ctx),
-                      borderRadius: BorderRadius.circular(99),
-                    ),
-                  ),
-                  Flexible(
-                    child: AccountFormScreen(
-                      existing: existing,
-                      embedded: true,
-                    ),
-                  ),
-                ],
-              ),
+            child: AccountFormScreen(
+              existing: existing,
+              embedded: true,
             ),
           ),
         ),
@@ -288,208 +266,238 @@ class _State extends ConsumerState<AccountFormScreen> {
     final curs =
         ref.watch(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
 
-    return PopScope(
-      // منع الرجوع المباشر إذا كانت هناك تغييرات لم تُحفظ.
-      canPop: !_dirty,
-      onPopInvokedWithResult: (didPop, _) => _guardedPop(didPop),
-      child: Scaffold(
-        backgroundColor:
-            widget.embedded ? Colors.transparent : null,
-        // داخل الورقة السفلية: ترويسة مدمجة أنحف بدل AppBar كامل.
-        appBar: widget.embedded
-            ? null
-            : AppBar(title: Text(_isEdit ? 'تعديل حساب' : 'حساب جديد')),
-        body: Form(
-          key: _formKey,
-          child: ListView(
-            padding: EdgeInsets.fromLTRB(
-              16,
-              widget.embedded ? 6 : 12,
-              16,
-              16,
-            ),
-            children: [
-              if (widget.embedded)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: Text(
-                    _isEdit ? 'تعديل حساب' : 'حساب جديد',
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w800,
-                    ),
+    final formContent = Form(
+      key: _formKey,
+      child: SingleChildScrollView(
+        physics: const ClampingScrollPhysics(),
+        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+        padding: EdgeInsets.fromLTRB(
+          16,
+          widget.embedded ? 8 : 12,
+          16,
+          20,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (widget.embedded) ...[
+              Center(
+                child: Container(
+                  width: 44,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 10),
+                  decoration: BoxDecoration(
+                    color: AppColors.borderOf(context),
+                    borderRadius: BorderRadius.circular(99),
                   ),
                 ),
-              // زر جلب بيانات العميل (اسم + رقم) من تطبيق جهات الاتصال.
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              ),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Text(
+                  _isEdit ? 'تعديل حساب' : 'حساب جديد',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+            // زر جلب بيانات العميل (اسم + رقم) من تطبيق جهات الاتصال.
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _name,
+                    scrollPadding: const EdgeInsets.only(bottom: 140),
+                    decoration:
+                        const InputDecoration(labelText: 'اسم الحساب *'),
+                    textInputAction: TextInputAction.next,
+                    validator: (v) =>
+                        (v ?? '').trim().isEmpty ? 'الاسم مطلوب' : null,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: IconButton.filledTonal(
+                    tooltip: 'جلب من جهات الاتصال',
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.blue.withValues(alpha: 0.12),
+                      foregroundColor: Colors.blue.shade700,
+                      minimumSize: const Size(48, 48),
+                    ),
+                    icon: const Icon(Icons.contacts_rounded),
+                    onPressed: _pickContact,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: Theme.of(context)
+                    .colorScheme
+                    .surfaceContainerHighest
+                    .withValues(alpha: 0.35),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller: _name,
-                      decoration:
-                          const InputDecoration(labelText: 'اسم الحساب *'),
-                      textInputAction: TextInputAction.next,
-                      validator: (v) =>
-                          (v ?? '').trim().isEmpty ? 'الاسم مطلوب' : null,
+                  const Text(
+                    'نوع الحساب:',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.grey,
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: IconButton.filledTonal(
-                      tooltip: 'جلب من جهات الاتصال',
-                      style: IconButton.styleFrom(
-                        backgroundColor: Colors.blue.withValues(alpha: 0.12),
-                        foregroundColor: Colors.blue.shade700,
-                        minimumSize: const Size(48, 48),
+                  ...AccountKind.values.map(
+                    (k) => ChoiceChip(
+                      label: Text(
+                        '${k.icon} ${k.label}',
+                        style: const TextStyle(fontSize: 11),
                       ),
-                      icon: const Icon(Icons.contacts_rounded),
-                      onPressed: _pickContact,
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 0,
+                      ),
+                      selected: _kind == k,
+                      showCheckmark: false,
+                      onSelected: (_) => setState(() => _kind = k),
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: Theme.of(context)
-                      .colorScheme
-                      .surfaceContainerHighest
-                      .withValues(alpha: 0.35),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  children: [
-                    const Text(
-                      'نوع الحساب:',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.grey,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Wrap(
-                        spacing: 5,
-                        children: AccountKind.values
-                            .map(
-                              (k) => ChoiceChip(
-                                label: Text(
-                                  '${k.icon} ${k.label}',
-                                  style: const TextStyle(fontSize: 11),
-                                ),
-                                visualDensity: VisualDensity.compact,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 4,
-                                  vertical: 0,
-                                ),
-                                selected: _kind == k,
-                                showCheckmark: false,
-                                onSelected: (_) => setState(() => _kind = k),
-                              ),
-                            )
-                            .toList(),
-                      ),
-                    ),
-                  ],
-                ),
+            ),
+            const SizedBox(height: 15),
+            TextFormField(
+              controller: _opening,
+              scrollPadding: const EdgeInsets.only(bottom: 140),
+              decoration: const InputDecoration(
+                labelText: 'الرصيد الافتتاحي (اختياري)',
+                hintText: '0.00',
               ),
-              const SizedBox(height: 15),
-              TextFormField(
-                controller: _opening,
-                decoration: const InputDecoration(
-                  labelText: 'الرصيد الافتتاحي (اختياري)',
-                  hintText: '0.00',
-                ),
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
-                  signed: true,
-                ),
-                validator: (v) {
-                  if ((v ?? '').trim().isEmpty) return null;
-                  return Fmt.parseAmount(v!) == null ? 'مبلغ غير صالح' : null;
-                },
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+                signed: true,
               ),
-              AmountWords(controller: _opening, decimals: 2),
-              const SizedBox(height: 13),
-              DropdownButtonFormField<String>(
-                initialValue:
-                    curs.any((c) => c.code == _currency) ? _currency : null,
-                decoration: const InputDecoration(labelText: 'العملة'),
-                items: curs
-                    .map(
-                      (c) => DropdownMenuItem(
-                        value: c.code,
-                        child: Text('${c.name} (${c.symbol})'),
+              validator: (v) {
+                if ((v ?? '').trim().isEmpty) return null;
+                return Fmt.parseAmount(v!) == null ? 'مبلغ غير صالح' : null;
+              },
+            ),
+            AmountWords(controller: _opening, decimals: 2),
+            const SizedBox(height: 13),
+            DropdownButtonFormField<String>(
+              initialValue:
+                  curs.any((c) => c.code == _currency) ? _currency : null,
+              decoration: const InputDecoration(labelText: 'العملة'),
+              items: curs
+                  .map(
+                    (c) => DropdownMenuItem(
+                      value: c.code,
+                      child: Text('${c.name} (${c.symbol})'),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (v) => setState(() => _currency = v ?? 'YER'),
+            ),
+            const SizedBox(height: 13),
+            TextFormField(
+              controller: _phone,
+              scrollPadding: const EdgeInsets.only(bottom: 140),
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(
+                labelText: 'رقم الجوال',
+                hintText: '7xxxxxxxx',
+                prefixIcon: Icon(Icons.phone_android),
+              ),
+            ),
+            const SizedBox(height: 13),
+            TextFormField(
+              controller: _address,
+              scrollPadding: const EdgeInsets.only(bottom: 140),
+              decoration: const InputDecoration(labelText: 'العنوان'),
+            ),
+            const SizedBox(height: 13),
+            TextFormField(
+              controller: _limit,
+              scrollPadding: const EdgeInsets.only(bottom: 140),
+              decoration: const InputDecoration(
+                labelText: 'حد ائتماني (اختياري)',
+                hintText: '0.00',
+              ),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+            ),
+            AmountWords(controller: _limit, decimals: 2),
+            const SizedBox(height: 13),
+            TextFormField(
+              controller: _tags,
+              scrollPadding: const EdgeInsets.only(bottom: 140),
+              decoration: const InputDecoration(
+                labelText: 'علامات',
+                hintText: 'افصل بينها بفاصلة',
+              ),
+            ),
+            const SizedBox(height: 13),
+            TextFormField(
+              controller: _notes,
+              scrollPadding: const EdgeInsets.only(bottom: 140),
+              decoration: const InputDecoration(labelText: 'ملاحظات'),
+              maxLines: 3,
+            ),
+            const SizedBox(height: 20),
+            FilledButton.icon(
+              onPressed: _saving ? null : _save,
+              icon: _saving
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
                       ),
                     )
-                    .toList(),
-                onChanged: (v) => setState(() => _currency = v ?? 'YER'),
-              ),
-              const SizedBox(height: 13),
-              TextFormField(
-                controller: _phone,
-                keyboardType: TextInputType.phone,
-                decoration: const InputDecoration(
-                  labelText: 'رقم الجوال',
-                  hintText: '7xxxxxxxx',
-                  prefixIcon: Icon(Icons.phone_android),
-                ),
-              ),
-              const SizedBox(height: 13),
-              TextFormField(
-                controller: _address,
-                decoration: const InputDecoration(labelText: 'العنوان'),
-              ),
-              const SizedBox(height: 13),
-              TextFormField(
-                controller: _limit,
-                decoration: const InputDecoration(
-                  labelText: 'حد ائتماني (اختياري)',
-                  hintText: '0.00',
-                ),
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
-                ),
-              ),
-              AmountWords(controller: _limit, decimals: 2),
-              const SizedBox(height: 13),
-              TextFormField(
-                controller: _tags,
-                decoration: const InputDecoration(
-                  labelText: 'علامات',
-                  hintText: 'افصل بينها بفاصلة',
-                ),
-              ),
-              const SizedBox(height: 13),
-              TextFormField(
-                controller: _notes,
-                decoration: const InputDecoration(labelText: 'ملاحظات'),
-                maxLines: 3,
-              ),
-              const SizedBox(height: 20),
-              FilledButton.icon(
-                onPressed: _saving ? null : _save,
-                icon: _saving
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                    : const Icon(Icons.check),
-                label: Text(_isEdit ? 'حفظ التعديلات' : 'إضافة الحساب'),
-              ),
-            ],
-          ),
+                  : const Icon(Icons.check),
+              label: Text(_isEdit ? 'حفظ التعديلات' : 'إضافة الحساب'),
+            ),
+          ],
         ),
       ),
+    );
+
+    return PopScope(
+      // منع الرجوع المباشر إذا كانت هناك تغييرات لم تُحفظ.
+      canPop: !_dirty,
+      onPopInvokedWithResult: (didPop, _) => _guardedPop(didPop),
+      child: widget.embedded
+          ? Material(
+              color: Colors.transparent,
+              child: formContent,
+            )
+          : Scaffold(
+              resizeToAvoidBottomInset: false,
+              appBar: AppBar(title: Text(_isEdit ? 'تعديل حساب' : 'حساب جديد')),
+              body: SafeArea(
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    bottom: MediaQuery.viewInsetsOf(context).bottom,
+                  ),
+                  child: formContent,
+                ),
+              ),
+            ),
     );
   }
 }

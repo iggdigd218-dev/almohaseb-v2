@@ -16,19 +16,36 @@ class AppDatabase {
 
   static Database? _db;
   static Future<Database>? _opening;
+  static String _activeWorkspaceId = defaultWorkspaceIdConst;
+  static bool _isTestOverride = false;
   static const int _version = 27;
 
   static int get schemaVersion => _version;
+
+  /// معرف مساحة العمل النشطة المرتبطة بملف قاعدة البيانات الحالية.
+  static String get activeWorkspaceId => _activeWorkspaceId;
+
+  /// اسم ملف قاعدة البيانات المحلية المرتبط بمعرف مساحة العمل:
+  /// `nexora_${workspaceId}.db` للمنشآت المرتبطة، أو `nexora.db` للوضع المستقل.
+  static String dbFileNameFor(String? workspaceId) {
+    final trimmed = (workspaceId ?? '').trim();
+    if (trimmed.isEmpty || trimmed == defaultWorkspaceIdConst) {
+      return 'nexora.db';
+    }
+    final safe = trimmed.replaceAll(RegExp(r'[^a-zA-Z0-9_\-]'), '_');
+    return 'nexora_$safe.db';
+  }
 
   /// حقن قاعدة في الذاكرة للاختبارات.
   static void overrideForTest(Database db) {
     _db = db;
     _opening = null;
+    _isTestOverride = true;
   }
 
   Future<Database> get database {
     if (_db != null) return Future.value(_db!);
-    return _opening ??= _openDb().then((db) {
+    return _opening ??= _openDb(_activeWorkspaceId).then((db) {
       _db = db;
       return db;
     }, onError: (Object e, StackTrace st) {
@@ -37,11 +54,41 @@ class AppDatabase {
     });
   }
 
-  Future<Database> _openDb() async {
+  /// التبديل إلى قاعدة بيانات مساحة عمل محددة (`nexora_${workspaceId}.db`).
+  /// يغلق الاتصال الحالي (إن لم يكن حقناً اختبارياً في الذاكرة) ويفتح القاعدة الخاصة بالمنشأة.
+  Future<Database> openForWorkspace(String? workspaceId) async {
+    final targetWs = (workspaceId == null || workspaceId.trim().isEmpty)
+        ? defaultWorkspaceIdConst
+        : workspaceId.trim();
+    if (_isTestOverride && _db != null) {
+      _activeWorkspaceId = targetWs;
+      return _db!;
+    }
+    if (_db != null && _activeWorkspaceId == targetWs && _db!.isOpen) {
+      return _db!;
+    }
+    await close();
+    _activeWorkspaceId = targetWs;
+    return database;
+  }
+
+  /// إغلاق اتصال قاعدة البيانات المحلية وتصفير معرف مساحة العمل المخزن محلياً
+  /// عند تسجيل الخروج أو تبديل حساب البريد الإلكتروني.
+  Future<void> closeAndResetWorkspace() async {
+    if (_isTestOverride && _db != null) {
+      _activeWorkspaceId = defaultWorkspaceIdConst;
+      return;
+    }
+    await close();
+    _activeWorkspaceId = defaultWorkspaceIdConst;
+  }
+
+  Future<Database> _openDb([String? workspaceId]) async {
     final dir = await databaseDirectory();
+    final fileName = dbFileNameFor(workspaceId ?? _activeWorkspaceId);
     var schemaJustMigrated = false;
     return openDatabase(
-      p.join(dir, 'nexora.db'),
+      p.join(dir, fileName),
       version: _version,
       onConfigure: (db) async => db.execute('PRAGMA foreign_keys = ON'),
       onCreate: (db, v) async {
@@ -84,6 +131,7 @@ class AppDatabase {
     final db = _db;
     _db = null;
     _opening = null;
+    _isTestOverride = false;
     if (db != null && db.isOpen) await db.close();
   }
 
