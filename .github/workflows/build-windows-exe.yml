@@ -25,6 +25,7 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.35.x'
           channel: stable
           cache: true
 
@@ -49,7 +50,7 @@ jobs:
       - name: Generate fresh Windows platform (match installed Visual Studio)
         run: |
           Remove-Item -Recurse -Force windows -ErrorAction SilentlyContinue
-          flutter create --platforms=windows --project-name nexora_app .
+          flutter create --no-pub --platforms=windows --project-name nexora_app .
 
       - name: Apply Nexora Windows branding (app icon + window/taskbar icon)
         shell: pwsh
