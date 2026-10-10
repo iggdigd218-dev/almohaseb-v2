@@ -56,7 +56,7 @@ class AppDatabase {
 
   /// التبديل إلى قاعدة بيانات مساحة عمل محددة (`nexora_${workspaceId}.db`).
   /// يغلق الاتصال الحالي (إن لم يكن حقناً اختبارياً في الذاكرة) ويفتح القاعدة الخاصة بالمنشأة.
-  Future<Database> openForWorkspace(String? workspaceId) async {
+  Future<Database?> openForWorkspace(String? workspaceId) async {
     final targetWs = (workspaceId == null || workspaceId.trim().isEmpty)
         ? defaultWorkspaceIdConst
         : workspaceId.trim();
@@ -67,8 +67,12 @@ class AppDatabase {
     if (_db != null && _activeWorkspaceId == targetWs && _db!.isOpen) {
       return _db!;
     }
+    final hadOpenDb = _db != null || _opening != null;
     await close();
     _activeWorkspaceId = targetWs;
+    if (!hadOpenDb) {
+      return null;
+    }
     return database;
   }
 

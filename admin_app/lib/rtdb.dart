@@ -1262,7 +1262,7 @@ class Rtdb {
       };
       if (fp.isNotEmpty) {
         await _patch('trials/${Uri.encodeComponent(fp)}', trialPatch);
-      } else if (clientOverride == null) {
+      } else {
         final trials = await _get('trials');
         var patchedAny = false;
         if (trials is Map) {
@@ -1275,7 +1275,7 @@ class Rtdb {
             }
           }
         }
-        if (!patchedAny) {
+        if (!patchedAny && clientOverride == null) {
           await _patch('trials/${Uri.encodeComponent(ws)}', trialPatch);
         }
       }
