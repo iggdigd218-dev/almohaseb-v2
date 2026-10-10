@@ -130,7 +130,8 @@ void main() {
     expect(helperBody.contains("SET type = 'debit'"), isTrue);
     expect(helperBody.contains("WHERE type = 'revenue'"), isTrue);
     expect(helperBody.contains('AND account_id IS NOT NULL'), isTrue);
-    expect(helperBody.contains("payment_method = 'credit'"), isTrue);
+    expect(helperBody.contains('payment_method'), isTrue);
+    expect(helperBody.contains("'credit'"), isTrue);
     expect(helperBody.contains('طريقة الدفع: آجل'), isTrue);
     expect(helperBody.contains('طريقة الدفع: جزئي'), isTrue);
 

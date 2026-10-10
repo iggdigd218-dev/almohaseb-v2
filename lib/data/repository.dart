@@ -4620,7 +4620,8 @@ class Repo {
       if (store == 'transactions' &&
           decoded is Map &&
           decoded['transaction'] is Map) {
-        final tx = Map<String, Object?>.from(decoded['transaction'] as Map);
+        final decodedMap = Map<String, Object?>.from(decoded);
+        final tx = Map<String, Object?>.from(decodedMap['transaction'] as Map);
         // وسوم المزامنة الداخلية (مثل __sync_entity) ليست أعمدة حقيقية.
         tx.removeWhere((k, _) => k.startsWith('__'));
         // (سلامة السلة) لا استرجاع قبل التأكد من وجود الحساب الأب.
@@ -4636,7 +4637,7 @@ class Repo {
         final txId = txIdRaw is int ? txIdRaw : int.tryParse('$txIdRaw');
         if (txId != null) {
           // استعادة أسطر وأصناف الفاتورة كاملة من حمولة المهملات
-          final rawItems = decoded['items'];
+          final rawItems = decodedMap['items'];
           final restoredLines = <InvoiceLine>[];
           if (rawItems is List && rawItems.isNotEmpty) {
             await txn.delete(
