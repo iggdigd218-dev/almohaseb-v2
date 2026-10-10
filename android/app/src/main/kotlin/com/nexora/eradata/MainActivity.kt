@@ -511,28 +511,30 @@ class MainActivity : FlutterFragmentActivity() {
     private fun startUpdateDownload(url: String): Long = try {
         val dm = getSystemService(android.content.Context.DOWNLOAD_SERVICE)
             as android.app.DownloadManager
-        // نظّف ملفات تحديث قديمة حتى لا تتراكم (المجلد العام + الخاص القديم).
+        // نظّف ملفات تحديث قديمة حتى لا تتراكم.
         try {
-            publicUpdateDir().mkdirs()
-            publicUpdateDir().listFiles()?.forEach { it.delete() }
+            getExternalFilesDir("updates")?.listFiles()?.forEach { it.delete() }
         } catch (_: Exception) {}
-        getExternalFilesDir("updates")?.listFiles()?.forEach { it.delete() }
+        try {
+            File(cacheDir, "updates").listFiles()?.forEach { it.delete() }
+        } catch (_: Exception) {}
         val req = android.app.DownloadManager.Request(Uri.parse(url)).apply {
             setTitle("تحديث المحاسب")
             setDescription("جارٍ تنزيل التحديث…")
             setMimeType("application/vnd.android.package-archive")
-            // إشعار النظام يظهر اكتمال التنزيل أيضاً (خدمة النظام نفسها).
             setNotificationVisibility(
                 android.app.DownloadManager.Request
                     .VISIBILITY_VISIBLE_NOTIFY_COMPLETED
             )
             setAllowedOverMetered(true)
             setAllowedOverRoaming(true)
-            // (2026-09-22) الحفظ في مجلد عام مخصص Download/Nexora — مرئي
-            // للمستخدم في مدير الملفات ولا يضخّم تخزين التطبيق الخاص.
-            setDestinationInExternalPublicDir(
-                android.os.Environment.DIRECTORY_DOWNLOADS,
-                "Nexora/nexora-update.apk"
+            // الحفظ في مجلد التطبيق الخارجي الخاص (externalFilesDir/updates) لتفادي
+            // خطأ صلاحيات Scoped Storage (errno = 13 Permission denied) على أندرويد 11+
+            // عند فحص بصمة SHA-256 وفتح الحزمة عبر FileProvider.
+            setDestinationInExternalFilesDir(
+                this@MainActivity,
+                "updates",
+                "nexora-update.apk"
             )
         }
         dm.enqueue(req)
@@ -601,12 +603,28 @@ class MainActivity : FlutterFragmentActivity() {
                     else -> "running"
                 }
                 if (status == android.app.DownloadManager.STATUS_SUCCESSFUL) {
-                    // (2026-09-22) المجلد العام أولاً؛ ملف الإصدار القديم
-                    // (التخزين الخاص) يبقى مدعوماً لاستئنافات ما قبل الترقية.
+                    val priv = File(getExternalFilesDir("updates"), "nexora-update.apk")
                     val pub = File(publicUpdateDir(), "nexora-update.apk")
-                    val legacy = File(getExternalFilesDir("updates"), "nexora-update.apk")
-                    val f = if (pub.exists()) pub else legacy
-                    if (f.exists()) out["path"] = f.absolutePath
+                    var resolved: File? = when {
+                        priv.exists() && priv.canRead() && priv.length() > 0L -> priv
+                        pub.exists() && pub.canRead() && pub.length() > 0L -> pub
+                        else -> null
+                    }
+                    if (resolved == null) {
+                        try {
+                            dm.openDownloadedFile(id)?.use { pfd ->
+                                val cacheUpdates = File(cacheDir, "updates").apply { mkdirs() }
+                                val dst = File(cacheUpdates, "nexora-update.apk")
+                                android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input ->
+                                    dst.outputStream().use { output -> input.copyTo(output) }
+                                }
+                                if (dst.exists() && dst.length() > 0L) {
+                                    resolved = dst
+                                }
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    if (resolved != null) out["path"] = resolved!!.absolutePath
                 }
             }
         } catch (e: Exception) { /* تُعاد "unknown" */ }

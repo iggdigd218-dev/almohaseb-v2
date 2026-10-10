@@ -10,10 +10,10 @@ import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
 /// إصدار تطبيق مدير التراخيص الحالي (يطابق admin_app/pubspec.yaml).
-const String kAdminAppVersion = '1.7.1';
+const String kAdminAppVersion = '1.7.2';
 
 /// رقم بناء تطبيق مدير التراخيص (ما بعد + في admin_app/pubspec.yaml).
-const int kAdminAppBuild = 41;
+const int kAdminAppBuild = 42;
 
 String get adminFullVersion => '$kAdminAppVersion+$kAdminAppBuild';
 
@@ -25,7 +25,7 @@ class AdminSemVer implements Comparable<AdminSemVer> {
 
   const AdminSemVer(this.major, this.minor, this.patch, [this.build = 0]);
 
-  static const AdminSemVer current = AdminSemVer(1, 7, 1, kAdminAppBuild);
+  static const AdminSemVer current = AdminSemVer(1, 7, 2, kAdminAppBuild);
 
   static AdminSemVer? tryParse(String? raw) {
     if (raw == null) return null;
@@ -404,6 +404,11 @@ class AdminUpdateInstaller {
       final dir = Directory(dirPath);
       await dir.create(recursive: true);
       apk = File('${dir.path}/license-admin-update.apk');
+      if (apk.existsSync()) {
+        try {
+          await apk.delete();
+        } catch (_) {}
+      }
     } catch (e) {
       yield AdminInstallProgress(
         AdminInstallPhase.failed,

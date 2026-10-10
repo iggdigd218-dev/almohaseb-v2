@@ -65,9 +65,24 @@ class UpdateInstaller {
     if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(expected)) {
       return false;
     }
-    if (!file.existsSync()) return false;
-    final actual = await computeFileSha256(file);
-    return actual == expected;
+    try {
+      if (!file.existsSync()) return false;
+      final actual = await computeFileSha256(file);
+      return actual == expected;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// يتحقق من إمكانية قراءة ملف الـ APK المنزّل فعلياً على أندرويد 11+ (Scoped Storage).
+  static Future<bool> _canReadFile(File file) async {
+    try {
+      if (!file.existsSync() || file.lengthSync() <= 1024 * 1024) return false;
+      await file.openRead(0, 16).first;
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// هل منح المستخدم إذن «تثبيت التطبيقات غير المعروفة» لهذا التطبيق؟
@@ -198,7 +213,7 @@ class UpdateInstaller {
       final status = '${st['status']}';
       if (status == 'done' && '${st['path']}'.isNotEmpty) {
         final apk = File('${st['path']}');
-        if (apk.existsSync() && apk.lengthSync() > 1024 * 1024) {
+        if (await _canReadFile(apk)) {
           // اكتمل في الخلفية لنفس هذا الرابط — أشعر ثم ثبّت مباشرة بعد فحص البصمة
           _notifyDownloadComplete('${st['path']}');
           yield* _install('${st['path']}', expectedSha256: targetSha256);
@@ -245,14 +260,12 @@ class UpdateInstaller {
       switch (status) {
         case 'done':
           final path = '${st['path']}';
-          if (path.isEmpty) {
-            await _saveDownload(null, null);
-            yield const InstallProgress(InstallPhase.failed,
-                error: 'اكتمل التنزيل لكن الملف غير موجود. أعد المحاولة.');
+          await _saveDownload(null, null);
+          if (path.isEmpty || !await _canReadFile(File(path))) {
+            yield* _fallbackHttpDownload(url, expectedSha256: targetSha256);
             return;
           }
           // (2026-09-22) إشعار نظام: اكتمل التنزيل — نقرة تفتح المجلد.
-          await _saveDownload(null, null);
           _notifyDownloadComplete(path);
           yield* _install(path, expectedSha256: targetSha256);
           return;
@@ -448,30 +461,22 @@ class UpdateInstaller {
     );
   }
 
-  /// (2026-09-22) مجلد التنزيل: على أندرويد مجلد عام مخصص في الهاتف
-  /// Download/Nexora — مرئي في مدير الملفات ولا يضخّم تخزين التطبيق
-  /// الخاص؛ وعند تعذّر الكتابة فيه (قيود بعض المصانع) نعود لمجلد
-  /// التطبيق الخارجي. بقية الأنظمة: مجلد مؤقت يُنظف قبل كل تنزيل.
+  /// مجلد التنزيل: على أندرويد نستخدم مجلد التطبيق الخارجي الخاص أولاً
+  /// (getExternalStorageDirectory/updates) ثم المجلد المؤقت للتطبيق (getTemporaryDirectory/updates)
+  /// لضمان صلاحية القراءة والكتابة الكاملة على أندرويد 11+ (Scoped Storage) دون خطأ errno=13.
   Future<Directory> _downloadDir(String fileName) async {
     Directory? dir;
     if (PlatformInfo.isAndroid) {
       try {
-        final d = Directory('/storage/emulated/0/Download/Nexora');
-        await d.create(recursive: true);
-        final probe = File('${d.path}/.probe');
-        await probe.writeAsString('x');
-        await probe.delete();
-        dir = d;
-      } catch (_) {
-        try {
-          final ext = await getExternalStorageDirectory();
-          if (ext != null) {
-            final d = Directory('${ext.path}/updates');
-            await d.create(recursive: true);
-            dir = d;
-          }
-        } catch (_) {}
-      }
+        final ext = await getExternalStorageDirectory();
+        if (ext != null) {
+          final d = Directory('${ext.path}/updates');
+          await d.create(recursive: true);
+          final target = File('${d.path}/$fileName');
+          if (target.existsSync()) await target.delete();
+          dir = d;
+        }
+      } catch (_) {}
     }
     if (dir == null) {
       final cache = await getTemporaryDirectory();
@@ -481,10 +486,9 @@ class UpdateInstaller {
       dir = d;
     }
     // نظّف ملفات التحديث القديمة حتى لا تتراكم وتهدر مساحة الهاتف.
-    final keep = '${dir.path}/$fileName';
     try {
       await for (final e in dir.list()) {
-        if (e is File && e.path != keep) {
+        if (e is File) {
           await e.delete();
         }
       }

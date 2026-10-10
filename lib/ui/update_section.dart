@@ -212,6 +212,16 @@ class _OneClickUpdateDialogState extends State<_OneClickUpdateDialog> {
               onPressed: () => Navigator.of(context).pop(),
               child: const Text('إغلاق'),
             ),
+            OutlinedButton.icon(
+              onPressed: () async {
+                final uri = Uri.tryParse(widget.url);
+                if (uri != null) {
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                }
+              },
+              icon: const Icon(Icons.open_in_new, size: 16),
+              label: const Text('تنزيل عبر المتصفح'),
+            ),
             FilledButton.icon(
               onPressed: _start,
               icon: const Icon(Icons.refresh),

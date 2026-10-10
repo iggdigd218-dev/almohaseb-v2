@@ -68,10 +68,11 @@ class MainActivity : FlutterActivity() {
     private fun startUpdateDownload(url: String): Long = try {
         val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
         try {
-            publicUpdateDir().mkdirs()
-            publicUpdateDir().listFiles()?.forEach { it.delete() }
+            getExternalFilesDir("updates")?.listFiles()?.forEach { it.delete() }
         } catch (_: Exception) {}
-        getExternalFilesDir("updates")?.listFiles()?.forEach { it.delete() }
+        try {
+            File(cacheDir, "updates").listFiles()?.forEach { it.delete() }
+        } catch (_: Exception) {}
 
         val req = DownloadManager.Request(Uri.parse(url)).apply {
             setTitle("تحديث مدير التراخيص")
@@ -82,9 +83,10 @@ class MainActivity : FlutterActivity() {
             )
             setAllowedOverMetered(true)
             setAllowedOverRoaming(true)
-            setDestinationInExternalPublicDir(
-                Environment.DIRECTORY_DOWNLOADS,
-                "NexoraAdmin/license-admin-update.apk"
+            setDestinationInExternalFilesDir(
+                this@MainActivity,
+                "updates",
+                "license-admin-update.apk"
             )
         }
         dm.enqueue(req)
@@ -123,10 +125,28 @@ class MainActivity : FlutterActivity() {
                     else -> "running"
                 }
                 if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                    val priv = File(getExternalFilesDir("updates"), "license-admin-update.apk")
                     val pub = File(publicUpdateDir(), "license-admin-update.apk")
-                    val legacy = File(getExternalFilesDir("updates"), "license-admin-update.apk")
-                    val f = if (pub.exists()) pub else legacy
-                    if (f.exists()) out["path"] = f.absolutePath
+                    var resolved: File? = when {
+                        priv.exists() && priv.canRead() && priv.length() > 0L -> priv
+                        pub.exists() && pub.canRead() && pub.length() > 0L -> pub
+                        else -> null
+                    }
+                    if (resolved == null) {
+                        try {
+                            dm.openDownloadedFile(id)?.use { pfd ->
+                                val cacheUpdates = File(cacheDir, "updates").apply { mkdirs() }
+                                val dst = File(cacheUpdates, "license-admin-update.apk")
+                                android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input ->
+                                    dst.outputStream().use { output -> input.copyTo(output) }
+                                }
+                                if (dst.exists() && dst.length() > 0L) {
+                                    resolved = dst
+                                }
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    if (resolved != null) out["path"] = resolved!!.absolutePath
                 }
             }
         } catch (_: Exception) {}
