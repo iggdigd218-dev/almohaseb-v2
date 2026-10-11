@@ -82,15 +82,11 @@ jobs:
         run: flutter test
 
       - name: "Build APK (arm64 modern + armv7 old)"
-        env:
-          ADMIN_REFRESH_TOKEN_SECRET: ${{ secrets.ADMIN_REFRESH_TOKEN }}
         run: |
-          DEFAULT_ADMIN_RT="AMf-vBy0fav-UQVlyVGr4fVIz7H0VS-RlxLbzXMVDIwm7kGTfjxUeMAwe1tZkwKx_u8geyYdiETw6yW9i3hmja0oDP3wi_M47tVAS6qiASt88Uw73uQv7tANn3W60_WUodhrQTRxpdpCt4aBPN_vVyXra2jCbanZnWxlEcUTOvdSc9y3Ny2pQ6U"
-          ADMIN_RT="${ADMIN_REFRESH_TOKEN_SECRET:-$DEFAULT_ADMIN_RT}"
           flutter build apk --release --split-per-abi \
             --target-platform android-arm,android-arm64 \
             --obfuscate --split-debug-info=build/app/symbols \
-            --dart-define=ADMIN_REFRESH_TOKEN="$ADMIN_RT"
+            --dart-define=ADMIN_REFRESH_TOKEN=${{ secrets.ADMIN_REFRESH_TOKEN }}
           cp build/app/outputs/apk/release/app-arm64-v8a-release.apk ../license-admin.apk
           cp build/app/outputs/apk/release/app-armeabi-v7a-release.apk ../license-admin-armv7.apk
           ls -lh ../license-admin.apk ../license-admin-armv7.apk
