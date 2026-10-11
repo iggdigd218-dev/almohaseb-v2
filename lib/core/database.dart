@@ -83,7 +83,9 @@ class AppDatabase {
       _activeWorkspaceId = defaultWorkspaceIdConst;
       return;
     }
-    await close();
+    try {
+      await close();
+    } catch (_) {}
     _activeWorkspaceId = defaultWorkspaceIdConst;
   }
 
@@ -136,13 +138,22 @@ class AppDatabase {
     _db = null;
     _opening = null;
     _isTestOverride = false;
-    if (db != null && db.isOpen) await db.close();
+    if (db != null && db.isOpen) {
+      try {
+        await db.close();
+      } catch (_) {}
+    }
   }
 
   /// إنشاء كل الجداول — مستقل ليُستخدم في الاختبارات أيضًا.
   static Future<void> createSchema(Database db) async {
     // ---------- البنية الجديدة للمزامنة ----------
-    await execSchemaScript(db, createSyncSchemaSql);
+    try {
+      await execSchemaScript(db, createSyncSchemaSql);
+    } catch (_) {}
+    try {
+      await _ensureCoreSyncTables(db);
+    } catch (_) {}
 
     // ---------- الحسابات ----------
     await db.execute('''

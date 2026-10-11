@@ -200,20 +200,28 @@ class FirebaseAuthRest {
         await repo.setSetting(lastOwnerUidKey, curUid);
       }
     } catch (_) {}
-    await repo.setSetting(uidKey, '');
-    await repo.setSetting(emailKey, '');
-    await repo.setSetting(nameKey, '');
-    await repo.setSetting('sync.workspaceId', '');
+    for (final entry in <String, String>{
+      uidKey: '',
+      emailKey: '',
+      nameKey: '',
+      'sync.workspaceId': '',
+      accountIdTokenKey: '',
+      accountRefreshKey: '',
+      accountExpiryKey: '0',
+    }.entries) {
+      try {
+        await repo.setSetting(entry.key, entry.value);
+      } catch (_) {}
+    }
     _accountUid = null;
     _accountIdToken = null;
     _accountRefreshToken = null;
     _accountExpiryMs = 0;
     _activeTokenUid = _anonUid;
-    await repo.setSetting(accountIdTokenKey, '');
-    await repo.setSetting(accountRefreshKey, '');
-    await repo.setSetting(accountExpiryKey, '0');
     repo.debugSetWorkspaceId(defaultWorkspaceIdConst);
-    await AppDatabase.instance.closeAndResetWorkspace();
+    try {
+      await AppDatabase.instance.closeAndResetWorkspace();
+    } catch (_) {}
   }
 
   // ══════ (المرحلة 2) مصادقة مجهولة صامتة — هوية جهاز دائمة ══════

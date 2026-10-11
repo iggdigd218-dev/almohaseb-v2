@@ -141,8 +141,14 @@ Future<void> _adminLogout(
   // 2) اشتراط وكيل: المدير/المالك فقط (الوكيل نفسه لا يحتاج وكيلاً،
   //    والفردي لا أعضاء لديه).
   if (!individual && isOwner && me?.role != UserRole.agent) {
-    final users = await repo.users();
-    final devices = await repo.devices();
+    List<AppUser> users = const [];
+    List<Map<String, Object?>> devices = const [];
+    try {
+      users = await repo.users();
+    } catch (_) {}
+    try {
+      devices = await repo.devices();
+    } catch (_) {}
     final myDevId = repo.deviceId;
     final candidates = <_DeputyCandidate>[];
     final seenUserIds = <int>{};
@@ -318,36 +324,46 @@ Future<void> _performSignOut(
         fileName: FactoryReset.kBackupBeforeSwitch,
       );
     } catch (_) {}
-    final db = await repo.database;
     try {
+      final db = await repo.database;
       await GoogleAuthService(db).signOut();
     } catch (_) {}
-    await FirebaseAuthRest.clearSession(repo);
+    try {
+      await FirebaseAuthRest.clearSession(repo);
+    } catch (_) {}
     // عزل وتصفير بيانات المنشأة السابقة ومعرف مساحة العمل عند تسجيل الخروج
-    await repo.isolateForWorkspaceSwitch(resetOnboarding: true);
+    try {
+      await repo.isolateForWorkspaceSwitch(resetOnboarding: true);
+    } catch (_) {}
     // مسح صريح وشامل للبريد السابق من كافة الإعدادات والجداول المحلية حتى لا يظهر في أي مكان بعد الخروج
-    final freshDb = await repo.database;
-    for (final k in const [
-      'account.email',
-      'email',
-      'user.email',
-      'company.email',
-      'account.photoPath',
-    ]) {
+    try {
+      final freshDb = await repo.database;
+      for (final k in const [
+        'account.email',
+        'email',
+        'user.email',
+        'company.email',
+        'account.photoPath',
+      ]) {
+        try {
+          await repo.setSetting(k, '');
+        } catch (_) {}
+      }
       try {
-        await repo.setSetting(k, '');
+        await freshDb.update('users', {'email': ''}, where: 'is_owner = 1 OR id = 1');
       } catch (_) {}
-    }
-    try {
-      await freshDb.update('users', {'email': ''}, where: 'is_owner = 1 OR id = 1');
+      try {
+        await freshDb.update('workspaces', {'owner_email': '', 'owner_google_id': ''});
+      } catch (_) {}
     } catch (_) {}
     try {
-      await freshDb.update('workspaces', {'owner_email': '', 'owner_google_id': ''});
+      await AppDatabase.instance.closeAndResetWorkspace();
     } catch (_) {}
-    await AppDatabase.instance.closeAndResetWorkspace();
     // جلسة مجهولة صامتة بديلة — المزامنة المحلية والسحابية تستمر
     // دون انقطاع أثناء غياب المدير (لا توقف للمحرك ولا لمسار الطابور).
-    await FirebaseAuthRest.initSilentAuth(repo);
+    try {
+      await FirebaseAuthRest.initSilentAuth(repo);
+    } catch (_) {}
     _invalidateAfterLogout(ref, container);
     final c = rootNavigatorKey.currentContext;
     if (c != null && c.mounted) {

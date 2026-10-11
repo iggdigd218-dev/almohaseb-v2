@@ -804,61 +804,77 @@ class Repo {
         'sync_queue',
       ];
       for (final t in tables) {
-        await txn.delete(t);
+        try {
+          await txn.delete(t);
+        } catch (_) {}
       }
-      await txn.delete('devices');
+      try {
+        await txn.delete('devices');
+      } catch (_) {}
       // مساحة العمل الجديدة تحل محل القديمة (حذف ثم إدراج يرضي FK).
-      await txn.delete('workspaces');
+      try {
+        await txn.delete('workspaces');
+      } catch (_) {}
       final now = DateTime.now().toIso8601String();
-      await txn.insert('workspaces', {
-        'id': freshWs,
-        'name': 'متجري',
-        'owner_google_id': '',
-        'owner_email': '',
-        'owner_name': '',
-        'created_at': now,
-        'updated_at': now,
-      });
-      await txn.insert('devices', {
-        'id': _deviceId,
-        'workspace_id': freshWs,
-        'name': devName,
-        'platform': Platform.operatingSystem,
-        'is_paired': 1,
-        'is_owner': 1,
-        'auth_secret': newSecret,
-        'revoked_at': '',
-        'expelled_at': '',
-        'last_seen_at': now,
-        'last_sync_at': '',
-        'created_at': now,
-        'updated_at': now,
-      });
-      await txn.insert('users', {
-        'name': 'المدير',
-        'role': 'admin',
-        'pin': '',
-        'password': '',
-        'permissions': permStr,
-        'is_me': 1,
-        'active': 1,
-        'workspace_id': freshWs,
-        'deleted_at': '',
-        'created_at': now,
-        'updated_at': now,
-      });
-      await txn.delete(
-        'sync_meta',
-        where:
-            "key LIKE 'last_synced_cursor%' OR key LIKE 'lastCloudTs:%' OR key LIKE 'lastRosterPush:%' OR key LIKE 'lastLanTs:%' OR key = 'ownerDeviceId'",
-      );
-      await txn.insert(
+      try {
+        await txn.insert('workspaces', {
+          'id': freshWs,
+          'name': 'متجري',
+          'owner_google_id': '',
+          'owner_email': '',
+          'owner_name': '',
+          'created_at': now,
+          'updated_at': now,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      } catch (_) {}
+      try {
+        await txn.insert('devices', {
+          'id': _deviceId,
+          'workspace_id': freshWs,
+          'name': devName,
+          'platform': Platform.operatingSystem,
+          'is_paired': 1,
+          'is_owner': 1,
+          'auth_secret': newSecret,
+          'revoked_at': '',
+          'expelled_at': '',
+          'last_seen_at': now,
+          'last_sync_at': '',
+          'created_at': now,
+          'updated_at': now,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      } catch (_) {}
+      try {
+        await txn.insert('users', {
+          'name': 'المدير',
+          'role': 'admin',
+          'pin': '',
+          'password': '',
+          'permissions': permStr,
+          'is_me': 1,
+          'active': 1,
+          'workspace_id': freshWs,
+          'deleted_at': '',
+          'created_at': now,
+          'updated_at': now,
+        });
+      } catch (_) {}
+      try {
+        await txn.delete(
           'sync_meta',
-          {
-            'key': 'workspaceMode',
-            'value': 'standalone',
-          },
-          conflictAlgorithm: ConflictAlgorithm.replace);
+          where:
+              "key LIKE 'last_synced_cursor%' OR key LIKE 'lastCloudTs:%' OR key LIKE 'lastRosterPush:%' OR key LIKE 'lastLanTs:%' OR key = 'ownerDeviceId'",
+        );
+      } catch (_) {}
+      try {
+        await txn.insert(
+            'sync_meta',
+            {
+              'key': 'workspaceMode',
+              'value': 'standalone',
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace);
+      } catch (_) {}
     });
     _workspaceId = freshWs;
     try {
@@ -875,7 +891,10 @@ class Repo {
     String? targetWorkspaceId,
     bool resetOnboarding = true,
   }) async {
-    final prevSt = await settings();
+    Map<String, String> prevSt = const {};
+    try {
+      prevSt = await settings();
+    } catch (_) {}
     final savedBackendUrl = (prevSt['cloudBackendUrl'] ?? '').trim();
     final savedLastEmail = (prevSt['account.lastOwnerEmail'] ??
             prevSt['account.email'] ??
@@ -895,10 +914,18 @@ class Repo {
             : generateWorkspaceId());
 
     if (_databaseProvider == null) {
-      await AppDatabase.instance.openForWorkspace(freshWs);
+      try {
+        await AppDatabase.instance.openForWorkspace(freshWs);
+      } catch (_) {}
     }
     final db = await _db;
-    final devName = await deviceName(this);
+    try {
+      await AppDatabase.ensureFullSchema(db);
+    } catch (_) {}
+    String devName = 'جهاز';
+    try {
+      devName = await deviceName(this);
+    } catch (_) {}
     final adminPerms = defaultPerms(UserRole.admin);
     final permStr =
         adminPerms.entries.where((e) => e.value).map((e) => e.key).join(',');
@@ -925,94 +952,118 @@ class Repo {
         'activity',
         'operations',
         'sync_queue',
+        'devices',
+        'workspaces',
       ];
       for (final t in tables) {
         try {
           await txn.delete(t);
         } catch (_) {}
       }
-      await txn.delete('devices');
-      await txn.delete('workspaces');
       final now = DateTime.now().toIso8601String();
-      await txn.insert('workspaces', {
-        'id': freshWs,
-        'name': 'متجري',
-        'owner_google_id': '',
-        'owner_email': '',
-        'owner_name': '',
-        'created_at': now,
-        'updated_at': now,
-      });
+      try {
+        await txn.insert('workspaces', {
+          'id': freshWs,
+          'name': 'متجري',
+          'owner_google_id': '',
+          'owner_email': '',
+          'owner_name': '',
+          'created_at': now,
+          'updated_at': now,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      } catch (_) {}
       if (_deviceId != null && _deviceId!.isNotEmpty) {
-        await txn.insert('devices', {
-          'id': _deviceId,
+        try {
+          await txn.insert('devices', {
+            'id': _deviceId,
+            'workspace_id': freshWs,
+            'name': devName,
+            'platform': Platform.operatingSystem,
+            'is_paired': 1,
+            'is_owner': 1,
+            'auth_secret': newSecret,
+            'revoked_at': '',
+            'expelled_at': '',
+            'last_seen_at': now,
+            'last_sync_at': '',
+            'created_at': now,
+            'updated_at': now,
+          }, conflictAlgorithm: ConflictAlgorithm.replace);
+        } catch (_) {}
+      }
+      try {
+        await txn.insert('users', {
+          'name': 'المدير',
+          'role': 'admin',
+          'pin': '',
+          'password': '',
+          'permissions': permStr,
+          'is_me': 1,
+          'active': 1,
           'workspace_id': freshWs,
-          'name': devName,
-          'platform': Platform.operatingSystem,
-          'is_paired': 1,
-          'is_owner': 1,
-          'auth_secret': newSecret,
-          'revoked_at': '',
-          'expelled_at': '',
-          'last_seen_at': now,
-          'last_sync_at': '',
+          'deleted_at': '',
           'created_at': now,
           'updated_at': now,
         });
-      }
-      await txn.insert('users', {
-        'name': 'المدير',
-        'role': 'admin',
-        'pin': '',
-        'password': '',
-        'permissions': permStr,
-        'is_me': 1,
-        'active': 1,
-        'workspace_id': freshWs,
-        'deleted_at': '',
-        'created_at': now,
-        'updated_at': now,
-      });
-      await txn.delete(
-        'sync_meta',
-        where:
-            "key LIKE 'last_synced_cursor%' OR key LIKE 'lastCloudTs:%' OR key LIKE 'lastRosterPush:%' OR key LIKE 'lastLanTs:%' OR key = 'ownerDeviceId'",
-      );
-      await txn.insert(
-        'sync_meta',
-        {
-          'key': 'workspaceMode',
-          'value': 'standalone',
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-      await txn.delete(
-        'settings',
-        where:
-            "key IN ('businessName','businessActivity','address','phone','whatsapp','user.phone','account.name','account.email','email','user.email','company.email','account.photoPath','org.icon.b64','sync.workspaceId','creatorDeviceId') OR key LIKE 'pendingJoin.%'",
-      );
-      if (resetOnboarding) {
+      } catch (_) {}
+      try {
+        await txn.delete(
+          'sync_meta',
+          where:
+              "key LIKE 'last_synced_cursor%' OR key LIKE 'lastCloudTs:%' OR key LIKE 'lastRosterPush:%' OR key LIKE 'lastLanTs:%' OR key = 'ownerDeviceId'",
+        );
+      } catch (_) {}
+      try {
+        await txn.insert(
+          'sync_meta',
+          {
+            'key': 'workspaceMode',
+            'value': 'standalone',
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      } catch (_) {}
+      try {
         await txn.delete(
           'settings',
-          where: "key IN ('has_completed_onboarding','onboarding.done')",
+          where:
+              "key IN ('businessName','businessActivity','address','phone','whatsapp','user.phone','account.name','account.email','email','user.email','company.email','account.photoPath','org.icon.b64','sync.workspaceId','creatorDeviceId') OR key LIKE 'pendingJoin.%'",
         );
+      } catch (_) {}
+      if (resetOnboarding) {
+        try {
+          await txn.delete(
+            'settings',
+            where: "key IN ('has_completed_onboarding','onboarding.done')",
+          );
+        } catch (_) {}
       }
     });
 
     _workspaceId = freshWs;
-    await setSetting('sync.workspaceId', freshWs);
+    try {
+      await setSetting('sync.workspaceId', freshWs);
+    } catch (_) {}
     if (savedBackendUrl.isNotEmpty) {
-      await setSetting('cloudBackendUrl', savedBackendUrl);
+      try {
+        await setSetting('cloudBackendUrl', savedBackendUrl);
+      } catch (_) {}
     }
     if (savedLastEmail.isNotEmpty) {
-      await setSetting('account.lastOwnerEmail', savedLastEmail);
+      try {
+        await setSetting('account.lastOwnerEmail', savedLastEmail);
+      } catch (_) {}
     }
     if (savedLastUid.isNotEmpty) {
-      await setSetting('account.lastOwnerUid', savedLastUid);
+      try {
+        await setSetting('account.lastOwnerUid', savedLastUid);
+      } catch (_) {}
     }
     _currentUserId = null;
-    final me = await currentUser();
-    _currentUserId = me?.id;
+    try {
+      final me = await currentUser();
+      _currentUserId = me?.id;
+    } catch (_) {}
     return freshWs;
   }
 
@@ -1040,26 +1091,32 @@ class Repo {
         'sync_queue',
       ];
       for (final t in entityTables) {
-        await txn.delete(t);
+        try {
+          await txn.delete(t);
+        } catch (_) {}
       }
       // لا نحذف devices (يبقى سجلنا وسجل المضيف)، ولا نحذف workspace ولا sync_meta.
       // جهازي لم يعد مالكاً.
       if (_deviceId != null) {
-        await txn.update(
-          'devices',
-          {'is_owner': 0, 'user_id': null, 'is_paired': 1},
-          where: 'id = ?',
-          whereArgs: [_deviceId],
-        );
+        try {
+          await txn.update(
+            'devices',
+            {'is_owner': 0, 'user_id': null, 'is_paired': 1},
+            where: 'id = ?',
+            whereArgs: [_deviceId],
+          );
+        } catch (_) {}
       }
       // ضبط الوضع كـ عضو.
-      await txn.insert(
-          'sync_meta',
-          {
-            'key': 'workspaceMode',
-            'value': 'member',
-          },
-          conflictAlgorithm: ConflictAlgorithm.replace);
+      try {
+        await txn.insert(
+            'sync_meta',
+            {
+              'key': 'workspaceMode',
+              'value': 'member',
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace);
+      } catch (_) {}
     });
   }
 
@@ -3075,18 +3132,22 @@ class Repo {
       await db.update('devices', {'workspace_id': ws},
           where: "COALESCE(workspace_id, '') = '' OR workspace_id = 'default'");
     } catch (_) {}
-    return db.rawQuery(
-      '''
-      SELECT d.*, u.name AS user_name, u.role AS user_role
-      FROM devices d
-      LEFT JOIN users u ON u.id = d.user_id
-      WHERE d.workspace_id = ? OR COALESCE(d.workspace_id, '') = '' OR COALESCE(d.workspace_id, '') = 'default'
-      ORDER BY
-        CASE WHEN COALESCE(d.revoked_at,'') = '' THEN 0 ELSE 1 END,
-        d.last_seen_at DESC
-    ''',
-      [ws],
-    );
+    try {
+      return await db.rawQuery(
+        '''
+        SELECT d.*, u.name AS user_name, u.role AS user_role
+        FROM devices d
+        LEFT JOIN users u ON u.id = d.user_id
+        WHERE d.workspace_id = ? OR COALESCE(d.workspace_id, '') = '' OR COALESCE(d.workspace_id, '') = 'default'
+        ORDER BY
+          CASE WHEN COALESCE(d.revoked_at,'') = '' THEN 0 ELSE 1 END,
+          d.last_seen_at DESC
+      ''',
+        [ws],
+      );
+    } catch (_) {
+      return const [];
+    }
   }
 
   /// (دفعة 56) «حذف نهائي من السجل» لجهاز مطرود/محظور: يمحو سجل الجهاز
