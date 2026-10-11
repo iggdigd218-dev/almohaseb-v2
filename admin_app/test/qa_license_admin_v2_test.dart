@@ -427,32 +427,43 @@ void main() {
       expect(merged.expiresAtMs, 1850000000000);
     });
 
-    test('LIC-ADM08 محرك الذكاء الاصطناعي عبر DeepSeek API: حفظ deepseek_api_key وموجه الرفيق العفوي متعدد الاهتمامات ودرجة الحرارة 0.8', () async {
+    test('LIC-ADM08 محرك الذكاء الاصطناعي الشامل (Universal OpenAI-Compatible Client): حفظ الإعدادات ودرجة الحرارة 0.7', () async {
       SharedPreferences.setMockInitialValues({});
       await Rtdb.instance.load();
       expect(Rtdb.instance.deepSeekApiKey, isEmpty);
       expect(DualPersonaAiEngine.instance.hasApiKey, isFalse);
+      expect(DualPersonaAiEngine.instance.baseUrl,
+          'https://openrouter.ai/api/v1/chat/completions');
+      expect(DualPersonaAiEngine.instance.modelId, 'deepseek/deepseek-chat');
 
-      // حفظ المفتاح تحت الاسم deepseek_api_key في SharedPreferences
-      await Rtdb.instance.saveDeepSeekApiKey('sk-deepseek-test-key-123');
+      // حفظ الإعدادات الشاملة في SharedPreferences
+      await Rtdb.instance.saveAiSettings(
+        baseUrl: 'https://openrouter.ai/api/v1/chat/completions',
+        apiKey: 'sk-or-v1-test-key-123',
+        modelId: 'deepseek/deepseek-chat',
+      );
       final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getString('deepseek_api_key'), 'sk-deepseek-test-key-123');
-      expect(Rtdb.instance.deepSeekApiKey, 'sk-deepseek-test-key-123');
-      expect(DualPersonaAiEngine.instance.apiKey, 'sk-deepseek-test-key-123');
+      expect(prefs.getString('deepseek_api_key'), 'sk-or-v1-test-key-123');
+      expect(prefs.getString('ai_api_key'), 'sk-or-v1-test-key-123');
+      expect(prefs.getString('ai_base_url'),
+          'https://openrouter.ai/api/v1/chat/completions');
+      expect(prefs.getString('ai_model_id'), 'deepseek/deepseek-chat');
+      expect(DualPersonaAiEngine.instance.apiKey, 'sk-or-v1-test-key-123');
       expect(DualPersonaAiEngine.instance.hasApiKey, isTrue);
 
-      // التحقق من ثوابت DeepSeek الرسمية
-      expect(kDeepSeekEndpoint, 'https://api.deepseek.com/chat/completions');
-      expect(kDeepSeekDefaultModel, 'deepseek-chat');
-      expect(kOwnerTemperature, 0.8);
+      // التحقق من ثوابت المحرك الشامل
+      expect(kDefaultAiEndpoint,
+          'https://openrouter.ai/api/v1/chat/completions');
+      expect(kDefaultAiModel, 'deepseek/deepseek-chat');
+      expect(kOwnerTemperature, 0.7);
       expect(kDeepSeekMaxTokens, 2048);
 
       // التحقق من موجه النظام الجديد (Persona: الرفيق العفوي متعدد الاهتمامات)
       final ownerSession = DualPersonaAiEngine.instance.ownerSession;
-      expect(ownerSession.temperature, 0.8);
+      expect(ownerSession.temperature, 0.7);
       expect(ownerSession.maxTokens, 2048);
       expect(ownerSession.systemInstruction,
-          contains('أنت رفيق شخصي تفاعلي، ذكي، وخفيف الظل.'));
+          contains('أنت رفيق شخصي تفاعلي، ذكي، وخفيف الظل'));
       expect(
           ownerSession.systemInstruction,
           contains(
@@ -496,7 +507,7 @@ void main() {
     });
 
     testWidgets(
-        'LIC-ADM09 واجهة رفيق المالك تعرض تنبيه إدخال مفتاح DeepSeek API عند غيابه وحقل الإعدادات المخصص',
+        'LIC-ADM09 واجهة رفيق المالك تعرض تنبيه إدخال مفتاح API عند غيابه ونافذة الإعدادات الشاملة (الرابط، المفتاح، النموذج، موجه النظام)',
         (tester) async {
       SharedPreferences.setMockInitialValues({});
       await Rtdb.instance.load();
@@ -511,15 +522,18 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('رفيقك الشخصي الذكي (DeepSeek Chat)'), findsOneWidget);
+      expect(find.text('رفيقك الشخصي الذكي (Universal AI Chat)'), findsOneWidget);
       expect(find.text('تفريغ الجلسة'), findsOneWidget);
       expect(find.text('إدخال المفتاح'), findsOneWidget);
-      expect(find.textContaining('DeepSeek API'), findsWidgets);
+      expect(find.textContaining('API Key'), findsWidgets);
 
-      // فتح نافذة الإعدادات والتحقق من وجود حقل "مفتاح DeepSeek API"
+      // فتح نافذة الإعدادات عبر أيقونة الترس والتحقق من وجود الحقول الأربعة
       await tester.tap(find.byIcon(Icons.settings_rounded));
       await tester.pumpAndSettle();
-      expect(find.text('مفتاح DeepSeek API'), findsOneWidget);
+      expect(find.text('رابط الخدمة (Base URL / Endpoint)'), findsOneWidget);
+      expect(find.text('مفتاح الواجهة (API Key)'), findsOneWidget);
+      expect(find.text('اسم النموذج (Model ID)'), findsOneWidget);
+      expect(find.text('موجه النظام (System Prompt)'), findsOneWidget);
     });
 
     testWidgets(
@@ -577,24 +591,29 @@ void main() {
     });
 
     test(
-        'LIC-ADM11 الاستدعاء المباشر لخدمة DeepSeek الرسمية (https://api.deepseek.com/chat/completions) بمعيار OpenAI وحقن موجه النظام system',
+        'LIC-ADM11 المرسل الديناميكي الشامل (Dynamic Request Dispatcher): الترويسات القياسية ومعالجة أخطاء 401/404/429',
         () async {
       SharedPreferences.setMockInitialValues({});
       await Rtdb.instance.load();
-      await Rtdb.instance.saveDeepSeekApiKey('sk-live-deepseek-999');
+      await Rtdb.instance.saveAiSettings(
+        baseUrl: 'https://openrouter.ai/api/v1/chat/completions',
+        apiKey: 'sk-or-v1-live-999',
+        modelId: 'deepseek/deepseek-chat',
+      );
       final engine = DualPersonaAiEngine.instance;
       engine.clearOwnerSession();
 
       final mockClient = MockClient((request) async {
-        expect(
-            request.url.toString(), 'https://api.deepseek.com/chat/completions');
-        expect(request.headers['Authorization'], 'Bearer sk-live-deepseek-999');
+        expect(request.url.toString(),
+            'https://openrouter.ai/api/v1/chat/completions');
+        expect(request.headers['Authorization'], 'Bearer sk-or-v1-live-999');
         expect(request.headers['Content-Type'], contains('application/json'));
+        expect(request.headers['HTTP-Referer'], 'https://nexora.app');
+        expect(request.headers['X-Title'], 'Nexora Admin');
 
         final body = jsonDecode(request.body) as Map<String, dynamic>;
-        expect(body['model'], 'deepseek-chat');
-        expect(body['temperature'], 0.8);
-        expect(body['max_tokens'], 2048);
+        expect(body['model'], 'deepseek/deepseek-chat');
+        expect(body['temperature'], 0.7);
 
         final messages = body['messages'] as List<dynamic>;
         expect(messages.length, 2);
@@ -637,6 +656,17 @@ void main() {
       expect(engine.ownerSession.history.length, 2);
       expect(engine.ownerSession.history[0].isUser, isTrue);
       expect(engine.ownerSession.history[1].isAssistant, isTrue);
+
+      // فحص معالجة رموز الأخطاء 401 و 404 و 429 بوضوح
+      expect(
+          DualPersonaAiEngine.parseOpenAiError(401, '{"error":{"message":"Invalid key"}}'),
+          contains('المفتاح غير صحيح'));
+      expect(
+          DualPersonaAiEngine.parseOpenAiError(404, '{"error":{"message":"Model not found"}}', 'gpt-99'),
+          contains('النموذج غير موجود'));
+      expect(
+          DualPersonaAiEngine.parseOpenAiError(429, '{"error":{"message":"Rate limit"}}'),
+          contains('نفاد الرصيد'));
     });
 
     test(

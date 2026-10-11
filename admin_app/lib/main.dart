@@ -305,78 +305,214 @@ class _ConfigDialog extends StatefulWidget {
 
 class _ConfigDialogState extends State<_ConfigDialog> {
   late final _url = TextEditingController(text: Rtdb.instance.baseUrl);
+  late final _aiBaseUrl =
+      TextEditingController(text: DualPersonaAiEngine.instance.baseUrl);
   late final _deepSeekKey =
-      TextEditingController(text: Rtdb.instance.deepSeekApiKey);
+      TextEditingController(text: DualPersonaAiEngine.instance.apiKey);
+  late final _aiModel =
+      TextEditingController(text: DualPersonaAiEngine.instance.modelId);
+  late final _aiSystemPrompt =
+      TextEditingController(text: DualPersonaAiEngine.instance.systemPrompt);
   bool _obscureDeepSeekKey = true;
   bool _busy = false;
 
   @override
   void dispose() {
     _url.dispose();
+    _aiBaseUrl.dispose();
     _deepSeekKey.dispose();
+    _aiModel.dispose();
+    _aiSystemPrompt.dispose();
     super.dispose();
+  }
+
+  Future<void> _autoSaveAiField() async {
+    await Rtdb.instance.saveAiSettings(
+      baseUrl: _aiBaseUrl.text,
+      apiKey: _deepSeekKey.text,
+      modelId: _aiModel.text,
+      systemPrompt: _aiSystemPrompt.text,
+    );
+    adminRefreshTick.value++;
   }
 
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('⚙️ إعدادات النظام ومفتاح الذكاء الاصطناعي'),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            TextField(
-              controller: _url,
-              textDirection: TextDirection.ltr,
-              decoration: const InputDecoration(
-                labelText: 'رابط Firebase RTDB',
-                hintText: kOfficialRtdbUrl,
-                prefixIcon: Icon(Icons.cloud_outlined),
-              ),
-            ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: _deepSeekKey,
-              obscureText: _obscureDeepSeekKey,
-              textDirection: TextDirection.ltr,
-              decoration: InputDecoration(
-                labelText: 'مفتاح DeepSeek API',
-                hintText: 'sk-...',
-                helperText:
-                    'يُحفظ محلياً في SharedPreferences تحت المفتاح deepseek_api_key (النموذج: deepseek-chat)',
-                prefixIcon: const Icon(Icons.vpn_key_rounded,
-                    color: Color(0xFF0284C7)),
-                suffixIcon: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      tooltip: _obscureDeepSeekKey
-                          ? 'إظهار المفتاح'
-                          : 'إخفاء المفتاح',
-                      icon: Icon(_obscureDeepSeekKey
-                          ? Icons.visibility_outlined
-                          : Icons.visibility_off_outlined),
-                      onPressed: () => setState(
-                          () => _obscureDeepSeekKey = !_obscureDeepSeekKey),
-                    ),
-                    IconButton(
-                      tooltip: 'لصق من الحافظة',
-                      icon: const Icon(Icons.content_paste_rounded),
-                      onPressed: () async {
-                        final clip =
-                            await Clipboard.getData(Clipboard.kTextPlain);
-                        final txt = (clip?.text ?? '').trim();
-                        if (txt.isNotEmpty) {
-                          setState(() => _deepSeekKey.text = txt);
-                        }
-                      },
-                    ),
-                  ],
+      title: const Text('⚙️ إعدادات النظام ومزود الذكاء الاصطناعي'),
+      content: SizedBox(
+        width: 480,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                controller: _url,
+                textDirection: TextDirection.ltr,
+                decoration: const InputDecoration(
+                  labelText: 'رابط Firebase RTDB',
+                  hintText: kOfficialRtdbUrl,
+                  prefixIcon: Icon(Icons.cloud_outlined),
                 ),
               ),
-            ),
-          ],
+              const SizedBox(height: 14),
+              TextField(
+                controller: _aiBaseUrl,
+                textDirection: TextDirection.ltr,
+                onChanged: (_) => _autoSaveAiField(),
+                decoration: InputDecoration(
+                  labelText: 'رابط الخدمة (Base URL / Endpoint)',
+                  hintText: kDefaultAiEndpoint,
+                  prefixIcon: const Icon(Icons.link_rounded,
+                      color: Color(0xFF0284C7)),
+                  suffixIcon: IconButton(
+                    tooltip: 'استعادة الرابط الافتراضي (OpenRouter)',
+                    icon: const Icon(Icons.restore_rounded, size: 18),
+                    onPressed: () {
+                      setState(() => _aiBaseUrl.text = kDefaultAiEndpoint);
+                      _autoSaveAiField();
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  ActionChip(
+                    visualDensity: VisualDensity.compact,
+                    label: const Text('OpenRouter', style: TextStyle(fontSize: 11)),
+                    onPressed: () {
+                      setState(() {
+                        _aiBaseUrl.text =
+                            'https://openrouter.ai/api/v1/chat/completions';
+                        if (_aiModel.text.trim().isEmpty ||
+                            _aiModel.text.trim() == 'deepseek-chat') {
+                          _aiModel.text = 'deepseek/deepseek-chat';
+                        }
+                      });
+                      _autoSaveAiField();
+                    },
+                  ),
+                  ActionChip(
+                    visualDensity: VisualDensity.compact,
+                    label: const Text('DeepSeek', style: TextStyle(fontSize: 11)),
+                    onPressed: () {
+                      setState(() {
+                        _aiBaseUrl.text =
+                            'https://api.deepseek.com/chat/completions';
+                        _aiModel.text = 'deepseek-chat';
+                      });
+                      _autoSaveAiField();
+                    },
+                  ),
+                  ActionChip(
+                    visualDensity: VisualDensity.compact,
+                    label: const Text('OpenAI', style: TextStyle(fontSize: 11)),
+                    onPressed: () {
+                      setState(() {
+                        _aiBaseUrl.text =
+                            'https://api.openai.com/v1/chat/completions';
+                        _aiModel.text = 'gpt-4o-mini';
+                      });
+                      _autoSaveAiField();
+                    },
+                  ),
+                  ActionChip(
+                    visualDensity: VisualDensity.compact,
+                    label: const Text('Groq', style: TextStyle(fontSize: 11)),
+                    onPressed: () {
+                      setState(() {
+                        _aiBaseUrl.text =
+                            'https://api.groq.com/openai/v1/chat/completions';
+                        _aiModel.text = 'llama-3.3-70b-versatile';
+                      });
+                      _autoSaveAiField();
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _deepSeekKey,
+                obscureText: _obscureDeepSeekKey,
+                textDirection: TextDirection.ltr,
+                onChanged: (_) => _autoSaveAiField(),
+                decoration: InputDecoration(
+                  labelText: 'مفتاح الواجهة (API Key)',
+                  hintText: 'sk-... أو sk-or-...',
+                  helperText:
+                      'مفتاح DeepSeek API / OpenRouter / OpenAI — يُحفظ تلقائياً في SharedPreferences',
+                  prefixIcon: const Icon(Icons.vpn_key_rounded,
+                      color: Color(0xFF0284C7)),
+                  suffixIcon: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: _obscureDeepSeekKey
+                            ? 'إظهار المفتاح'
+                            : 'إخفاء المفتاح',
+                        icon: Icon(_obscureDeepSeekKey
+                            ? Icons.visibility_outlined
+                            : Icons.visibility_off_outlined),
+                        onPressed: () => setState(
+                            () => _obscureDeepSeekKey = !_obscureDeepSeekKey),
+                      ),
+                      IconButton(
+                        tooltip: 'لصق من الحافظة',
+                        icon: const Icon(Icons.content_paste_rounded),
+                        onPressed: () async {
+                          final clip =
+                              await Clipboard.getData(Clipboard.kTextPlain);
+                          final txt = (clip?.text ?? '').trim();
+                          if (txt.isNotEmpty) {
+                            setState(() => _deepSeekKey.text = txt);
+                            await _autoSaveAiField();
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _aiModel,
+                textDirection: TextDirection.ltr,
+                onChanged: (_) => _autoSaveAiField(),
+                decoration: const InputDecoration(
+                  labelText: 'اسم النموذج (Model ID)',
+                  hintText: 'deepseek/deepseek-chat أو gpt-4o-mini أو llama-3.3-70b',
+                  prefixIcon: Icon(Icons.smart_toy_outlined,
+                      color: Color(0xFF0284C7)),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _aiSystemPrompt,
+                minLines: 3,
+                maxLines: 6,
+                onChanged: (_) => _autoSaveAiField(),
+                decoration: InputDecoration(
+                  labelText: 'موجه النظام (System Prompt)',
+                  hintText: 'اكتب التوجيهات الشخصية للرفيق الذكي...',
+                  prefixIcon: const Icon(Icons.psychology_alt_outlined,
+                      color: Color(0xFF0284C7)),
+                  suffixIcon: IconButton(
+                    tooltip: 'استعادة موجه النظام الافتراضي',
+                    icon: const Icon(Icons.restore_rounded, size: 18),
+                    onPressed: () {
+                      setState(
+                          () => _aiSystemPrompt.text = kOwnerSystemInstruction);
+                      _autoSaveAiField();
+                    },
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
       actions: [
@@ -391,7 +527,12 @@ class _ConfigDialogState extends State<_ConfigDialog> {
                   setState(() => _busy = true);
                   try {
                     await Rtdb.instance.save(_url.text);
-                    await Rtdb.instance.saveDeepSeekApiKey(_deepSeekKey.text);
+                    await Rtdb.instance.saveAiSettings(
+                      baseUrl: _aiBaseUrl.text,
+                      apiKey: _deepSeekKey.text,
+                      modelId: _aiModel.text,
+                      systemPrompt: _aiSystemPrompt.text,
+                    );
                     adminRefreshTick.value++;
                     if (mounted) nav.pop();
                   } finally {
@@ -4126,11 +4267,12 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
   Widget build(BuildContext context) {
     final engine = DualPersonaAiEngine.instance;
     final hasKey = engine.hasApiKey;
+    final currentModel = engine.modelId;
     final history = engine.ownerSession.history;
 
     return Column(
       children: [
-        // 1) الشريط العلوي: عنوان المحادثة + زر إعدادات المفتاح + تفريغ الجلسة
+        // 1) الشريط العلوي: عنوان المحادثة + أيقونة الترس (⚙️) لضبط المزود والنموذج + تفريغ الجلسة
         Container(
           margin: const EdgeInsets.fromLTRB(12, 10, 12, 4),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
@@ -4151,24 +4293,27 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                     color: Color(0xFF0284C7), size: 22),
               ),
               const SizedBox(width: 10),
-              const Expanded(
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'رفيقك الشخصي الذكي (DeepSeek Chat)',
+                    const Text(
+                      'رفيقك الشخصي الذكي (Universal AI Chat)',
                       style:
                           TextStyle(fontWeight: FontWeight.w900, fontSize: 13),
                     ),
                     Text(
-                      'حوار عفوي وودود في شتى مجالات الحياة والعمل • deepseek-chat',
-                      style: TextStyle(fontSize: 11, color: Colors.black54),
+                      'النموذج النشط: $currentModel • يدعم OpenRouter / OpenAI / DeepSeek / Groq',
+                      style:
+                          const TextStyle(fontSize: 11, color: Colors.black54),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ],
                 ),
               ),
               IconButton(
-                tooltip: 'إعدادات مفتاح DeepSeek API',
+                tooltip: '⚙️ إعدادات مزود الذكاء الاصطناعي والنموذج',
                 icon: const Icon(Icons.settings_rounded,
                     color: Color(0xFF334155)),
                 onPressed: _openSettingsDialog,
@@ -4189,7 +4334,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
           ),
         ),
 
-        // 2) تنبيه لطيف عند عدم إدخال مفتاح DeepSeek API بعد
+        // 2) تنبيه واضح عند عدم إدخال مفتاح الواجهة (API Key) يطلب الضغط على الترس لضبط الإعدادات
         if (!hasKey)
           Container(
             margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -4206,7 +4351,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                 const SizedBox(width: 8),
                 const Expanded(
                   child: Text(
-                    'مفتاح DeepSeek API غير مضاف بعد. أدخل المفتاح من الإعدادات لبدء الدردشة.',
+                    'لم يتم إدخال مفتاح الواجهة (API Key) بعد. اضغط على أيقونة الترس (⚙️) لضبط الإعدادات (الرابط، المفتاح، والنموذج).',
                     style: TextStyle(
                       fontSize: 11.5,
                       fontWeight: FontWeight.w700,
@@ -4354,7 +4499,7 @@ class _OwnerCompanionScreenState extends State<OwnerCompanionScreen> {
                           ? Icons.person_rounded
                           : Icons.auto_awesome_rounded;
                       final String senderLabel =
-                          isUser ? 'أنت' : '✨ الرفيق الشخصي (DeepSeek)';
+                          isUser ? 'أنت' : '✨ الرفيق الشخصي ($currentModel)';
                       final DateTime msgTime =
                           DateTime.fromMillisecondsSinceEpoch(m.timestamp);
                       final String timeStr =
@@ -4609,8 +4754,14 @@ class _SystemControlScreenState extends State<SystemControlScreen> {
   final _maintMsg = TextEditingController();
   final _minBuildCtrl = TextEditingController(text: '162');
   final _minVerCtrl = TextEditingController(text: '3.81.0');
+  late final _aiBaseUrlCtrl =
+      TextEditingController(text: DualPersonaAiEngine.instance.baseUrl);
   late final _deepSeekKeyCtrl =
-      TextEditingController(text: Rtdb.instance.deepSeekApiKey);
+      TextEditingController(text: DualPersonaAiEngine.instance.apiKey);
+  late final _aiModelCtrl =
+      TextEditingController(text: DualPersonaAiEngine.instance.modelId);
+  late final _aiSystemPromptCtrl =
+      TextEditingController(text: DualPersonaAiEngine.instance.systemPrompt);
   bool _obscureDeepSeekKey = true;
 
   bool _maintActive = false;
@@ -4632,14 +4783,20 @@ class _SystemControlScreenState extends State<SystemControlScreen> {
     _maintMsg.dispose();
     _minBuildCtrl.dispose();
     _minVerCtrl.dispose();
+    _aiBaseUrlCtrl.dispose();
     _deepSeekKeyCtrl.dispose();
+    _aiModelCtrl.dispose();
+    _aiSystemPromptCtrl.dispose();
     super.dispose();
   }
 
   void _onTick() {
     if (mounted) {
       setState(() {
-        _deepSeekKeyCtrl.text = Rtdb.instance.deepSeekApiKey;
+        _aiBaseUrlCtrl.text = DualPersonaAiEngine.instance.baseUrl;
+        _deepSeekKeyCtrl.text = DualPersonaAiEngine.instance.apiKey;
+        _aiModelCtrl.text = DualPersonaAiEngine.instance.modelId;
+        _aiSystemPromptCtrl.text = DualPersonaAiEngine.instance.systemPrompt;
       });
     }
   }
@@ -4690,7 +4847,7 @@ class _SystemControlScreenState extends State<SystemControlScreen> {
                     SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        '🤖 إعدادات مفتاح DeepSeek API (deepseek_api_key)',
+                        '🤖 إعدادات مزود الذكاء الاصطناعي الشامل (OpenAI-Compatible)',
                         style: TextStyle(fontWeight: FontWeight.w800),
                       ),
                     ),
@@ -4698,8 +4855,18 @@ class _SystemControlScreenState extends State<SystemControlScreen> {
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  'يُحفظ المفتاح محلياً في SharedPreferences تحت الاسم deepseek_api_key لتهيئة الرفيق الشخصي (0.8) والدعم الفني (0.2).',
+                  'متوافق مع OpenRouter, OpenAI, DeepSeek, Groq, Together, Ollama.. يُحفظ تلقائياً في SharedPreferences.',
                   style: TextStyle(fontSize: 11.5, color: Colors.black54),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _aiBaseUrlCtrl,
+                  textDirection: TextDirection.ltr,
+                  decoration: const InputDecoration(
+                    labelText: 'رابط الخدمة (Base URL / Endpoint)',
+                    hintText: kDefaultAiEndpoint,
+                    prefixIcon: Icon(Icons.link_rounded),
+                  ),
                 ),
                 const SizedBox(height: 10),
                 TextField(
@@ -4707,8 +4874,8 @@ class _SystemControlScreenState extends State<SystemControlScreen> {
                   obscureText: _obscureDeepSeekKey,
                   textDirection: TextDirection.ltr,
                   decoration: InputDecoration(
-                    labelText: 'مفتاح DeepSeek API',
-                    hintText: 'sk-...',
+                    labelText: 'مفتاح الواجهة (API Key)',
+                    hintText: 'sk-... أو sk-or-...',
                     prefixIcon: const Icon(Icons.vpn_key_outlined),
                     suffixIcon: IconButton(
                       icon: Icon(_obscureDeepSeekKey
@@ -4720,22 +4887,46 @@ class _SystemControlScreenState extends State<SystemControlScreen> {
                   ),
                 ),
                 const SizedBox(height: 10),
+                TextField(
+                  controller: _aiModelCtrl,
+                  textDirection: TextDirection.ltr,
+                  decoration: const InputDecoration(
+                    labelText: 'اسم النموذج (Model ID)',
+                    hintText: 'deepseek/deepseek-chat أو gpt-4o-mini',
+                    prefixIcon: Icon(Icons.smart_toy_outlined),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _aiSystemPromptCtrl,
+                  minLines: 2,
+                  maxLines: 4,
+                  decoration: const InputDecoration(
+                    labelText: 'موجه النظام (System Prompt)',
+                    prefixIcon: Icon(Icons.psychology_alt_outlined),
+                  ),
+                ),
+                const SizedBox(height: 10),
                 FilledButton.icon(
                   onPressed: () async {
-                    await Rtdb.instance
-                        .saveDeepSeekApiKey(_deepSeekKeyCtrl.text.trim());
+                    await Rtdb.instance.saveAiSettings(
+                      baseUrl: _aiBaseUrlCtrl.text.trim(),
+                      apiKey: _deepSeekKeyCtrl.text.trim(),
+                      modelId: _aiModelCtrl.text.trim(),
+                      systemPrompt: _aiSystemPromptCtrl.text.trim(),
+                    );
                     adminRefreshTick.value++;
                     if (context.mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
                           content: Text(
-                              'تم حفظ مفتاح DeepSeek API (deepseek_api_key) محلياً بنجاح ✓'),
+                              'تم حفظ إعدادات مزود الذكاء الاصطناعي والنموذج محلياً بنجاح ✓'),
                         ),
                       );
                     }
                   },
                   icon: const Icon(Icons.save_outlined, size: 16),
-                  label: const Text('حفظ مفتاح DeepSeek API'),
+                  label: const Text('حفظ إعدادات الذكاء الاصطناعي'),
                 ),
               ],
             ),

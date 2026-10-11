@@ -70,9 +70,16 @@ class Rtdb {
   static const _kAdminRt = 'rtdbAdminRefreshToken';
   static const _kAdminUid = 'rtdbAdminUid';
   static const kDeepSeekApiKeyPref = 'deepseek_api_key';
+  static const kAiApiKeyPref = 'ai_api_key';
+  static const kAiBaseUrlPref = 'ai_base_url';
+  static const kAiModelPref = 'ai_model_id';
+  static const kAiSystemPromptPref = 'ai_system_prompt';
   static const kAutoSupportPref = 'auto_support_enabled';
 
   String deepSeekApiKey = '';
+  String aiBaseUrl = kDefaultAiEndpoint;
+  String aiModelId = kDefaultAiModel;
+  String aiSystemPrompt = kOwnerSystemInstruction;
   bool autoSupportEnabled = true;
 
   String _idToken = '';
@@ -136,9 +143,27 @@ class Rtdb {
     _refreshToken = sp.getString(_kRefresh) ?? '';
     _expiryMs = sp.getInt(_kExpiry) ?? 0;
 
-    deepSeekApiKey = (sp.getString(kDeepSeekApiKeyPref) ?? '').trim();
+    final storedAiKey = (sp.getString(kAiApiKeyPref) ?? '').trim();
+    final storedDeepSeekKey = (sp.getString(kDeepSeekApiKeyPref) ?? '').trim();
+    deepSeekApiKey = storedAiKey.isNotEmpty ? storedAiKey : storedDeepSeekKey;
+
+    final storedBaseUrl = (sp.getString(kAiBaseUrlPref) ?? '').trim();
+    aiBaseUrl = storedBaseUrl.isNotEmpty ? storedBaseUrl : kDefaultAiEndpoint;
+
+    final storedModel = (sp.getString(kAiModelPref) ?? '').trim();
+    aiModelId = storedModel.isNotEmpty ? storedModel : kDefaultAiModel;
+
+    final storedPrompt = (sp.getString(kAiSystemPromptPref) ?? '').trim();
+    aiSystemPrompt =
+        storedPrompt.isNotEmpty ? storedPrompt : kOwnerSystemInstruction;
+
     autoSupportEnabled = sp.getBool(kAutoSupportPref) ?? true;
-    DualPersonaAiEngine.instance.syncApiKey(deepSeekApiKey);
+    DualPersonaAiEngine.instance.syncSettings(
+      apiKey: deepSeekApiKey,
+      baseUrl: aiBaseUrl,
+      modelId: aiModelId,
+      systemPrompt: aiSystemPrompt,
+    );
 
     // تنظيف أي جلسة زائر/مجهولة سابقة حتى لا يُرسل توكن زائر بدلاً من توكن المشرف الرسمي
     if (adminUid.isNotEmpty && adminUid != kOfficialAdminUid) {
@@ -165,10 +190,53 @@ class Rtdb {
     final sp = await SharedPreferences.getInstance();
     if (deepSeekApiKey.isEmpty) {
       await sp.remove(kDeepSeekApiKeyPref);
+      await sp.remove(kAiApiKeyPref);
     } else {
       await sp.setString(kDeepSeekApiKeyPref, deepSeekApiKey);
+      await sp.setString(kAiApiKeyPref, deepSeekApiKey);
     }
     DualPersonaAiEngine.instance.syncApiKey(deepSeekApiKey);
+  }
+
+  Future<void> saveAiSettings({
+    String? baseUrl,
+    String? apiKey,
+    String? modelId,
+    String? systemPrompt,
+  }) async {
+    final sp = await SharedPreferences.getInstance();
+    if (baseUrl != null) {
+      final cleanUrl = baseUrl.trim();
+      aiBaseUrl = cleanUrl.isEmpty ? kDefaultAiEndpoint : cleanUrl;
+      await sp.setString(kAiBaseUrlPref, aiBaseUrl);
+    }
+    if (apiKey != null) {
+      deepSeekApiKey = apiKey.trim();
+      if (deepSeekApiKey.isEmpty) {
+        await sp.remove(kDeepSeekApiKeyPref);
+        await sp.remove(kAiApiKeyPref);
+      } else {
+        await sp.setString(kDeepSeekApiKeyPref, deepSeekApiKey);
+        await sp.setString(kAiApiKeyPref, deepSeekApiKey);
+      }
+    }
+    if (modelId != null) {
+      final cleanModel = modelId.trim();
+      aiModelId = cleanModel.isEmpty ? kDefaultAiModel : cleanModel;
+      await sp.setString(kAiModelPref, aiModelId);
+    }
+    if (systemPrompt != null) {
+      final cleanPrompt = systemPrompt.trim();
+      aiSystemPrompt =
+          cleanPrompt.isEmpty ? kOwnerSystemInstruction : cleanPrompt;
+      await sp.setString(kAiSystemPromptPref, aiSystemPrompt);
+    }
+    DualPersonaAiEngine.instance.syncSettings(
+      apiKey: deepSeekApiKey,
+      baseUrl: aiBaseUrl,
+      modelId: aiModelId,
+      systemPrompt: aiSystemPrompt,
+    );
   }
 
   Future<void> saveAutoSupportEnabled(bool enabled) async {
@@ -2330,17 +2398,25 @@ Object? _firstNum(Object? a, Object? b) {
 }
 
 // ============================================================================
-// 🤖 محرك الذكاء الاصطناعي المباشر عبر DeepSeek API (الرفيق العفوي + الدعم الفني)
+// 🤖 محرك الذكاء الاصطناعي الشامل المتوافق مع معيار OpenAI (Universal OpenAI-Compatible Client)
+// يدعم: OpenRouter, OpenAI, DeepSeek, Groq, Together, Ollama, وأي خادم Chat Completions.
 // ============================================================================
 
-/// رابط الاستدعاء المباشر لخدمة DeepSeek الرسمية المتوافقة مع معيار OpenAI.
+/// الرابط الافتراضي لخدمة Chat Completions الشاملة (OpenRouter).
+const String kDefaultAiEndpoint =
+    'https://openrouter.ai/api/v1/chat/completions';
+
+/// رابط الاستدعاء المباشر لخدمة DeepSeek الرسمية (محفوظ للتوافق).
 const String kDeepSeekEndpoint = 'https://api.deepseek.com/chat/completions';
 
-/// النموذج الافتراضي المعتمد في خدمة DeepSeek.
+/// النموذج الافتراضي المعتمد في الواجهة الشاملة.
+const String kDefaultAiModel = 'deepseek/deepseek-chat';
+
+/// النموذج الافتراضي لـ DeepSeek (محفوظ للتوافق).
 const String kDeepSeekDefaultModel = 'deepseek-chat';
 
-/// درجة الحرارة المعتمدة لمحادثة الرفيق الشخصي (`0.8`).
-const double kOwnerTemperature = 0.8;
+/// درجة الحرارة المعتمدة لمحادثة الرفيق الشخصي (`0.7`).
+const double kOwnerTemperature = 0.7;
 
 /// الحد الأقصى للرموز المولّدة في كل رد (`2048`).
 const int kDeepSeekMaxTokens = 2048;
@@ -2348,10 +2424,10 @@ const int kDeepSeekMaxTokens = 2048;
 /// سعة سياق المحادثة الموسعة.
 const int kMaxConversationContextMessages = 100;
 
-/// موجه النظام الجديد (Persona: الرفيق العفوي متعدد الاهتمامات) — يُحقن كرسالة `system`.
+/// موجه النظام الافتراضي (Persona: الرفيق العفوي متعدد الاهتمامات) — يُحقن كرسالة `system`.
 const String kOwnerSystemInstruction = '''
-أنت رفيق شخصي تفاعلي، ذكي، وخفيف الظل.
-- شخصيتك وطبيعتك: إنسان واسع الاطلاع، سريع البديهة، حاضر الفكاهة، وتجيد خوض الأحاديث في شتى مجالات الحياة (السمر، التجارة، الثقافة، يوميات العمل، النقاشات العامة، والفلسفة) بنفس الكفاءة التي تفهم بها التقنية.
+أنت رفيق شخصي تفاعلي، ذكي، وخفيف الظل، ومستمع وفيّ للفضفضة والدردشة مع المدير.
+- شخصيتك وطبيعتك: إنسان واسع الاطلاع، سريع البديهة، حاضر الفكاهة، وتجيد خوض الأحاديث في شتى مجالات الحياة (السمر، الفضفضة، التجارة، الثقافة، يوميات العمل، النقاشات العامة، والفلسفة) بنفس الكفاءة التي تفهم بها التقنية.
 - أسلوب الحوار:
   1. تكيّف فوراً مع موضوع المستخدم ومزاجه؛ إذا أراد فضفضة عامة أو نقاشاً حراً فتحدث معه كصديق واقعي في جلسة سمر، ولا تجرّ الحديث أبداً نحو البرمجة أو الأكواد ما لم يطلب هو ذلك صراحة.
   2. تحدث بلهجة عربية عفوية وودودة، بلا مقدمات ترحيبية رسمية مكررة ("أهلاً بك كيف أساعدك اليوم") وبلا أسلوب روبوتي.
@@ -2376,11 +2452,18 @@ const double kClientSupportTemperature = 0.2;
 const String kMandatoryEscalationText =
     'تم تسجيل المشكلة والبيانات بالكامل. يرجى الانتظار قليلاً حتى يدخل مدير المشروع بنفسه لمراجعة الحالة والرد عليك مباشرة.';
 
-/// بناء الترويسات الرسمية لخدمة DeepSeek API.
-Map<String, String> buildDeepSeekHeaders(String apiKey) => <String, String>{
-      'Content-Type': 'application/json',
+/// بناء الترويسات القياسية المتوافقة مع كافة مزودي OpenAI و OpenRouter.
+Map<String, String> buildOpenAiCompatibleHeaders(String apiKey) =>
+    <String, String>{
       'Authorization': 'Bearer ${apiKey.trim()}',
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://nexora.app',
+      'X-Title': 'Nexora Admin',
     };
+
+/// بناء الترويسات الرسمية (محفوظ للتوافق).
+Map<String, String> buildDeepSeekHeaders(String apiKey) =>
+    buildOpenAiCompatibleHeaders(apiKey);
 
 /// رسالة واحدة داخل جلسة الذكاء الاصطناعي (`ChatSession`).
 class AiChatMessage {
@@ -2428,11 +2511,11 @@ class AiChatMessage {
       };
 }
 
-/// جلسة محادثة مستقلة (`ChatSession`) تعمل بمحرك DeepSeek المباشر.
+/// جلسة محادثة مستقلة (`ChatSession`) تعمل بمحرك Chat Completions القياسي.
 class ChatSession {
   final String personaId;
-  final String systemInstruction;
-  final double temperature;
+  String systemInstruction;
+  double temperature;
   final int maxTokens;
   final List<AiChatMessage> _history = [];
 
@@ -2480,11 +2563,13 @@ class ChatSession {
     }
   }
 
-  /// إرسال رسالة إلى DeepSeek API (`https://api.deepseek.com/chat/completions`)
+  /// إرسال رسالة إلى المزود المتوافق مع معيار OpenAI Chat Completions
   /// مع الحفاظ على رسالة المستخدم في السجل عند حدوث خطأ في الشبكة أو المفتاح.
   Stream<String> sendMessageStream(
     String userText, {
     String? apiKey,
+    String? baseUrl,
+    String? model,
     String? existingMessageId,
     http.Client? httpClient,
   }) async* {
@@ -2522,10 +2607,11 @@ class ChatSession {
       _history.add(userMsg);
     }
 
-    final cleanKey = (apiKey ?? DualPersonaAiEngine.instance.apiKey).trim();
+    final engine = DualPersonaAiEngine.instance;
+    final cleanKey = (apiKey ?? engine.apiKey).trim();
     if (cleanKey.isEmpty) {
       const errMsg =
-          'يرجى إدخال مفتاح DeepSeek API في إعدادات المفاتيح لتفعيل المحادثة.';
+          'لم يتم إدخال مفتاح الواجهة (API Key) بعد. اضغط على أيقونة الترس (⚙️) في أعلى الشاشة لضبط الإعدادات وإدخال المفتاح.';
       updateMessageState(userMsg.id, hasError: true, errorText: errMsg);
       throw Exception(errMsg);
     }
@@ -2539,19 +2625,26 @@ class ChatSession {
             : 0)
         .toList();
 
+    final effectiveSystemPrompt = personaId == 'owner_companion'
+        ? engine.systemPrompt.trim()
+        : systemInstruction.trim();
+
     final messagesPayload = <Map<String, dynamic>>[
-      {
-        'role': 'system',
-        'content': systemInstruction.trim(),
-      },
+      if (effectiveSystemPrompt.isNotEmpty)
+        {
+          'role': 'system',
+          'content': effectiveSystemPrompt,
+        },
       for (final m in recentHistory) m.toOpenAiMessage(),
     ];
 
     final buffer = StringBuffer();
     try {
-      await for (final chunk in DualPersonaAiEngine.instance.streamDeepSeekChat(
+      await for (final chunk in engine.streamDeepSeekChat(
         messages: messagesPayload,
         apiKey: cleanKey,
+        baseUrl: baseUrl ?? engine.baseUrl,
+        model: model ?? engine.modelId,
         temperature: temperature,
         maxTokens: maxTokens,
         httpClient: httpClient,
@@ -2567,7 +2660,7 @@ class ChatSession {
 
     final finalReply = buffer.toString().trim();
     if (finalReply.isEmpty) {
-      const errText = 'تعذر الحصول على رد من خدمة DeepSeek API.';
+      const errText = 'تعذر الحصول على رد من مزود الذكاء الاصطناعي.';
       updateMessageState(userMsg.id, hasError: true, errorText: errText);
       throw Exception(errText);
     }
@@ -2589,12 +2682,16 @@ class ChatSession {
   Future<String> sendMessage(
     String userText, {
     String? apiKey,
+    String? baseUrl,
+    String? model,
     http.Client? httpClient,
   }) async {
     final buf = StringBuffer();
     await for (final chunk in sendMessageStream(
       userText,
       apiKey: apiKey,
+      baseUrl: baseUrl,
+      model: model,
       httpClient: httpClient,
     )) {
       buf.write(chunk);
@@ -2603,14 +2700,17 @@ class ChatSession {
   }
 }
 
-/// محرك الذكاء الاصطناعي الموحد والمبسط عبر DeepSeek API:
-/// 1) `ownerSession`: جلسة الرفيق الشخصي التفاعلي (`temperature: 0.8`, `max_tokens: 2048`)
+/// محرك الذكاء الاصطناعي الشامل المتوافق مع معيار OpenAI (Universal OpenAI-Compatible Client):
+/// 1) `ownerSession`: جلسة الرفيق الشخصي التفاعلي (`temperature: 0.7`)
 /// 2) `supportSessionFor(wsId)`: جلسة الدعم الفني للمستخدمين (`temperature: 0.2`)
 class DualPersonaAiEngine {
   DualPersonaAiEngine._();
   static final DualPersonaAiEngine instance = DualPersonaAiEngine._();
 
   String _apiKey = '';
+  String _baseUrl = kDefaultAiEndpoint;
+  String _modelId = kDefaultAiModel;
+  String _systemPrompt = kOwnerSystemInstruction;
 
   /// الجلسة الأولى المستقلة: رفيق المالك الشخصي (الرفيق العفوي متعدد الاهتمامات).
   final ChatSession ownerSession = ChatSession(
@@ -2627,19 +2727,60 @@ class DualPersonaAiEngine {
     _apiKey = key.trim();
   }
 
+  void syncSettings({
+    String? apiKey,
+    String? baseUrl,
+    String? modelId,
+    String? systemPrompt,
+  }) {
+    if (apiKey != null) _apiKey = apiKey.trim();
+    if (baseUrl != null) {
+      final u = baseUrl.trim();
+      _baseUrl = u.isEmpty ? kDefaultAiEndpoint : u;
+    }
+    if (modelId != null) {
+      final m = modelId.trim();
+      _modelId = m.isEmpty ? kDefaultAiModel : m;
+    }
+    if (systemPrompt != null) {
+      final p = systemPrompt.trim();
+      _systemPrompt = p.isEmpty ? kOwnerSystemInstruction : p;
+      ownerSession.systemInstruction = _systemPrompt;
+    }
+  }
+
   String get apiKey =>
       _apiKey.isNotEmpty ? _apiKey : Rtdb.instance.deepSeekApiKey.trim();
 
   String get deepSeekApiKey => apiKey;
 
+  String get baseUrl {
+    if (_baseUrl.trim().isNotEmpty) return _baseUrl.trim();
+    final r = Rtdb.instance.aiBaseUrl.trim();
+    return r.isNotEmpty ? r : kDefaultAiEndpoint;
+  }
+
+  String get modelId {
+    if (_modelId.trim().isNotEmpty) return _modelId.trim();
+    final r = Rtdb.instance.aiModelId.trim();
+    return r.isNotEmpty ? r : kDefaultAiModel;
+  }
+
+  String get systemPrompt {
+    if (_systemPrompt.trim().isNotEmpty) return _systemPrompt.trim();
+    final r = Rtdb.instance.aiSystemPrompt.trim();
+    return r.isNotEmpty ? r : kOwnerSystemInstruction;
+  }
+
   bool get hasApiKey => apiKey.isNotEmpty;
 
-  /// استدعاء مباشر لخدمة DeepSeek الرسمية (`https://api.deepseek.com/chat/completions`)
-  /// يدعم كلاً من الاستجابة المباشرة (JSON) والبث المتدفق (SSE) بمعيار OpenAI.
+  /// مرسل الطلبات الديناميكي (Dynamic Request Dispatcher) لأي مزود متوافق مع معيار OpenAI Chat Completions
+  /// (OpenRouter, OpenAI, DeepSeek, Groq, Together, Ollama.. إلخ).
   Stream<String> streamDeepSeekChat({
     required List<Map<String, dynamic>> messages,
     String? apiKey,
-    String model = kDeepSeekDefaultModel,
+    String? baseUrl,
+    String? model,
     double temperature = kOwnerTemperature,
     int maxTokens = kDeepSeekMaxTokens,
     http.Client? httpClient,
@@ -2647,17 +2788,33 @@ class DualPersonaAiEngine {
     final cleanKey = (apiKey ?? this.apiKey).trim();
     if (cleanKey.isEmpty) {
       throw Exception(
-          'مفتاح DeepSeek API غير متوفر. يرجى إدخاله في نافذة الإعدادات.');
+          'لم يتم إدخال مفتاح الواجهة (API Key) بعد. اضغط على أيقونة الترس (⚙️) لضبط الإعدادات.');
+    }
+
+    final targetUrl = (baseUrl ?? this.baseUrl).trim().isEmpty
+        ? kDefaultAiEndpoint
+        : (baseUrl ?? this.baseUrl).trim();
+    final selectedModel = (model ?? modelId).trim().isEmpty
+        ? kDefaultAiModel
+        : (model ?? modelId).trim();
+
+    final Uri uri;
+    try {
+      uri = Uri.parse(targetUrl);
+      if (!uri.hasScheme || uri.host.isEmpty) {
+        throw const FormatException('Invalid URL');
+      }
+    } catch (_) {
+      throw Exception(
+          'رابط الخدمة (Base URL) غير صالح: $targetUrl — يرجى مراجعته من أيقونة الترس (⚙️).');
     }
 
     final client = httpClient ?? http.Client();
-    final uri = Uri.parse(kDeepSeekEndpoint);
-    final headers = buildDeepSeekHeaders(cleanKey);
+    final headers = buildOpenAiCompatibleHeaders(cleanKey);
     final payload = <String, dynamic>{
-      'model': model,
+      'model': selectedModel,
       'messages': messages,
       'temperature': temperature,
-      'max_tokens': maxTokens,
     };
 
     http.Response res;
@@ -2668,15 +2825,15 @@ class DualPersonaAiEngine {
             headers: headers,
             body: jsonEncode(payload),
           )
-          .timeout(const Duration(seconds: 40));
+          .timeout(const Duration(seconds: 45));
     } catch (e) {
       throw Exception(
-          'تعذر الاتصال بخدمة DeepSeek API. تحقق من اتصال الإنترنت وحاول مجدداً.');
+          'تعذر الاتصال بخادم الذكاء الاصطناعي ($targetUrl). تحقق من اتصال الإنترنت أو صحة الرابط.');
     }
 
     final rawBody = utf8.decode(res.bodyBytes);
     if (res.statusCode != 200) {
-      throw Exception(_parseDeepSeekError(res.statusCode, rawBody));
+      throw Exception(parseOpenAiError(res.statusCode, rawBody, selectedModel));
     }
 
     // 1) إذا أعاد الخادم تدفق SSE (data: ...)
@@ -2703,14 +2860,24 @@ class DualPersonaAiEngine {
     // 2) استجابة JSON قياسية متوافقة مع OpenAI Chat Completions
     try {
       final decoded = jsonDecode(rawBody);
+      if (decoded is Map && decoded['error'] != null) {
+        throw Exception(parseOpenAiError(400, rawBody, selectedModel));
+      }
       final text = _extractOpenAiContent(decoded);
       if (text.isNotEmpty) {
         yield text;
         return;
       }
-    } catch (_) {}
+    } catch (e) {
+      if (e.toString().contains('خطأ') ||
+          e.toString().contains('401') ||
+          e.toString().contains('404') ||
+          e.toString().contains('429')) {
+        rethrow;
+      }
+    }
 
-    throw Exception('لم يتم استلام نص رد صالح من DeepSeek API.');
+    throw Exception('لم يتم استلام نص رد صالح من المزود ($selectedModel).');
   }
 
   static String _extractOpenAiContent(Object? decoded) {
@@ -2727,31 +2894,46 @@ class DualPersonaAiEngine {
     if (delta is Map && delta['content'] != null) {
       return '${delta['content']}';
     }
+    if (first['text'] != null) {
+      return '${first['text']}';
+    }
     return '';
   }
 
-  static String _parseDeepSeekError(int status, String rawBody) {
+  static String parseOpenAiError(
+      int status, String rawBody, [String model = '']) {
     String detail = '';
     try {
       final decoded = jsonDecode(rawBody);
-      if (decoded is Map && decoded['error'] is Map) {
-        detail = asStr((decoded['error'] as Map)['message']);
+      if (decoded is Map) {
+        final err = decoded['error'];
+        if (err is Map) {
+          detail = asStr(err['message']);
+        } else if (err is String) {
+          detail = err;
+        } else if (decoded['message'] != null) {
+          detail = asStr(decoded['message']);
+        }
       }
     } catch (_) {}
 
     if (status == 401 || status == 403) {
-      return 'مفتاح DeepSeek API غير صحيح أو غير صالح ($status). يرجى التحقق من المفتاح في الإعدادات.';
+      return 'المفتاح غير صحيح أو غير مصرح به ($status): تحقق من صحة مفتاح الـ API Key في الإعدادات (⚙️).'
+          '${detail.isNotEmpty ? ' ($detail)' : ''}';
     }
-    if (status == 402) {
-      return 'رصيد حساب DeepSeek API غير كافٍ (402).';
+    if (status == 404) {
+      return 'النموذج غير موجود أو رابط الخدمة غير صحيح (404): تأكد من كتابة اسم النموذج'
+          '${model.isNotEmpty ? ' "$model"' : ''} ورابط الـ Endpoint بشكل صحيح في الإعدادات (⚙️).'
+          '${detail.isNotEmpty ? ' ($detail)' : ''}';
     }
-    if (status == 429) {
-      return 'تم تجاوز حد الطلبات المؤقت لخدمة DeepSeek (429). يرجى المحاولة بعد لحظات.';
+    if (status == 402 || status == 429) {
+      return 'نفاد الرصيد أو تجاوز حد الطلبات المسموح ($status): يرجى شحن الرصيد لدى المزود أو الانتظار قليلاً.'
+          '${detail.isNotEmpty ? ' ($detail)' : ''}';
     }
     if (detail.isNotEmpty) {
-      return 'خطأ DeepSeek API ($status): $detail';
+      return 'خطأ من مزود الذكاء الاصطناعي ($status): $detail';
     }
-    return 'تعذر إتمام الطلب من خادم DeepSeek (رمز الحالة $status).';
+    return 'تعذر إتمام الطلب من المزود (رمز الحالة $status).';
   }
 
   /// الحصول على جلسة الدعم الفني المستقلة الخاصة بمنشأة معينة (`temperature: 0.2`).
