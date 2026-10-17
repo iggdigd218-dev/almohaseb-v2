@@ -27,6 +27,7 @@ import 'sync_diagnostics.dart';
 
 /// الجدول الأب لكل عمود مفتاح أجنبي معروف في المخطط.
 const Map<String, String> kForeignParentTable = {
+  'workspace_id': 'workspaces',
   'account_id': 'accounts',
   'from_id': 'accounts',
   'to_id': 'accounts',
@@ -103,6 +104,7 @@ Future<void> insertStubRow(
   final now = DateTime.now().toIso8601String();
   final row = <String, Object?>{
     pk: id,
+    if (table == 'workspaces') 'name': 'متجري',
     if (table == 'accounts') 'name': 'حساب مؤقت (قيد المزامنة) $id',
     if (table == 'items') 'name': 'صنف مؤقت (قيد المزامنة) $id',
     if (table == 'item_categories') 'name': 'تصنيف مؤقت $id',
