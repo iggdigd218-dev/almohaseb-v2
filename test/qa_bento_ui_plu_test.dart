@@ -40,26 +40,6 @@ class _TestPosRepo extends Repo {
 
   @override
   Future<Map<String, String>> settings() async => <String, String>{};
-
-  @override
-  Future<List<Tx>> transactions({
-    int? accountId,
-    DateTime? from,
-    DateTime? to,
-    OpType? type,
-  }) async => <Tx>[];
-
-  @override
-  Future<List<Account>> accounts({bool includeArchived = false}) async => <Account>[];
-
-  @override
-  Future<List<Section>> sections() async => <Section>[];
-
-  @override
-  Future<List<ItemCategory>> itemCategories() async => <ItemCategory>[];
-
-  @override
-  Future<List<Item>> items() async => <Item>[];
 }
 
 void main() {
