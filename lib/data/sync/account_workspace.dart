@@ -910,7 +910,9 @@ class AccountWorkspace {
     var swapped = false;
     try {
       // 3) فتح قاعدة البيانات الخاصة بالمساحة المستهدفة وتفريغ أي بقايا قديمة.
-      await AppDatabase.instance.openForWorkspace(toWorkspaceId);
+      if (!repo.hasCustomDatabaseProvider) {
+        await AppDatabase.instance.openForWorkspace(toWorkspaceId);
+      }
       final db = await repo.database;
       await FactoryReset.wipeAccountingTables(db);
 

@@ -36,19 +36,29 @@ class SnapshotApply {
     Map<String, Object?> snap,
   ) async {
     var db = await dbProvider();
-    if (!db.isOpen) {
+    bool isClosed = false;
+    try {
+      isClosed = !db.isOpen;
+    } catch (_) {
+      isClosed = false;
+    }
+    if (isClosed) {
       final path = db.path;
       if (path.isNotEmpty &&
           path != ':memory:' &&
           !path.contains('in_memory')) {
-        db = await databaseFactory.openDatabase(
-          path,
-          options: OpenDatabaseOptions(
-            version: AppDatabase.schemaVersion,
-            onConfigure: (d) => d.execute('PRAGMA foreign_keys = ON'),
-          ),
-        );
-        await AppDatabase.ensureFullSchema(db);
+        try {
+          db = await databaseFactory.openDatabase(
+            path,
+            options: OpenDatabaseOptions(
+              version: AppDatabase.schemaVersion,
+              onConfigure: (d) => d.execute('PRAGMA foreign_keys = ON'),
+            ),
+          );
+          await AppDatabase.ensureFullSchema(db);
+        } catch (_) {
+          db = await AppDatabase.instance.database;
+        }
       } else {
         db = await AppDatabase.instance.database;
       }

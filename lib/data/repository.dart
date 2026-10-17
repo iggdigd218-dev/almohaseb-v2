@@ -67,26 +67,39 @@ class Repo {
   Database? _reopenedOverrideDb;
   bool get hasCustomDatabaseProvider => _databaseProvider != null;
   Future<Database> get _db async {
-    if (_reopenedOverrideDb != null && _reopenedOverrideDb!.isOpen) {
-      return _reopenedOverrideDb!;
+    if (_reopenedOverrideDb != null) {
+      bool isOpen = false;
+      try {
+        isOpen = _reopenedOverrideDb!.isOpen;
+      } catch (_) {}
+      if (isOpen) return _reopenedOverrideDb!;
     }
     if (_databaseProvider != null) {
       final provided = await _databaseProvider();
-      if (provided.isOpen) return provided;
-      final path = provided.path;
-      if (path.isNotEmpty &&
-          path != ':memory:' &&
-          !path.contains('in_memory')) {
-        final reopened = await databaseFactory.openDatabase(
-          path,
-          options: OpenDatabaseOptions(
-            version: AppDatabase.schemaVersion,
-            onConfigure: (d) => d.execute('PRAGMA foreign_keys = ON'),
-          ),
-        );
-        await AppDatabase.ensureFullSchema(reopened);
-        _reopenedOverrideDb = reopened;
-        return reopened;
+      bool isClosed = false;
+      try {
+        isClosed = !provided.isOpen;
+      } catch (_) {
+        isClosed = false;
+      }
+      if (isClosed) {
+        final path = provided.path;
+        if (path.isNotEmpty &&
+            path != ':memory:' &&
+            !path.contains('in_memory')) {
+          try {
+            final reopened = await databaseFactory.openDatabase(
+              path,
+              options: OpenDatabaseOptions(
+                version: AppDatabase.schemaVersion,
+                onConfigure: (d) => d.execute('PRAGMA foreign_keys = ON'),
+              ),
+            );
+            await AppDatabase.ensureFullSchema(reopened);
+            _reopenedOverrideDb = reopened;
+            return reopened;
+          } catch (_) {}
+        }
       }
       return provided;
     }

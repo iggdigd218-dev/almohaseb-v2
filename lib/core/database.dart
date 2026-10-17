@@ -23,7 +23,6 @@ class AppDatabase {
   static Future<Database>? _opening;
   static String _activeWorkspaceId = defaultWorkspaceIdConst;
   static bool _isTestOverride = false;
-  static bool _everOpened = false;
   static const int _version = 28;
 
   /// مفتاح التخزين الدائم للمنشأة النشطة في SharedPreferences
@@ -162,15 +161,11 @@ class AppDatabase {
     if (_db != null && _activeWorkspaceId == targetWs && _db!.isOpen) {
       return _db!;
     }
-    final shouldOpen = _db != null || _opening != null || _everOpened;
+    final hadOpenDb = _db != null || _opening != null;
     await close();
     _activeWorkspaceId = targetWs;
-    if (!shouldOpen) {
-      try {
-        return await database;
-      } catch (_) {
-        return null;
-      }
+    if (!hadOpenDb) {
+      return null;
     }
     return database;
   }
@@ -193,7 +188,6 @@ class AppDatabase {
   }
 
   Future<Database> _openDb([String? workspaceId]) async {
-    _everOpened = true;
     final dir = await databaseDirectory();
     final effectiveWs = (workspaceId ?? _activeWorkspaceId).trim();
     final fileName = dbFileNameFor(effectiveWs);

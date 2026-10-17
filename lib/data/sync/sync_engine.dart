@@ -100,13 +100,21 @@ class SyncEngine {
 
   Future<Database> get _db async {
     final db = await dbProvider();
-    if (db.isOpen) return db;
-    return repo.database;
+    try {
+      if (!db.isOpen) return repo.database;
+    } catch (_) {}
+    return db;
   }
 
   Future<SyncQueueOps> _ensureQueue() async {
     final db = await _db;
-    if (_queue == null || !identical(_queue!.db, db) || !_queue!.db.isOpen) {
+    bool isClosed = false;
+    try {
+      isClosed = !(_queue?.db.isOpen ?? true);
+    } catch (_) {
+      isClosed = false;
+    }
+    if (_queue == null || !identical(_queue!.db, db) || isClosed) {
       _queue = SyncQueueOps(db);
     }
     return _queue!;
