@@ -228,6 +228,8 @@ class _PosScreenState extends ConsumerState<PosScreen>
       }
       _openCheckoutSheet();
     };
+    // مستمع عالمي لأحداث لوحة المفاتيح (سطح المكتب وقارئات الباركود):
+    HardwareKeyboard.instance.addHandler(_onGlobalKeyEvent);
   }
 
   /// (2026-09-24) كتابة خارجية (الزر العائم): أعد قراءة الأصناف فتظهر
@@ -240,6 +242,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onGlobalKeyEvent);
     dataChangeTick.removeListener(_onExternalDataChange);
     if (PosScreen.openCheckoutBridge != null) {
       PosScreen.openCheckoutBridge = null;
@@ -326,38 +329,165 @@ class _PosScreenState extends ConsumerState<PosScreen>
     setState(() {});
   }
 
-  // ---------------- اختصارات لوحة مفاتيح سطح المكتب ----------------
+  // ---------------- اختصارات لوحة مفاتيح سطح المكتب العالمية ----------------
   // F1 دفع نقدي فوري • F2 آجل • F3 تركيز بحث العميل/الأصناف •
-  // F12 تعليق الفاتورة • Esc إفراغ السلة / إغلاق النافذة النشطة.
+  // F9 تعليق وفاتورة جديدة • F12 تعليق الفاتورة • Esc مسح البحث / إفراغ السلة
+  // • الكتابة المباشرة توجّه تلقائياً لحقل البحث والباركود/PLU دون نقر الفأرة
+  // • Enter يضيف أول صنف مطابق أو يفتح إتمام البيع السريع.
   final FocusNode _shortcutFocus = FocusNode();
   final FocusNode _searchFocus = FocusNode();
 
-  KeyEventResult _handleDesktopKey(FocusNode node, KeyEvent event) {
-    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+  bool _onGlobalKeyEvent(KeyEvent event) {
+    if (!mounted) return false;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
+
+    // لا نتدخل إذا كانت هناك نافذة حوارية أو شريحة منبثقة مفتوحة فوق شاشة المبيعات.
+    final route = ModalRoute.of(context);
+    if (route != null && !route.isCurrent) return false;
+
+    // لا نتدخل إذا كان المستخدم في تبويب سجل المبيعات على الجوال/التابلت.
+    if (!isDesktopLayout(context) && _tabController.index != 0) return false;
+
+    // إذا كان التركيز داخل حقل نصي آخر غير حقل البحث (مثل ملاحظات أو خصم)، نتركه يعمل طبيعياً.
+    final primaryFocus = FocusManager.instance.primaryFocus;
+    final isOtherEditableFocused = primaryFocus != null &&
+        primaryFocus != _searchFocus &&
+        primaryFocus.context != null &&
+        primaryFocus.context!.findAncestorWidgetOfExactType<EditableText>() !=
+            null;
+    if (isOtherEditableFocused) return false;
+
     final key = event.logicalKey;
-    if (key == LogicalKeyboardKey.f1) {
-      _quickSettle(_PosPayment.cash);
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.f2) {
-      _quickSettle(_PosPayment.credit);
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.f3) {
-      _searchFocus.requestFocus();
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.f12) {
-      _holdInvoice();
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.escape) {
-      if (_cart.isNotEmpty) {
-        _clearCart();
-        return KeyEventResult.handled;
+
+    if (event is KeyDownEvent) {
+      if (key == LogicalKeyboardKey.f1) {
+        _quickSettle(_PosPayment.cash);
+        return true;
+      }
+      if (key == LogicalKeyboardKey.f2) {
+        _quickSettle(_PosPayment.credit);
+        return true;
+      }
+      if (key == LogicalKeyboardKey.f3 || key == LogicalKeyboardKey.f4) {
+        _searchFocus.requestFocus();
+        _searchCtrl.selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: _searchCtrl.text.length,
+        );
+        return true;
+      }
+      if (key == LogicalKeyboardKey.f9) {
+        _quickHoldAndNewBill();
+        return true;
+      }
+      if (key == LogicalKeyboardKey.f12) {
+        _holdInvoice();
+        return true;
+      }
+      if (key == LogicalKeyboardKey.escape) {
+        if (_searchCtrl.text.isNotEmpty || _searchQuery.isNotEmpty) {
+          _searchCtrl.clear();
+          setState(() => _searchQuery = '');
+          return true;
+        }
+        if (_atSectionsGate ||
+            _selectedCategoryId != null ||
+            _selectedSectionId != null) {
+          setState(() {
+            _atSectionsGate = false;
+            _selectedCategoryId = null;
+            _selectedSectionId = null;
+          });
+          return true;
+        }
+        if (_cart.isNotEmpty) {
+          _clearCart();
+          return true;
+        }
+        return false;
+      }
+      if (key == LogicalKeyboardKey.enter ||
+          key == LogicalKeyboardKey.numpadEnter) {
+        // إذا كان حقل البحث مركزاً فسيقوم onSubmitted بمعالجة الحدث، وإلا نعالج الإدخال فوراً.
+        if (!_searchFocus.hasFocus) {
+          _handleSearchOrQuickSubmit(_searchCtrl.text);
+          return true;
+        }
+        return false;
       }
     }
+
+    // إذا كان حقل البحث يمتلك التركيز حالياً، يكتب فيه فلاتر مباشرة دون تكرار.
+    if (_searchFocus.hasFocus) return false;
+
+    final hw = HardwareKeyboard.instance;
+    if (hw.isControlPressed || hw.isAltPressed || hw.isMetaPressed) {
+      return false;
+    }
+
+    if (key == LogicalKeyboardKey.backspace) {
+      if (_searchCtrl.text.isNotEmpty) {
+        final next =
+            _searchCtrl.text.substring(0, _searchCtrl.text.length - 1);
+        _searchCtrl.value = TextEditingValue(
+          text: next,
+          selection: TextSelection.collapsed(offset: next.length),
+        );
+        setState(() => _searchQuery = next.trim());
+        _searchFocus.requestFocus();
+        return true;
+      }
+      return false;
+    }
+
+    // التقاط الأحرف والأرقام والرموز القابلة للطباعة وتوجيهها تلقائياً لحقل البحث.
+    final ch = event.character;
+    if (ch != null &&
+        ch.isNotEmpty &&
+        ch.runes.every((r) => r >= 0x20 && r != 0x7F)) {
+      final next = '${_searchCtrl.text}$ch';
+      _searchCtrl.value = TextEditingValue(
+        text: next,
+        selection: TextSelection.collapsed(offset: next.length),
+      );
+      setState(() => _searchQuery = next.trim());
+      _searchFocus.requestFocus();
+      return true;
+    }
+
+    return false;
+  }
+
+  KeyEventResult _handleDesktopKey(FocusNode node, KeyEvent event) {
+    // المعالجة تتم عبر المستمع العالمي _onGlobalKeyEvent لضمان العمل مع أو بدون تركيز مسبق.
     return KeyEventResult.ignored;
+  }
+
+  /// معالجة الضغط على Enter في البحث أو الشاشة:
+  /// 1) إن وُجد نص بحث: يطابق الباركود أو PLU أولاً، وإلا يضيف أول صنف مطابق في الشبكة.
+  /// 2) إن كان البحث فارغاً والسلة تحتوي أصنافاً: يفتح نافذة إتمام البيع السريع.
+  void _handleSearchOrQuickSubmit(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isNotEmpty) {
+      if (_handleQuickIndex(trimmed)) return;
+      final allItems = ref.read(itemsProvider).valueOrNull ?? const <Item>[];
+      final categories =
+          ref.read(itemCategoriesProvider).valueOrNull ?? const <ItemCategory>[];
+      final filtered = _computeFilteredItems(allItems, categories);
+      if (filtered.isNotEmpty) {
+        final first = filtered.first;
+        _addItem(first);
+        _searchCtrl.clear();
+        setState(() => _searchQuery = '');
+        _searchFocus.requestFocus();
+        return;
+      }
+      setState(() => _searchQuery = trimmed);
+      return;
+    }
+    if (_cart.isNotEmpty && !_saving) {
+      _openCheckoutSheet();
+    }
   }
 
   /// تسوية سريعة من الاختصار: نقدي ينفّذ فوراً؛ آجل يتطلب عميلاً —
@@ -1163,13 +1293,10 @@ class _PosScreenState extends ConsumerState<PosScreen>
         ),
       );
 
-  Widget _buildPosSaleTab() {
-    final categories = ref.watch(itemCategoriesProvider).valueOrNull ?? [];
-    final allItems = ref.watch(itemsProvider).valueOrNull ?? [];
-    final currencies =
-        ref.watch(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
-    final cur = currencies.first;
-
+  List<Item> _computeFilteredItems(
+    List<Item> allItems,
+    List<ItemCategory> categories,
+  ) {
     final hasSearch = _searchQuery.trim().isNotEmpty;
     final normQ = hasSearch ? Fmt.normArabic(_searchQuery) : '';
 
@@ -1189,14 +1316,6 @@ class _PosScreenState extends ConsumerState<PosScreen>
         }
       }
     }
-
-    final favorites = allItems.where((i) {
-      if (!i.isActive || i.isDeleted) return false;
-      if (_pinnedItemIds.isNotEmpty) {
-        return _pinnedItemIds.contains(i.id);
-      }
-      return i.quantity > 0;
-    }).take(10).toList();
 
     final filteredItems = allItems.where((item) {
       if (hasSearch) {
@@ -1218,7 +1337,8 @@ class _PosScreenState extends ConsumerState<PosScreen>
       }
       if (_selectedSectionId != null && _selectedCategoryId == null) {
         if (_selectedSectionId == kGeneralSectionId) {
-          final allSecs = ref.read(sectionsProvider).valueOrNull ?? const <Section>[];
+          final allSecs =
+              ref.read(sectionsProvider).valueOrNull ?? const <Section>[];
           final activeSecIds = allSecs.map((s) => s.id).toSet();
           final effectiveSecId =
               item.sectionId ?? _sectionOfCat(categories, item.categoryId);
@@ -1246,6 +1366,27 @@ class _PosScreenState extends ConsumerState<PosScreen>
       default:
         filteredItems.sort((a, b) => a.name.compareTo(b.name));
     }
+    return filteredItems;
+  }
+
+  Widget _buildPosSaleTab() {
+    final categories = ref.watch(itemCategoriesProvider).valueOrNull ?? [];
+    final allItems = ref.watch(itemsProvider).valueOrNull ?? [];
+    final currencies =
+        ref.watch(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
+    final cur = currencies.first;
+
+    final hasSearch = _searchQuery.trim().isNotEmpty;
+
+    final favorites = allItems.where((i) {
+      if (!i.isActive || i.isDeleted) return false;
+      if (_pinnedItemIds.isNotEmpty) {
+        return _pinnedItemIds.contains(i.id);
+      }
+      return i.quantity > 0;
+    }).take(10).toList();
+
+    final filteredItems = _computeFilteredItems(allItems, categories);
 
     return PopScope(
       canPop: !hasSearch &&
@@ -1829,11 +1970,8 @@ class _PosScreenState extends ConsumerState<PosScreen>
             ),
           ),
           onChanged: (v) => setState(() => _searchQuery = v.trim()),
-          // Enter: رقم PLU (أو رقم×كمية) يضيف للسلة مباشرة، وإلا فالبحث.
-          onSubmitted: (v) {
-            if (_handleQuickIndex(v)) return;
-            setState(() => _searchQuery = v.trim());
-          },
+          // Enter: يطابق الباركود/PLU أو يضيف أول صنف مطابق أو يفتح الدفع السريع.
+          onSubmitted: _handleSearchOrQuickSubmit,
         ),
       );
 

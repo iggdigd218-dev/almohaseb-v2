@@ -1,7 +1,7 @@
-// شبكة الأصناف في نقطة البيع (2026-09-24) — مربعات متساوية الأضلاع.
+// شبكة الأصناف في نقطة البيع (2026-09-24) — بطاقات متجاوبة واضحة الأسعار والأسماء.
 //
 // • الجوال: 4 أصناف في الصف · التابلت: 6 · الحاسوب: 8 (ديناميكي حسب العرض).
-// • الاسم والسعر بخطوط عريضة بارزة، السعر بالأخضر، وزر إضافة بلون متناسق.
+// • اسم الصنف يظهر بوضوح تام على سطرين كحد أقصى دون تداخل مع زر الإضافة (+).
 // • رقم الترقيم السريع (PLU) **مخفي**: موجود في النموذج للبحث الرقمي فقط.
 library;
 
@@ -14,7 +14,10 @@ import '../core/media_paths.dart';
 import '../core/models.dart';
 import '../core/theme.dart';
 
-/// بطاقة صنف مربّعة داخل شبكة نقطة البيع.
+/// اسم بديل قياسي لبطاقة الصنف في شبكة نقطة البيع.
+typedef PosItemCard = PosItemTile;
+
+/// بطاقة صنف داخل شبكة نقطة البيع.
 class PosItemTile extends StatelessWidget {
   const PosItemTile({
     super.key,
@@ -94,9 +97,9 @@ class PosItemTile extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // مساحة الصورة العلوية مع شارة التوفر ونجمة المفضلة.
+              // 1) الجزء العلوي: الصورة/الأيقونة + مؤشر المخزون + شارة الكمية + نجمة المفضلة.
               Expanded(
-                flex: 5,
+                flex: 4,
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
@@ -105,13 +108,13 @@ class PosItemTile extends StatelessWidget {
                       width: double.infinity,
                       child: _buildThumb(context),
                     ),
-                    // شارة التوفر والمخزون الثلاثية (أخضر / أصفر / أحمر).
+                    // مؤشر حالة المخزون (أعلى اليسار في RTL).
                     PositionedDirectional(
-                      top: 5,
-                      end: 5,
+                      top: 4,
+                      end: 4,
                       child: Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 5, vertical: 2),
+                            horizontal: 4.5, vertical: 1.5),
                         decoration: BoxDecoration(
                           color: AppColors.surfaceOf(context)
                               .withValues(alpha: .94),
@@ -125,18 +128,18 @@ class PosItemTile extends StatelessWidget {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Container(
-                              width: 6,
-                              height: 6,
+                              width: 5.5,
+                              height: 5.5,
                               decoration: BoxDecoration(
                                 color: tone.foreground,
                                 shape: BoxShape.circle,
                               ),
                             ),
-                            const SizedBox(width: 3.5),
+                            const SizedBox(width: 3),
                             Text(
                               statusLabel,
                               style: TextStyle(
-                                fontSize: 9,
+                                fontSize: 8.5,
                                 fontWeight: FontWeight.w800,
                                 color: tone.foreground,
                               ),
@@ -145,13 +148,47 @@ class PosItemTile extends StatelessWidget {
                         ),
                       ),
                     ),
+                    // شارة الكمية المتوفرة (أسفل اليمين على الصورة لتفريغ المساحة السفلية للاسم).
+                    PositionedDirectional(
+                      bottom: 4,
+                      start: 4,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 72),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 4.5, vertical: 1.5),
+                          decoration: BoxDecoration(
+                            color: AppColors.surfaceOf(context)
+                                .withValues(alpha: .92),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: AlignmentDirectional.centerStart,
+                            child: Text(
+                              '${Fmt.money(item.quantity)} ${item.unit}',
+                              style: TextStyle(
+                                fontSize: 9,
+                                fontWeight:
+                                    isLow ? FontWeight.w800 : FontWeight.w600,
+                                color: isOut
+                                    ? AppColors.dangerOf(context)
+                                    : (isLow
+                                        ? const Color(0xFFD97706)
+                                        : AppColors.text2Of(context)),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                     // نجمة التثبيت في المفضلة.
                     if (isFavorite)
                       PositionedDirectional(
-                        top: 5,
-                        start: 5,
+                        top: 4,
+                        start: 4,
                         child: Container(
-                          padding: const EdgeInsets.all(2.5),
+                          padding: const EdgeInsets.all(2),
                           decoration: BoxDecoration(
                             color: AppColors.surfaceOf(context)
                                 .withValues(alpha: .94),
@@ -164,7 +201,7 @@ class PosItemTile extends StatelessWidget {
                           ),
                           child: const Icon(
                             Icons.star_rounded,
-                            size: 13,
+                            size: 12,
                             color: Color(0xFFF59E0B),
                           ),
                         ),
@@ -172,113 +209,96 @@ class PosItemTile extends StatelessWidget {
                   ],
                 ),
               ),
-              // منطقة بيانات الصنف: الاسم مستقل تماماً في الأعلى، والسعر/المخزون وزر (+) في الصف السفلي دون أي تداخل.
+              // 2) الجزء السفلي: اسم الصنف بعرض البطاقة الكامل (سطرين كحد أقصى) + شريط السعر وزر (+) المستقل.
               Expanded(
-                flex: 5,
+                flex: 6,
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(6, 5, 6, 5),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      // اسم الصنف واضح ومقروء بالكامل دون أي تداخل مع الأزرار.
                       Expanded(
                         child: Align(
                           alignment: AlignmentDirectional.topStart,
                           child: Text(
                             item.name,
                             maxLines: 2,
+                            softWrap: true,
                             overflow: TextOverflow.ellipsis,
                             textAlign: TextAlign.start,
                             style: TextStyle(
                               fontWeight: FontWeight.w800,
                               fontSize: 12,
-                              height: 1.18,
+                              height: 1.2,
                               color: AppColors.textOf(context),
                             ),
                           ),
                         ),
                       ),
-                      const SizedBox(height: 2),
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  alignment: AlignmentDirectional.centerStart,
-                                  child: Text(
-                                    '${Fmt.money(price)} $symbol',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w900,
-                                      fontSize: 13,
-                                      color: isOut
-                                          ? AppColors.dangerOf(context)
-                                          : (isLow
-                                              ? const Color(0xFFD97706)
-                                              : AppColors.greenOf(context)),
-                                    ),
-                                  ),
-                                ),
-                                FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  alignment: AlignmentDirectional.centerStart,
-                                  child: Text(
-                                    '${Fmt.money(item.quantity)} ${item.unit}',
-                                    style: TextStyle(
-                                      fontSize: 10,
-                                      fontWeight: isLow
-                                          ? FontWeight.w700
-                                          : FontWeight.normal,
-                                      color: isLow
-                                          ? const Color(0xFFD97706)
-                                          : AppColors.text3Of(context),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 4),
-                          // زر الإضافة مدمج في الركن السفلي بدون التداخل مع اسم الصنف.
-                          Material(
-                            color: enabled
-                                ? AppColors.primaryOf(context)
-                                : AppColors.text3Of(context),
-                            borderRadius: BorderRadius.circular(10),
-                            clipBehavior: Clip.antiAlias,
-                            child: InkWell(
-                              onTap: enabled ? onAdd : null,
-                              child: SizedBox(
-                                height: 26,
-                                child: Padding(
-                                  padding:
-                                      const EdgeInsets.symmetric(horizontal: 6),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(Icons.add,
-                                          size: 14, color: Colors.white),
-                                      if (inCart > 0) ...[
-                                        const SizedBox(width: 2),
-                                        Text(
-                                          Fmt.money(inCart),
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontWeight: FontWeight.w900,
-                                            fontSize: 11,
-                                          ),
-                                        ),
-                                      ],
-                                    ],
+                      const SizedBox(height: 3),
+                      // شريط سفلي مخصص للسعر وزر الإضافة (+) دون المساس بمساحة الاسم.
+                      SizedBox(
+                        height: 24,
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Expanded(
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: AlignmentDirectional.centerStart,
+                                child: Text(
+                                  '${Fmt.money(price)} $symbol',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w900,
+                                    fontSize: 12.5,
+                                    color: isOut
+                                        ? AppColors.dangerOf(context)
+                                        : (isLow
+                                            ? const Color(0xFFD97706)
+                                            : AppColors.greenOf(context)),
                                   ),
                                 ),
                               ),
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 4),
+                            Material(
+                              color: enabled
+                                  ? AppColors.primaryOf(context)
+                                  : AppColors.text3Of(context),
+                              borderRadius: BorderRadius.circular(8),
+                              clipBehavior: Clip.antiAlias,
+                              child: InkWell(
+                                onTap: enabled ? onAdd : null,
+                                child: SizedBox(
+                                  height: 24,
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 5.5),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(Icons.add,
+                                            size: 13.5, color: Colors.white),
+                                        if (inCart > 0) ...[
+                                          const SizedBox(width: 2),
+                                          Text(
+                                            Fmt.money(inCart),
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w900,
+                                              fontSize: 10.5,
+                                            ),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
@@ -294,7 +314,7 @@ class PosItemTile extends StatelessWidget {
   Widget _fallback(BuildContext context) => Center(
         child: Icon(
           Icons.inventory_2_outlined,
-          size: 34,
+          size: 28,
           color: AppTone.blue.foreground.withValues(alpha: .55),
         ),
       );
@@ -334,13 +354,13 @@ class PosItemsGrid extends StatelessWidget {
   Widget build(BuildContext context) {
     final cross = crossAxisCountFor(MediaQuery.sizeOf(context).width);
     return GridView.builder(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 96),
+      padding: const EdgeInsets.fromLTRB(8, 4, 8, 96),
       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: cross,
-        // مربّع متساوي الأضلاع تقريباً.
-        childAspectRatio: .94,
-        crossAxisSpacing: 10,
-        mainAxisSpacing: 10,
+        // ارتفاع إضافي متوازن يمنح اسم الصنف (سطرين) مساحة مريحة دون اقتطاع.
+        childAspectRatio: .70,
+        crossAxisSpacing: 8,
+        mainAxisSpacing: 8,
       ),
       itemCount: items.length,
       itemBuilder: (context, i) {
