@@ -27,7 +27,20 @@ import 'package:nexora_app/ui/pos_screen.dart';
 import 'package:nexora_app/ui/profile_dialog.dart';
 import 'package:nexora_app/ui/trial_ui.dart';
 import 'package:nexora_app/data/sync/subscription_guard.dart';
+import 'package:nexora_app/core/rbac.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+
+class _TestPosRepo extends Repo {
+  _TestPosRepo({required super.databaseProvider});
+
+  @override
+  Future<EffectivePermissions> effectivePermissions() async {
+    return EffectivePermissions.full('admin@test.local');
+  }
+
+  @override
+  Future<Map<String, String>> settings() async => <String, String>{};
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -186,8 +199,9 @@ void main() {
   group('POS — بوابة الأقسام وشبكة الأصناف المتجاوبة', () {
     testWidgets('POS-01 شاشة المبيعات تفتح افتراضياً وقائمة الأقسام مطوية مع إمكانية فتحها',
         (tester) async {
+      final testRepo = _TestPosRepo(databaseProvider: () async => db);
       final posContainer = ProviderContainer(overrides: [
-        repoProvider.overrideWithValue(repo),
+        repoProvider.overrideWithValue(testRepo),
         settingsProvider.overrideWith((ref) => Future.value(<String, String>{})),
         currenciesProvider.overrideWith((ref) => Future.value(kDefaultCurrencies)),
         sectionsProvider.overrideWith((ref) => Future.value(<Section>[])),
