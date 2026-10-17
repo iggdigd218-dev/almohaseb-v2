@@ -208,7 +208,8 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.byType(PosSectionsGate), findsOneWidget);
 
-      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(seconds: 15));
     });
 
     test('POS-02 أعمدة شبكة الأصناف المربّعة تتسع لـ 4 جوال، 6 تابلت، 8 حاسوب', () {
