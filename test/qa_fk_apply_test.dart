@@ -190,12 +190,16 @@ void main() {
   test('OWNER-01 المالك بلا مستخدم: مدير كامل وصف صلاحيات فعّال', () async {
     final db = await repo.database;
     final devId = repo.requireDeviceId;
-    await db.insert('workspaces', {
-      'id': 'WS-QA',
-      'name': 'مساحة تحقق',
-      'created_at': DateTime.now().toIso8601String(),
-      'updated_at': DateTime.now().toIso8601String(),
-    });
+    await db.insert(
+      'workspaces',
+      {
+        'id': 'WS-QA',
+        'name': 'مساحة تحقق',
+        'created_at': DateTime.now().toIso8601String(),
+        'updated_at': DateTime.now().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
     // التهيئة تُنشئ صف الجهاز — نرفعه إلى مالك (is_owner=1).
     await db.update(
       'devices',
