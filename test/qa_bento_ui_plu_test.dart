@@ -58,6 +58,9 @@ void main() {
 
     container = ProviderContainer(overrides: [
       repoProvider.overrideWithValue(repo),
+      subscriptionProvider.overrideWith(
+        (ref) => Future.value(SubscriptionState.none),
+      ),
     ]);
   });
 
@@ -209,7 +212,7 @@ void main() {
       expect(find.byType(PosSectionsGate), findsOneWidget);
 
       await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pump(const Duration(seconds: 15));
+      await tester.pump(const Duration(milliseconds: 100));
     });
 
     test('POS-02 أعمدة شبكة الأصناف المربّعة تتسع لـ 4 جوال، 6 تابلت، 8 حاسوب', () {
