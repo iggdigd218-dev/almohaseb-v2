@@ -126,6 +126,8 @@ void main() {
           overrides: [
             repoProvider.overrideWithValue(repo),
             syncEngineProvider.overrideWithValue(engine),
+            currentUserProvider.overrideWith((ref) => Future.value(null)),
+            isOwnerProvider.overrideWith((ref) => Future.value(true)),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
@@ -222,7 +224,7 @@ void main() {
       expect(tester.takeException(), isNull);
     } finally {
       await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pump(const Duration(seconds: 4));
+      await tester.pump(const Duration(seconds: 15));
       engine.stop();
       await tester.runAsync(() async {
         // (استقرار CI) إثبات الاستمرارية على القرص يتم عبر **نسخة** من
