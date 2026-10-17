@@ -74,36 +74,9 @@ class Repo {
       } catch (_) {}
       if (isOpen) return _reopenedOverrideDb!;
     }
-    if (_databaseProvider != null) {
-      final provided = await _databaseProvider();
-      bool isClosed = false;
-      try {
-        isClosed = !provided.isOpen;
-      } catch (_) {
-        isClosed = false;
-      }
-      if (isClosed) {
-        final path = provided.path;
-        if (path.isNotEmpty &&
-            path != ':memory:' &&
-            !path.contains('in_memory')) {
-          try {
-            final reopened = await databaseFactory.openDatabase(
-              path,
-              options: OpenDatabaseOptions(
-                version: AppDatabase.schemaVersion,
-                onConfigure: (d) => d.execute('PRAGMA foreign_keys = ON'),
-              ),
-            );
-            await AppDatabase.ensureFullSchema(reopened);
-            _reopenedOverrideDb = reopened;
-            return reopened;
-          } catch (_) {}
-        }
-      }
-      return provided;
-    }
-    return AppDatabase.instance.database;
+    return _databaseProvider != null
+        ? _databaseProvider()
+        : AppDatabase.instance.database;
   }
   Future<Database> get database async => _db;
 
