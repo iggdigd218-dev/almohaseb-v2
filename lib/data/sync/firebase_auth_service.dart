@@ -301,7 +301,10 @@ class FirebaseAuthRest {
   static Future<String> savedEmail(Repo repo) async =>
       ((await repo.settings())[emailKey] ?? '').trim();
 
-  static Future<void> clearSession(Repo repo) async {
+  static Future<void> clearSession(
+    Repo repo, {
+    bool keepDatabaseOpen = false,
+  }) async {
     try {
       final st = await repo.settings();
       final curEmail = (st[emailKey] ?? st['email'] ?? '').trim().toLowerCase();
@@ -336,10 +339,12 @@ class FirebaseAuthRest {
     _accountExpiryMs = 0;
     _activeTokenUid = _anonUid;
     await purgeAllSessionPrefs();
-    repo.debugSetWorkspaceId(defaultWorkspaceIdConst);
-    try {
-      await AppDatabase.instance.closeAndResetWorkspace();
-    } catch (_) {}
+    if (!keepDatabaseOpen) {
+      repo.debugSetWorkspaceId(defaultWorkspaceIdConst);
+      try {
+        await AppDatabase.instance.closeAndResetWorkspace();
+      } catch (_) {}
+    }
   }
 
   // ══════ (المرحلة 2) مصادقة مجهولة صامتة — هوية جهاز دائمة ══════

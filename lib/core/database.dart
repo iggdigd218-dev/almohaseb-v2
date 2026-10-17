@@ -23,6 +23,7 @@ class AppDatabase {
   static Future<Database>? _opening;
   static String _activeWorkspaceId = defaultWorkspaceIdConst;
   static bool _isTestOverride = false;
+  static bool _everOpened = false;
   static const int _version = 28;
 
   /// مفتاح التخزين الدائم للمنشأة النشطة في SharedPreferences
@@ -94,7 +95,15 @@ class AppDatabase {
   }
 
   Future<Database> get database {
-    if (_db != null) return Future.value(_db!);
+    if (_db != null) {
+      if (_db!.isOpen) return Future.value(_db!);
+      if (!_isTestOverride) {
+        _db = null;
+        _opening = null;
+      } else {
+        return Future.value(_db!);
+      }
+    }
     if (_activeWorkspaceId == defaultWorkspaceIdConst && !_isTestOverride) {
       return SharedPreferences.getInstance().then((prefs) {
         final saved = (prefs.getString(kPrefActiveWorkspaceId) ?? '').trim();
@@ -135,7 +144,7 @@ class AppDatabase {
         : workspaceId.trim();
     if (_isTestOverride && _db != null) {
       _activeWorkspaceId = targetWs;
-      if (targetWs != defaultWorkspaceIdConst) {
+      if (targetWs != defaultWorkspaceIdConst && _db!.isOpen) {
         await ensureWorkspaceRow(_db!, targetWs);
       }
       return _db!;
@@ -153,11 +162,15 @@ class AppDatabase {
     if (_db != null && _activeWorkspaceId == targetWs && _db!.isOpen) {
       return _db!;
     }
-    final hadOpenDb = _db != null || _opening != null;
+    final shouldOpen = _db != null || _opening != null || _everOpened;
     await close();
     _activeWorkspaceId = targetWs;
-    if (!hadOpenDb) {
-      return null;
+    if (!shouldOpen) {
+      try {
+        return await database;
+      } catch (_) {
+        return null;
+      }
     }
     return database;
   }
@@ -180,6 +193,7 @@ class AppDatabase {
   }
 
   Future<Database> _openDb([String? workspaceId]) async {
+    _everOpened = true;
     final dir = await databaseDirectory();
     final effectiveWs = (workspaceId ?? _activeWorkspaceId).trim();
     final fileName = dbFileNameFor(effectiveWs);
@@ -298,28 +312,35 @@ class AppDatabase {
     }
     await close();
     _activeWorkspaceId = targetWs;
-    final dir = await databaseDirectory();
-    final targetPath = (currentPath != null &&
-            currentPath.isNotEmpty &&
-            currentPath != ':memory:' &&
-            !currentPath.contains('in_memory'))
-        ? currentPath
-        : p.join(dir, dbFileNameFor(targetWs));
+    try {
+      final dir = await databaseDirectory();
+      final targetPath = (currentPath != null &&
+              currentPath.isNotEmpty &&
+              currentPath != ':memory:' &&
+              !currentPath.contains('in_memory'))
+          ? currentPath
+          : p.join(dir, dbFileNameFor(targetWs));
 
-    // حذف ملفات الـ WAL و الـ SHM المؤقتة لمنع أي تعارض أو تلف بعد الاستبدال.
-    for (final suffix in ['-wal', '-shm', '-journal']) {
-      final walFile = File('$targetPath$suffix');
-      if (await walFile.exists()) {
-        try {
-          await walFile.delete();
-        } catch (_) {}
+      // حذف ملفات الـ WAL و الـ SHM المؤقتة لمنع أي تعارض أو تلف بعد الاستبدال.
+      for (final suffix in ['-wal', '-shm', '-journal']) {
+        final walFile = File('$targetPath$suffix');
+        if (await walFile.exists()) {
+          try {
+            await walFile.delete();
+          } catch (_) {}
+        }
       }
-    }
 
-    final targetFile = File(targetPath);
-    await targetFile.parent.create(recursive: true);
-    await sourceDbFile.copy(targetPath);
-    return database;
+      final targetFile = File(targetPath);
+      await targetFile.parent.create(recursive: true);
+      await sourceDbFile.copy(targetPath);
+      return await database;
+    } catch (_) {
+      try {
+        await database;
+      } catch (_) {}
+      rethrow;
+    }
   }
 
   /// إنشاء كل الجداول — مستقل ليُستخدم في الاختبارات أيضًا.

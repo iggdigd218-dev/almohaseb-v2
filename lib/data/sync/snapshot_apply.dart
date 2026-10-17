@@ -35,7 +35,24 @@ class SnapshotApply {
     String ourDeviceId,
     Map<String, Object?> snap,
   ) async {
-    final db = await dbProvider();
+    var db = await dbProvider();
+    if (!db.isOpen) {
+      final path = db.path;
+      if (path.isNotEmpty &&
+          path != ':memory:' &&
+          !path.contains('in_memory')) {
+        db = await databaseFactory.openDatabase(
+          path,
+          options: OpenDatabaseOptions(
+            version: AppDatabase.schemaVersion,
+            onConfigure: (d) => d.execute('PRAGMA foreign_keys = ON'),
+          ),
+        );
+        await AppDatabase.ensureFullSchema(db);
+      } else {
+        db = await AppDatabase.instance.database;
+      }
+    }
     await db.transaction((txn) async {
       final nowIso = DateTime.now().toIso8601String();
       final snapWsList =

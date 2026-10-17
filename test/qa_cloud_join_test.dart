@@ -394,4 +394,44 @@ void main() {
         throwsA(isA<CloudJoinException>()),
         reason: 'العضو الفعّال يُمنع من الانضمام لمجموعة أخرى');
   });
+
+  test('QA-JOIN-08 منع خطأ database_closed أثناء completeApprovedJoin واستيراد نسخة المجموعة',
+      () async {
+    final cloud = FakeCloudStore();
+    await repoA.saveAccount(Account(
+      name: 'عميل استيراد آمن',
+      kind: AccountKind.customer,
+      notifyChannel: 'none',
+      createdAt: now,
+      updatedAt: now,
+    ));
+    final inv = await http.runWithClient(
+        () => CloudJoin.createInvite(repoA), cloud.client);
+
+    // تطهير سابق كما يحدث قبل الانضمام + إكمال الانضمام المعتمد:
+    await http.runWithClient(() async {
+      await CloudJoin.purgeAndIsolateJoiningMember(
+        repoB,
+        backendUrl: inv.backendUrl,
+        targetWorkspaceId: inv.workspaceId,
+      );
+      expect((await repoB.database).isOpen, isTrue,
+          reason: 'يجب أن يظل اتصال قاعدة البيانات مفتوحاً بعد تطهير الجلسة السابقة');
+
+      await CloudJoin.completeApprovedJoin(
+        repoB,
+        backendUrl: inv.backendUrl,
+        token: inv.token,
+        workspaceId: inv.workspaceId,
+        cloudCode: inv.cloudCode,
+      );
+    }, cloud.client);
+
+    final dbAfter = await repoB.database;
+    expect(dbAfter.isOpen, isTrue,
+        reason: 'يجب أن يظل اتصال قاعدة البيانات مفتوحاً بعد استيراد نسخة المجموعة');
+    expect(await repoB.workspaceMode(), 'member');
+    final accountsB = await repoB.accounts();
+    expect(accountsB.map((a) => a.name), contains('عميل استيراد آمن'));
+  });
 }

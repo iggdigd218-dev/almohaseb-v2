@@ -70,9 +70,27 @@ class Repo {
     if (_reopenedOverrideDb != null && _reopenedOverrideDb!.isOpen) {
       return _reopenedOverrideDb!;
     }
-    return _databaseProvider != null
-        ? _databaseProvider()
-        : AppDatabase.instance.database;
+    if (_databaseProvider != null) {
+      final provided = await _databaseProvider();
+      if (provided.isOpen) return provided;
+      final path = provided.path;
+      if (path.isNotEmpty &&
+          path != ':memory:' &&
+          !path.contains('in_memory')) {
+        final reopened = await databaseFactory.openDatabase(
+          path,
+          options: OpenDatabaseOptions(
+            version: AppDatabase.schemaVersion,
+            onConfigure: (d) => d.execute('PRAGMA foreign_keys = ON'),
+          ),
+        );
+        await AppDatabase.ensureFullSchema(reopened);
+        _reopenedOverrideDb = reopened;
+        return reopened;
+      }
+      return provided;
+    }
+    return AppDatabase.instance.database;
   }
   Future<Database> get database async => _db;
 
@@ -327,9 +345,11 @@ class Repo {
     // مساحة عمل المنشأة المعتمدة
     await setSetting('sync.workspaceId', id);
     _workspaceId = id;
-    try {
-      await AppDatabase.instance.openForWorkspace(id);
-    } catch (_) {}
+    if (_databaseProvider == null) {
+      try {
+        await AppDatabase.instance.openForWorkspace(id);
+      } catch (_) {}
+    }
     final dbAfter = await _db;
     await AppDatabase.ensureWorkspaceRow(dbAfter, id);
     await setSetting('sync.workspaceId', id);
@@ -7143,7 +7163,7 @@ class Repo {
   /// حذف البيانات المحلية واستيراد نسخة السحابة كلياً كما هي
   Future<bool> wipeLocalAndImportCloudSnapshot({dynamic engine}) async {
     final bool amIOwnerBefore = await isWorkspaceOwner();
-    final db = await _db;
+    var db = await _db;
     final st = await settings();
     final url = effectiveBackendUrl(st['cloudBackendUrl']);
     final ws = requireWorkspaceId;
@@ -7165,8 +7185,9 @@ class Repo {
     } catch (_) {}
 
     if (snap != null) {
-      await SnapshotApply.applySnapshot(() async => db, ourId, snap);
+      await SnapshotApply.applySnapshot(() => _db, ourId, snap);
     } else {
+      db = await _db;
       await FactoryReset.wipeAccountingTables(db);
     }
 
@@ -7174,6 +7195,7 @@ class Repo {
       await restoreManagerOwnership();
     }
 
+    db = await _db;
     await db.delete('sync_queue');
     await db.delete('operations');
     await db.delete('sync_meta',

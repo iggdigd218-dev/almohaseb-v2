@@ -1619,15 +1619,17 @@ class AccountWorkspace {
     // 1) توليد workspaceId فريد جديد وإغلاق اتصال SQLite السابق وفتح ملف SQLite جديد ونظيف كلياً
     SubscriptionGuard.debugReset();
     final newWsId = generateWorkspaceId();
-    await DatabaseHelper.instance.close();
-    if (prevWsId.isNotEmpty && prevWsId != 'default') {
-      // ضمان نسخ nexora.db إلى nexora_${prevWsId}.db إن كانت المنشأة الأولى على القاعدة الافتراضية
-      try {
-        await AppDatabase.instance.openForWorkspace(prevWsId);
-        await DatabaseHelper.instance.close();
-      } catch (_) {}
+    if (!repo.hasCustomDatabaseProvider) {
+      await DatabaseHelper.instance.close();
+      if (prevWsId.isNotEmpty && prevWsId != 'default') {
+        // ضمان نسخ nexora.db إلى nexora_${prevWsId}.db إن كانت المنشأة الأولى على القاعدة الافتراضية
+        try {
+          await AppDatabase.instance.openForWorkspace(prevWsId);
+          await DatabaseHelper.instance.close();
+        } catch (_) {}
+      }
+      await AppDatabase.instance.openForWorkspace(newWsId);
     }
-    await AppDatabase.instance.openForWorkspace(newWsId);
     await repo.isolateForWorkspaceSwitch(
       targetWorkspaceId: newWsId,
       resetOnboarding: false,

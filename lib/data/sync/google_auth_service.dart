@@ -260,7 +260,7 @@ class GoogleAuthService {
     }
   }
 
-  Future<void> signOut() async {
+  Future<void> signOut({bool keepDatabaseOpen = false}) async {
     final gs = _ensureSignIn();
     try {
       await gs?.disconnect().timeout(const Duration(seconds: 3));
@@ -269,9 +269,13 @@ class GoogleAuthService {
       await gs?.signOut().timeout(const Duration(seconds: 3));
     } catch (_) {}
     try {
-      await _clear();
+      if (db.isOpen) {
+        await _clear();
+      }
     } catch (_) {}
-    await AppDatabase.instance.closeAndResetWorkspace();
+    if (!keepDatabaseOpen) {
+      await AppDatabase.instance.closeAndResetWorkspace();
+    }
   }
 
   GoogleUser _mapAccount(GoogleSignInAccount a, String? idToken) {

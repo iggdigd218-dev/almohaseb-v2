@@ -1201,11 +1201,12 @@ class CloudJoin {
     // 3) هوية مجهولة مقترنة بمساحة المالك: تسجيل خروج أي حساب Google
     //    شخصي أولاً، ثم جلسة مجهولة مستقلة لا ترث بصمة الموظف.
     try {
-      await GoogleAuthService(await repo.database).signOut();
+      await GoogleAuthService(await repo.database)
+          .signOut(keepDatabaseOpen: true);
     } catch (e) {
       debugPrint('CloudJoin: google signOut: $e');
     }
-    await FirebaseAuthRest.clearSession(repo);
+    await FirebaseAuthRest.clearSession(repo, keepDatabaseOpen: true);
     await FirebaseAuthRest.resetAnonymousSession(repo);
     await FirebaseAuthRest.ensureScopedAnonymous(repo, workspaceId);
     await FirebaseAuthRest.initSilentAuth(repo);
@@ -1214,9 +1215,14 @@ class CloudJoin {
     await repo.setSetting('account.type', 'enterprise');
 
     // ══ فتح وتثبيت قاعدة بيانات المنشأة المعزولة nexora_${workspaceId}.db ══
-    await AppDatabase.instance.openForWorkspace(workspaceId);
+    if (!repo.hasCustomDatabaseProvider) {
+      await AppDatabase.instance.openForWorkspace(workspaceId);
+    }
 
-    final db = await repo.database;
+    var db = await repo.database;
+    if (!db.isOpen) {
+      db = await repo.database;
+    }
     // ضمان وجود سجل المنشأة الأب أولاً قبل أي استعلام أو إدراج في devices
     await AppDatabase.ensureWorkspaceRow(db, workspaceId);
     var ourId = await ensureDeviceId(repo);
@@ -1314,11 +1320,15 @@ class CloudJoin {
 
     // نلتقط سجل جهازنا قبل الاستبدال: إعادة إدراج workspaces بنمط REPLACE
     // قد تحذف سجلنا عبر قيد ON DELETE CASCADE، فنعيد إنشاءه بعد اللقطة.
+    if (!db.isOpen) {
+      db = await repo.database;
+    }
     final ourRowBefore = await db.query('devices',
         where: 'id = ?', whereArgs: [ourId], limit: 1);
     // حذف كامل البيانات المحلية واستبدالها بنسخة المجموعة (معاملة واحدة):
     // نفس منطق الانضمام المحلي بالضبط — الجهاز يبدأ نظيفاً ببيانات المجموعة.
-    await SnapshotApply.applySnapshot(() async => db, ourId, snap);
+    await SnapshotApply.applySnapshot(() => repo.database, ourId, snap);
+    db = await repo.database;
 
     // ضمان وجود سجل جهازنا كعضو بعد الاستبدال (يظهر لدى المدير عبر roster).
     final ourRowAfter = await db.query('devices',
@@ -1436,6 +1446,7 @@ class CloudJoin {
     await repo.setSetting('cloudAutoSync', '1');
     // ══ تثبيت ربط العضو بمساحة المنشأة الواحدة حصراً ومحو أي مساحات أخرى ══
     await repo.bindWorkspaceId(workspaceId);
+    db = await repo.database;
     await repo.setSetting('sync.workspaceId', workspaceId);
     await repo.setSetting('sync.groupId', workspaceId);
     await AppDatabase.ensureWorkspaceRow(db, workspaceId);
@@ -1566,6 +1577,13 @@ class CloudJoin {
     // الدعوة تُستخدم مرة واحدة (حُذفت مبكراً؛ هذا حذف احتياطي idempotent).
     try {
       await _delete('$root/invites/$tok.json');
+    } catch (_) {}
+    // تأكيد أن اتصال قاعدة البيانات نشط ومفتوح بعد اكتمال استيراد نسخة المجموعة.
+    try {
+      final finalDb = await repo.database;
+      if (!finalDb.isOpen && !repo.hasCustomDatabaseProvider) {
+        await AppDatabase.instance.openForWorkspace(workspaceId);
+      }
     } catch (_) {}
   }
 
@@ -2360,25 +2378,33 @@ class CloudJoin {
     String workspaceId = 'default',
     String cloudCode = '',
   }) async {
-    await join(repo,
-        backendUrl: backendUrl,
-        token: token,
-        workspaceId: workspaceId,
-        cloudCode: cloudCode);
-    final ourId = await ensureDeviceId(repo);
     try {
-      await _delete(requestPath(backendUrl, workspaceId, ourId));
-    } catch (_) {}
-    // (استرداد بصمة العتاد) تسجيل بصمة العضو مربوطة بمساحة المجموعة —
-    // حذف التطبيق ثم إعادة تثبيته تعيده عضواً لنفس المجموعة تلقائياً.
-    try {
-      await DeviceRegistry.bindAsMember(repo,
-          backendUrl: backendUrl, workspaceId: workspaceId);
-    } catch (_) {}
-    // تنظيف سياق الانتظار.
-    final db = await repo.database;
-    await db.delete('settings',
-        where: "key LIKE 'pendingJoin.%'");
+      await join(repo,
+          backendUrl: backendUrl,
+          token: token,
+          workspaceId: workspaceId,
+          cloudCode: cloudCode);
+      final ourId = await ensureDeviceId(repo);
+      try {
+        await _delete(requestPath(backendUrl, workspaceId, ourId));
+      } catch (_) {}
+      // (استرداد بصمة العتاد) تسجيل بصمة العضو مربوطة بمساحة المجموعة —
+      // حذف التطبيق ثم إعادة تثبيته تعيده عضواً لنفس المجموعة تلقائياً.
+      try {
+        await DeviceRegistry.bindAsMember(repo,
+            backendUrl: backendUrl, workspaceId: workspaceId);
+      } catch (_) {}
+      // تنظيف سياق الانتظار.
+      final db = await repo.database;
+      await db.delete('settings', where: "key LIKE 'pendingJoin.%'");
+    } finally {
+      try {
+        final db = await repo.database;
+        if (!db.isOpen && !repo.hasCustomDatabaseProvider) {
+          await AppDatabase.instance.openForWorkspace(workspaceId);
+        }
+      } catch (_) {}
+    }
   }
 
   /// تطهير شامل للبيانات المحلية والسحابية السابقة للعضو وعزله عن أي مؤسسة سابقة
@@ -2389,11 +2415,11 @@ class CloudJoin {
     required String targetWorkspaceId,
   }) async {
     final url = backendUrl.trim();
-    final db = await repo.database;
     try {
-      // 1) تسجيل خروج ومسح أي حساب Google شخصي مرتبط بالجهاز
+      var db = await repo.database;
+      // 1) تسجيل خروج ومسح أي حساب Google شخصي مرتبط بالجهاز مع الإبقاء على اتصال القاعدة مفتوحاً
       try {
-        await GoogleAuthService(db).signOut();
+        await GoogleAuthService(db).signOut(keepDatabaseOpen: true);
       } catch (_) {}
       final oldUid = await FirebaseAuthRest.savedUid(repo);
       var root = url;
@@ -2414,7 +2440,8 @@ class CloudJoin {
           await _delete('$root/workspaces/_registry/emails_index/$emailKey.json');
         } catch (_) {}
       }
-      await FirebaseAuthRest.clearSession(repo);
+      await FirebaseAuthRest.clearSession(repo, keepDatabaseOpen: true);
+      db = await repo.database;
       await db.delete('settings',
           where: "key IN ('account.email','email','user.email')");
 
@@ -2458,6 +2485,7 @@ class CloudJoin {
       }
 
       // 3) تفريغ جميع الجداول المحاسبية المحلية فوراً قبل إرسال الطلب
+      db = await repo.database;
       await FactoryReset.wipeAccountingTables(db);
     } catch (_) {}
   }

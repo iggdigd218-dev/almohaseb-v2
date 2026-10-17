@@ -98,7 +98,19 @@ class SyncEngine {
 
   SyncEngine({required this.repo, required this.dbProvider});
 
-  Future<Database> get _db async => dbProvider();
+  Future<Database> get _db async {
+    final db = await dbProvider();
+    if (db.isOpen) return db;
+    return repo.database;
+  }
+
+  Future<SyncQueueOps> _ensureQueue() async {
+    final db = await _db;
+    if (_queue == null || !identical(_queue!.db, db) || !_queue!.db.isOpen) {
+      _queue = SyncQueueOps(db);
+    }
+    return _queue!;
+  }
 
   void registerTransport(SyncTransport t) {
     if (_transports.any((x) => x.targetId == t.targetId)) return;
@@ -369,7 +381,7 @@ class SyncEngine {
     } catch (_) {}
     _started = true;
     final generation = ++_generation;
-    _queue ??= SyncQueueOps(await _db);
+    _queue = await _ensureQueue();
     await _queue!.recoverInterrupted();
     // إنقاذ سحابي: عمليات سُجّلت قبل تهيئة السحابة (لا صف cloud لها) —
     // تُدرج الآن لتصعد للسحابة فتصل الأجهزة المرتبطة سحابياً.
@@ -577,8 +589,7 @@ class SyncEngine {
 
     // 🔒 التحقق الصارم من صلاحيات العضو ومساحة العمل قبل السحب
     try {
-      final db = await _db;
-      final q = _queue ??= SyncQueueOps(db);
+      final q = await _ensureQueue();
       final activeWs = await repo.activeWorkspaceId();
       final t = _cloudTransport!;
       final isExpelled = await repo.amIExpelled();
@@ -837,6 +848,7 @@ class SyncEngine {
   void stop() {
     _started = false;
     _generation++;
+    _queue = null;
     _completeTimer?.cancel();
     _completeTimer = null;
     _recentDelivered.clear();
@@ -866,7 +878,7 @@ class SyncEngine {
         await _ensureCloudTransport();
       } catch (_) {}
     }
-    final q = _queue ??= SyncQueueOps(await _db);
+    final q = await _ensureQueue();
     await q.retryFailed();
     await processQueue();
     if (deepReconcile && _cloudTransport != null) {
@@ -1113,7 +1125,7 @@ class SyncEngine {
   }
 
   Future<SyncSummary> summary() async {
-    final q = _queue ??= SyncQueueOps(await _db);
+    final q = await _ensureQueue();
     final pending = await q.countPending();
     final failed = await q.countFailed();
     return SyncSummary(pending: pending, failed: failed);
@@ -1145,7 +1157,7 @@ class SyncEngine {
       // 🔒 انتهاء التجربة يجمّد الدفع السحابي كلياً (العمل المحلي يستمر).
       if (await _trialBlocked()) return;
       final db = await _db;
-      final q = _queue ??= SyncQueueOps(db);
+      final q = await _ensureQueue();
       // 🔒 التحقق الصارم من صلاحيات العضو ومساحة العمل قبل دفع أي بيانات
       final activeWs = await repo.activeWorkspaceId();
       final isExpelled = await repo.amIExpelled();
