@@ -191,8 +191,10 @@ void main() {
         settingsProvider.overrideWith((ref) => Future.value(<String, String>{})),
         currenciesProvider.overrideWith((ref) => Future.value(kDefaultCurrencies)),
         sectionsProvider.overrideWith((ref) => Future.value(<Section>[])),
+        itemCategoriesProvider.overrideWith((ref) => Future.value(<ItemCategory>[])),
         itemCategoryTreeProvider.overrideWith((ref) => Future.value(<ItemCategory>[])),
         itemsProvider.overrideWith((ref) => Future.value(<Item>[])),
+        allAccountsProvider.overrideWith((ref) => Future.value(<Account>[])),
         heldInvoicesProvider.overrideWith((ref) => <PosDraft>[]),
         subscriptionProvider.overrideWith((ref) => Future.value(SubscriptionState.none)),
       ]);
