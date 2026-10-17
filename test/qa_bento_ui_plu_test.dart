@@ -190,10 +190,10 @@ void main() {
         repoProvider.overrideWithValue(repo),
         settingsProvider.overrideWith((ref) => Future.value(<String, String>{})),
         currenciesProvider.overrideWith((ref) => Future.value(kDefaultCurrencies)),
-        sectionsProvider.overrideWith((ref) => Future.value([])),
-        itemCategoryTreeProvider.overrideWith((ref) => Future.value([])),
-        itemsProvider.overrideWith((ref) => Future.value([])),
-        heldInvoicesProvider.overrideWith((ref) => Future.value([])),
+        sectionsProvider.overrideWith((ref) => Future.value(<Section>[])),
+        itemCategoryTreeProvider.overrideWith((ref) => Future.value(<ItemCategory>[])),
+        itemsProvider.overrideWith((ref) => Future.value(<Item>[])),
+        heldInvoicesProvider.overrideWith((ref) => <PosDraft>[]),
         subscriptionProvider.overrideWith((ref) => Future.value(SubscriptionState.none)),
       ]);
       addTearDown(posContainer.dispose);
