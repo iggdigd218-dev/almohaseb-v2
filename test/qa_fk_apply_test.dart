@@ -274,4 +274,44 @@ void main() {
     expect(item.category, isEmpty);
     expect(item.categoryId, isNull);
   });
+
+  test('DEVICES-FK-01 إدراج أو تحديث سجل جهاز بعد الموافقة على ربط العضو لا يرمي FOREIGN KEY 787', () async {
+    final db = await repo.database;
+    const newWsId = 'WS-MEMBER-JOIN-787';
+    await AppDatabase.ensureWorkspaceRow(db, newWsId, name: 'منشأة العضو');
+
+    // إدراج سجل جهاز يشير إلى workspace_id جديد أو user_id لم يصل بعد في الدلتا
+    final now = DateTime.now().toIso8601String();
+    await db.insert(
+      'devices',
+      {
+        'id': 'DEV-MEMBER-787',
+        'workspace_id': newWsId,
+        'name': 'جهاز الكاشير',
+        'is_paired': 1,
+        'is_owner': 0,
+        'user_id': 987654321,
+        'revoked_at': '',
+        'expelled_at': '',
+        'created_at': now,
+        'updated_at': now,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+
+    final devRows = await db.query(
+      'devices',
+      where: 'id = ?',
+      whereArgs: ['DEV-MEMBER-787'],
+    );
+    expect(devRows.length, 1);
+    expect(devRows.first['workspace_id'], newWsId);
+
+    final wsRows = await db.query(
+      'workspaces',
+      where: 'id = ?',
+      whereArgs: [newWsId],
+    );
+    expect(wsRows.length, 1);
+  });
 }

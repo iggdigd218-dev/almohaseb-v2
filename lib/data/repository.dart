@@ -147,6 +147,7 @@ class Repo {
     final db = await _db;
     // إنشاء Workspace افتراضي إن لم يوجد.
     _workspaceId = await ensureWorkspace(db, repo: this);
+    await AppDatabase.ensureWorkspaceRow(db, _workspaceId);
     // توليد deviceId ثابت.
     _deviceId = await ensureDeviceId(this);
     // تسجيل هذا الجهاز في جدول devices إن لم يكن مسجلاً.
@@ -299,13 +300,18 @@ class Repo {
 
   /// مساحة العمل النشطة المعتمدة في النظام للمنشأة الواحدة حصراً.
   Future<String> activeWorkspaceId() async {
+    final db = await _db;
     try {
       final st = await settings();
       final groupId = (st['sync.groupId'] ?? '').trim();
-      if (groupId.isNotEmpty) return groupId;
+      if (groupId.isNotEmpty) {
+        await AppDatabase.ensureWorkspaceRow(db, groupId);
+        _workspaceId = groupId;
+        return groupId;
+      }
     } catch (_) {}
-    final db = await _db;
     final id = await ensureWorkspace(db, repo: this);
+    await AppDatabase.ensureWorkspaceRow(db, id);
     _workspaceId = id;
     return id;
   }
@@ -316,26 +322,18 @@ class Repo {
   Future<void> bindWorkspaceId(String workspaceId) async {
     final id = workspaceId.trim();
     if (id.isEmpty) return;
-    final db = await _db;
-    final rows = await db.query('workspaces',
-        where: 'id = ?', whereArgs: [id], limit: 1);
-    if (rows.isEmpty) {
-      await db.insert('workspaces', {
-        'id': id,
-        'name': 'متجري',
-        'owner_google_id': '',
-        'owner_email': '',
-        'owner_name': '',
-        'created_at': DateTime.now().toIso8601String(),
-        'updated_at': DateTime.now().toIso8601String(),
-      });
-    }
+    final dbBefore = await _db;
+    await AppDatabase.ensureWorkspaceRow(dbBefore, id);
     // مساحة عمل المنشأة المعتمدة
     await setSetting('sync.workspaceId', id);
     _workspaceId = id;
     try {
       await AppDatabase.instance.openForWorkspace(id);
     } catch (_) {}
+    final dbAfter = await _db;
+    await AppDatabase.ensureWorkspaceRow(dbAfter, id);
+    await setSetting('sync.workspaceId', id);
+    _workspaceId = id;
     await refreshWorkspaceId();
   }
 

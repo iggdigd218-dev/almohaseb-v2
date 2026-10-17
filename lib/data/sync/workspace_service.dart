@@ -110,15 +110,19 @@ Future<String> ensureWorkspace(Database db, {Repo? repo}) async {
   // 3. إذا لم توجد مساحة في الجدول ولكن كان هناك معرف في الإعدادات:
   if (rawPref != null && rawPref.isNotEmpty && rawPref != 'default') {
     final now = DateTime.now().toIso8601String();
-    await db.insert('workspaces', {
-      'id': rawPref,
-      'name': 'متجري',
-      'owner_google_id': '',
-      'owner_email': accountEmail ?? '',
-      'owner_name': '',
-      'created_at': now,
-      'updated_at': now,
-    });
+    await db.insert(
+      'workspaces',
+      {
+        'id': rawPref,
+        'name': 'متجري',
+        'owner_google_id': '',
+        'owner_email': accountEmail ?? '',
+        'owner_name': '',
+        'created_at': now,
+        'updated_at': now,
+      },
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
     return rawPref;
   }
 
@@ -182,15 +186,19 @@ Future<String> ensureWorkspace(Database db, {Repo? repo}) async {
   final now = DateTime.now().toIso8601String();
   final id =
       debugForceLegacyWorkspaceId ? defaultWorkspaceId : generateWorkspaceId();
-  await db.insert('workspaces', {
-    'id': id,
-    'name': 'متجري',
-    'owner_google_id': '',
-    'owner_email': accountEmail ?? '',
-    'owner_name': '',
-    'created_at': now,
-    'updated_at': now,
-  });
+  await db.insert(
+    'workspaces',
+    {
+      'id': id,
+      'name': 'متجري',
+      'owner_google_id': '',
+      'owner_email': accountEmail ?? '',
+      'owner_name': '',
+      'created_at': now,
+      'updated_at': now,
+    },
+    conflictAlgorithm: ConflictAlgorithm.ignore,
+  );
   await repo?.setSetting(_workspaceIdSetting, id);
   return id;
 }

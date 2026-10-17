@@ -723,6 +723,27 @@ class CloudJoin {
     }
   }
 
+  static const Set<String> _dbDeviceColumns = {
+    'id',
+    'workspace_id',
+    'name',
+    'platform',
+    'app_version',
+    'last_seen_at',
+    'last_sync_at',
+    'pair_token',
+    'pair_token_exp',
+    'auth_secret',
+    'revoked_at',
+    'expelled_at',
+    'user_id',
+    'paired_by',
+    'is_paired',
+    'is_owner',
+    'created_at',
+    'updated_at',
+  };
+
   /// سجل جهاز بصيغة آمنة للرفع (بلا أسرار ولا رموز اقتران).
   static Map<String, Object?> _safeDeviceRow(Map<String, Object?> d) {
     final m = Map<String, Object?>.from(d);
@@ -733,6 +754,56 @@ class CloudJoin {
     // أقدم قد تحملها فتفشل الإدراج/التحديث.
     m.remove('ip_address');
     m.remove('port');
+    return m;
+  }
+
+  /// تنقية وتجهيز صف جهاز وارد من السحابة قبل إدراجه/تحديثه في جدول `devices` المحلي:
+  /// 1) يقتصر على الأعمدة الفعلية لجدول `devices` فقط (يستبعد حقول السحابة كـ fingerprint وemail وlast_seen).
+  /// 2) يضمن وجود سجل المنشأة الأب في جدول `workspaces` أولاً لمنع خطأ قيد المفتاح الأجنبي (Code 787).
+  /// 3) يتحقق من وجود `user_id` محلياً في جدول `users` أو يضبطه على null إذا لم يصل بعد.
+  static Future<Map<String, Object?>> _sanitizeDeviceRowForDb(
+    DatabaseExecutor db,
+    Map<String, Object?> raw, {
+    required String fallbackWorkspaceId,
+  }) async {
+    final m = <String, Object?>{};
+    raw.forEach((k, v) {
+      if (_dbDeviceColumns.contains(k)) {
+        m[k] = v;
+      }
+    });
+    m['auth_secret'] = '';
+    m['pair_token'] = '';
+    m['pair_token_exp'] = '';
+    final ws = '${m['workspace_id'] ?? ''}'.trim();
+    final effectiveWs = ws.isNotEmpty && ws != 'default'
+        ? ws
+        : (fallbackWorkspaceId.trim().isNotEmpty
+            ? fallbackWorkspaceId.trim()
+            : 'default');
+    m['workspace_id'] = effectiveWs;
+    await AppDatabase.ensureWorkspaceRow(db, effectiveWs);
+
+    if (m.containsKey('user_id') && m['user_id'] != null) {
+      final rawUid = m['user_id'];
+      final uid = rawUid is int ? rawUid : int.tryParse('$rawUid');
+      if (uid == null) {
+        m['user_id'] = null;
+      } else {
+        try {
+          final uHit = await db.query('users',
+              columns: ['id'], where: 'id = ?', whereArgs: [uid], limit: 1);
+          m['user_id'] = uHit.isNotEmpty ? uid : null;
+        } catch (_) {
+          m['user_id'] = null;
+        }
+      }
+    }
+    if (m.containsKey('paired_by') && m['paired_by'] != null) {
+      final rawPaired = m['paired_by'];
+      final pUid = rawPaired is int ? rawPaired : int.tryParse('$rawPaired');
+      m['paired_by'] = pUid;
+    }
     return m;
   }
 
@@ -1068,11 +1139,45 @@ class CloudJoin {
         snap = Map<String, Object?>.from(fallbackRec!['data'] as Map);
       } else {
         // إذا لم تكتمل اللقطة بعد، نبني هيكل لقطة أولي آمن ويستكمل SyncEngine المزامنة
+        final snapNow = DateTime.now().toIso8601String();
         snap = <String, Object?>{
-          'workspaces': [{'id': workspaceId, 'title': 'مساحة العمل'}],
-          'settings': [{'key': 'sync.workspaceId', 'value': workspaceId}],
+          'workspaces': [
+            {
+              'id': workspaceId,
+              'name': 'مساحة العمل',
+              'owner_google_id': '',
+              'owner_email': '',
+              'owner_name': '',
+              'created_at': snapNow,
+              'updated_at': snapNow,
+            }
+          ],
+          'settings': [
+            {'key': 'sync.workspaceId', 'value': workspaceId}
+          ],
         };
       }
+    }
+    // ضمان احتواء اللقطة دائماً على سجل المنشأة المستهدفة (workspaceId)
+    {
+      final snapNow = DateTime.now().toIso8601String();
+      final wsList = <Map<String, Object?>>[
+        if (snap['workspaces'] is List)
+          for (final w in (snap['workspaces'] as List))
+            if (w is Map) Map<String, Object?>.from(w),
+      ];
+      if (!wsList.any((w) => '${w['id'] ?? ''}'.trim() == workspaceId.trim())) {
+        wsList.insert(0, {
+          'id': workspaceId.trim().isEmpty ? 'default' : workspaceId.trim(),
+          'name': 'مساحة العمل',
+          'owner_google_id': '',
+          'owner_email': '',
+          'owner_name': '',
+          'created_at': snapNow,
+          'updated_at': snapNow,
+        });
+      }
+      snap['workspaces'] = wsList;
     }
 
     // إبطال الدعوة بعد التأكد من وجود اللقطة — استخدام لمرة واحدة.
@@ -1112,6 +1217,8 @@ class CloudJoin {
     await AppDatabase.instance.openForWorkspace(workspaceId);
 
     final db = await repo.database;
+    // ضمان وجود سجل المنشأة الأب أولاً قبل أي استعلام أو إدراج في devices
+    await AppDatabase.ensureWorkspaceRow(db, workspaceId);
     var ourId = await ensureDeviceId(repo);
     final myFp = await ensureHardwareFingerprintHash(repo);
 
@@ -1220,6 +1327,9 @@ class CloudJoin {
         ? workspaceId
         : await repo.activeWorkspaceId();
     final nowIso = DateTime.now().toIso8601String();
+    // تأكيد وجود سجل المنشأة الأب محلياً قبل إدراج المستخدم أو الجهاز
+    await AppDatabase.ensureWorkspaceRow(db, ws2);
+    await AppDatabase.ensureWorkspaceRow(db, workspaceId);
     final before = ourRowBefore.isNotEmpty
         ? Map<String, Object?>.from(ourRowBefore.first)
         : <String, Object?>{};
@@ -1328,6 +1438,11 @@ class CloudJoin {
     await repo.bindWorkspaceId(workspaceId);
     await repo.setSetting('sync.workspaceId', workspaceId);
     await repo.setSetting('sync.groupId', workspaceId);
+    await AppDatabase.ensureWorkspaceRow(db, workspaceId);
+    await db.update('devices', {'workspace_id': workspaceId},
+        where: 'workspace_id != ?', whereArgs: [workspaceId]);
+    await db.update('users', {'workspace_id': workspaceId},
+        where: 'workspace_id != ?', whereArgs: [workspaceId]);
     await db.delete('workspaces', where: 'id != ?', whereArgs: [workspaceId]);
     await repo.setSetting('account.type', 'enterprise');
     await repo.setSetting('onboardingCompleted', '1');
@@ -1380,10 +1495,24 @@ class CloudJoin {
           '$root/roster/${Uri.encodeComponent(ourId)}.json');
       if (oldRec != null && oldRec.isNotEmpty) {
         final nowIso = DateTime.now().toIso8601String();
+        final rawOldUid = oldRec['user_id'];
+        final parsedOldUid =
+            rawOldUid is int ? rawOldUid : int.tryParse('${rawOldUid ?? ''}');
+        int? safeOldUid;
+        if (parsedOldUid != null) {
+          final uHit = await db.query('users',
+              columns: ['id'],
+              where: 'id = ?',
+              whereArgs: [parsedOldUid],
+              limit: 1);
+          if (uHit.isNotEmpty) {
+            safeOldUid = parsedOldUid;
+          }
+        }
         await db.update(
           'devices',
           {
-            'user_id': oldRec['user_id'],
+            if (safeOldUid != null) 'user_id': safeOldUid,
             'name': (oldRec['name'] as String?)?.trim().isNotEmpty == true
                 ? oldRec['name']
                 : null,
@@ -1556,13 +1685,14 @@ class CloudJoin {
       remote = null;
     }
     if (remote != null && remote.isNotEmpty) {
+      final localWs = workspaceId.isNotEmpty && workspaceId != 'default'
+          ? workspaceId
+          : await repo.activeWorkspaceId();
+      await AppDatabase.ensureWorkspaceRow(db, localWs);
       final localRows = await db.query('devices');
       final localById = {
         for (final r in localRows) '${r['id']}': Map<String, Object?>.from(r)
       };
-      final localWs = workspaceId.isNotEmpty && workspaceId != 'default'
-          ? workspaceId
-          : await repo.activeWorkspaceId();
       var sawNewPeer = false;
       for (final entry in remote.entries) {
         final v = entry.value;
@@ -1594,15 +1724,25 @@ class CloudJoin {
           };
           if (!isOwner) {
             patch['name'] = r['name'] ?? local['name'];
-            patch['user_id'] = r['user_id'];
+            final rawUid = r['user_id'];
+            final uid = rawUid is int ? rawUid : int.tryParse('${rawUid ?? ''}');
+            if (uid != null) {
+              final uHit = await db.query('users',
+                  columns: ['id'], where: 'id = ?', whereArgs: [uid], limit: 1);
+              if (uHit.isNotEmpty) {
+                patch['user_id'] = uid;
+              }
+            }
           }
-          await db.update(
-            'devices',
-            patch,
-            where: 'id = ?',
-            whereArgs: [id],
-          );
-          changed = true;
+          try {
+            await db.update(
+              'devices',
+              patch,
+              where: 'id = ?',
+              whereArgs: [id],
+            );
+            changed = true;
+          } catch (_) {}
           continue;
         }
         await syncUserFromRoster(
@@ -1612,13 +1752,14 @@ class CloudJoin {
           fallbackUpd: remoteUpd,
         );
         if (local == null) {
-          final row = _safeDeviceRow(r);
-          // (دفعة 56) user_role حقل عرضي للشارات فقط — ليس عموداً في
-          // جدول devices، وإبقاؤه يفشل الإدراج بصمت ويعطل مزامنة السجل.
-          row.remove('user_role');
-          row.remove('user_permissions');
+          final row = await _sanitizeDeviceRowForDb(
+            db,
+            r,
+            fallbackWorkspaceId: localWs,
+          );
           row['id'] = id;
           row['workspace_id'] = localWs;
+          row['name'] = '${row['name'] ?? r['name'] ?? 'جهاز عضو'}';
           row['created_at'] =
               '${r['created_at'] ?? DateTime.now().toIso8601String()}';
           row['updated_at'] = remoteUpd.isEmpty
@@ -1645,13 +1786,14 @@ class CloudJoin {
             continue;
           }
           if (remoteUpd.compareTo(localUpd) <= 0) continue;
-          final row = _safeDeviceRow(r);
+          final row = await _sanitizeDeviceRowForDb(
+            db,
+            r,
+            fallbackWorkspaceId: localWs,
+          );
           row.remove('id');
           row.remove('created_at');
-          // (دفعة 56) حقل عرضي — ليس عموداً في devices (انظر أعلاه).
-          row.remove('user_role');
-          row.remove('user_permissions');
-          // لا نلمس سرّ المصادقة المحلي (قد يكون تعلّمه عبر اقتران LAN).
+          // لا نلمس سرّ المصادقة المحلي (قد يكون تعلّمه عبر اقتران سابق).
           row.remove('auth_secret');
           row['workspace_id'] = localWs;
           row['revoked_at'] = '${r['revoked_at'] ?? ''}';
@@ -2638,11 +2780,16 @@ class CloudJoin {
       }
     } catch (_) {}
 
+    // ضمان وجود سجل المنشأة الأب أولاً قبل إدراج سجل الجهاز العضو في جدول devices
+    final targetWsId = repo.requireWorkspaceId.trim().isNotEmpty
+        ? repo.requireWorkspaceId.trim()
+        : (workspaceId.trim().isNotEmpty ? workspaceId.trim() : 'default');
+    await AppDatabase.ensureWorkspaceRow(db, targetWsId);
     await db.insert(
         'devices',
         {
           'id': deviceId,
-          'workspace_id': repo.requireWorkspaceId,
+          'workspace_id': targetWsId,
           'name': deviceName,
           'is_paired': 1,
           'is_owner': 0,
@@ -3241,6 +3388,7 @@ class CloudJoin {
     // ══ (2026-09-29 — قانون شاشة إدارة المجموعة: لا أشباح في السحابة) ══
     // إذا كان هذا جهاز المدير: أي عضو معتمد بالسحابة يظهر فوراً في إدارة المجموعة
     // وإذا لم يكن موجوداً محلياً يُدرج في جدول devices فوراً لمنع حذفه بالخطأ.
+    await AppDatabase.ensureWorkspaceRow(db, workspaceId);
     final localIds = rows.map((r) => '${r['id']}').toSet();
     for (final e in roster.entries) {
       final rId = Uri.decodeComponent(e.key);
@@ -3249,11 +3397,14 @@ class CloudJoin {
       if (cloudDev is! Map || !active(cloudDev)) continue;
       if (!localIds.contains(rId)) {
         try {
-          final row = _safeDeviceRow(Map<String, Object?>.from(cloudDev));
-          row.remove('user_role');
-          row.remove('user_permissions');
+          final row = await _sanitizeDeviceRowForDb(
+            db,
+            Map<String, Object?>.from(cloudDev),
+            fallbackWorkspaceId: workspaceId,
+          );
           row['id'] = rId;
           row['workspace_id'] = workspaceId;
+          row['name'] = '${row['name'] ?? cloudDev['name'] ?? 'جهاز عضو'}';
           row['created_at'] = '${cloudDev['created_at'] ?? now}';
           row['updated_at'] = '${cloudDev['updated_at'] ?? now}';
           row['is_paired'] = 1;

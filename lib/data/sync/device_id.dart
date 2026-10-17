@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../repository.dart';
+import '../../core/database.dart';
 import '../../core/platform_info.dart';
 
 const _chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -251,6 +252,8 @@ Future<String> adoptCanonicalDeviceId(
       if (rows.isNotEmpty) {
         final updatedRow = Map<String, Object?>.from(rows.first);
         updatedRow['id'] = cleanId;
+        await AppDatabase.ensureWorkspaceRow(
+            db, '${updatedRow['workspace_id'] ?? ''}');
         await db.insert(
           'devices',
           updatedRow,

@@ -23,12 +23,40 @@ class AppDatabase {
   static Future<Database>? _opening;
   static String _activeWorkspaceId = defaultWorkspaceIdConst;
   static bool _isTestOverride = false;
-  static const int _version = 27;
+  static const int _version = 28;
 
   /// مفتاح التخزين الدائم للمنشأة النشطة في SharedPreferences
   static const String kPrefActiveWorkspaceId = 'nexora_active_workspace_id';
 
   static int get schemaVersion => _version;
+
+  /// ضمان وجود سجل المنشأة الأب في جدول `workspaces` محلياً قبل إدراج أي سجلات
+  /// فرعية مرتبطة به (مثل `devices` أو الأعضاء أو الأصناف) لمنع خطأ
+  /// `FOREIGN KEY constraint failed (code 787)`.
+  static Future<void> ensureWorkspaceRow(
+    DatabaseExecutor db,
+    String? workspaceId, {
+    String name = 'متجري',
+  }) async {
+    final ws = (workspaceId ?? '').trim();
+    final targetId = ws.isEmpty ? defaultWorkspaceIdConst : ws;
+    final now = DateTime.now().toIso8601String();
+    try {
+      await db.insert(
+        'workspaces',
+        {
+          'id': targetId,
+          'name': name.trim().isEmpty ? 'متجري' : name.trim(),
+          'owner_google_id': '',
+          'owner_email': '',
+          'owner_name': '',
+          'created_at': now,
+          'updated_at': now,
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+    } catch (_) {}
+  }
 
   /// معرف مساحة العمل النشطة المرتبطة بملف قاعدة البيانات الحالية.
   static String get activeWorkspaceId => _activeWorkspaceId;
@@ -107,6 +135,9 @@ class AppDatabase {
         : workspaceId.trim();
     if (_isTestOverride && _db != null) {
       _activeWorkspaceId = targetWs;
+      if (targetWs != defaultWorkspaceIdConst) {
+        await ensureWorkspaceRow(_db!, targetWs);
+      }
       return _db!;
     }
     // حفظ المنشأة في SharedPreferences لضمان استمرارية فتحها عند إغلاق التطبيق وإعادة تشغيله
@@ -228,6 +259,9 @@ class AppDatabase {
           if (!alreadyEnsured) {
             await ensureFullSchema(db);
           }
+        }
+        if (effectiveWs.isNotEmpty && effectiveWs != defaultWorkspaceIdConst) {
+          await ensureWorkspaceRow(db, effectiveWs);
         }
         await repairOwnerAdminStatus(db);
       },
@@ -915,7 +949,7 @@ class AppDatabase {
 
       CREATE TABLE IF NOT EXISTS devices (
         id             TEXT PRIMARY KEY,
-        workspace_id   TEXT NOT NULL,
+        workspace_id   TEXT NOT NULL DEFAULT 'default',
         name           TEXT NOT NULL DEFAULT '',
         platform       TEXT DEFAULT '',
         app_version    TEXT DEFAULT '',
@@ -931,9 +965,7 @@ class AppDatabase {
         is_paired      INTEGER NOT NULL DEFAULT 1,
         is_owner       INTEGER NOT NULL DEFAULT 0,
         created_at     TEXT NOT NULL,
-        updated_at     TEXT NOT NULL,
-        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+        updated_at     TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS operations (
@@ -1569,6 +1601,10 @@ class AppDatabase {
     if (from < 27) {
       await migrateToV27(db);
     }
+    // ====== v28: تحرير جدول devices من قيود المفاتيح الأجنبية الصلبة لدعم المزامنة التزايدية ======
+    if (from < 28) {
+      await migrateToV22(db);
+    }
     // ====== v17: ضمان المخطط الكامل عند كل فتح (إصلاح قواعد ويندوز الناقصة) ======
     // أي جدول ناقص من بناء سابق يُنشأ، والبذرة idempotent. هذا يغلق نهائيًا
     // خطأ "table workspaces already exists" و"تعذّر تحميل الفئات/الإعدادات".
@@ -1648,15 +1684,19 @@ class AppDatabase {
   /// idempotent بالكامل — تُستدعى أيضاً من ensureFullSchema عند كل فتح.
   static Future<void> migrateToV22(Database db) async {
     await db.execute('DROP TABLE IF EXISTS op_deliveries');
-    // إعادة بناء devices فقط إن كانت أعمدة LAN ما تزال موجودة.
+    // إعادة بناء devices إن كانت أعمدة LAN ما تزال موجودة أو بقيت قيود المفاتيح
+    // الأجنبية القديمة التي تعيق المزامنة التزايدية (FOREIGN KEY 787).
     final cols = await db.rawQuery('PRAGMA table_info(devices)');
     final names = cols.map((c) => '${c['name']}').toSet();
-    if (names.contains('ip_address') || names.contains('port')) {
+    final fks = await db.rawQuery('PRAGMA foreign_key_list(devices)');
+    if (names.contains('ip_address') ||
+        names.contains('port') ||
+        fks.isNotEmpty) {
       await db.transaction((txn) async {
         await txn.execute('''
           CREATE TABLE IF NOT EXISTS devices_v22 (
             id             TEXT PRIMARY KEY,
-            workspace_id   TEXT NOT NULL,
+            workspace_id   TEXT NOT NULL DEFAULT 'default',
             name           TEXT NOT NULL DEFAULT '',
             platform       TEXT DEFAULT '',
             app_version    TEXT DEFAULT '',

@@ -3,10 +3,32 @@
 // تمسح بيانات الجهاز المحلية كاملة وتستبدلها بنسخة المجموعة.
 import 'package:sqflite/sqflite.dart';
 
+import '../../core/database.dart';
 import '../../core/media_paths.dart';
 import '../../core/secret_store.dart';
 
 class SnapshotApply {
+  static const Set<String> _deviceColumns = {
+    'id',
+    'workspace_id',
+    'name',
+    'platform',
+    'app_version',
+    'last_seen_at',
+    'last_sync_at',
+    'pair_token',
+    'pair_token_exp',
+    'auth_secret',
+    'revoked_at',
+    'expelled_at',
+    'user_id',
+    'paired_by',
+    'is_paired',
+    'is_owner',
+    'created_at',
+    'updated_at',
+  };
+
   /// يُطبّق لقطة البيانات القادمة من المضيف على الجهاز العضو (يمسح القديم ويستبدله).
   static Future<void> applySnapshot(
     Future<Database> Function() dbProvider,
@@ -15,6 +37,18 @@ class SnapshotApply {
   ) async {
     final db = await dbProvider();
     await db.transaction((txn) async {
+      final nowIso = DateTime.now().toIso8601String();
+      final snapWsList =
+          (snap['workspaces'] as List?)?.whereType<Map>().toList();
+      final realWs = snapWsList?.firstWhere(
+          (w) =>
+              '${w['id'] ?? ''}' != 'default' &&
+              '${w['id'] ?? ''}'.trim().isNotEmpty,
+          orElse: () => snapWsList.firstOrNull ?? const {});
+      final wsId = '${realWs?['id'] ?? ''}'.trim().isNotEmpty
+          ? '${realWs?['id']}'.trim()
+          : 'default';
+
       final knownDevices =
           await txn.query('devices', columns: ['id', 'auth_secret']);
       final knownSecrets = {
@@ -50,6 +84,13 @@ class SnapshotApply {
       // نحذف سجلات الأجهزة الأخرى ونُبقي سجلنا وسجل المضيف.
       await txn.delete('devices', where: 'id <> ?', whereArgs: [ourDeviceId]);
 
+      // ضمان وجود سجل المنشأة الأب أولاً قبل أي إدراج أو تعديل في الجداول الفرعية
+      await AppDatabase.ensureWorkspaceRow(
+        txn,
+        wsId,
+        name: '${realWs?['name'] ?? realWs?['title'] ?? 'متجري'}',
+      );
+
       // 2) نسخ الجداول من اللقطة.
       Future<void> insertAll(String table) async {
         final raw = snap[table];
@@ -61,6 +102,24 @@ class SnapshotApply {
             r.forEach((k, v) {
               if (k is String) map[k] = v as Object?;
             });
+            if (table == 'workspaces') {
+              final wId = '${map['id'] ?? ''}'.trim();
+              if (wId.isEmpty) continue;
+              map['id'] = wId;
+              final title = map.remove('title');
+              if ('${map['name'] ?? ''}'.trim().isEmpty) {
+                map['name'] = '${title ?? 'متجري'}';
+              }
+              map['owner_google_id'] ??= '';
+              map['owner_email'] ??= '';
+              map['owner_name'] ??= '';
+              if ('${map['created_at'] ?? ''}'.trim().isEmpty) {
+                map['created_at'] = nowIso;
+              }
+              if ('${map['updated_at'] ?? ''}'.trim().isEmpty) {
+                map['updated_at'] = nowIso;
+              }
+            }
             if (table == 'items') {
               final thumbB64 = map.remove('thumb_b64');
               if (thumbB64 is String && thumbB64.trim().isNotEmpty) {
@@ -72,10 +131,35 @@ class SnapshotApply {
               }
             }
             if (table == 'devices') {
-              // (دفعة 58) أعمدة LAN أُسقطت من المخطط — لقطات المضيفين
-              // الأقدم قد ما تزال تحملها فتُسقط قبل الإدراج.
-              map.remove('ip_address');
-              map.remove('port');
+              // تصفية الحقول غير الموجودة في جدول devices المحلي (مثل أعمدة LAN أو حقول السحابة)
+              map.removeWhere((k, _) => !_deviceColumns.contains(k));
+              final devWs = '${map['workspace_id'] ?? ''}'.trim().isNotEmpty
+                  ? '${map['workspace_id']}'.trim()
+                  : wsId;
+              map['workspace_id'] = devWs;
+              await AppDatabase.ensureWorkspaceRow(txn, devWs);
+              map['name'] = '${map['name'] ?? 'جهاز'}';
+              if ('${map['created_at'] ?? ''}'.trim().isEmpty) {
+                map['created_at'] = nowIso;
+              }
+              if ('${map['updated_at'] ?? ''}'.trim().isEmpty) {
+                map['updated_at'] = nowIso;
+              }
+              if (map['user_id'] != null) {
+                final rawUid = map['user_id'];
+                final uid =
+                    rawUid is int ? rawUid : int.tryParse('$rawUid');
+                if (uid == null) {
+                  map['user_id'] = null;
+                } else {
+                  final uHit = await txn.query('users',
+                      columns: ['id'],
+                      where: 'id = ?',
+                      whereArgs: [uid],
+                      limit: 1);
+                  map['user_id'] = uHit.isNotEmpty ? uid : null;
+                }
+              }
               if (map['id'] == ourDeviceId ||
                   (map['auth_secret'] as String? ?? '').isEmpty) {
                 // سرّنا لا يُكتب أبداً من لقطة واردة؛ وعند غياب السر في
@@ -112,6 +196,7 @@ class SnapshotApply {
         }
       }
 
+      // 2أ) إدراج المنشأة الأب أولاً قبل المستخدمين والأجهزة والأصناف
       await insertAll('workspaces');
       // (3.71.0 — دخول نظيف) العضو يبقى في مساحة المجموعة وحدها: كل صف
       // محلي خارج اللقطة (مساحة شخصية ميتة) يُحذف — كان يظلل مسار
@@ -121,9 +206,16 @@ class SnapshotApply {
         if (snapWs is List && snapWs.isNotEmpty) {
           final keep = <String>[
             for (final r in snapWs)
-              if (r is Map) '${r['id'] ?? ''}'
+              if (r is Map) '${r['id'] ?? ''}'.trim()
           ]..removeWhere((e) => e.isEmpty);
           if (keep.isNotEmpty) {
+            await txn.update(
+              'devices',
+              {'workspace_id': keep.first},
+              where:
+                  'workspace_id NOT IN (${List.filled(keep.length, '?').join(',')})',
+              whereArgs: keep,
+            );
             await txn.delete(
               'workspaces',
               where:
@@ -195,7 +287,6 @@ class SnapshotApply {
       // ب) الجهاز المسجل ببريد إلكتروني هو المدير دوماً (البريد خاص بجهاز المدير فقط).
       final dev = await txn.query('devices',
           where: 'id = ?', whereArgs: [ourDeviceId], limit: 1);
-      final nowIso = DateTime.now().toIso8601String();
       final hostId = '${snap['hostDeviceId'] ?? ''}';
 
       final emailRow = await txn.query('settings',
@@ -238,12 +329,8 @@ class SnapshotApply {
             },
             conflictAlgorithm: ConflictAlgorithm.replace);
       } else {
-        // جهاز العضو الجديد المنضم
-        final snapWsList = (snap['workspaces'] as List?)?.whereType<Map>().toList();
-        final realWs = snapWsList?.firstWhere(
-            (w) => '${w['id'] ?? ''}' != 'default' && '${w['id'] ?? ''}'.isNotEmpty,
-            orElse: () => snapWsList.firstOrNull ?? const {});
-        final wsId = '${realWs?['id'] ?? 'default'}';
+        // جهاز العضو الجديد المنضم — ضمان وجود سجل المنشأة الأب أولاً قبل إدراج/تحديث الجهاز
+        await AppDatabase.ensureWorkspaceRow(txn, wsId);
         if (dev.isEmpty) {
           await txn.insert(
             'devices',

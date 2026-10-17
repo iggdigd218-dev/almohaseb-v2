@@ -11,6 +11,7 @@ import 'package:flutter/material.dart' show MaterialPageRoute;
 import 'package:http/http.dart' as http;
 import 'package:sqflite/sqflite.dart';
 
+import '../../core/database.dart';
 import '../../core/token_cipher.dart';
 import 'auto_backup.dart';
 import '../providers.dart' show rootNavigatorKey;
@@ -287,6 +288,7 @@ class SyncEngine {
     // (3.71.0 — ربط حتمي) نفس حلّ المستودع: الربط الصريح في الإعدادات
     // أولاً ثم أحدث صف — النقل لا يرتبط أبداً بمساحة شخصية ميتة.
     final wsId = await ensureWorkspace(db, repo: repo);
+    await AppDatabase.ensureWorkspaceRow(db, wsId);
     try {
       await repo.purgeNonEmailWorkspaces();
     } catch (_) {}
@@ -606,6 +608,8 @@ class SyncEngine {
     try {
       // (3.71.0) تشخيص: سهم الاستقبال يومض أثناء الدورة وتُسجَّل نتيجتها.
       SyncDiagnostics.instance.pullStarted();
+      await AppDatabase.ensureWorkspaceRow(
+          await _db, _cloudTransport!.workspaceId);
       final applied = await _cloudTransport!.pull(resolver: ConflictResolver());
       SyncDiagnostics.instance.pullFinished(
         ok: true,
@@ -624,9 +628,11 @@ class SyncEngine {
       // السحابة) ويعيّن لها مستخدمين، وتصل التعيينات/الحظر/الطرد للأعضاء.
       try {
         final t = _cloudTransport!;
+        final db = await _db;
+        await AppDatabase.ensureWorkspaceRow(db, t.workspaceId);
         final changed = await CloudJoin.syncRoster(
           repo,
-          await _db,
+          db,
           backendUrl: t.backendUrl,
           workspaceId: t.workspaceId,
         );

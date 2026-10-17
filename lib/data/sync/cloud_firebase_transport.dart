@@ -17,6 +17,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:sqflite/sqflite.dart';
 
+import '../../core/database.dart';
 import '../../core/desktop_net.dart';
 import '../repository.dart';
 import 'apply_remote.dart';
@@ -379,6 +380,9 @@ class CloudFirebaseTransport implements SyncTransport {
 
   Future<int> pull({ConflictResolver? resolver, bool forceFullSync = false}) async {
     final db = await _db;
+    // ضمان وجود سجل المنشأة الرئيسية (workspaces) أولاً في قاعدة البيانات المحلية
+    // قبل تطبيق أي عمليات مزامنة أو تحديث سجلات الأجهزة والأعضاء والأصناف.
+    await AppDatabase.ensureWorkspaceRow(db, workspaceId);
     // استهلاك السحب بالمؤشر الزمني حصراً (Cursor-Based Inbound Sync):
     // نقرأ المؤشر المحلي الدائم `last_synced_cursor` المعتمد على `server_time`.
     // يُمنع أي استعلام مفتوح يجلب كامل مسار العمليات `/workspaces/{ws}/operations`.
