@@ -13,6 +13,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nexora_app/core/accounting.dart';
 import 'package:nexora_app/core/database.dart';
 import 'package:nexora_app/core/models.dart';
 import 'package:nexora_app/core/sfx.dart';
@@ -185,9 +186,21 @@ void main() {
   group('POS — بوابة الأقسام وشبكة الأصناف المتجاوبة', () {
     testWidgets('POS-01 شاشة المبيعات تفتح افتراضياً وقائمة الأقسام مطوية مع إمكانية فتحها',
         (tester) async {
+      final posContainer = ProviderContainer(overrides: [
+        repoProvider.overrideWithValue(repo),
+        settingsProvider.overrideWith((ref) => Future.value(<String, String>{})),
+        currenciesProvider.overrideWith((ref) => Future.value(kDefaultCurrencies)),
+        sectionsProvider.overrideWith((ref) => Future.value([])),
+        itemCategoryTreeProvider.overrideWith((ref) => Future.value([])),
+        itemsProvider.overrideWith((ref) => Future.value([])),
+        heldInvoicesProvider.overrideWith((ref) => Future.value([])),
+        subscriptionProvider.overrideWith((ref) => Future.value(SubscriptionState.none)),
+      ]);
+      addTearDown(posContainer.dispose);
+
       await tester.pumpWidget(
         UncontrolledProviderScope(
-          container: container,
+          container: posContainer,
           child: MaterialApp(
             locale: const Locale('ar'),
             theme: AppTheme.light(),
@@ -212,7 +225,6 @@ void main() {
       expect(find.byType(PosSectionsGate), findsOneWidget);
 
       await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pump(const Duration(milliseconds: 100));
     });
 
     test('POS-02 أعمدة شبكة الأصناف المربّعة تتسع لـ 4 جوال، 6 تابلت، 8 حاسوب', () {
