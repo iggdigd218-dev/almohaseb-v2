@@ -243,7 +243,8 @@ void main() {
       posContainer.dispose();
     });
 
-    test('POS-02 أعمدة شبكة الأصناف المربّعة تتسع لـ 4 جوال، 6 تابلت، 8 حاسوب', () {
+    testWidgets('POS-02 أعمدة شبكة الأصناف المربّعة تتسع لـ 4 جوال، 6 تابلت، 8 حاسوب',
+        (tester) async {
       expect(PosItemsGrid.crossAxisCountFor(360), 4, reason: '4 على الجوال');
       expect(PosItemsGrid.crossAxisCountFor(480), 4);
       expect(PosItemsGrid.crossAxisCountFor(768), 6, reason: '6 على التابلت');
