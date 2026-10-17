@@ -374,7 +374,7 @@ class _IconPickerSheetState extends State<_IconPickerSheet> {
                     child: Text(widget.title,
                         style: Theme.of(context).textTheme.titleLarge),
                   ),
-                  if (_selected.isNotEmpty)
+                  if ((_selected ?? '').isNotEmpty)
                     TextButton.icon(
                       onPressed: () => Navigator.pop(context, ''),
                       icon: const Icon(Icons.clear_rounded, size: 16),

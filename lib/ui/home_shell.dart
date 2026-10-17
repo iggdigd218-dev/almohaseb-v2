@@ -953,7 +953,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
           deviceId: devId,
           workspaceId: effectiveWs,
         );
-        final status = '${checkReq['status'] ?? ''}'.trim();
+        final status = (checkReq['status'] ?? '').trim();
         if (status == 'approved' || status == 'rejected' || status == 'missing') {
           // حُسم نهائياً (قبول أو رفض) — يُحفظ في السجل
           _handledJoinRequests[key] = DateTime.now().millisecondsSinceEpoch;

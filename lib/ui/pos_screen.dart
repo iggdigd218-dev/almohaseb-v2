@@ -401,7 +401,8 @@ class _PosScreenState extends ConsumerState<PosScreen>
       return;
     }
     final heldList = ref.read(heldInvoicesProvider);
-    final customers = ref.read(customersProvider).valueOrNull ?? const <Account>[];
+    final customers =
+        ref.read(allAccountsProvider).valueOrNull ?? const <Account>[];
     String? custName;
     if (_selectedCustomerId != null) {
       for (final c in customers) {
@@ -482,7 +483,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
       ),
     );
 
-    if (ok != true) return;
+    if (ok != true || !mounted) return;
     final label = ctrl.text.trim();
     _cartCtl.holdCurrentDraft(label: label.isEmpty ? defaultLabel : label);
     _paidCtrl.clear();
@@ -831,7 +832,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                                           );
                                           if (switchOk == true) {
                                             _cartCtl.holdCurrentDraft();
-                                            Navigator.pop(ctx);
+                                            if (ctx.mounted) Navigator.pop(ctx);
                                             _resumeHeld(i);
                                           }
                                         } else {
