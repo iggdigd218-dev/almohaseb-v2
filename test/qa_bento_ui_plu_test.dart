@@ -212,7 +212,6 @@ void main() {
         heldInvoicesProvider.overrideWith((ref) => <PosDraft>[]),
         subscriptionProvider.overrideWith((ref) => Future.value(SubscriptionState.none)),
       ]);
-      addTearDown(posContainer.dispose);
 
       await tester.pumpWidget(
         UncontrolledProviderScope(
@@ -241,6 +240,7 @@ void main() {
       expect(find.byType(PosSectionsGate), findsOneWidget);
 
       await tester.pumpWidget(const SizedBox.shrink());
+      posContainer.dispose();
     });
 
     test('POS-02 أعمدة شبكة الأصناف المربّعة تتسع لـ 4 جوال، 6 تابلت، 8 حاسوب', () {
