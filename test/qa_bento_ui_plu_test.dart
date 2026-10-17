@@ -40,6 +40,26 @@ class _TestPosRepo extends Repo {
 
   @override
   Future<Map<String, String>> settings() async => <String, String>{};
+
+  @override
+  Future<List<Tx>> transactions({
+    int? accountId,
+    DateTime? from,
+    DateTime? to,
+    OpType? type,
+  }) async => <Tx>[];
+
+  @override
+  Future<List<Account>> accounts({bool includeArchived = false}) async => <Account>[];
+
+  @override
+  Future<List<Section>> sections() async => <Section>[];
+
+  @override
+  Future<List<ItemCategory>> itemCategories() async => <ItemCategory>[];
+
+  @override
+  Future<List<Item>> items() async => <Item>[];
 }
 
 void main() {
@@ -52,11 +72,8 @@ void main() {
   late Repo repo;
   late ProviderContainer container;
 
-  setUpAll(() {
+  setUpAll(() async {
     Sfx.setMuted(true);
-  });
-
-  setUp(() async {
     tmp = await Directory.systemTemp.createTemp('nexora_bento_plu_');
     db = await databaseFactory.openDatabase('${tmp.path}/test.db',
         options: OpenDatabaseOptions(
@@ -78,10 +95,14 @@ void main() {
     ]);
   });
 
-  tearDown(() async {
+  tearDownAll(() async {
     container.dispose();
-    await db.close();
-    await tmp.delete(recursive: true);
+    try {
+      await db.close();
+    } catch (_) {}
+    try {
+      await tmp.delete(recursive: true);
+    } catch (_) {}
   });
 
   // =========================================================================
@@ -211,6 +232,13 @@ void main() {
         allAccountsProvider.overrideWith((ref) => Future.value(<Account>[])),
         heldInvoicesProvider.overrideWith((ref) => <PosDraft>[]),
         subscriptionProvider.overrideWith((ref) => Future.value(SubscriptionState.none)),
+        txPageProvider.overrideWith((ref) => Future.value(const TxPage(
+              items: [],
+              accounts: {},
+              inflowByCurrency: {},
+              outflowByCurrency: {},
+            ))),
+        currentUserProvider.overrideWith((ref) => Future.value(null)),
       ]);
 
       await tester.pumpWidget(
@@ -240,11 +268,11 @@ void main() {
       expect(find.byType(PosSectionsGate), findsOneWidget);
 
       await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(seconds: 15));
       posContainer.dispose();
     });
 
-    testWidgets('POS-02 أعمدة شبكة الأصناف المربّعة تتسع لـ 4 جوال، 6 تابلت، 8 حاسوب',
-        (tester) async {
+    test('POS-02 أعمدة شبكة الأصناف المربّعة تتسع لـ 4 جوال، 6 تابلت، 8 حاسوب', () {
       expect(PosItemsGrid.crossAxisCountFor(360), 4, reason: '4 على الجوال');
       expect(PosItemsGrid.crossAxisCountFor(480), 4);
       expect(PosItemsGrid.crossAxisCountFor(768), 6, reason: '6 على التابلت');
