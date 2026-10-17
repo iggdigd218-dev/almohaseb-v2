@@ -195,7 +195,8 @@ void main() {
           ),
         ),
       );
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
 
       // قائمة الأقسام مطوية افتراضياً لتوفير مساحة لشبكة الأصناف
       expect(find.byType(PosSectionsGate), findsNothing);
@@ -203,11 +204,11 @@ void main() {
 
       // عند النقر على شريط القسم تفتح لوحة الأقسام
       await tester.tap(find.text('كل الأقسام').first);
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
       expect(find.byType(PosSectionsGate), findsOneWidget);
 
-      // استنزاف مؤقتات keepAlive (8 ثوانٍ)
-      await tester.pump(const Duration(seconds: 10));
+      await tester.pumpWidget(const SizedBox());
     });
 
     test('POS-02 أعمدة شبكة الأصناف المربّعة تتسع لـ 4 جوال، 6 تابلت، 8 حاسوب', () {
