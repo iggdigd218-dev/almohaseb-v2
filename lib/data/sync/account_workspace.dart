@@ -1,0 +1,1940 @@
+// (ربط الحساب — بدون لمس هوية المؤسسة) فهرس سحابي اختياري للحساب.
+//
+// المبدأ بعد 3.61 (استعادة سلوك 3.55):
+//   - هوية المؤسسة = معرّف مساحة محلي عشوائي (WS-XXXXXXXX) لكل تثبيت.
+//     لا علاقة له بحساب Google إطلاقاً — الربط يعمل بلا إنترنت.
+//   - حساب Google يُستخدم للترخيص والنسخ على Drive فقط، ويُسجَّل ربطه
+//     بالمساحة الحالية في فهرس اختياري لأجل استرداد يدوي مستقبلي.
+//   - انضمام الموظفين يبقى عبر QR/PIN — لا يحتاجون حساب Google.
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io' show Platform;
+
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite/sqflite.dart';
+
+import '../../core/database.dart';
+import '../../core/factory_reset.dart';
+import 'auto_backup.dart';
+import '../repository.dart';
+import 'cloud_firebase_transport.dart';
+import 'cloud_join.dart';
+import 'workspace_recovery.dart';
+import 'device_id.dart';
+import 'device_registry.dart';
+import 'firebase_auth_service.dart';
+import 'subscription_guard.dart';
+import 'workspace_service.dart';
+
+/// معلومات منشأة مرتبطة بحساب المستخدم (سواء كمالك أو عضو مصرح).
+class WorkspaceInfo {
+  final String workspaceId;
+  final String storeName;
+  final String businessActivity;
+  final String defaultCurrency;
+  final String phone;
+  final String ownerEmail;
+  final String role; // 'owner' | 'member'
+  final bool isCurrent;
+
+  const WorkspaceInfo({
+    required this.workspaceId,
+    required this.storeName,
+    this.businessActivity = '',
+    this.defaultCurrency = 'YER',
+    this.phone = '',
+    this.ownerEmail = '',
+    this.role = 'owner',
+    this.isCurrent = false,
+  });
+
+  Map<String, Object?> toJson() => {
+        'workspaceId': workspaceId,
+        'storeName': storeName,
+        'businessActivity': businessActivity,
+        'defaultCurrency': defaultCurrency,
+        'phone': phone,
+        'ownerEmail': ownerEmail,
+        'role': role,
+      };
+
+  factory WorkspaceInfo.fromJson(
+    Map<String, dynamic> m, {
+    String fallbackId = '',
+    bool isCurrent = false,
+  }) {
+    final wsId =
+        '${m['workspaceId'] ?? m['id'] ?? m['workspace_id'] ?? fallbackId}'
+            .trim();
+    final name =
+        '${m['storeName'] ?? m['store_name'] ?? m['businessName'] ?? m['name'] ?? ''}'
+            .trim();
+    return WorkspaceInfo(
+      workspaceId: wsId,
+      storeName: name.isEmpty ? 'منشأة ($wsId)' : name,
+      businessActivity: '${m['businessActivity'] ?? ''}'.trim(),
+      defaultCurrency: '${m['defaultCurrency'] ?? 'YER'}'.trim().isEmpty
+          ? 'YER'
+          : '${m['defaultCurrency'] ?? 'YER'}'.trim(),
+      phone: '${m['phone'] ?? m['whatsapp'] ?? ''}'.trim(),
+      ownerEmail: '${m['ownerEmail'] ?? m['owner_email'] ?? m['email'] ?? ''}'
+          .trim()
+          .toLowerCase(),
+      role: '${m['role'] ?? 'owner'}'.trim().isEmpty
+          ? 'owner'
+          : '${m['role'] ?? 'owner'}'.trim(),
+      isCurrent: isCurrent,
+    );
+  }
+}
+
+/// نتيجة فحص معالج توجيه الحسابات (Workspace Resolver / Auth Gate) في السحابة.
+class CloudWorkspaceResolution {
+  final String workspaceId;
+  final String role; // 'owner' | 'member' | ''
+  final String memberRoleCode;
+  final Map<String, dynamic>? meta;
+
+  const CloudWorkspaceResolution({
+    required this.workspaceId,
+    this.role = 'owner',
+    this.memberRoleCode = 'admin',
+    this.meta,
+  });
+
+  bool get found => workspaceId.isNotEmpty && workspaceId != 'default';
+}
+
+/// نتيجة تبنّي/استرداد مساحة الحساب بعد تسجيل الدخول.
+enum AccountLinkOutcome {
+  /// (محفوظة للتوافق) استُعيدت مساحة سابقة كاملة بالبيانات.
+  /// لا يُنتِجها أي مسار تلقائي بعد 3.61 — الاسترداد صار بقرار صريح.
+  recovered,
+
+  /// اكتمل ربط الحساب: جلسة محفوظة + فهرس مسجّل — **بلا أي تغيير
+  /// على معرّف المساحة المحلي** (سلوك 3.55 المستعاد).
+  migrated,
+
+  /// جهاز عضو في مجموعة — لا تغيير على مساحته (يتبع مديره).
+  memberUntouched,
+
+  /// (دفعة 65) الحساب مرتبط بمساحة **أخرى**: حُظر الدمج، وأُخذت نسخة
+  /// احتياطية، وفُرّغت الجداول، ونُزّلت بيانات المساحة الجديدة.
+  switched,
+
+  /// حساب بريد جديد غير عضو في المنشأة السابقة وليس له مساحة سحابية سابقة:
+  /// تم عزل وتصفير بيانات المنشأة السابقة وفتح قاعدة بيانات ومساحة عمل جديدة له.
+  isolatedNewWorkspace,
+
+  /// (دفعة 65) الحساب مرتبط بمساحة أخرى لكن **لا نسخة سحابية** لتلك
+  /// المساحة — لم يُفرَّغ شيء، وتعذّر إتمام التبديل.
+  switchUnavailable,
+
+  /// (دفعة 65) تعذّر إتمام التبديل **بعد** تفريغ الجداول: استُرجعت
+  /// بيانات المساحة الأصلية من النسخة المحتفظ بها — **بلا فقدان بيانات**.
+  switchRestored,
+
+  /// (دفعة 65) تعذّر التبديل بعد التفريغ **وتعذّر الاسترجاع التلقائي**:
+  /// البيانات الأصلية ما زالت في ملف `pre_switch_backup.nexora` داخل
+  /// مجلد النسخ — يجب إبلاغ المستخدم بمكانها صراحةً.
+  switchDataLost,
+
+  /// تعذر الإكمال (شبكة/إعدادات).
+  failed,
+}
+
+class AccountWorkspace {
+  AccountWorkspace._();
+
+  static String _indexPath(String base, String uid) =>
+      '${base.replaceAll(RegExp(r'/+$'), '')}/workspaces/_registry/'
+      'accounts_index/${Uri.encodeComponent(uid)}.json';
+
+  static String emailToKey(String email) {
+    final clean = email.trim().toLowerCase();
+    return sha256.convert(utf8.encode(clean)).toString();
+  }
+
+  static String _emailIndexPath(String base, String email) =>
+      '${base.replaceAll(RegExp(r'/+$'), '')}/workspaces/_registry/'
+      'emails_index/${emailToKey(email)}.json';
+
+  /// تطبيع رقم الهاتف مع الرمز الدولي إلى مفتاح موحّد (أرقام فقط بعد إزالة البادئة 00/+).
+  static String normalizePhone(String phone) {
+    var digits = phone.trim().replaceAll(RegExp(r'[^\d+]'), '');
+    if (digits.startsWith('+')) digits = digits.substring(1);
+    if (digits.startsWith('00')) digits = digits.substring(2);
+    return digits;
+  }
+
+  static String phoneToKey(String phone) {
+    final norm = normalizePhone(phone);
+    if (norm.isEmpty) return '';
+    return sha256.convert(utf8.encode('phone:$norm')).toString();
+  }
+
+  static String _phoneIndexPath(String base, String phone) =>
+      '${base.replaceAll(RegExp(r'/+$'), '')}/workspaces/_registry/'
+      'phones_index/${phoneToKey(phone)}.json';
+
+  /// قراءة مساحة العمل المرتبطة برقم الهاتف (مع الرمز الدولي) من الفهرس السحابي.
+  static Future<String> lookupByPhone({
+    required String backendUrl,
+    required String phone,
+  }) async {
+    final norm = normalizePhone(phone);
+    if (norm.length < 7) return '';
+    try {
+      final res = await http
+          .get(Uri.parse(_phoneIndexPath(backendUrl, norm)))
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode < 200 || res.statusCode >= 300) return '';
+      final body = utf8.decode(res.bodyBytes).trim();
+      if (body.isEmpty || body == 'null') return '';
+      final m = jsonDecode(body);
+      if (m is! Map) return '';
+      final ws = '${m['workspaceId'] ?? ''}'.trim();
+      return ws == 'default' ? '' : ws;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// ربط رقم الهاتف بمساحة العمل مع منع تكرار الرقم لمساحة أخرى.
+  static Future<bool> bindPhoneWorkspace({
+    required String backendUrl,
+    required String phone,
+    required String workspaceId,
+    String email = '',
+  }) async {
+    final norm = normalizePhone(phone);
+    if (norm.length < 7 || workspaceId.isEmpty || workspaceId == 'default') {
+      return false;
+    }
+    try {
+      final existingWs =
+          await lookupByPhone(backendUrl: backendUrl, phone: norm);
+      if (existingWs.isNotEmpty && existingWs != workspaceId) {
+        // رقم الهاتف مسجّل مسبقاً لمساحة أخرى — يمنع التكرار منعاً باتاً.
+        return false;
+      }
+      await http
+          .put(
+            Uri.parse(_phoneIndexPath(backendUrl, norm)),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'workspaceId': workspaceId,
+              'phone': norm,
+              if (email.trim().isNotEmpty)
+                'email': email.trim().toLowerCase(),
+              'updated_at': {'.sv': 'timestamp'},
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static String _trimSlashes(String url) {
+    var out = url.trim();
+    while (out.endsWith('/')) {
+      out = out.substring(0, out.length - 1);
+    }
+    return out;
+  }
+
+  /// فحص شامل في Firebase Realtime Database لتحديد مساحة العمل المرتبطة بالحساب:
+  ///   1) فهرس البريد (`emails_index`) وفهرس الحساب (`accounts_index`).
+  ///   2) فهرس منشآت المستخدم (`user_workspaces/{emailKey}`).
+  ///   3) فحص عقدة `/workspaces` للبحث عن:
+  ///      • مساحة عمل يكون فيها `owner_email == currentUser.email` (في `meta` أو الجذر).
+  ///      • أو فحص هل البريد مضاف كعضو مصرح في روستر (`roster` / `members` / `devices`) إحدى المنشآت.
+  static Future<CloudWorkspaceResolution> resolveWorkspaceInCloud({
+    required String backendUrl,
+    required String email,
+    String uid = '',
+  }) async {
+    final clean = email.trim().toLowerCase();
+    final cleanUid = uid.trim();
+    if (clean.isEmpty && cleanUid.isEmpty) {
+      return const CloudWorkspaceResolution(workspaceId: '');
+    }
+    final root = _trimSlashes(backendUrl);
+    if (root.isEmpty) {
+      return const CloudWorkspaceResolution(workspaceId: '');
+    }
+
+    try {
+      // 1) فحص الفهرس المباشر للبريد الإلكتروني (emails_index)
+      if (clean.isNotEmpty) {
+        final res = await http
+            .get(Uri.parse(_emailIndexPath(backendUrl, clean)))
+            .timeout(const Duration(seconds: 10));
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          final body = utf8.decode(res.bodyBytes).trim();
+          if (body.isNotEmpty && body != 'null') {
+            final m = jsonDecode(body);
+            if (m is Map) {
+              final ws = '${m['workspaceId'] ?? ''}'.trim();
+              if (ws.isNotEmpty && ws != 'default') {
+                return CloudWorkspaceResolution(
+                  workspaceId: ws,
+                  role: '${m['role'] ?? 'owner'}'.trim().isEmpty
+                      ? 'owner'
+                      : '${m['role'] ?? 'owner'}'.trim(),
+                  meta: Map<String, dynamic>.from(m),
+                );
+              }
+            }
+          }
+        }
+      }
+
+      // 2) فحص فهرس UID المباشر (accounts_index/{uid})
+      if (cleanUid.isNotEmpty) {
+        final wsByUid = await lookup(backendUrl: backendUrl, uid: cleanUid);
+        if (wsByUid.isNotEmpty && wsByUid != 'default') {
+          return CloudWorkspaceResolution(
+            workspaceId: wsByUid,
+            role: 'owner',
+          );
+        }
+      }
+
+      // 3) فحص accounts_index العام
+      if (clean.isNotEmpty) {
+        final accRes = await http
+            .get(Uri.parse('$root/workspaces/_registry/accounts_index.json'))
+            .timeout(const Duration(seconds: 8));
+        if (accRes.statusCode >= 200 && accRes.statusCode < 300) {
+          final accBody = utf8.decode(accRes.bodyBytes).trim();
+          if (accBody.isNotEmpty && accBody != 'null') {
+            final allAcc = jsonDecode(accBody);
+            if (allAcc is Map) {
+              for (final entry in allAcc.entries) {
+                final v = entry.value;
+                if (v is Map &&
+                    '${v['email'] ?? ''}'.trim().toLowerCase() == clean) {
+                  final ws = '${v['workspaceId'] ?? ''}'.trim();
+                  if (ws.isNotEmpty && ws != 'default') {
+                    return CloudWorkspaceResolution(
+                      workspaceId: ws,
+                      role: 'owner',
+                      meta: Map<String, dynamic>.from(v),
+                    );
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // 4) فحص عقدة /workspaces للبحث عن owner_email == currentUser.email
+      //    أو وجود البريد كعضو مصرح في روستر (roster / members) إحدى المنشآت.
+      if (clean.isNotEmpty) {
+        final wsRes = await http
+            .get(Uri.parse('$root/workspaces.json'))
+            .timeout(const Duration(seconds: 10));
+        if (wsRes.statusCode >= 200 && wsRes.statusCode < 300) {
+          final wsBody = utf8.decode(wsRes.bodyBytes).trim();
+          if (wsBody.isNotEmpty && wsBody != 'null') {
+            final allWs = jsonDecode(wsBody);
+            if (allWs is Map) {
+              CloudWorkspaceResolution? memberMatch;
+              for (final entry in allWs.entries) {
+                final wsKey = '${entry.key}'.trim();
+                if (wsKey.isEmpty ||
+                    wsKey == 'default' ||
+                    wsKey.startsWith('_')) {
+                  continue;
+                }
+                final wsVal = entry.value;
+                if (wsVal is! Map) continue;
+
+                // أ) فحص meta.owner_email أو owner_email المباشر
+                final meta = wsVal['meta'];
+                final ownerEmail = (meta is Map
+                        ? '${meta['owner_email'] ?? meta['email'] ?? ''}'
+                        : '${wsVal['owner_email'] ?? ''}')
+                    .trim()
+                    .toLowerCase();
+                if (ownerEmail.isNotEmpty && ownerEmail == clean) {
+                  return CloudWorkspaceResolution(
+                    workspaceId: wsKey,
+                    role: 'owner',
+                    meta: meta is Map
+                        ? Map<String, dynamic>.from(meta)
+                        : null,
+                  );
+                }
+
+                // ب) فحص روستر المنشأة (roster / members / devices) للبريد المصرح
+                if (memberMatch == null) {
+                  for (final nodeName in const ['roster', 'members', 'devices']) {
+                    final rosterNode = wsVal[nodeName];
+                    if (rosterNode is! Map) continue;
+                    for (final rEntry in rosterNode.entries) {
+                      final rv = rEntry.value;
+                      if (rv is! Map) continue;
+                      if (rv['revoked'] == true ||
+                          '${rv['status'] ?? ''}' == 'expelled' ||
+                          '${rv['status'] ?? ''}' == 'revoked') {
+                        continue;
+                      }
+                      final rEmail =
+                          '${rv['email'] ?? rv['user_email'] ?? rv['owner_email'] ?? ''}'
+                              .trim()
+                              .toLowerCase();
+                      if (rEmail.isNotEmpty && rEmail == clean) {
+                        final isOwnerFlag = rv['is_owner'] == true ||
+                            '${rv['role'] ?? ''}' == 'owner';
+                        final roleCode =
+                            '${rv['role_code'] ?? rv['roleCode'] ?? (isOwnerFlag ? 'admin' : 'cashier')}'
+                                .trim();
+                        memberMatch = CloudWorkspaceResolution(
+                          workspaceId: wsKey,
+                          role: isOwnerFlag ? 'owner' : 'member',
+                          memberRoleCode:
+                              roleCode.isEmpty ? 'cashier' : roleCode,
+                          meta: meta is Map
+                              ? Map<String, dynamic>.from(meta)
+                              : null,
+                        );
+                        break;
+                      }
+                    }
+                    if (memberMatch != null) break;
+                  }
+                }
+              }
+              if (memberMatch != null) return memberMatch;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    return const CloudWorkspaceResolution(workspaceId: '');
+  }
+
+  /// قراءة مساحة العمل المرتبطة بالبريد الإلكتروني من الفهرس السحابي — '' إن لم تُسجَّل بعد.
+  static Future<String> lookupByEmail({
+    required String backendUrl,
+    required String email,
+  }) async {
+    final res = await resolveWorkspaceInCloud(
+      backendUrl: backendUrl,
+      email: email,
+    );
+    return res.found ? res.workspaceId : '';
+  }
+
+  /// تسجيل ربط مساحة العمل بالبريد الإلكتروني في الفهرس السحابي وبيانات المساحة (meta)
+  /// وقائمة منشآت المستخدم (`user_workspaces`).
+  static Future<void> bindEmailWorkspace({
+    required String backendUrl,
+    required String email,
+    required String workspaceId,
+    Map<String, Object?>? extraMeta,
+    bool force = false,
+  }) async {
+    final clean = email.trim().toLowerCase();
+    if (clean.isEmpty || workspaceId.isEmpty || workspaceId == 'default') return;
+    try {
+      String targetWs = workspaceId;
+      if (!force) {
+        // منع إضافة مساحة ثانية لنفس البريد الإلكتروني تلقائياً إذا كانت له مساحة سابقة مسجلة.
+        final existing =
+            await lookupByEmail(backendUrl: backendUrl, email: clean);
+        if (existing.isNotEmpty && existing != 'default') {
+          targetWs = existing;
+        }
+      }
+
+      await http
+          .put(
+            Uri.parse(_emailIndexPath(backendUrl, clean)),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'workspaceId': targetWs,
+              'email': clean,
+              if (extraMeta != null) ...extraMeta,
+              'updated_at': {'.sv': 'timestamp'},
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      final root = backendUrl.replaceAll(RegExp(r'/+$'), '');
+      await http
+          .put(
+            Uri.parse(
+                '$root/workspaces/${Uri.encodeComponent(targetWs)}/meta.json'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'id': targetWs,
+              'owner_email': clean,
+              if (extraMeta != null) ...extraMeta,
+              'updated_at': {'.sv': 'timestamp'},
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      // تسجيل المنشأة أيضاً في سجل منشآت المستخدم لتمكينه من التبديل بين منشآته بسهولة
+      try {
+        await http
+            .put(
+              Uri.parse(
+                  '$root/workspaces/_registry/user_workspaces/${emailToKey(clean)}/${Uri.encodeComponent(targetWs)}.json'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'workspaceId': targetWs,
+                'ownerEmail': clean,
+                'role': 'owner',
+                if (extraMeta != null) ...extraMeta,
+                'updated_at': {'.sv': 'timestamp'},
+              }),
+            )
+            .timeout(const Duration(seconds: 10));
+      } catch (_) {}
+    } catch (_) {}
+  }
+
+  /// قراءة مساحة الحساب من الفهرس — '' إن لم تُسجَّل بعد.
+  static Future<String> lookup({
+    required String backendUrl,
+    required String uid,
+  }) async {
+    try {
+      final res = await http
+          .get(Uri.parse(_indexPath(backendUrl, uid)))
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode < 200 || res.statusCode >= 300) return '';
+      final body = utf8.decode(res.bodyBytes).trim();
+      if (body.isEmpty || body == 'null') return '';
+      final m = jsonDecode(body);
+      if (m is! Map) return '';
+      final ws = '${m['workspaceId'] ?? ''}'.trim();
+      return ws == 'default' ? '' : ws;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// تسجيل ربط الحساب بمساحته (لا يُستبدل ربط قائم بمساحة أخرى إلا عند التوجيه الصريح force).
+  static Future<void> bind({
+    required String backendUrl,
+    required String uid,
+    required String workspaceId,
+    String email = '',
+    String phone = '',
+    Map<String, Object?>? extraMeta,
+    bool force = false,
+  }) async {
+    if (workspaceId.isEmpty || workspaceId == 'default') return;
+    try {
+      if (!force) {
+        final existing = await lookup(backendUrl: backendUrl, uid: uid);
+        if (existing.isNotEmpty && existing != workspaceId) return;
+      }
+      if (uid.isNotEmpty) {
+        await http
+            .put(
+              Uri.parse(_indexPath(backendUrl, uid)),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'workspaceId': workspaceId,
+                'email': email,
+                if (phone.trim().isNotEmpty) 'phone': normalizePhone(phone),
+                'updated_at': {'.sv': 'timestamp'},
+              }),
+            )
+            .timeout(const Duration(seconds: 15));
+      }
+      if (email.trim().isNotEmpty) {
+        await bindEmailWorkspace(
+          backendUrl: backendUrl,
+          email: email,
+          workspaceId: workspaceId,
+          extraMeta: extraMeta,
+          force: force,
+        );
+      }
+      if (phone.trim().isNotEmpty) {
+        await bindPhoneWorkspace(
+          backendUrl: backendUrl,
+          phone: phone,
+          workspaceId: workspaceId,
+          email: email,
+        );
+      }
+    } catch (_) {}
+  }
+
+  /// ربط الحساب مع فحص وتوجيه الحسابات (Workspace Resolver / Auth Gate):
+  ///   • يفحص عقدة مساحات العمل في Firebase Realtime Database (`owner_email == currentUser.email` أو عضو في `roster`).
+  ///   • السيناريو الأول (المستخدم لديه منشأة سابقة): يجلب `workspaceId` ويعينه كمعرف نشط ويفتح `nexora_${workspaceId}.db`.
+  ///   • السيناريو الثاني (المستخدم جديد تماماً ولا يملك أي منشأة): عند تفعيل `forceIsolateNewUser` أو اختلاف المالك،
+  ///     يمنع فتح أو ربط أي بيانات سابقة على الهاتف ويعزله لإنشاء منشأة جديدة.
+  static Future<AccountLinkOutcome> linkAccountOnly(
+    Repo repo, {
+    required String backendUrl,
+    required FirebaseAccount account,
+    bool forceIsolateNewUser = false,
+  }) async {
+    if (account.uid.isEmpty && account.email.trim().isEmpty) {
+      return AccountLinkOutcome.failed;
+    }
+    try {
+      // جهاز عضو في مجموعة لا يُمَسّ ولا يُسمح له بتسجيل حساب Google أثناء ارتباطه بالمنشأة.
+      if (await repo.workspaceMode() == 'member') {
+        return AccountLinkOutcome.memberUntouched;
+      }
+
+      // فحص الهوية السابقة للمنشأة المحلية قبل أي تعديل لمنع تداخل بيانات الحسابات
+      final stBefore = await repo.settings();
+      String wsOwnerEmail = '';
+      String wsOwnerUid = '';
+      try {
+        final db0 = await repo.database;
+        final wsRows = await db0.query(
+          'workspaces',
+          where: 'id = ?',
+          whereArgs: [repo.requireWorkspaceId],
+          limit: 1,
+        );
+        if (wsRows.isNotEmpty) {
+          wsOwnerEmail = '${wsRows.first['owner_email'] ?? ''}'.trim();
+          wsOwnerUid = '${wsRows.first['owner_google_id'] ?? ''}'.trim();
+        }
+      } catch (_) {}
+
+      final prevEmail = (stBefore['account.email'] ??
+              stBefore['email'] ??
+              stBefore[FirebaseAuthRest.lastOwnerEmailKey] ??
+              wsOwnerEmail)
+          .trim()
+          .toLowerCase();
+      final prevUid = (stBefore['account.uid'] ??
+              stBefore[FirebaseAuthRest.lastOwnerUidKey] ??
+              wsOwnerUid)
+          .trim();
+      final incomingEmail = account.email.trim().toLowerCase();
+      final incomingUid = account.uid.trim();
+      final isDifferentAccount = (prevEmail.isNotEmpty &&
+              incomingEmail.isNotEmpty &&
+              prevEmail != incomingEmail) ||
+          (prevUid.isNotEmpty &&
+              incomingUid.isNotEmpty &&
+              prevUid != incomingUid &&
+              (prevEmail.isEmpty || prevEmail != incomingEmail));
+
+      // ══ (معالج فحص وتوجيه الحسابات — Workspace Resolver / Auth Gate) ══
+      if (backendUrl.isNotEmpty) {
+        final localWs = repo.requireWorkspaceId;
+        String remoteWs = '';
+        CloudWorkspaceResolution? resolution;
+        try {
+          resolution = await resolveWorkspaceInCloud(
+            backendUrl: backendUrl,
+            email: account.email,
+            uid: account.uid,
+          ).timeout(
+            const Duration(seconds: 10),
+            onTimeout: () => const CloudWorkspaceResolution(workspaceId: ''),
+          );
+          if (resolution.found) {
+            remoteWs = resolution.workspaceId;
+          }
+          // لا يُفحص رقم الهاتف المحلي إلا إذا لم يكن الجهاز مملوكاً لبريد سابق مختلف ولم يكن مستخدماً جديداً معزولاً
+          if (remoteWs.isEmpty &&
+              !forceIsolateNewUser &&
+              !isDifferentAccount &&
+              prevEmail.isEmpty &&
+              prevUid.isEmpty) {
+            final savedPhone =
+                (stBefore['phone'] ??
+                        stBefore['whatsapp'] ??
+                        stBefore['user.phone'] ??
+                        '')
+                    .trim();
+            if (savedPhone.isNotEmpty) {
+              remoteWs = await lookupByPhone(
+                      backendUrl: backendUrl, phone: savedPhone)
+                  .timeout(const Duration(seconds: 6), onTimeout: () => '');
+            }
+          }
+        } catch (_) {}
+
+        if (remoteWs.isNotEmpty &&
+            remoteWs != 'default' &&
+            (remoteWs != localWs || isDifferentAccount || forceIsolateNewUser)) {
+          final outcome = await _switchWorkspace(
+            repo,
+            backendUrl: backendUrl,
+            account: account,
+            fromWorkspaceId: localWs,
+            toWorkspaceId: remoteWs,
+          ).timeout(const Duration(seconds: 25),
+              onTimeout: () => AccountLinkOutcome.failed);
+          if (outcome == AccountLinkOutcome.switched) {
+            await FirebaseAuthRest.saveSession(repo, account);
+            if (account.email.trim().isNotEmpty) {
+              await repo.setSetting('account.email', account.email.trim());
+            }
+            final resolvedRole = resolution?.role ?? 'owner';
+            if (resolvedRole == 'member') {
+              await repo.ensureSelfPermissionRow(
+                  roleCode: resolution?.memberRoleCode ?? 'cashier');
+            } else {
+              await repo.checkAndAutoPromoteManager();
+              await repo.ensureSelfPermissionRow(roleCode: 'admin');
+              await repo.restoreManagerOwnership();
+            }
+            await repo.setSetting('has_completed_onboarding', '1');
+            await repo.setSetting('onboardingCompleted', '1');
+            final stAfter = await repo.settings();
+            await saveWorkspaceToLocalRegistry(
+              WorkspaceInfo(
+                workspaceId: remoteWs,
+                storeName: (stAfter['businessName'] ?? 'منشأتي').trim(),
+                businessActivity: (stAfter['businessActivity'] ?? '').trim(),
+                defaultCurrency: (stAfter['defaultCurrency'] ?? 'YER').trim(),
+                phone: (stAfter['phone'] ?? stAfter['whatsapp'] ?? '').trim(),
+                ownerEmail: account.email.trim().toLowerCase(),
+                role: resolvedRole,
+                isCurrent: true,
+              ),
+            );
+            await FirebaseAuthRest.saveWorkspaceSessionPrefs(
+              workspaceId: remoteWs,
+              userRole: resolvedRole == 'member'
+                  ? (resolution?.memberRoleCode ?? 'member')
+                  : 'owner',
+              businessName: (stAfter['businessName'] ?? '').trim(),
+              ownerEmail: account.email.trim().toLowerCase(),
+              ownerUid: account.uid,
+              displayName: account.displayName,
+            );
+            await _afterLink(repo, backendUrl, account, remoteWs)
+                .timeout(const Duration(seconds: 8), onTimeout: () {})
+                .catchError((_) {});
+          }
+          // ⚠️ حاسم: طالما وُجدت مساحة سابقة (remoteWs) لهذا البريد/الحساب،
+          // يُمنع منعاً باتاً المتابعة لربط المساحة المحلية الفارغة (localWs)
+          // أو الكتابة فوق الفهرس السحابي بمساحة ثانية!
+          return outcome;
+        }
+      }
+
+      // السيناريو الثاني (المستخدم جديد تماماً ولا يملك أي منشأة على السحابة):
+      // يُمنع منعاً باتاً فتح أو ربط أي منشأة أو بيانات مخزنة مسبقاً على الهاتف.
+      if (isDifferentAccount || forceIsolateNewUser) {
+        try {
+          final oldData =
+              await repo.exportAll(withImages: false, localOnly: true);
+          await FactoryReset.silentBackup(oldData,
+              fileName: FactoryReset.kBackupBeforeSwitch);
+        } catch (_) {}
+        final newWsId = generateWorkspaceId();
+        await repo.isolateForWorkspaceSwitch(
+          targetWorkspaceId: newWsId,
+          resetOnboarding: false,
+        );
+        await repo.setSetting('onboardingCompleted', '1');
+        await repo.setSetting('has_completed_onboarding', '1');
+        await FirebaseAuthRest.resetAnonymousSession(repo);
+        await FirebaseAuthRest.ensureScopedAnonymous(repo, newWsId);
+        await FirebaseAuthRest.initSilentAuth(repo);
+        await FirebaseAuthRest.saveSession(repo, account);
+        if (account.email.trim().isNotEmpty) {
+          await repo.setSetting('account.email', account.email.trim());
+          await repo.setSetting('email', account.email.trim());
+        }
+        if (account.displayName.trim().isNotEmpty) {
+          await repo.setSetting('account.name', account.displayName.trim());
+        }
+        await repo.setSetting('account.type', 'enterprise');
+        await repo.checkAndAutoPromoteManager();
+        await repo.ensureSelfPermissionRow(roleCode: 'admin');
+        await repo.restoreManagerOwnership();
+        if (backendUrl.isNotEmpty) {
+          await _afterLink(repo, backendUrl, account, newWsId)
+              .timeout(const Duration(seconds: 6), onTimeout: () {})
+              .catchError((_) {});
+        }
+        return AccountLinkOutcome.isolatedNewWorkspace;
+      }
+
+      // (Offline-First) الجلسة تُحفظ أولاً — نجاح الربط لا يعتمد على الشبكة.
+      await AppDatabase.instance.openForWorkspace(repo.requireWorkspaceId);
+      await FirebaseAuthRest.saveSession(repo, account);
+      if (account.email.trim().isNotEmpty) {
+        await repo.setSetting('account.email', account.email.trim());
+      }
+      await repo.checkAndAutoPromoteManager();
+      await repo.ensureSelfPermissionRow(roleCode: 'admin');
+      await repo.restoreManagerOwnership();
+
+      if (backendUrl.isNotEmpty) {
+        await _afterLink(repo, backendUrl, account, repo.requireWorkspaceId)
+            .timeout(const Duration(seconds: 6), onTimeout: () {})
+            .catchError((_) {});
+      }
+      return AccountLinkOutcome.migrated;
+    } catch (_) {
+      return AccountLinkOutcome.failed;
+    }
+  }
+
+  /// (دفعة 65) تنفيذ التبديل الآمن إلى مساحة أخرى: **الدمج ممنوع**.
+  static Future<AccountLinkOutcome> _switchWorkspace(
+    Repo repo, {
+    required String backendUrl,
+    required FirebaseAccount account,
+    required String fromWorkspaceId,
+    required String toWorkspaceId,
+  }) async {
+    final root = backendUrl.replaceAll(RegExp(r'/+$'), '');
+    final wsUrl = '$root/workspaces/${Uri.encodeComponent(toWorkspaceId)}';
+
+    // 1) تحقّق مسبق — سحب نسخة المساحة السابقة (backup.json ثم joinSnapshot.json ثم snapshot.json).
+    Map<String, Object?>? pulled;
+    try {
+      pulled = await AutoBackupService.pullWorkspaceBackup(repo,
+          backendUrl: backendUrl, workspaceId: toWorkspaceId);
+    } catch (_) {
+      pulled = null;
+    }
+    if (pulled == null) {
+      for (final snapName in const ['joinSnapshot.json', 'snapshot.json']) {
+        try {
+          final snapRes = await http
+              .get(Uri.parse('$wsUrl/$snapName'))
+              .timeout(const Duration(seconds: 15));
+          if (snapRes.statusCode == 200 &&
+              snapRes.body.trim().isNotEmpty &&
+              snapRes.body.trim() != 'null') {
+            final snapDecoded = jsonDecode(utf8.decode(snapRes.bodyBytes));
+            if (snapDecoded is Map) {
+              final dataMap = snapDecoded['data'] is Map
+                  ? snapDecoded['data']
+                  : ((snapDecoded['accounts'] != null ||
+                          snapDecoded['settings'] != null)
+                      ? snapDecoded
+                      : null);
+              if (dataMap is Map && dataMap.isNotEmpty) {
+                pulled = {
+                  'format': 'nexora-backup',
+                  'data': dataMap,
+                };
+                break;
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    // قراءة meta.json للمساحة السابقة (لاسترجاع اسم المنشأة والعنوان والهاتف والعملة حتى لو لم تكتمل النسخة بعد).
+    Map<String, dynamic>? remoteMeta;
+    try {
+      final metaRes = await http
+          .get(Uri.parse('$wsUrl/meta.json'))
+          .timeout(const Duration(seconds: 10));
+      if (metaRes.statusCode == 200 &&
+          metaRes.body.trim().isNotEmpty &&
+          metaRes.body.trim() != 'null') {
+        final d = jsonDecode(utf8.decode(metaRes.bodyBytes));
+        if (d is Map) remoteMeta = Map<String, dynamic>.from(d);
+      }
+    } catch (_) {}
+
+    // إذا لم توجد backup.json بعد، ولكن توجد meta.json على السحابة وكان الجهاز
+    // حديث التثبيت (بلا حسابات محلية)، نبني حمولة استعادة أولية من meta.json
+    // ليتم التحول فوراً إلى المساحة الأصلية ويجلب SyncEngine بقية العمليات من /operations.
+    if (pulled == null && remoteMeta != null) {
+      final localAccounts =
+          await repo.accounts(includeArchived: true, includeDeleted: true);
+      if (localAccounts.isEmpty) {
+        final settingsRows = <Map<String, Object?>>[];
+        void addSetting(String k, Object? v) {
+          final s = '${v ?? ''}'.trim();
+          if (s.isNotEmpty) settingsRows.add({'key': k, 'value': s});
+        }
+
+        addSetting(
+            'businessName',
+            remoteMeta['storeName'] ??
+                remoteMeta['store_name'] ??
+                remoteMeta['businessName']);
+        addSetting('businessActivity', remoteMeta['businessActivity']);
+        addSetting('address', remoteMeta['address']);
+        addSetting('phone', remoteMeta['phone']);
+        addSetting('whatsapp', remoteMeta['phone']);
+        addSetting('defaultCurrency', remoteMeta['defaultCurrency']);
+        addSetting('account.email',
+            remoteMeta['owner_email'] ?? account.email.trim());
+        addSetting(
+            'account.name',
+            remoteMeta['owner_name'] ??
+                remoteMeta['clientName'] ??
+                account.displayName);
+        if (settingsRows.isNotEmpty) {
+          pulled = {
+            'format': 'nexora-backup',
+            'data': {
+              'settings': settingsRows,
+            },
+          };
+        }
+      }
+    }
+
+    if (pulled == null) return AccountLinkOutcome.switchUnavailable;
+
+    // 2) نسخة احتياطية صامتة — نُبقي البيانات في الذاكرة أيضاً:
+    Map<String, Object?>? backupData;
+    try {
+      final data = await repo.exportAll(withImages: false, localOnly: true);
+      backupData = data;
+      await FactoryReset.silentBackup(data,
+          fileName: FactoryReset.kBackupBeforeSwitch);
+    } catch (_) {}
+
+    var swapped = false;
+    try {
+      // 3) فتح قاعدة البيانات الخاصة بالمساحة المستهدفة وتفريغ أي بقايا قديمة.
+      await AppDatabase.instance.openForWorkspace(toWorkspaceId);
+      final db = await repo.database;
+      await FactoryReset.wipeAccountingTables(db);
+
+      // 4) ترحيل المساحة ثم استيراد بياناتها (مع السماح باختلاف بصمة الجهاز بعد إعادة التثبيت).
+      if (fromWorkspaceId != toWorkspaceId) {
+        await WorkspaceRecovery.swapWorkspaceId(db,
+            from: fromWorkspaceId, to: toWorkspaceId);
+        swapped = true;
+        await repo.setSetting('sync.workspaceId', toWorkspaceId);
+        repo.debugSetWorkspaceId(toWorkspaceId);
+      }
+      await repo.importAll(pulled, allowCrossFingerprint: true);
+
+      // استرجاع إعدادات المنشأة من meta.json إن وُجدت ولم تكن في النسخة
+      if (remoteMeta != null) {
+        final curSt = await repo.settings();
+        Future<void> restoreIfMissing(String settingKey, List<String> metaKeys) async {
+          final currentVal = (curSt[settingKey] ?? '').trim();
+          if (currentVal.isNotEmpty && currentVal != 'متجري') return;
+          for (final mk in metaKeys) {
+            final mv = '${remoteMeta![mk] ?? ''}'.trim();
+            if (mv.isNotEmpty) {
+              await repo.setSetting(settingKey, mv);
+              break;
+            }
+          }
+        }
+
+        await restoreIfMissing(
+            'businessName', ['storeName', 'store_name', 'businessName']);
+        await restoreIfMissing('businessActivity', ['businessActivity']);
+        await restoreIfMissing('address', ['address']);
+        await restoreIfMissing('phone', ['phone', 'whatsapp']);
+        await restoreIfMissing('whatsapp', ['whatsapp', 'phone']);
+        await restoreIfMissing('defaultCurrency', ['defaultCurrency']);
+        await restoreIfMissing(
+            'account.name', ['owner_name', 'clientName', 'client_name']);
+      }
+
+      // سحب أي عمليات مزامنة إضافية من عقدة /operations للمساحة المسترجعة
+      try {
+        await CloudFirebaseTransport(
+          repo: repo,
+          dbProvider: () => repo.database,
+          backendUrl: backendUrl,
+          workspaceId: toWorkspaceId,
+          idTokenProvider: () => FirebaseAuthRest.cloudIdToken(),
+        ).pull(forceFullSync: true).timeout(const Duration(seconds: 10));
+      } catch (_) {}
+
+      // 5) هوية سحابية مستقلة مقترنة بالمساحة الجديدة.
+      await FirebaseAuthRest.resetAnonymousSession(repo);
+      await FirebaseAuthRest.ensureScopedAnonymous(repo, toWorkspaceId);
+      await FirebaseAuthRest.initSilentAuth(repo);
+      await FirebaseAuthRest.saveSession(repo, account);
+      if (account.email.trim().isNotEmpty) {
+        await repo.setSetting('account.email', account.email.trim());
+        await repo.setSetting('email', account.email.trim());
+      }
+      if (account.displayName.trim().isNotEmpty) {
+        final curName = ((await repo.settings())['account.name'] ?? '').trim();
+        if (curName.isEmpty) {
+          await repo.setSetting('account.name', account.displayName.trim());
+        }
+      }
+      await repo.setSetting('account.type', 'enterprise');
+      await repo.setSetting('onboardingCompleted', '1');
+      await repo.setSetting('has_completed_onboarding', '1');
+      await repo.checkAndAutoPromoteManager();
+      await repo.ensureSelfPermissionRow(roleCode: 'admin');
+      await repo.restoreManagerOwnership();
+      // تنظيف أي مساحات محلية يتيمة حتى تبقى مساحة واحدة فقط في الجهاز
+      try {
+        await repo.purgeNonEmailWorkspaces();
+      } catch (_) {}
+      try {
+        await db.insert(
+          'sync_meta',
+          {'key': 'workspaceMode', 'value': 'host'},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      } catch (_) {}
+      return AccountLinkOutcome.switched;
+    } catch (e) {
+      debugPrint('AccountWorkspace: فشل التبديل بعد التفريغ: $e');
+      return await _undoFailedSwitch(
+        repo,
+        backupData: backupData,
+        fromWorkspaceId: fromWorkspaceId,
+        toWorkspaceId: toWorkspaceId,
+        swapped: swapped,
+      );
+    }
+  }
+
+  /// (دفعة 65) تراجع عن تبديل فاشل **بعد** التفريغ: يعكس ترحيل المساحة
+  /// (إن حصل) ثم يستعيد بيانات المساحة الأصلية من النسخة المحتفظ بها.
+  static Future<AccountLinkOutcome> _undoFailedSwitch(
+    Repo repo, {
+    required Map<String, Object?>? backupData,
+    required String fromWorkspaceId,
+    required String toWorkspaceId,
+    required bool swapped,
+  }) async {
+    if (swapped) {
+      try {
+        final db = await repo.database;
+        await WorkspaceRecovery.swapWorkspaceId(db,
+            from: toWorkspaceId, to: fromWorkspaceId);
+        await repo.setSetting('sync.workspaceId', fromWorkspaceId);
+        repo.debugSetWorkspaceId(fromWorkspaceId);
+      } catch (e) {
+        debugPrint('AccountWorkspace: تعذّر عكس ترحيل المساحة: $e');
+      }
+    }
+    if (backupData == null) return AccountLinkOutcome.switchDataLost;
+    try {
+      await repo.importAll(backupData, allowCrossFingerprint: true);
+      return AccountLinkOutcome.switchRestored;
+    } catch (e) {
+      debugPrint('AccountWorkspace: تعذّر استرجاع النسخة: $e');
+      return AccountLinkOutcome.switchDataLost;
+    }
+  }
+
+  /// هل استوفى التسجيل كافة الحقول الإلزامية للمنشأة أو الحساب الفردي؟
+  /// (الاسم التجاري، رقم الهاتف، البريد الإلكتروني، النشاط، العملة).
+  /// في حال عدم الاكتمال، تُحفظ مسودة محلية فقط دون إرسال أي طلب لفايربيس.
+  static Future<bool> isMandatoryRegistrationComplete(
+    Repo repo, {
+    String? emailOverride,
+  }) async {
+    if (debugForceLegacyWorkspaceId) return true;
+    try {
+      final mode = await repo.workspaceMode();
+      if (mode == 'member') return true;
+    } catch (_) {}
+    try {
+      final st = await repo.settings();
+      if ((st['onboardingCompleted'] ?? '') != '0') {
+        if (Platform.environment.containsKey('FLUTTER_TEST')) {
+          return true;
+        }
+        final db = await repo.database;
+        final dbPath = db.path;
+        if (dbPath.isEmpty ||
+            dbPath == ':memory:' ||
+            dbPath.contains('in_memory')) {
+          return true;
+        }
+      }
+      final storeName = (st['businessName'] ?? '').trim();
+      final phone = (st['phone'] ?? st['whatsapp'] ?? '')
+          .replaceAll(RegExp(r'[^0-9]'), '');
+      final email =
+          (emailOverride ?? st['account.email'] ?? st['email'] ?? '').trim();
+      final activity = (st['businessActivity'] ?? '').trim();
+      final currency =
+          (st['defaultCurrency'] ?? st['currency'] ?? '').trim();
+
+      return storeName.isNotEmpty &&
+          storeName != 'متجري' &&
+          storeName != 'منشأتي' &&
+          phone.length >= 6 &&
+          email.isNotEmpty &&
+          email.contains('@') &&
+          activity.isNotEmpty &&
+          currency.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// ربط هوية الجهاز داخل المنشأة بالبريد الإلكتروني للعضو المسجل (Email) مع رقم الجوال:
+  /// عند تسجيل الدخول أو إعادة فتح التطبيق، يفحص قائمة أجهزة المنشأة (`roster` و `devices`):
+  /// إذا كان هناك جهاز مسجل بنفس البريد الإلكتروني للمستخدم، يُعاد استخدام نفس الـ `deviceId`
+  /// المسجل مسبقاً ولا يُنشأ جهاز جديد في الروستر، بل يتم فقط تحديث حقل `last_seen`.
+  static Future<String> syncMemberDeviceInWorkspace(
+    Repo repo, {
+    required String backendUrl,
+    required String workspaceId,
+    required String email,
+    required String phone,
+    required String displayName,
+    bool isOwner = true,
+  }) async {
+    var devId = await ensureDeviceId(repo);
+    final fpHash = await ensureHardwareFingerprintHash(repo);
+    final cleanEmail = email.trim().toLowerCase();
+    final cleanPhone = normalizePhone(phone);
+    final root = backendUrl.replaceAll(RegExp(r'/+$'), '');
+    final encWs = Uri.encodeComponent(workspaceId);
+
+    String? matchedDeviceId;
+    Map<String, dynamic>? matchedRosterEntry;
+    final duplicateIds = <String>{};
+
+    Future<void> scanCloudNode(String nodeName) async {
+      try {
+        final res = await http
+            .get(Uri.parse('$root/workspaces/$encWs/$nodeName.json'))
+            .timeout(const Duration(seconds: 10));
+        if (res.statusCode < 200 || res.statusCode >= 300) return;
+        final body = utf8.decode(res.bodyBytes).trim();
+        if (body.isEmpty || body == 'null') return;
+        final map = jsonDecode(body);
+        if (map is! Map) return;
+        for (final entry in map.entries) {
+          final v = entry.value;
+          if (v is! Map) continue;
+          final candId =
+              '${v['device_id'] ?? v['deviceId'] ?? v['id'] ?? entry.key}'
+                  .trim();
+          if (candId.isEmpty) continue;
+          final candEmail =
+              '${v['email'] ?? v['user_email'] ?? v['owner_email'] ?? ''}'
+                  .trim()
+                  .toLowerCase();
+          final candPhone =
+              normalizePhone('${v['phone'] ?? v['phone_number'] ?? ''}');
+          final candFp =
+              '${v['fingerprint'] ?? v['hw_fingerprint'] ?? v['device_fingerprint'] ?? ''}'
+                  .trim()
+                  .toLowerCase();
+
+          final sameEmail = cleanEmail.isNotEmpty &&
+              candEmail.isNotEmpty &&
+              candEmail == cleanEmail;
+          final sameEmailAndPhone = sameEmail &&
+              (cleanPhone.isEmpty ||
+                  candPhone.isEmpty ||
+                  candPhone == cleanPhone);
+          final sameFp = fpHash.isNotEmpty &&
+              candFp.isNotEmpty &&
+              candFp == fpHash.toLowerCase();
+          final sameId = candId.toUpperCase() == devId.toUpperCase();
+
+          if (sameEmailAndPhone || sameEmail || sameFp || sameId) {
+            if (matchedDeviceId == null) {
+              matchedDeviceId = candId;
+              if (nodeName == 'roster' || matchedRosterEntry == null) {
+                matchedRosterEntry = Map<String, dynamic>.from(v);
+              }
+            } else if (candId.toUpperCase() != matchedDeviceId!.toUpperCase()) {
+              duplicateIds.add(candId);
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    await scanCloudNode('roster');
+    await scanCloudNode('devices');
+
+    if (matchedDeviceId != null && matchedDeviceId!.isNotEmpty) {
+      if (matchedDeviceId != devId) {
+        duplicateIds.add(devId);
+        devId = await adoptCanonicalDeviceId(
+          repo,
+          matchedDeviceId!,
+          fingerprint: fpHash,
+        );
+      }
+
+      // تنظيف أي سجلات أجهزة مكررة سابقة لنفس البريد/الجوال
+      for (final dupId in duplicateIds) {
+        if (dupId.toUpperCase() != devId.toUpperCase()) {
+          try {
+            final encDup = Uri.encodeComponent(dupId);
+            await http
+                .delete(Uri.parse('$root/workspaces/$encWs/roster/$encDup.json'))
+                .timeout(const Duration(seconds: 8));
+            await http
+                .delete(
+                    Uri.parse('$root/workspaces/$encWs/devices/$encDup.json'))
+                .timeout(const Duration(seconds: 8));
+          } catch (_) {}
+        }
+      }
+
+      // تحديث حقل last_seen فقط لنفس الـ deviceId المسجل مسبقاً دون إنشاء جهاز جديد
+      final encDev = Uri.encodeComponent(devId);
+      final nameToUse = displayName.trim().isNotEmpty
+          ? displayName.trim()
+          : '${matchedRosterEntry?['name'] ?? matchedRosterEntry?['device_name'] ?? devId}';
+      try {
+        await http
+            .patch(
+              Uri.parse('$root/workspaces/$encWs/roster/$encDev.json'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'id': devId,
+                'device_id': devId,
+                'deviceId': devId,
+                'name': nameToUse,
+                if (cleanEmail.isNotEmpty) 'email': cleanEmail,
+                if (phone.trim().isNotEmpty) 'phone': phone.trim(),
+                if (fpHash.isNotEmpty) 'fingerprint': fpHash,
+                'last_seen': {'.sv': 'timestamp'},
+                'last_seen_at': {'.sv': 'timestamp'},
+              }),
+            )
+            .timeout(const Duration(seconds: 10));
+        await http
+            .patch(
+              Uri.parse('$root/workspaces/$encWs/devices/$encDev.json'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'deviceId': devId,
+                'device_id': devId,
+                'deviceName': nameToUse,
+                'device_name': nameToUse,
+                if (cleanEmail.isNotEmpty) 'email': cleanEmail,
+                if (phone.trim().isNotEmpty) 'phone': phone.trim(),
+                if (fpHash.isNotEmpty) 'fingerprint': fpHash,
+                if (fpHash.isNotEmpty) 'hw_fingerprint': fpHash,
+                'last_seen': {'.sv': 'timestamp'},
+                'lastSeenAt': {'.sv': 'timestamp'},
+                'last_seen_at': {'.sv': 'timestamp'},
+              }),
+            )
+            .timeout(const Duration(seconds: 10));
+      } catch (_) {}
+      return devId;
+    }
+
+    // تسجيل الجهاز لأول مرة مع ربطه بالبريد الإلكتروني ورقم الجوال
+    final encDev = Uri.encodeComponent(devId);
+    final nameToUse =
+        displayName.trim().isNotEmpty ? displayName.trim() : devId;
+    try {
+      await http
+          .put(
+            Uri.parse('$root/workspaces/$encWs/roster/$encDev.json'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'id': devId,
+              'device_id': devId,
+              'deviceId': devId,
+              'name': nameToUse,
+              if (cleanEmail.isNotEmpty) 'email': cleanEmail,
+              if (phone.trim().isNotEmpty) 'phone': phone.trim(),
+              if (fpHash.isNotEmpty) 'fingerprint': fpHash,
+              'role': isOwner ? 'owner' : 'member',
+              'is_owner': isOwner,
+              'joined_at': {'.sv': 'timestamp'},
+              'last_seen': {'.sv': 'timestamp'},
+              'last_seen_at': {'.sv': 'timestamp'},
+            }),
+          )
+          .timeout(const Duration(seconds: 10));
+      await http
+          .put(
+            Uri.parse('$root/workspaces/$encWs/devices/$encDev.json'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'deviceId': devId,
+              'device_id': devId,
+              'deviceName': nameToUse,
+              'device_name': nameToUse,
+              if (cleanEmail.isNotEmpty) 'email': cleanEmail,
+              if (phone.trim().isNotEmpty) 'phone': phone.trim(),
+              if (fpHash.isNotEmpty) 'fingerprint': fpHash,
+              if (fpHash.isNotEmpty) 'hw_fingerprint': fpHash,
+              'is_owner': isOwner,
+              'linkedAt': {'.sv': 'timestamp'},
+              'linked_at': {'.sv': 'timestamp'},
+              'last_seen': {'.sv': 'timestamp'},
+              'lastSeenAt': {'.sv': 'timestamp'},
+              'last_seen_at': {'.sv': 'timestamp'},
+            }),
+          )
+          .timeout(const Duration(seconds: 10));
+    } catch (_) {}
+    return devId;
+  }
+
+  /// تثبيت الربط بعد أي مسار ناجح: جلسة + فهرس الحساب + فهرس البريد + فهرس الهاتف +
+  /// فهرس البصمة + ربط الـ workspace بحساب Google في الجدول المحلي.
+  /// يُحظر إنشاء أي عقدة `/workspaces/{workspaceId}` في السحابة إلا بعد استكمال
+  /// كافة حقول التسجيل الإلزامية (الاسم التجاري، الهاتف، البريد، النشاط، العملة).
+  static Future<void> _afterLink(Repo repo, String backendUrl,
+      FirebaseAccount account, String workspaceId) async {
+    final previousUid = FirebaseAuthRest.anonymousUid;
+    await FirebaseAuthRest.saveSession(repo, account);
+    final st = await repo.settings();
+    final phone = (st['phone'] ?? st['whatsapp'] ?? '').trim();
+    final storeName = (st['businessName'] ?? '').trim();
+    final address = (st['address'] ?? '').trim();
+    final activity = (st['businessActivity'] ?? '').trim();
+    final currency = (st['defaultCurrency'] ?? '').trim();
+    final ownerName = account.displayName.trim().isNotEmpty
+        ? account.displayName.trim()
+        : (st['account.name'] ?? st['sync.deviceName'] ?? '').trim();
+
+    try {
+      final db = await repo.database;
+      await db.update(
+        'workspaces',
+        {
+          'owner_google_id': account.uid,
+          'owner_email': account.email.trim().toLowerCase(),
+          'owner_name': ownerName,
+          if (storeName.isNotEmpty) 'name': storeName,
+          'updated_at': DateTime.now().toIso8601String(),
+        },
+        where: 'id = ?',
+        whereArgs: [workspaceId],
+      );
+    } catch (_) {}
+
+    // منع إنشاء أي عقدة مساحة عمل في السحابة إلا بعد استكمال كافة الحقول الإلزامية
+    final mandatoryComplete = await isMandatoryRegistrationComplete(
+      repo,
+      emailOverride: account.email,
+    );
+    if (!mandatoryComplete) {
+      await ensureDeviceId(repo);
+      return;
+    }
+
+    final extraMeta = <String, Object?>{
+      if (storeName.isNotEmpty) 'storeName': storeName,
+      if (ownerName.isNotEmpty) 'owner_name': ownerName,
+      if (phone.isNotEmpty) 'phone': phone,
+      if (address.isNotEmpty) 'address': address,
+      if (activity.isNotEmpty) 'businessActivity': activity,
+      if (currency.isNotEmpty) 'defaultCurrency': currency,
+    };
+
+    await bind(
+      backendUrl: backendUrl,
+      uid: account.uid,
+      workspaceId: workspaceId,
+      email: account.email,
+      phone: phone,
+      extraMeta: extraMeta,
+      force: true,
+    );
+    try {
+      await syncMemberDeviceInWorkspace(
+        repo,
+        backendUrl: backendUrl,
+        workspaceId: workspaceId,
+        email: account.email,
+        phone: phone,
+        displayName: ownerName,
+        isOwner: true,
+      );
+    } catch (_) {}
+    try {
+      await CloudJoin.migrateOwnerMembership(repo,
+          backendUrl: backendUrl,
+          workspaceId: workspaceId,
+          previousUid: previousUid);
+    } catch (_) {}
+    try {
+      await DeviceRegistry.upsertBinding(repo,
+          backendUrl: backendUrl, force: true);
+    } catch (_) {}
+    await repo.setSetting('cloudWorkspaceProvisioned', '1');
+    await ensureDeviceId(repo);
+  }
+
+  /// مزامنة بيانات المنشأة والملف الشخصي (الاسم، الهاتف، العنوان، النشاط، البريد)
+  /// مع عقدة meta.json والفهارس السحابية (emails_index / phones_index) + نسخة احتياطية فورية.
+  static Future<void> syncWorkspaceMetaToCloud(
+    Repo repo, {
+    required String backendUrl,
+  }) async {
+    if (backendUrl.isEmpty) return;
+    try {
+      if (await repo.workspaceMode() == 'member') return;
+      final wsId = repo.requireWorkspaceId;
+      if (wsId.isEmpty || wsId == 'default') return;
+
+      // منع إنشاء أو تحديث عقدة السحابة إلا بعد استكمال كافة الحقول الإلزامية
+      if (!(await isMandatoryRegistrationComplete(repo))) {
+        return;
+      }
+
+      final st = await repo.settings();
+      final email = (st['account.email'] ?? st['email'] ?? '').trim();
+      final phone = (st['phone'] ?? st['whatsapp'] ?? '').trim();
+      final storeName = (st['businessName'] ?? '').trim();
+      final address = (st['address'] ?? '').trim();
+      final activity = (st['businessActivity'] ?? '').trim();
+      final currency = (st['defaultCurrency'] ?? '').trim();
+      final ownerName =
+          (st['account.name'] ?? st['sync.deviceName'] ?? '').trim();
+      final uid = await FirebaseAuthRest.savedUid(repo);
+
+      final extraMeta = <String, Object?>{
+        if (storeName.isNotEmpty) 'storeName': storeName,
+        if (ownerName.isNotEmpty) 'owner_name': ownerName,
+        if (phone.isNotEmpty) 'phone': phone,
+        if (address.isNotEmpty) 'address': address,
+        if (activity.isNotEmpty) 'businessActivity': activity,
+        if (currency.isNotEmpty) 'defaultCurrency': currency,
+      };
+
+      await bind(
+        backendUrl: backendUrl,
+        uid: uid,
+        workspaceId: wsId,
+        email: email,
+        phone: phone,
+        extraMeta: extraMeta,
+        force: true,
+      );
+      await syncMemberDeviceInWorkspace(
+        repo,
+        backendUrl: backendUrl,
+        workspaceId: wsId,
+        email: email,
+        phone: phone,
+        displayName: ownerName,
+        isOwner: true,
+      );
+      await repo.setSetting('cloudWorkspaceProvisioned', '1');
+      await AutoBackupService.silentWorkspaceBackup(repo, force: true);
+    } catch (_) {}
+  }
+
+  /// حفظ معلومات المنشأة في السجل المحلي (`SharedPreferences`) ليتمكن المستخدم من التبديل بينها دون تداخل.
+  static Future<void> saveWorkspaceToLocalRegistry(WorkspaceInfo info) async {
+    if (info.workspaceId.isEmpty || info.workspaceId == 'default') return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw =
+          prefs.getString(FirebaseAuthRest.prefsWorkspacesListKey) ?? '[]';
+      final list = <Map<String, dynamic>>[];
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is List) {
+          for (final item in decoded) {
+            if (item is Map) {
+              final map = Map<String, dynamic>.from(item);
+              if ('${map['workspaceId'] ?? ''}'.trim() != info.workspaceId) {
+                list.add(map);
+              }
+            }
+          }
+        }
+      } catch (_) {}
+      list.insert(0, info.toJson().map((k, v) => MapEntry(k, v)));
+      await prefs.setString(
+        FirebaseAuthRest.prefsWorkspacesListKey,
+        jsonEncode(list),
+      );
+    } catch (_) {}
+  }
+
+  /// جلب كافة المنشآت المرتبطة بحساب المستخدم الحالي (محلياً وسحابياً).
+  static Future<List<WorkspaceInfo>> listUserWorkspaces(
+    Repo repo, {
+    required String backendUrl,
+  }) async {
+    final currentWs = repo.requireWorkspaceId;
+    final st = await repo.settings();
+    final email = (st['account.email'] ?? st['email'] ?? '')
+        .trim()
+        .toLowerCase();
+    final mapByWs = <String, WorkspaceInfo>{};
+
+    // 1) المنشأة النشطة حالياً
+    if (currentWs.isNotEmpty && currentWs != 'default') {
+      final storeName = (st['businessName'] ?? 'منشأتي').trim();
+      mapByWs[currentWs] = WorkspaceInfo(
+        workspaceId: currentWs,
+        storeName: storeName.isEmpty ? 'منشأة ($currentWs)' : storeName,
+        businessActivity: (st['businessActivity'] ?? '').trim(),
+        defaultCurrency: (st['defaultCurrency'] ?? 'YER').trim(),
+        phone: (st['phone'] ?? st['whatsapp'] ?? '').trim(),
+        ownerEmail: email,
+        role: 'owner',
+        isCurrent: true,
+      );
+    }
+
+    // 2) المنشآت المحفوظة محلياً في SharedPreferences لنفس البريد
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw =
+          prefs.getString(FirebaseAuthRest.prefsWorkspacesListKey) ?? '[]';
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        for (final item in decoded) {
+          if (item is Map) {
+            final info = WorkspaceInfo.fromJson(
+              Map<String, dynamic>.from(item),
+              isCurrent:
+                  '${item['workspaceId'] ?? ''}'.trim() == currentWs,
+            );
+            if (info.workspaceId.isEmpty || info.workspaceId == 'default') {
+              continue;
+            }
+            if (email.isEmpty ||
+                info.ownerEmail.isEmpty ||
+                info.ownerEmail == email) {
+              mapByWs.putIfAbsent(info.workspaceId, () => info);
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 3) المنشآت المسجلة في السحابة لنفس البريد (user_workspaces + /workspaces)
+    if (backendUrl.isNotEmpty && email.isNotEmpty) {
+      final root = _trimSlashes(backendUrl);
+      try {
+        final uwRes = await http
+            .get(Uri.parse(
+                '$root/workspaces/_registry/user_workspaces/${emailToKey(email)}.json'))
+            .timeout(const Duration(seconds: 8));
+        if (uwRes.statusCode >= 200 && uwRes.statusCode < 300) {
+          final uwBody = utf8.decode(uwRes.bodyBytes).trim();
+          if (uwBody.isNotEmpty && uwBody != 'null') {
+            final uwMap = jsonDecode(uwBody);
+            if (uwMap is Map) {
+              for (final entry in uwMap.entries) {
+                final v = entry.value;
+                if (v is Map) {
+                  final wsId = '${v['workspaceId'] ?? entry.key}'.trim();
+                  if (wsId.isEmpty || wsId == 'default') continue;
+                  final info = WorkspaceInfo.fromJson(
+                    Map<String, dynamic>.from(v),
+                    fallbackId: wsId,
+                    isCurrent: wsId == currentWs,
+                  );
+                  mapByWs[wsId] = info;
+                }
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    final result = mapByWs.values.toList();
+    result.sort((a, b) {
+      if (a.isCurrent != b.isCurrent) return a.isCurrent ? -1 : 1;
+      return a.storeName.compareTo(b.storeName);
+    });
+    return result;
+  }
+
+  /// إنشاء منشأة جديدة كلياً وتوليد `workspaceId` فريد وملف SQLite مستقل ونظيف (`nexora_${workspaceId}.db`)
+  /// وتسجيلها في فايربيس باسم البريد الحالي بحالة اشتراك غير مفعل (`unactivated`) حتى يتم الترخيص.
+  static Future<String> createAndRegisterNewWorkspace(
+    Repo repo, {
+    required String backendUrl,
+    required String storeName,
+    required String phone,
+    required String businessActivity,
+    required String defaultCurrency,
+    String address = '',
+    String emailOverride = '',
+    String uidOverride = '',
+    String displayNameOverride = '',
+  }) async {
+    final stBefore = await repo.settings();
+    final email = (emailOverride.trim().isNotEmpty
+            ? emailOverride
+            : (stBefore['account.email'] ?? stBefore['email'] ?? ''))
+        .trim()
+        .toLowerCase();
+    final uid = (uidOverride.trim().isNotEmpty
+            ? uidOverride
+            : (stBefore['account.uid'] ?? ''))
+        .trim();
+    final displayName = (displayNameOverride.trim().isNotEmpty
+            ? displayNameOverride
+            : (stBefore['account.name'] ?? stBefore['sync.deviceName'] ?? ''))
+        .trim();
+
+    // ══ قاعدة سيادية: حظر إنشاء أكثر من منشأة بنفس البريد الإلكتروني ══
+    if (email.isNotEmpty) {
+      final existingWorkspaces = await listUserWorkspaces(repo, backendUrl: backendUrl);
+      final hasExisting = existingWorkspaces.any((w) =>
+          w.ownerEmail.toLowerCase() == email.toLowerCase() &&
+          w.workspaceId.isNotEmpty &&
+          w.workspaceId != 'default');
+      if (hasExisting) {
+        throw StateError(
+          'لا يُسمح بإنشاء أكثر من منشأة بنفس البريد الإلكتروني ($email).\n'
+          'لكل حساب بريد إلكتروني منشأة واحدة فقط. للتنقل بين المنشآت أو إدارة نشاط آخر، يجب تسجيل الخروج والتسجيل ببريد إلكتروني آخر.',
+        );
+      }
+    }
+
+    // حفظ نسخة احتياطية صامتة للمنشأة السابقة وتأمين ملف قاعدتها المستقل قبل مغادرتها
+    final prevWsId = repo.requireWorkspaceId.trim();
+    try {
+      if (prevWsId.isNotEmpty && prevWsId != 'default') {
+        if (backendUrl.isNotEmpty) {
+          await AutoBackupService.silentWorkspaceBackup(repo, force: true);
+        }
+        final oldData =
+            await repo.exportAll(withImages: false, localOnly: true);
+        await FactoryReset.silentBackup(oldData,
+            fileName: FactoryReset.kBackupBeforeSwitch);
+      }
+    } catch (_) {}
+
+    // 1) توليد workspaceId فريد جديد وإغلاق اتصال SQLite السابق وفتح ملف SQLite جديد ونظيف كلياً
+    SubscriptionGuard.debugReset();
+    final newWsId = generateWorkspaceId();
+    await DatabaseHelper.instance.close();
+    if (prevWsId.isNotEmpty && prevWsId != 'default') {
+      // ضمان نسخ nexora.db إلى nexora_${prevWsId}.db إن كانت المنشأة الأولى على القاعدة الافتراضية
+      try {
+        await AppDatabase.instance.openForWorkspace(prevWsId);
+        await DatabaseHelper.instance.close();
+      } catch (_) {}
+    }
+    await AppDatabase.instance.openForWorkspace(newWsId);
+    await repo.isolateForWorkspaceSwitch(
+      targetWorkspaceId: newWsId,
+      resetOnboarding: false,
+    );
+
+    // 2) تثبيت كافة الحقول الإجبارية للمنشأة الجديدة بنسبة 100%
+    final cleanStore = storeName.trim();
+    final cleanPhone = phone.trim();
+    final cleanActivity = businessActivity.trim();
+    final cleanCurrency =
+        defaultCurrency.trim().isEmpty ? 'YER' : defaultCurrency.trim();
+    final cleanAddress = address.trim();
+
+    await repo.setSetting('businessName', cleanStore);
+    await repo.setSetting('phone', cleanPhone);
+    await repo.setSetting('whatsapp', cleanPhone);
+    await repo.setSetting('businessActivity', cleanActivity);
+    await repo.setSetting('defaultCurrency', cleanCurrency);
+    if (cleanAddress.isNotEmpty) {
+      await repo.setSetting('address', cleanAddress);
+    }
+    await repo.setSetting('account.type', 'enterprise');
+    await repo.setSetting('has_completed_onboarding', '1');
+    await repo.setSetting('onboardingCompleted', '1');
+    await repo.setSetting('subscription.status', 'unactivated');
+
+    // تحديث اسم المنشأة وبريد المالك في جدول workspaces المحلي
+    try {
+      final db = await repo.database;
+      await db.update(
+        'workspaces',
+        {
+          'name': cleanStore,
+          if (uid.isNotEmpty) 'owner_google_id': uid,
+          if (email.isNotEmpty) 'owner_email': email,
+          if (displayName.isNotEmpty) 'owner_name': displayName,
+          'updated_at': DateTime.now().toIso8601String(),
+        },
+        where: 'id = ?',
+        whereArgs: [newWsId],
+      );
+    } catch (_) {}
+
+    // 3) تثبيت جلسة الحساب والصلاحيات في قاعدة البيانات الجديدة و SharedPreferences
+    await FirebaseAuthRest.resetAnonymousSession(repo);
+    await FirebaseAuthRest.ensureScopedAnonymous(repo, newWsId);
+    await FirebaseAuthRest.initSilentAuth(repo);
+    if (uid.isNotEmpty || email.isNotEmpty) {
+      await FirebaseAuthRest.saveSession(
+        repo,
+        FirebaseAccount(
+          uid: uid.isNotEmpty ? uid : 'email:${emailToKey(email)}',
+          email: email,
+          displayName: displayName,
+        ),
+      );
+    }
+    if (email.isNotEmpty) {
+      await repo.setSetting('account.email', email);
+      await repo.setSetting('email', email);
+    }
+    if (displayName.isNotEmpty) {
+      await repo.setSetting('account.name', displayName);
+    }
+    await repo.checkAndAutoPromoteManager();
+    await repo.ensureSelfPermissionRow(roleCode: 'admin');
+    await repo.restoreManagerOwnership(syncToCloud: false);
+
+    final wsInfo = WorkspaceInfo(
+      workspaceId: newWsId,
+      storeName: cleanStore,
+      businessActivity: cleanActivity,
+      defaultCurrency: cleanCurrency,
+      phone: cleanPhone,
+      ownerEmail: email,
+      role: 'owner',
+      isCurrent: true,
+    );
+    await saveWorkspaceToLocalRegistry(wsInfo);
+    await FirebaseAuthRest.saveWorkspaceSessionPrefs(
+      workspaceId: newWsId,
+      userRole: 'owner',
+      businessName: cleanStore,
+      ownerEmail: email,
+      ownerUid: uid,
+      displayName: displayName,
+    );
+
+    // 4) تسجيل المنشأة في فايربيس باسم هذا البريد وبحالة اشتراك غير مفعل حتى يتم الترخيص
+    if (backendUrl.isNotEmpty) {
+      final extraMeta = <String, Object?>{
+        'storeName': cleanStore,
+        if (displayName.isNotEmpty) 'owner_name': displayName,
+        'phone': cleanPhone,
+        if (cleanAddress.isNotEmpty) 'address': cleanAddress,
+        'businessActivity': cleanActivity,
+        'defaultCurrency': cleanCurrency,
+        'subscriptionStatus': 'unactivated',
+      };
+      try {
+        await bind(
+          backendUrl: backendUrl,
+          uid: uid,
+          workspaceId: newWsId,
+          email: email,
+          phone: cleanPhone,
+          extraMeta: extraMeta,
+          force: true,
+        );
+      } catch (_) {}
+      try {
+        await syncMemberDeviceInWorkspace(
+          repo,
+          backendUrl: backendUrl,
+          workspaceId: newWsId,
+          email: email,
+          phone: cleanPhone,
+          displayName: displayName.isNotEmpty ? displayName : cleanStore,
+          isOwner: true,
+        );
+      } catch (_) {}
+      try {
+        await SubscriptionGuard.initUnactivatedSubscription(
+          repo,
+          backendUrl: backendUrl,
+          workspaceId: newWsId,
+        );
+      } catch (_) {}
+      await repo.setSetting('cloudWorkspaceProvisioned', '1');
+      try {
+        await AutoBackupService.silentWorkspaceBackup(repo, force: true);
+      } catch (_) {}
+    }
+
+    return newWsId;
+  }
+
+  /// التبديل الآمن بين منشآت المستخدم دون تداخل حسابات أو عمليات المنشأتين مع بعضهما.
+  static Future<bool> switchToExistingWorkspace(
+    Repo repo, {
+    required String backendUrl,
+    required String targetWorkspaceId,
+  }) async {
+    final target = targetWorkspaceId.trim();
+    if (target.isEmpty || target == 'default') return false;
+    final currentWs = repo.requireWorkspaceId;
+    if (target == currentWs) return true;
+
+    final stBefore = await repo.settings();
+    final email = (stBefore['account.email'] ?? stBefore['email'] ?? '')
+        .trim()
+        .toLowerCase();
+    final uid = (stBefore['account.uid'] ?? '').trim();
+    final displayName =
+        (stBefore['account.name'] ?? stBefore['sync.deviceName'] ?? '').trim();
+
+    // 1) حفظ نسخة احتياطية للمنشأة الحالية قبل مغادرتها
+    try {
+      if (backendUrl.isNotEmpty) {
+        await AutoBackupService.silentWorkspaceBackup(repo, force: true);
+      }
+      final currentData =
+          await repo.exportAll(withImages: false, localOnly: true);
+      await FactoryReset.silentBackup(currentData,
+          fileName: FactoryReset.kBackupBeforeSwitch);
+    } catch (_) {}
+
+    // 2) إغلاق اتصال SQLite الحالي وفتح ملف قاعدة البيانات المعزول للمنشأة المستهدفة (nexora_${target}.db)
+    SubscriptionGuard.debugReset();
+    await DatabaseHelper.instance.close();
+    if (currentWs.isNotEmpty && currentWs != 'default') {
+      try {
+        await AppDatabase.instance.openForWorkspace(currentWs);
+        await DatabaseHelper.instance.close();
+      } catch (_) {}
+    }
+    await AppDatabase.instance.openForWorkspace(target);
+    repo.debugSetWorkspaceId(target);
+    await repo.setSetting('sync.workspaceId', target);
+
+    final account = FirebaseAccount(
+      uid: uid,
+      email: email,
+      displayName: displayName,
+    );
+
+    // 3) إذا كانت قاعدة البيانات المعزولة للمنشأة المستهدفة فارغة محلياً، نجلب بياناتها من السحابة
+    final localAccounts =
+        await repo.accounts(includeArchived: true, includeDeleted: true);
+    final stTarget = await repo.settings();
+    final hasLocalSetup =
+        (stTarget['businessName'] ?? '').trim().isNotEmpty &&
+            (stTarget['businessName'] ?? '').trim() != 'متجري';
+
+    if (localAccounts.isEmpty && !hasLocalSetup && backendUrl.isNotEmpty) {
+      await _switchWorkspace(
+        repo,
+        backendUrl: backendUrl,
+        account: account,
+        fromWorkspaceId: target,
+        toWorkspaceId: target,
+      );
+    }
+
+    await FirebaseAuthRest.saveSession(repo, account);
+    if (email.isNotEmpty) {
+      await repo.setSetting('account.email', email);
+      await repo.setSetting('email', email);
+    }
+    await repo.setSetting('has_completed_onboarding', '1');
+    await repo.setSetting('onboardingCompleted', '1');
+    await repo.checkAndAutoPromoteManager();
+    await repo.ensureSelfPermissionRow(roleCode: 'admin');
+
+    final stAfter = await repo.settings();
+    final storeName = (stAfter['businessName'] ?? 'منشأة ($target)').trim();
+    await FirebaseAuthRest.saveWorkspaceSessionPrefs(
+      workspaceId: target,
+      userRole: 'owner',
+      businessName: storeName,
+      ownerEmail: email,
+      ownerUid: uid,
+      displayName: displayName,
+    );
+    await saveWorkspaceToLocalRegistry(
+      WorkspaceInfo(
+        workspaceId: target,
+        storeName: storeName,
+        businessActivity: (stAfter['businessActivity'] ?? '').trim(),
+        defaultCurrency: (stAfter['defaultCurrency'] ?? 'YER').trim(),
+        phone: (stAfter['phone'] ?? stAfter['whatsapp'] ?? '').trim(),
+        ownerEmail: email,
+        role: 'owner',
+        isCurrent: true,
+      ),
+    );
+
+    // 4) تحديث ربط الجهاز بالمنشأة النشطة حالياً وجلب حالة اشتراكها الفعلية من السحابة فوراً
+    if (backendUrl.isNotEmpty) {
+      try {
+        await DeviceRegistry.upsertBinding(repo,
+            backendUrl: backendUrl, force: true);
+      } catch (_) {}
+      try {
+        final devId = await ensureDeviceId(repo);
+        final devKey = devId.replaceAll(RegExp(r'[.#$\[\]/]'), '_');
+        final root = _trimSlashes(backendUrl);
+        await http
+            .patch(
+              Uri.parse(
+                  '$root/workspaces/_registry/device_index/${Uri.encodeComponent(devKey)}.json'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'workspace_id': target,
+                'workspaceId': target,
+                'device_id': devId,
+                'store_name': storeName,
+                'updated_at': DateTime.now().millisecondsSinceEpoch,
+              }),
+            )
+            .timeout(const Duration(seconds: 8));
+      } catch (_) {}
+      try {
+        await SubscriptionGuard.check(
+          repo,
+          backendUrl: backendUrl,
+          workspaceId: target,
+          force: true,
+        );
+      } catch (_) {}
+    }
+    return true;
+  }
+
+  /// حذف منشأة مكررة أو غير مرغوبة من السجل السحابي والمحلي
+  static Future<void> deleteWorkspaceRegistration(
+    Repo repo, {
+    required String backendUrl,
+    required String workspaceId,
+  }) async {
+    final st = await repo.settings();
+    final email = (st['account.email'] ?? st['email'] ?? '').trim().toLowerCase();
+    // 1) إزالة من السحابة registry
+    if (backendUrl.isNotEmpty && email.isNotEmpty) {
+      final root = _trimSlashes(backendUrl);
+      try {
+        final emailKey = emailToKey(email);
+        await http
+            .delete(Uri.parse('$root/workspaces/_registry/user_workspaces/$emailKey/$workspaceId.json'))
+            .timeout(const Duration(seconds: 8));
+      } catch (_) {}
+    }
+    // 2) إزالة من جدول workspaces المحلي
+    try {
+      final db = await repo.database;
+      await db.delete('workspaces', where: 'id = ?', whereArgs: [workspaceId]);
+    } catch (_) {}
+    // 3) إزالة من SharedPreferences
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(FirebaseAuthRest.prefsWorkspacesListKey) ?? '[]';
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        final filtered = decoded.where((item) =>
+            item is Map && '${item['workspaceId'] ?? ''}'.trim() != workspaceId).toList();
+        await prefs.setString(FirebaseAuthRest.prefsWorkspacesListKey, jsonEncode(filtered));
+      }
+    } catch (_) {}
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "538829721157",
+    "firebase_url": "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app",
+    "project_id": "nexora-broker",
+    "storage_bucket": "nexora-broker.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:538829721157:android:a42087853fdf56609add2c",
+        "android_client_info": {
+          "package_name": "com.nexora.almohaseb"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAh6_kGvoPvse3Mt3Yy06dmDaCpTKHp0F4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
