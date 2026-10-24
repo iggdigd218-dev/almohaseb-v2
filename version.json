@@ -1,0 +1,17 @@
+{
+  "version": "3.97.3+270",
+  "minSupported": "3.13.0",
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/latest",
+  "downloads": {
+    "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-universal.apk",
+    "androidVariants": {
+      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-arm64.apk",
+      "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-armv7.apk",
+      "x64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-x64.apk"
+    },
+    "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe"
+  },
+  "publishedAt": "2026-10-17T02:38:00Z",
+  "notes": "• اعتماد وإغلاق فوري لمنتقي الأيقونات بمجرد النقر وتصغير منتقي الألوان بشكل مدمج.\n• إعادة توزيع عناصر بطاقة الصنف في نقطة البيع لمنع تداخل زر (+) مع الاسم.\n• طي قائمة الأقسام افتراضياً في المبيعات والوضع المدمج التلقائي عند التمرير.\n• إضافة زر فاتورة جديدة / تعليق الفاتورة بضغطة واحدة بجانب الفواتير المعلقة.\n• تفعيل مزامنة شعار المنشأة والضغط الفائق لمصغرات صور الأصناف عبر السحابة.\n• دعم القسم العام والأصناف بدون فئة أو قسم بمرونة عالية."
+}

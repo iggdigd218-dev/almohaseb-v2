@@ -1,0 +1,3614 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:printing/printing.dart';
+
+import '../core/accounting.dart';
+import '../core/desktop.dart';
+import '../core/format.dart';
+import '../core/models.dart';
+import '../core/thermal_invoice_doc.dart';
+import '../core/shell_nav.dart';
+import '../core/sfx.dart';
+import '../core/theme.dart';
+import '../data/pos_cart.dart';
+import '../data/providers.dart';
+import '../data/sync/subscription_guard.dart' show Feature;
+import 'barcode_scanner.dart';
+import 'pos_gate.dart';
+import 'pos_items_grid.dart';
+import 'transactions_screen.dart' show showTxDetails;
+import 'trial_ui.dart' show featureNeedsStamp;
+import 'tx_share.dart';
+import 'widgets.dart';
+import '../core/data_change.dart';
+
+enum _PosPayment {
+  cash('نقداً 💵', 'cash'),
+  credit('آجل 📑', 'credit'),
+  partial('جزئي ⚖️', 'partial');
+
+  final String label;
+  final String code;
+  const _PosPayment(this.label, this.code);
+
+  static _PosPayment fromCode(String c) => _PosPayment.values
+      .firstWhere((p) => p.code == c, orElse: () => _PosPayment.cash);
+}
+
+/// شاشة نقطة البيع ونظام المبيعات المتكامل
+class PosScreen extends ConsumerStatefulWidget {
+  const PosScreen({super.key});
+
+  /// جسر الزر المركزي (Omni): عندما تكون شاشة POS ظاهرة يفتح زر
+  /// الإجراء الموحد درج الدفع مباشرة عبر هذا المرجع.
+  static void Function()? openCheckoutBridge;
+
+  @override
+  ConsumerState<PosScreen> createState() => _PosScreenState();
+}
+
+class _PosScreenState extends ConsumerState<PosScreen>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tabController;
+  int? _selectedCategoryId;
+  // (2026-09-22) القسم المختار في الشريط اللمسي (null = الكل، -1 = عام).
+  int? _selectedSectionId;
+
+  /// هل لوحة الأقسام المنسدلة مفتوحة؟ (مطوية افتراضياً لتوفير مساحة لشبكة الأصناف).
+  bool _atSectionsGate = false;
+
+  /// الوضع المدمج التدريجي للترويسة العلوية عند تمرير شبكة الأصناف لأسفل.
+  bool _isScrolledCompact = false;
+
+  /// معرّف تبويب المفضلة في شريط الفئات.
+  static const int kFavoritesCategoryId = -999;
+
+  /// قائمة معرفات الأصناف المثبتة يدوياً في المفضلة.
+  final Set<int> _pinnedItemIds = <int>{};
+
+  void _loadPinnedFavorites() {
+    final st = ref.read(settingsProvider).valueOrNull ?? const {};
+    final raw = st['pos_pinned_items'] ?? '';
+    if (raw.isNotEmpty) {
+      _pinnedItemIds.clear();
+      for (final part in raw.split(',')) {
+        final id = int.tryParse(part.trim());
+        if (id != null) _pinnedItemIds.add(id);
+      }
+    }
+  }
+
+  Future<void> _togglePinItem(Item it) async {
+    final id = it.id;
+    if (id == null) return;
+    setState(() {
+      if (_pinnedItemIds.contains(id)) {
+        _pinnedItemIds.remove(id);
+        showSnack(context, 'تمت إزالة «${it.name}» من المفضلة');
+      } else {
+        _pinnedItemIds.add(id);
+        showSnack(context, 'تم تثبيت «${it.name}» في المفضلة ⭐');
+      }
+    });
+    final repo = ref.read(repoProvider);
+    await repo.setSetting('pos_pinned_items', _pinnedItemIds.join(','));
+  }
+
+  String _searchQuery = '';
+
+  /// (2026-09-24) ترتيب شبكة الأصناف: 0 الاسم · 1 السعر · 2 الكمية.
+  int _posSort = 0;
+  final TextEditingController _searchCtrl = TextEditingController();
+  bool _saving = false;
+
+  /// «السماح بالبيع عند نفاد الرصيد الدفتري» — إعداد المخزون.
+  bool get _allowNegative =>
+      (ref.read(settingsProvider).valueOrNull ?? const {})['allowNegativeStock'] ==
+      '1';
+
+  // السلة الحية تعيش في Riverpod (pos_cart.dart) — التنقل لا يفقدها.
+  PosDraft get _draft => ref.read(posDraftProvider);
+  PosDraftNotifier get _cartCtl => ref.read(posDraftProvider.notifier);
+
+  // جسور قراءة من المسودة — تبقي بقية الشيفرة كما هي.
+  Map<int, CartEntry> get _cart => _draft.cart;
+  int? get _selectedCustomerId => _draft.customerId;
+  _PosPayment get _payment => _PosPayment.fromCode(_draft.payment);
+  double get _subtotal => _draft.subtotal;
+  double get _discount => _draft.discountValue;
+  double get _netTotal => _draft.netTotal;
+  int get _itemCount => _draft.itemCount;
+  // حقول نصية تُستعاد من المسودة عند إعادة بناء الشاشة (تُهيأ في
+  // initState — التهيئة الكسولة تنفجر لو أول وصول كان في dispose).
+  late final TextEditingController _paidCtrl;
+  late final TextEditingController _discountCtrl;
+  late final TextEditingController _notesCtrl;
+
+  /// (3.70) صلاحية الخصم المحلية — تُحجب عن الكاشير فوراً (بلا شبكة).
+  bool _canDiscount = true;
+  /// اعتماد المشرف لتخطي حجب الخصم في الفاتورة الحالية فقط (Supervisor Override)
+  bool _supervisorOverride = false;
+
+  bool get _hasDiscountPermission {
+    if (_supervisorOverride) return true;
+    final user = ref.read(currentUserProvider).valueOrNull;
+    if (user != null) {
+      return user.role == UserRole.admin ||
+          user.role == UserRole.agent ||
+          user.can('can_discount');
+    }
+    return _canDiscount;
+  }
+
+  Future<void> _promptSupervisorOverride(StateSetter setSheetState) async {
+    final pinCtrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('الموافقة على الخصم (مشرف/مدير)'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('أدخل رمز PIN للمشرف أو المدير لتخطي حجب الخصم لهذه الفاتورة:'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: pinCtrl,
+              obscureText: true,
+              keyboardType: TextInputType.number,
+              autofocus: true,
+              maxLength: 6,
+              decoration: const InputDecoration(
+                labelText: 'رمز PIN',
+                counterText: '',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              final repo = ref.read(repoProvider);
+              final st = await repo.settings();
+              final masterPin = st['pos.master_pin'] ?? '1234';
+              if (pinCtrl.text.trim() == masterPin) {
+                if (ctx.mounted) Navigator.pop(ctx, true);
+              } else {
+                if (ctx.mounted) showSnack(ctx, 'رمز PIN غير صحيح', error: true);
+              }
+            },
+            child: const Text('تأكيد'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && mounted) {
+      setState(() {
+        _supervisorOverride = true;
+      });
+      setSheetState(() {});
+      showSnack(context, 'تمت الموافقة على الخصم بواسطة المشرف ✅');
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    final d = ref.read(posDraftProvider);
+    _paidCtrl = TextEditingController(text: d.paidText);
+    _discountCtrl = TextEditingController(text: d.discountText);
+    _notesCtrl = TextEditingController(text: d.notesText);
+    _tabController = TabController(length: 2, vsync: this);
+    _tabController.addListener(() {
+      if (mounted) setState(() {});
+    });
+    _loadPinnedFavorites();
+    // (2026-09-24) بيع من الزر العائم ⇒ حدّث الأرصدة والمسودة فوراً.
+    dataChangeTick.addListener(_onExternalDataChange);
+    // (3.70 — المرحلة 4) RBAC محلي Offline-Ready: حقل الخصم يظهر فقط
+    // لصاحب صلاحية can_discount.
+    ref.read(repoProvider).effectivePermissions().then((p) {
+      if (mounted && p.canDiscount != _canDiscount) {
+        setState(() => _canDiscount = p.canDiscount);
+      }
+    });
+    // ربط الزر المركزي الموحد: على شاشة POS يفتح درج الدفع مباشرة.
+    PosScreen.openCheckoutBridge = () {
+      if (!mounted) return;
+      if (_draft.cart.isEmpty) {
+        Sfx.reject();
+        showSnack(context, 'السلة فارغة — أضف أصنافاً أولاً', error: true);
+        return;
+      }
+      _openCheckoutSheet();
+    };
+    // مستمع عالمي لأحداث لوحة المفاتيح (سطح المكتب وقارئات الباركود):
+    HardwareKeyboard.instance.addHandler(_onGlobalKeyEvent);
+  }
+
+  /// (2026-09-24) كتابة خارجية (الزر العائم): أعد قراءة الأصناف فتظهر
+  /// الأرصدة الحديثة، وحدّث المسودة المعروضة.
+  void _onExternalDataChange() {
+    if (!mounted) return;
+    bump(ref);
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onGlobalKeyEvent);
+    dataChangeTick.removeListener(_onExternalDataChange);
+    if (PosScreen.openCheckoutBridge != null) {
+      PosScreen.openCheckoutBridge = null;
+    }
+    _tabController.dispose();
+    _searchCtrl.dispose();
+    _paidCtrl.dispose();
+    _discountCtrl.dispose();
+    _notesCtrl.dispose();
+    _shortcutFocus.dispose();
+    _searchFocus.dispose();
+    super.dispose();
+  }
+
+  /// يضيف الصنف إلى السلة بكمية (الافتراضي 1).
+  void _addItem(Item item, {double quantity = 1}) {
+    final allowNeg = _allowNegative;
+    if (!allowNeg && item.quantity <= 0) {
+      Sfx.reject();
+      showSnack(context, 'الصنف «${item.name}» نفد من المخزون', error: true);
+      return;
+    }
+    final ok = _cartCtl.addItem(item, allowNegative: allowNeg, quantity: quantity);
+    if (!ok) {
+      Sfx.reject();
+      showSnack(
+        context,
+        'الكمية المتاحة من «${item.name}»: ${item.quantity.toStringAsFixed(0)} ${item.unit} فقط',
+        error: true,
+      );
+      return;
+    }
+    if (allowNeg && item.quantity - (_draft.cart[item.id]?.quantity ?? 0) < 0) {
+      showSnack(context,
+          '⚠️ «${item.name}»: البيع تجاوز الرصيد الدفتري (رصيد سالب)',
+          error: true, silent: true);
+    }
+    Sfx.click();
+  }
+
+  /// إدخال كمية مباشر: نقرة على رقم الكمية تفتح لوحة إدخال سريعة بدل
+  /// تكرار «+» للأعداد الكبيرة.
+  Future<void> _editQuantity(CartEntry entry) async {
+    final qty = await showQuickAmountPad(
+      context,
+      title: 'كمية «${entry.item.name}»',
+      initial: entry.quantity,
+      hint: 'المتاح: ${Fmt.money(entry.item.quantity)} ${entry.item.unit}',
+    );
+    if (qty == null) return;
+    final ok = _cartCtl.setQuantity(entry.item.id!, qty,
+        allowNegative: _allowNegative);
+    if (!ok) {
+      Sfx.reject();
+      if (mounted) {
+        showSnack(
+          context,
+          'الكمية المتاحة: ${entry.item.quantity.toStringAsFixed(0)} ${entry.item.unit} فقط',
+          error: true,
+        );
+      }
+    }
+  }
+
+  /// تعديل سعر بيع الوحدة لصنف داخل الفاتورة الحالية.
+  Future<void> _editUnitPrice(CartEntry entry) async {
+    final price = await showQuickAmountPad(
+      context,
+      title: 'سعر بيع «${entry.item.name}»',
+      initial: entry.unitPrice,
+      hint: 'السعر الأصلي: ${Fmt.money(entry.item.sellPrice)}',
+    );
+    if (price == null || price <= 0) return;
+    _cartCtl.setUnitPrice(entry.item.id!, price);
+    if (mounted) setState(() {});
+  }
+
+  void _clearCart() {
+    _cartCtl.clear();
+    _paidCtrl.clear();
+    _discountCtrl.clear();
+    _notesCtrl.clear();
+    _supervisorOverride = false;
+    setState(() {});
+  }
+
+  // ---------------- اختصارات لوحة مفاتيح سطح المكتب العالمية ----------------
+  // F1 دفع نقدي فوري • F2 آجل • F3 تركيز بحث العميل/الأصناف •
+  // F9 تعليق وفاتورة جديدة • F12 تعليق الفاتورة • Esc مسح البحث / إفراغ السلة
+  // • الكتابة المباشرة توجّه تلقائياً لحقل البحث والباركود/PLU دون نقر الفأرة
+  // • Enter يضيف أول صنف مطابق أو يفتح إتمام البيع السريع.
+  final FocusNode _shortcutFocus = FocusNode();
+  final FocusNode _searchFocus = FocusNode();
+
+  bool _onGlobalKeyEvent(KeyEvent event) {
+    if (!mounted) return false;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
+
+    // لا نتدخل إذا كانت هناك نافذة حوارية أو شريحة منبثقة مفتوحة فوق شاشة المبيعات.
+    final route = ModalRoute.of(context);
+    if (route != null && !route.isCurrent) return false;
+
+    // لا نتدخل إذا كان المستخدم في تبويب سجل المبيعات على الجوال/التابلت.
+    if (!isDesktopLayout(context) && _tabController.index != 0) return false;
+
+    // إذا كان التركيز داخل حقل نصي آخر غير حقل البحث (مثل ملاحظات أو خصم)، نتركه يعمل طبيعياً.
+    final primaryFocus = FocusManager.instance.primaryFocus;
+    final isOtherEditableFocused = primaryFocus != null &&
+        primaryFocus != _searchFocus &&
+        primaryFocus.context != null &&
+        primaryFocus.context!.findAncestorWidgetOfExactType<EditableText>() !=
+            null;
+    if (isOtherEditableFocused) return false;
+
+    final key = event.logicalKey;
+
+    if (event is KeyDownEvent) {
+      if (key == LogicalKeyboardKey.f1) {
+        _quickSettle(_PosPayment.cash);
+        return true;
+      }
+      if (key == LogicalKeyboardKey.f2) {
+        _quickSettle(_PosPayment.credit);
+        return true;
+      }
+      if (key == LogicalKeyboardKey.f3 || key == LogicalKeyboardKey.f4) {
+        _searchFocus.requestFocus();
+        _searchCtrl.selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: _searchCtrl.text.length,
+        );
+        return true;
+      }
+      if (key == LogicalKeyboardKey.f9) {
+        _quickHoldAndNewBill();
+        return true;
+      }
+      if (key == LogicalKeyboardKey.f12) {
+        _holdInvoice();
+        return true;
+      }
+      if (key == LogicalKeyboardKey.escape) {
+        if (_searchCtrl.text.isNotEmpty || _searchQuery.isNotEmpty) {
+          _searchCtrl.clear();
+          setState(() => _searchQuery = '');
+          return true;
+        }
+        if (_atSectionsGate ||
+            _selectedCategoryId != null ||
+            _selectedSectionId != null) {
+          setState(() {
+            _atSectionsGate = false;
+            _selectedCategoryId = null;
+            _selectedSectionId = null;
+          });
+          return true;
+        }
+        if (_cart.isNotEmpty) {
+          _clearCart();
+          return true;
+        }
+        return false;
+      }
+      if (key == LogicalKeyboardKey.enter ||
+          key == LogicalKeyboardKey.numpadEnter) {
+        // إذا كان حقل البحث مركزاً فسيقوم onSubmitted بمعالجة الحدث، وإلا نعالج الإدخال فوراً.
+        if (!_searchFocus.hasFocus) {
+          _handleSearchOrQuickSubmit(_searchCtrl.text);
+          return true;
+        }
+        return false;
+      }
+    }
+
+    // إذا كان حقل البحث يمتلك التركيز حالياً، يكتب فيه فلاتر مباشرة دون تكرار.
+    if (_searchFocus.hasFocus) return false;
+
+    final hw = HardwareKeyboard.instance;
+    if (hw.isControlPressed || hw.isAltPressed || hw.isMetaPressed) {
+      return false;
+    }
+
+    if (key == LogicalKeyboardKey.backspace) {
+      if (_searchCtrl.text.isNotEmpty) {
+        final next =
+            _searchCtrl.text.substring(0, _searchCtrl.text.length - 1);
+        _searchCtrl.value = TextEditingValue(
+          text: next,
+          selection: TextSelection.collapsed(offset: next.length),
+        );
+        setState(() => _searchQuery = next.trim());
+        _searchFocus.requestFocus();
+        return true;
+      }
+      return false;
+    }
+
+    // التقاط الأحرف والأرقام والرموز القابلة للطباعة وتوجيهها تلقائياً لحقل البحث.
+    final ch = event.character;
+    if (ch != null &&
+        ch.isNotEmpty &&
+        ch.runes.every((r) => r >= 0x20 && r != 0x7F)) {
+      final next = '${_searchCtrl.text}$ch';
+      _searchCtrl.value = TextEditingValue(
+        text: next,
+        selection: TextSelection.collapsed(offset: next.length),
+      );
+      setState(() => _searchQuery = next.trim());
+      _searchFocus.requestFocus();
+      return true;
+    }
+
+    return false;
+  }
+
+  KeyEventResult _handleDesktopKey(FocusNode node, KeyEvent event) {
+    // المعالجة تتم عبر المستمع العالمي _onGlobalKeyEvent لضمان العمل مع أو بدون تركيز مسبق.
+    return KeyEventResult.ignored;
+  }
+
+  /// معالجة الضغط على Enter في البحث أو الشاشة:
+  /// 1) إن وُجد نص بحث: يطابق الباركود أو PLU أولاً، وإلا يضيف أول صنف مطابق في الشبكة.
+  /// 2) إن كان البحث فارغاً والسلة تحتوي أصنافاً: يفتح نافذة إتمام البيع السريع.
+  void _handleSearchOrQuickSubmit(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isNotEmpty) {
+      if (_handleQuickIndex(trimmed)) return;
+      final allItems = ref.read(itemsProvider).valueOrNull ?? const <Item>[];
+      final categories =
+          ref.read(itemCategoriesProvider).valueOrNull ?? const <ItemCategory>[];
+      final filtered = _computeFilteredItems(allItems, categories);
+      if (filtered.isNotEmpty) {
+        final first = filtered.first;
+        _addItem(first);
+        _searchCtrl.clear();
+        setState(() => _searchQuery = '');
+        _searchFocus.requestFocus();
+        return;
+      }
+      setState(() => _searchQuery = trimmed);
+      return;
+    }
+    if (_cart.isNotEmpty && !_saving) {
+      _openCheckoutSheet();
+    }
+  }
+
+  /// تسوية سريعة من الاختصار: نقدي ينفّذ فوراً؛ آجل يتطلب عميلاً —
+  /// إن لم يُحدد نفتح درج الدفع على وضع الآجل ليختار.
+  void _quickSettle(_PosPayment mode) {
+    if (_cart.isEmpty) {
+      Sfx.reject();
+      showSnack(context, 'السلة فارغة — أضف أصنافاً أولاً', error: true);
+      return;
+    }
+    _cartCtl.setPayment(mode.code);
+    if (mode == _PosPayment.cash) {
+      _executeSale(null);
+    } else if (_selectedCustomerId != null) {
+      _executeSale(null);
+    } else {
+      _openCheckoutSheet();
+    }
+  }
+
+  /// تعليق الفاتورة الحالية (F12) — تُحفظ في قائمة المعلّقات وتُفرغ السلة.
+  /// تعليق الفاتورة الحالية برمجياً (أو عبر F12).
+  void _holdInvoice() {
+    _promptHoldInvoice();
+  }
+
+  /// زر «تعليق / فاتورة جديدة» بضغطة واحدة بجانب زر الفواتير المعلقة.
+  void _quickHoldAndNewBill() {
+    if (_cart.isEmpty) {
+      if (_selectedCustomerId != null ||
+          _discountCtrl.text.isNotEmpty ||
+          _notesCtrl.text.isNotEmpty ||
+          _paidCtrl.text.isNotEmpty) {
+        _clearCart();
+        Sfx.pop();
+        showSnack(context, 'تم تصفير البيانات — فاتورة جديدة جاهزة ✨');
+      } else {
+        Sfx.tap();
+        showSnack(context, 'الفاتورة الحالية فارغة وجاهزة للطلب الجديد ✨');
+      }
+      return;
+    }
+    final heldList = ref.read(heldInvoicesProvider);
+    final customers =
+        ref.read(allAccountsProvider).valueOrNull ?? const <Account>[];
+    String? custName;
+    if (_selectedCustomerId != null) {
+      for (final c in customers) {
+        if (c.id == _selectedCustomerId) {
+          custName = c.name;
+          break;
+        }
+      }
+    }
+    final autoLabel = (custName != null && custName.trim().isNotEmpty)
+        ? '$custName (#${heldList.length + 1})'
+        : 'فاتورة #${heldList.length + 1}';
+    _cartCtl.holdCurrentDraft(label: autoLabel);
+    _paidCtrl.clear();
+    _discountCtrl.clear();
+    _notesCtrl.clear();
+    _supervisorOverride = false;
+    setState(() {});
+    Sfx.pop();
+    showSnack(
+      context,
+      'تم تعليق «$autoLabel» وفتح فاتورة جديدة فارغة ⏸️✨',
+    );
+  }
+
+  /// تعليق الفاتورة مع طلب تسمية اختيارية (مثل: زبون رقم 1 أو طاولة 4).
+  Future<void> _promptHoldInvoice() async {
+    if (_cart.isEmpty) {
+      Sfx.reject();
+      showSnack(context, 'لا توجد فاتورة لتعليقها', error: true);
+      return;
+    }
+    final heldList = ref.read(heldInvoicesProvider);
+    final defaultLabel = 'فاتورة #${heldList.length + 1}';
+    final ctrl = TextEditingController(text: defaultLabel);
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dlgCtx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.pause_circle_outline_rounded, color: AppColors.primary),
+            SizedBox(width: 8),
+            Text('تعليق الفاتورة الحالية'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'أدخل اسماً أو وصفاً اختيارياً للفاتورة المعلقة (مثل: اسم الزبون أو رقم الطلب):',
+              style: TextStyle(fontSize: 13.5),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'تسمية الفاتورة المعلقة',
+                prefixIcon: Icon(Icons.label_outline_rounded),
+              ),
+              onSubmitted: (_) => Navigator.of(dlgCtx).pop(true),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dlgCtx).pop(false),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(dlgCtx).pop(true),
+            icon: const Icon(Icons.pause_rounded),
+            label: const Text('تعليق الفاتورة'),
+          ),
+        ],
+      ),
+    );
+
+    if (ok != true || !mounted) return;
+    final label = ctrl.text.trim();
+    _cartCtl.holdCurrentDraft(label: label.isEmpty ? defaultLabel : label);
+    _paidCtrl.clear();
+    _discountCtrl.clear();
+    _notesCtrl.clear();
+    setState(() {});
+    Sfx.pop();
+    showSnack(context, 'تم تعليق الفاتورة بنجاح ⏸️ — يمكنك استئنافها من زر المعلّقات');
+  }
+
+  /// استئناف فاتورة معلّقة (تحل محل السلة الحالية إن كانت فارغة).
+  void _resumeHeld(int index) {
+    final held = ref.read(heldInvoicesProvider);
+    if (index < 0 || index >= held.length) return;
+    if (_cart.isNotEmpty) {
+      Sfx.reject();
+      showSnack(context, 'أفرغ السلة الحالية أو علّقها أولاً لاستئناف هذه الفاتورة', error: true);
+      return;
+    }
+    final d = _cartCtl.resumeDraft(index);
+    if (d != null) {
+      _paidCtrl.text = d.paidText;
+      _discountCtrl.text = d.discountText;
+      _notesCtrl.text = d.notesText;
+      setState(() {});
+      Sfx.pop();
+      showSnack(context, 'تم استئناف الفاتورة بنجاح ▶️');
+    }
+  }
+
+  /// حذف فاتورة معلّقة نهائياً من القائمة والتخزين.
+  void _discardHeld(int index) {
+    final held = ref.read(heldInvoicesProvider);
+    if (index < 0 || index >= held.length) return;
+    final d = _cartCtl.discardDraft(index);
+    if (d != null) {
+      setState(() {});
+      Sfx.pop();
+      showSnack(context, 'تم حذف الفاتورة المعلقة 🗑️');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // مراقبة المسودة: أي تغيير في السلة (حتى من جلسة سابقة قبل تنقل
+    // عرضي بين التبويبات) يعيد بناء الشريط السفلي فوراً.
+    ref.watch(posDraftProvider);
+    // سطح المكتب (>900dp): مركز قيادة ثنائي اللوحين مع اختصارات لوحة
+    // المفاتيح؛ الهاتف يبقى على التبويبات المعتادة.
+    if (isDesktopLayout(context)) {
+      return Focus(
+        focusNode: _shortcutFocus,
+        onKeyEvent: _handleDesktopKey,
+        autofocus: true,
+        child: _buildDesktopPos(),
+      );
+    }
+    return Scaffold(
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(38),
+        child: Container(
+          color: Theme.of(context).colorScheme.surface,
+          child: TabBar(
+            controller: _tabController,
+            labelPadding: const EdgeInsets.symmetric(horizontal: 8),
+            tabs: const [
+              Tab(
+                height: 36,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.point_of_sale_outlined, size: 17),
+                    SizedBox(width: 6),
+                    Text('نقطة البيع'),
+                  ],
+                ),
+              ),
+              Tab(
+                height: 36,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.history_edu_outlined, size: 17),
+                    SizedBox(width: 6),
+                    Text('سجل المبيعات'),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      body: TabBarView(
+        controller: _tabController,
+        children: [_buildPosSaleTab(), const _PosHistoryTab()],
+      ),
+      bottomNavigationBar: _tabController.index == 0 && _cart.isNotEmpty
+          ? _buildCartBottomBar()
+          : null,
+    );
+  }
+
+  /// تخطيط سطح المكتب: يمين (60%) كتالوج الأصناف والبحث؛ يسار (40%)
+  /// لوح الفاتورة الحية بإطار بارز مع الملخص المالي وأزرار التسوية.
+  Widget _buildDesktopPos() {
+    final currencies =
+        ref.watch(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
+    final cur = currencies.first;
+    final held = ref.watch(heldInvoicesProvider);
+    return Scaffold(
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // ---- اللوح الأيمن في RTL (الأول): الكتالوج 60% ----
+            Expanded(
+              flex: 6,
+              child: DesktopPanel(
+                padding: EdgeInsets.zero,
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.point_of_sale_outlined, size: 20),
+                          const SizedBox(width: 8),
+                          Text('نقطة البيع',
+                              style:
+                                  Theme.of(context).textTheme.titleMedium),
+                          const Spacer(),
+                          TextButton.icon(
+                            onPressed: _quickHoldAndNewBill,
+                            onLongPress: _promptHoldInvoice,
+                            icon: const Icon(Icons.post_add_rounded, size: 18),
+                            label: Text(_cart.isNotEmpty
+                                ? 'تعليق / جديد'
+                                : 'فاتورة جديدة'),
+                          ),
+                          if (held.isNotEmpty)
+                            TextButton.icon(
+                              onPressed: () => _showHeldSheet(),
+                              icon: const Icon(Icons.pause_circle_outline,
+                                  size: 18),
+                              label: Text('معلّقة (${held.length})'),
+                            ),
+                          TextButton.icon(
+                            onPressed: () => showModalBottomSheet(
+                              context: context,
+                              isScrollControlled: true,
+                              useSafeArea: true,
+                              builder: (_) => const FractionallySizedBox(
+                                heightFactor: 0.85,
+                                child: _PosHistoryTab(),
+                              ),
+                            ),
+                            icon: const Icon(Icons.history_edu_outlined,
+                                size: 18),
+                            label: const Text('سجل المبيعات'),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Expanded(child: _buildPosSaleTab()),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            // ---- اللوح الأيسر: الفاتورة الحية 40% ----
+            Expanded(
+              flex: 4,
+              child: DesktopPanel(
+                padding: EdgeInsets.zero,
+                child: _buildDesktopInvoicePane(cur),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// قائمة الفواتير المعلّقة مع الإجماليات والتوقيت وخياري [استئناف] و [حذف].
+  void _showHeldSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (ctx) {
+        return Consumer(
+          builder: (context, ref, _) {
+            final held = ref.watch(heldInvoicesProvider);
+            final currencies =
+                ref.watch(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
+            final cur = currencies.first;
+
+            return SafeArea(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.sizeOf(context).height * 0.78,
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.pause_circle_filled_rounded,
+                              color: AppColors.primary, size: 24),
+                          const SizedBox(width: 8),
+                          Text(
+                            'الفواتير المعلقة (${held.length})',
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const Spacer(),
+                          IconButton(
+                            icon: const Icon(Icons.close_rounded),
+                            onPressed: () => Navigator.pop(ctx),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      if (held.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 36),
+                          child: EmptyState(
+                            icon: Icons.pause_circle_outline_rounded,
+                            title: 'لا توجد فواتير معلقة',
+                            message:
+                                'يمكنك تعليق أي فاتورة مفتوحة للعودة إليها واستئنافها لاحقاً.',
+                          ),
+                        )
+                      else
+                        Flexible(
+                          child: ListView.separated(
+                            shrinkWrap: true,
+                            itemCount: held.length,
+                            separatorBuilder: (_, __) => const SizedBox(height: 8),
+                            itemBuilder: (c, i) {
+                              final d = held[i];
+                              final label = (d.holdLabel != null && d.holdLabel!.trim().isNotEmpty)
+                                  ? d.holdLabel!
+                                  : 'فاتورة معلقة #${i + 1}';
+                              final timeStr = d.heldAt != null ? Fmt.dateTime(d.heldAt!) : '';
+
+                              return Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: AppColors.surfaceOf(context),
+                                  borderRadius: BorderRadius.circular(AppRadius.card),
+                                  border: Border.all(
+                                    color: AppColors.borderOf(context),
+                                    width: 1,
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      width: 40,
+                                      height: 40,
+                                      decoration: BoxDecoration(
+                                        color: AppTone.blue.background,
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      child: const Icon(
+                                        Icons.receipt_long_rounded,
+                                        color: AppColors.primary,
+                                        size: 20,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            label,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.w800,
+                                              fontSize: 14.5,
+                                            ),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                          const SizedBox(height: 3),
+                                          Wrap(
+                                            spacing: 8,
+                                            crossAxisAlignment: WrapCrossAlignment.center,
+                                            children: [
+                                              Text(
+                                                '${d.itemCount} أصناف • ${Fmt.money(d.netTotal)} ${cur.symbol}',
+                                                style: TextStyle(
+                                                  fontSize: 12.5,
+                                                  fontWeight: FontWeight.w700,
+                                                  color: AppColors.greenOf(context),
+                                                ),
+                                              ),
+                                              if (timeStr.isNotEmpty)
+                                                Text(
+                                                  '• $timeStr',
+                                                  style: TextStyle(
+                                                    fontSize: 11,
+                                                    color: AppColors.text3Of(context),
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    // زر استئناف
+                                    FilledButton.tonalIcon(
+                                      style: FilledButton.styleFrom(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 10, vertical: 8),
+                                        visualDensity: VisualDensity.compact,
+                                      ),
+                                      onPressed: () async {
+                                        if (_cart.isNotEmpty) {
+                                          final switchOk = await showDialog<bool>(
+                                            context: context,
+                                            builder: (dCtx) => AlertDialog(
+                                              title: const Text('السلة الحالية غير فارغة'),
+                                              content: const Text(
+                                                  'هل تريد تعليق الفاتورة الحالية واستئناف هذه الفاتورة المعلقة؟'),
+                                              actions: [
+                                                TextButton(
+                                                  onPressed: () =>
+                                                      Navigator.of(dCtx).pop(false),
+                                                  child: const Text('إلغاء'),
+                                                ),
+                                                FilledButton(
+                                                  onPressed: () =>
+                                                      Navigator.of(dCtx).pop(true),
+                                                  child: const Text('تعليق الحالية واستئناف'),
+                                                ),
+                                              ],
+                                            ),
+                                          );
+                                          if (switchOk == true) {
+                                            _cartCtl.holdCurrentDraft();
+                                            if (ctx.mounted) Navigator.pop(ctx);
+                                            _resumeHeld(i);
+                                          }
+                                        } else {
+                                          Navigator.pop(ctx);
+                                          _resumeHeld(i);
+                                        }
+                                      },
+                                      icon: const Icon(Icons.play_arrow_rounded, size: 17),
+                                      label: const Text('استئناف'),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    // زر حذف
+                                    IconButton(
+                                      tooltip: 'حذف الفاتورة المعلقة',
+                                      icon: const Icon(
+                                        Icons.delete_outline_rounded,
+                                        color: AppColors.red,
+                                        size: 20,
+                                      ),
+                                      onPressed: () async {
+                                        final delOk = await showDialog<bool>(
+                                          context: context,
+                                          builder: (dCtx) => AlertDialog(
+                                            title: const Text('حذف الفاتورة المعلقة؟'),
+                                            content: Text('هل أنت متأكد من حذف "$label" نهائياً؟'),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () =>
+                                                    Navigator.of(dCtx).pop(false),
+                                                child: const Text('إلغاء'),
+                                              ),
+                                              FilledButton(
+                                                style: FilledButton.styleFrom(
+                                                  backgroundColor: AppColors.dangerOf(context),
+                                                ),
+                                                onPressed: () =>
+                                                    Navigator.of(dCtx).pop(true),
+                                                child: const Text('حذف'),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                        if (delOk == true) {
+                                          _discardHeld(i);
+                                        }
+                                      },
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// لوح الفاتورة المكتبي: بنود السلة + محددات كمية مباشرة + ملخص مالي
+  /// حي (الإجمالي/الخصم/الصافي) + أزرار تسوية عريضة مع قفل فوري.
+  Widget _buildDesktopInvoicePane(CurrencyDef cur) {
+    final entries = _cart.values.toList();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: AppColors.primaryOf(context).withValues(alpha: 0.06),
+            borderRadius:
+                const BorderRadius.vertical(top: Radius.circular(12)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.receipt_long_outlined, size: 20),
+              const SizedBox(width: 8),
+              Text('الفاتورة الحالية',
+                  style: Theme.of(context).textTheme.titleMedium),
+              const Spacer(),
+              Text('$_itemCount صنف',
+                  style: TextStyle(
+                      fontSize: 12.5, color: AppColors.text2Of(context))),
+              if (_cart.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                IconButton(
+                  tooltip: 'إفراغ السلة (Esc)',
+                  icon: const Icon(Icons.delete_sweep_outlined,
+                      color: AppColors.red, size: 20),
+                  onPressed: _clearCart,
+                ),
+              ],
+            ],
+          ),
+        ),
+        Expanded(
+          child: entries.isEmpty
+              ? const EmptyState(
+                  icon: Icons.shopping_cart_outlined,
+                  title: 'السلة فارغة',
+                  message: 'انقر أصنافاً من الكتالوج لإضافتها للفاتورة.',
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.all(10),
+                  itemCount: entries.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (c, i) {
+                    final e = entries[i];
+                    return HoverLift(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 8),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: [
+                                  Text(e.item.name,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.w700,
+                                          fontSize: 13.5)),
+                                  const SizedBox(height: 2),
+                                  InkWell(
+                                    onTap: () async {
+                                      await _editUnitPrice(e);
+                                      setState(() {});
+                                    },
+                                    borderRadius: BorderRadius.circular(4),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(vertical: 2),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(
+                                            '${Fmt.money(e.unitPrice)} × ${Fmt.money(e.quantity)} = ${Fmt.money(e.total)} ${cur.symbol}',
+                                            style: TextStyle(
+                                                fontSize: 12,
+                                                color:
+                                                    AppColors.text2Of(context)),
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Icon(
+                                            Icons.edit_outlined,
+                                            size: 13,
+                                            color: AppColors.text2Of(context).withValues(alpha: 0.7),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            // محدد كمية مباشر: − / كمية قابلة للنقر / +
+                            IconButton(
+                              tooltip: 'إنقاص',
+                              iconSize: 19,
+                              icon: const Icon(
+                                  Icons.remove_circle_outline),
+                              onPressed: () {
+                                _cartCtl.setQuantity(
+                                    e.item.id!, e.quantity - 1,
+                                    allowNegative: _allowNegative);
+                                setState(() {});
+                              },
+                            ),
+                            InkWell(
+                              onTap: () async {
+                                await _editQuantity(e);
+                                setState(() {});
+                              },
+                              borderRadius: BorderRadius.circular(8),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: AppColors.primaryOf(context)
+                                      .withValues(alpha: 0.1),
+                                  borderRadius:
+                                      BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  Fmt.money(e.quantity),
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      fontSize: 13),
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: 'زيادة',
+                              iconSize: 19,
+                              icon:
+                                  const Icon(Icons.add_circle_outline),
+                              onPressed: () => _addItem(e.item),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+        // الملخص المالي الحي.
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            border: BorderDirectional(
+              top: BorderSide(
+                color:
+                    Theme.of(context).dividerColor.withValues(alpha: 0.18),
+                width: 1.2,
+              ),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _summaryRow('الإجمالي', _subtotal, cur),
+              if (_discount > 0) _summaryRow('الخصم', -_discount, cur),
+              const SizedBox(height: 4),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('الصافي',
+                      style: Theme.of(context).textTheme.titleLarge),
+                  Text(
+                    '${Fmt.money(_netTotal)} ${cur.symbol}',
+                    style: Theme.of(context)
+                        .textTheme
+                        .headlineSmall
+                        ?.copyWith(
+                          fontWeight: FontWeight.w900,
+                          color: AppColors.primaryOf(context),
+                        ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              // أزرار تسوية عريضة + تلميحات الاختصارات.
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        padding:
+                            const EdgeInsets.symmetric(vertical: 16),
+                      ),
+                      onPressed: _saving || _cart.isEmpty
+                          ? null
+                          : () => _quickSettle(_PosPayment.cash),
+                      icon: const Icon(Icons.payments_outlined),
+                      label: const Text('دفع نقدي (F1)'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: FilledButton.tonalIcon(
+                      style: FilledButton.styleFrom(
+                        padding:
+                            const EdgeInsets.symmetric(vertical: 16),
+                      ),
+                      onPressed: _saving || _cart.isEmpty
+                          ? null
+                          : () => _quickSettle(_PosPayment.credit),
+                      icon: const Icon(Icons.schedule_outlined),
+                      label: const Text('آجل (F2)'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.filledTonal(
+                    tooltip: 'تعليق الفاتورة (F12)',
+                    style: IconButton.styleFrom(
+                      padding: const EdgeInsets.all(15),
+                    ),
+                    icon: const Icon(Icons.pause_circle_outline_rounded, size: 22),
+                    onPressed: _saving || _cart.isEmpty
+                        ? null
+                        : _promptHoldInvoice,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed:
+                    _saving || _cart.isEmpty ? null : _openCheckoutSheet,
+                icon: const Icon(Icons.tune),
+                label: const Text('خيارات الدفع الكاملة (خصم/جزئي)'),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'F3 بحث • F12 تعليق الفاتورة • Esc إفراغ',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    fontSize: 11, color: AppColors.text3Of(context)),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _summaryRow(String label, double value, CurrencyDef cur) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(label,
+                style: TextStyle(
+                    fontSize: 13.5, color: AppColors.text2Of(context))),
+            Text(
+              '${Fmt.money(value)} ${cur.symbol}',
+              style: const TextStyle(
+                  fontSize: 13.5, fontWeight: FontWeight.w700),
+            ),
+          ],
+        ),
+      );
+
+  List<Item> _computeFilteredItems(
+    List<Item> allItems,
+    List<ItemCategory> categories,
+  ) {
+    final hasSearch = _searchQuery.trim().isNotEmpty;
+    final normQ = hasSearch ? Fmt.normArabic(_searchQuery) : '';
+
+    final catsInSection = <int>{
+      for (final c in categories)
+        if (_sectionMatches(c.sectionId)) c.id!,
+    };
+
+    final allowedCatIds = <int>{};
+    if (!hasSearch &&
+        _selectedCategoryId != null &&
+        _selectedCategoryId != kFavoritesCategoryId) {
+      allowedCatIds.add(_selectedCategoryId!);
+      for (final c in categories) {
+        if (c.parentId == _selectedCategoryId && c.id != null) {
+          allowedCatIds.add(c.id!);
+        }
+      }
+    }
+
+    final filteredItems = allItems.where((item) {
+      if (hasSearch) {
+        final matchPlu = item.plu != null &&
+            ('${item.plu}' == normQ || '${item.plu}'.startsWith(normQ));
+        final matchSku = Fmt.normArabic(item.sku).contains(normQ);
+        final matchNameCat =
+            Fmt.smartContains('${item.name} ${item.category}', _searchQuery);
+        return matchPlu || matchSku || matchNameCat;
+      }
+
+      if (_selectedCategoryId == kFavoritesCategoryId) {
+        if (_pinnedItemIds.isNotEmpty) return _pinnedItemIds.contains(item.id);
+        return item.quantity > 0;
+      }
+
+      if (_selectedCategoryId != null) {
+        return item.categoryId != null && allowedCatIds.contains(item.categoryId);
+      }
+      if (_selectedSectionId != null && _selectedCategoryId == null) {
+        if (_selectedSectionId == kGeneralSectionId) {
+          final allSecs =
+              ref.read(sectionsProvider).valueOrNull ?? const <Section>[];
+          final activeSecIds = allSecs.map((s) => s.id).toSet();
+          final effectiveSecId =
+              item.sectionId ?? _sectionOfCat(categories, item.categoryId);
+          return effectiveSecId == null ||
+              effectiveSecId == kGeneralSectionId ||
+              !activeSecIds.contains(effectiveSecId) ||
+              item.categoryId == null ||
+              catsInSection.contains(item.categoryId);
+        } else {
+          return item.sectionId == _selectedSectionId ||
+              (item.categoryId != null &&
+                  catsInSection.contains(item.categoryId));
+        }
+      }
+      return true;
+    }).toList();
+
+    // (2026-09-24) الترتيب المختار من زر الفلاتر — **لا يغيّر أرقام PLU**:
+    // الأرقام ثابتة للأبد ومستقلة عن أي فرز معروض.
+    switch (_posSort) {
+      case 1:
+        filteredItems.sort((a, b) => b.sellPrice.compareTo(a.sellPrice));
+      case 2:
+        filteredItems.sort((a, b) => b.quantity.compareTo(a.quantity));
+      default:
+        filteredItems.sort((a, b) => a.name.compareTo(b.name));
+    }
+    return filteredItems;
+  }
+
+  Widget _buildPosSaleTab() {
+    final categories = ref.watch(itemCategoriesProvider).valueOrNull ?? [];
+    final allItems = ref.watch(itemsProvider).valueOrNull ?? [];
+    final currencies =
+        ref.watch(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
+    final cur = currencies.first;
+
+    final hasSearch = _searchQuery.trim().isNotEmpty;
+
+    final favorites = allItems.where((i) {
+      if (!i.isActive || i.isDeleted) return false;
+      if (_pinnedItemIds.isNotEmpty) {
+        return _pinnedItemIds.contains(i.id);
+      }
+      return i.quantity > 0;
+    }).take(10).toList();
+
+    final filteredItems = _computeFilteredItems(allItems, categories);
+
+    return PopScope(
+      canPop: !hasSearch &&
+          !_atSectionsGate &&
+          _selectedSectionId == null &&
+          _selectedCategoryId == null,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) {
+          if (hasSearch) {
+            setState(() {
+              _searchQuery = '';
+              _searchCtrl.clear();
+            });
+          } else if (_selectedCategoryId != null) {
+            setState(() => _selectedCategoryId = null);
+          } else if (_selectedSectionId != null) {
+            setState(() => _selectedSectionId = null);
+          } else if (_atSectionsGate) {
+            setState(() => _atSectionsGate = false);
+          }
+        }
+      },
+      child: Column(
+        children: [
+          // الشريط العلوي المدمج: تدرّج أزرق ملكي + بحث بيضاوي (Enter = PLU).
+          _buildPosHeader(),
+
+          if (!hasSearch) ...[
+            // الوضع المدمج التدريجي: عند التمرير لأسفل تتقلص أشرطة الأقسام والمفضلة لتوفير أقصى مساحة للأصناف.
+            AnimatedSize(
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              child: _isScrolledCompact
+                  ? const SizedBox.shrink()
+                  : Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // شريط القسم النشط مع أزرار التنقل والطي السريع:
+                        Consumer(
+                          builder: (ctx, rref, _) {
+                            final sections = rref
+                                    .watch(sectionsProvider)
+                                    .valueOrNull ??
+                                const <Section>[];
+                            return _buildSectionBar(sections, categories);
+                          },
+                        ),
+
+                        // لوحة الأقسام المنسدلة المرنة (Collapsible Top Panel — مطوية افتراضياً):
+                        if (_atSectionsGate)
+                          SizedBox(
+                            height: 128,
+                            child: Consumer(
+                              builder: (ctx, rref, _) {
+                                final sections = rref
+                                        .watch(sectionsProvider)
+                                        .valueOrNull ??
+                                    const <Section>[];
+                                final roots = rref
+                                        .watch(itemCategoryTreeProvider)
+                                        .valueOrNull ??
+                                    const <ItemCategory>[];
+                                return PosSectionsGate(
+                                  sections: sections,
+                                  roots: roots,
+                                  items: allItems,
+                                  padding:
+                                      const EdgeInsets.fromLTRB(12, 4, 12, 6),
+                                  childAspectRatio: 1.25,
+                                  onOpen: (sid) => setState(() {
+                                    _selectedSectionId = sid;
+                                    _selectedCategoryId = null;
+                                    _atSectionsGate = false;
+                                  }),
+                                );
+                              },
+                            ),
+                          ),
+                      ],
+                    ),
+            ),
+
+            // شريط الفئات التابع للقسم النشط:
+            Consumer(
+              builder: (ctx, rref, _) {
+                final roots =
+                    rref.watch(itemCategoryTreeProvider).valueOrNull ??
+                        const <ItemCategory>[];
+                return PosCategoryStrip(
+                  categories: _categoriesOfSection(roots, categories),
+                  selectedId: _selectedCategoryId,
+                  onPick: (cid) => setState(() => _selectedCategoryId = cid),
+                );
+              },
+            ),
+
+            // قسم / صف الأصناف المفضلة والأكثر طلباً (يطوى تلقائياً عند التمرير لأسفل):
+            if (!_isScrolledCompact)
+              _buildFavoritesRow(favorites, cur.symbol),
+          ],
+
+          // شبكة الأصناف المباشرة (Single-Screen POS) مع مستشعر التمرير للوضع المدمج:
+          Expanded(
+            child: filteredItems.isEmpty
+                ? const EmptyState(
+                    icon: Icons.inventory_2_outlined,
+                    title: 'لا توجد أصناف مطابقة',
+                    message: 'أضف أصنافاً من شاشة المخزون أو غيّر نص البحث.',
+                  )
+                : NotificationListener<ScrollNotification>(
+                    onNotification: (notif) {
+                      if (notif is ScrollUpdateNotification &&
+                          notif.metrics.axis == Axis.vertical) {
+                        final px = notif.metrics.pixels;
+                        if (px > 28 && !_isScrolledCompact) {
+                          setState(() {
+                            _isScrolledCompact = true;
+                            _atSectionsGate = false;
+                          });
+                        } else if (px <= 8 && _isScrolledCompact) {
+                          setState(() => _isScrolledCompact = false);
+                        }
+                      }
+                      return false;
+                    },
+                    child: PosItemsGrid(
+                      items: filteredItems,
+                      symbol: cur.symbol,
+                      quantityInCart: (it) => _cart[it.id]?.quantity ?? 0,
+                      canAdd: (it) => it.quantity > 0 || _allowNegative,
+                      onAdd: (it) => _addItem(it),
+                      onLongPress: (it) => _togglePinItem(it),
+                      isFavorite: (it) => _pinnedItemIds.contains(it.id),
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// فئات القسم النشط (بلا فروع) مرتّبة للعرض في الشريط العلوي مع تبويب المفضلة.
+  List<ItemCategory> _categoriesOfSection(
+    List<ItemCategory> roots,
+    List<ItemCategory> flat,
+  ) {
+    final out = <ItemCategory>[];
+    void collect(ItemCategory c) {
+      if (_sectionMatches(c.sectionId)) out.add(c);
+    }
+
+    if (roots.isNotEmpty) {
+      for (final c in roots) {
+        collect(c);
+      }
+    } else {
+      for (final c in flat) {
+        collect(c);
+      }
+    }
+    out.sort((a, b) => a.name.compareTo(b.name));
+
+    // إضافة تبويب المفضلة كخيار أول مميز في الشريط:
+    out.insert(
+      0,
+      ItemCategory(
+        id: kFavoritesCategoryId,
+        name: 'المفضلة ⭐',
+        iconKey: 'star',
+        colorHex: '#F59E0B',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+    );
+
+    return out;
+  }
+
+  /// شريط القسم النشط مع تنقّل سريع للقسم المجاور وزر طي/فتح اللوحة المنسدلة.
+  Widget _buildSectionBar(List<Section> sections, List<ItemCategory> cats) {
+    // تسلسل التنقل: [كل الأقسام] ثم [عام] دائماً للوصول السريع للأصناف غير المصنفة، ثم بقية الأقسام.
+    final seq = <(int?, String)>[
+      (null, 'كل الأقسام'),
+      (kGeneralSectionId, 'عام'),
+      for (final s in sections) (s.id, s.name),
+    ];
+    final idx = seq.indexWhere((e) => e.$1 == _selectedSectionId);
+    final prev = idx > 0 ? seq[idx - 1] : null;
+    final next = (idx >= 0 && idx < seq.length - 1) ? seq[idx + 1] : null;
+    final title = _atSectionsGate
+        ? 'تصفح الأقسام'
+        : (idx >= 0 ? seq[idx].$2 : 'كل الأقسام');
+
+    return PosSectionBar(
+      title: title,
+      isExpanded: _atSectionsGate,
+      onToggleExpand: () => setState(() => _atSectionsGate = !_atSectionsGate),
+      onBackToGate: () => setState(() {
+        _atSectionsGate = !_atSectionsGate;
+      }),
+      onPrev: prev == null
+          ? null
+          : () => setState(() {
+                _selectedSectionId = prev.$1;
+                _selectedCategoryId = null;
+              }),
+      onNext: next == null
+          ? null
+          : () => setState(() {
+                _selectedSectionId = next.$1;
+                _selectedCategoryId = null;
+              }),
+    );
+  }
+
+  /// صف / شريط أفقي مخصص للأصناف المفضلة والأكثر طلباً.
+  Widget _buildFavoritesRow(List<Item> favorites, String symbol) {
+    if (favorites.isEmpty) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 4, 12, 6),
+      padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
+      decoration: BoxDecoration(
+        color: AppTone.blue.background.withValues(alpha: .35),
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        border: Border.all(
+          color: AppColors.borderOf(context).withValues(alpha: .6),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.star_rounded, size: 16, color: Color(0xFFF59E0B)),
+              const SizedBox(width: 4),
+              Text(
+                'المفضلة والأكثر طلباً',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  color: AppColors.textOf(context),
+                ),
+              ),
+              const Spacer(),
+              Text(
+                '${favorites.length} أصناف • نقرة للإضافة',
+                style: TextStyle(
+                  fontSize: 10,
+                  color: AppColors.text3Of(context),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          SizedBox(
+            height: 38,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: favorites.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 6),
+              itemBuilder: (ctx, i) {
+                final it = favorites[i];
+                final inCart = _cart[it.id]?.quantity ?? 0;
+                final isOut = it.quantity <= 0;
+                final isLow = !isOut &&
+                    (it.low || (it.minQuantity > 0 && it.quantity <= it.minQuantity));
+                final dotColor = isOut
+                    ? AppColors.dangerOf(context)
+                    : (isLow ? const Color(0xFFD97706) : AppColors.greenOf(context));
+
+                return Material(
+                  color: inCart > 0
+                      ? AppColors.primarySoftOf(context)
+                      : AppColors.surfaceOf(context),
+                  borderRadius: BorderRadius.circular(AppRadius.pill),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.pill),
+                    side: BorderSide(
+                      color: inCart > 0
+                          ? AppColors.primaryOf(context)
+                          : AppColors.borderOf(context),
+                      width: inCart > 0 ? 1.4 : .8,
+                    ),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: () => _addItem(it),
+                    onLongPress: () => _togglePinItem(it),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 6.5,
+                            height: 6.5,
+                            decoration: BoxDecoration(
+                              color: dotColor,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 5),
+                          Text(
+                            it.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: AppColors.textOf(context),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            '${Fmt.money(it.sellPrice > 0 ? it.sellPrice : it.buyPrice)} $symbol',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                              color: inCart > 0
+                                  ? AppColors.primaryOf(context)
+                                  : AppColors.greenOf(context),
+                            ),
+                          ),
+                          if (inCart > 0) ...[
+                            const SizedBox(width: 5),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                              decoration: BoxDecoration(
+                                color: AppColors.primaryOf(context),
+                                borderRadius: BorderRadius.circular(AppRadius.pill),
+                              ),
+                              child: Text(
+                                Fmt.money(inCart),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  int? _sectionOfCat(List<ItemCategory> cats, int? catId) {
+    if (catId == null) return null;
+    for (final c in cats) {
+      if (c.id == catId) return c.sectionId;
+    }
+    return null;
+  }
+
+  /// هل تنتمي الفئة إلى القسم المختار حالياً؟
+  bool _sectionMatches(int? sectionId) {
+    if (_selectedSectionId == null) return true;
+    return _selectedSectionId == kGeneralSectionId
+        ? sectionId == null
+        : sectionId == _selectedSectionId;
+  }
+
+  /// الشريط العلوي المدمج لنقطة البيع (أزرق ملكي متدرّج).
+  Widget _buildPosHeader() {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final held = ref.watch(heldInvoicesProvider);
+    final hasCartItems = _cart.isNotEmpty;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topRight,
+          end: Alignment.bottomLeft,
+          colors: dark
+              ? const [Color(0xFF0B2A5B), Color(0xFF14407E)]
+              : [AppColors.primary2, AppColors.primary],
+        ),
+        borderRadius: BorderRadius.vertical(
+          bottom: Radius.circular(_isScrolledCompact ? 16 : 20),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primary.withValues(alpha: .22),
+            blurRadius: _isScrolledCompact ? 8 : 14,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            8,
+            _isScrolledCompact ? 2 : 4,
+            8,
+            _isScrolledCompact ? 6 : 8,
+          ),
+          child: Row(
+            children: [
+              _headerCircleButton(
+                icon: Icons.home_rounded,
+                tooltip: 'الرئيسية',
+                onTap: () => ShellNav.go(ShellNav.home),
+              ),
+              const SizedBox(width: 6),
+              Expanded(child: _buildPillSearch()),
+              const SizedBox(width: 6),
+              // زر فاتورة جديدة / تعليق الفاتورة الحالية بجانب زر الفواتير المعلقة:
+              Tooltip(
+                message: hasCartItems
+                    ? 'تعليق الفاتورة الحالية وبدء فاتورة جديدة (ضغطة مطولة للتسمية)'
+                    : 'فاتورة جديدة فارغة',
+                child: Material(
+                  color: hasCartItems
+                      ? const Color(0xFFF59E0B)
+                      : Colors.white.withValues(alpha: .18),
+                  borderRadius: BorderRadius.circular(999),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: _quickHoldAndNewBill,
+                    onLongPress: hasCartItems ? _promptHoldInvoice : null,
+                    child: SizedBox(
+                      height: 38,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              hasCartItems
+                                  ? Icons.post_add_rounded
+                                  : Icons.note_add_outlined,
+                              color: hasCartItems ? Colors.black : Colors.white,
+                              size: 18,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              hasCartItems ? 'تعليق/جديد' : 'جديد',
+                              style: TextStyle(
+                                color:
+                                    hasCartItems ? Colors.black : Colors.white,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              _headerCircleButton(
+                icon: Icons.pause_circle_outline_rounded,
+                tooltip: 'الفواتير المعلقة (Held Bills)',
+                badgeCount: held.length,
+                onTap: _showHeldSheet,
+              ),
+              const SizedBox(width: 6),
+              _headerCircleButton(
+                icon: Icons.tune_rounded,
+                tooltip: 'ترتيب الأصناف',
+                onTap: _openPosSortSheet,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _headerCircleButton({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onTap,
+    int badgeCount = 0,
+  }) =>
+      SizedBox(
+        width: 38,
+        height: 38,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Material(
+              color: Colors.white.withValues(alpha: .18),
+              shape: const CircleBorder(),
+              clipBehavior: Clip.antiAlias,
+              child: IconButton(
+                padding: EdgeInsets.zero,
+                tooltip: tooltip,
+                icon: Icon(icon, color: Colors.white, size: 19),
+                onPressed: onTap,
+              ),
+            ),
+            if (badgeCount > 0)
+              PositionedDirectional(
+                top: -2,
+                end: -2,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF59E0B),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.white, width: 1.5),
+                  ),
+                  child: Text(
+                    badgeCount > 99 ? '99+' : '$badgeCount',
+                    style: const TextStyle(
+                      color: Colors.black,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      );
+
+  /// حقل البحث البيضاوي (Pill) بخلفية بيضاء نظيفة.
+  Widget _buildPillSearch() => SizedBox(
+        height: 38,
+        child: TextField(
+          controller: _searchCtrl,
+          focusNode: _searchFocus,
+          // على سطح المكتب: تركيز تلقائي لحقل الباركود/البحث — قارئ
+          // الباركود يكتب مباشرة بلا نقرة.
+          autofocus: isDesktopLayout(context),
+          style: const TextStyle(fontSize: 14.5, color: Color(0xFF12223A)),
+          textAlignVertical: TextAlignVertical.center,
+          decoration: InputDecoration(
+            filled: true,
+            fillColor: Colors.white,
+            hintText: 'ابحث باسم الصنف أو الباركود…',
+            hintStyle:
+                const TextStyle(color: Color(0xFF9AA6B8), fontSize: 13.5),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 14),
+            prefixIcon: const Icon(Icons.search_rounded,
+                size: 20, color: Color(0xFF9AA6B8)),
+            prefixIconConstraints:
+                const BoxConstraints(minWidth: 40, minHeight: 40),
+            border: _pillBorder(Colors.transparent),
+            enabledBorder: _pillBorder(Colors.transparent),
+            focusedBorder: _pillBorder(Colors.transparent),
+            suffixIcon: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  tooltip: 'مسح الباركود',
+                  icon: const Icon(Icons.barcode_reader,
+                      size: 20, color: Color(0xFF9AA6B8)),
+                  onPressed: () async {
+                    final code = await scanBarcode(context);
+                    if (code != null && code.isNotEmpty) {
+                      _searchCtrl.text = code;
+                      setState(() => _searchQuery = code.trim());
+                    }
+                  },
+                ),
+                if (_searchQuery.isNotEmpty)
+                  IconButton(
+                    icon: const Icon(Icons.clear,
+                        size: 20, color: Color(0xFF9AA6B8)),
+                    onPressed: () {
+                      _searchCtrl.clear();
+                      setState(() => _searchQuery = '');
+                    },
+                  ),
+              ],
+            ),
+          ),
+          onChanged: (v) => setState(() => _searchQuery = v.trim()),
+          // Enter: يطابق الباركود/PLU أو يضيف أول صنف مطابق أو يفتح الدفع السريع.
+          onSubmitted: _handleSearchOrQuickSubmit,
+        ),
+      );
+
+  OutlineInputBorder _pillBorder(Color c) => OutlineInputBorder(
+        borderRadius: BorderRadius.circular(999),
+        borderSide: BorderSide(color: c),
+      );
+
+  /// (2026-09-24) **نظام الترقيم السريع (PLU) ودعم قارئ الباركود**.
+  ///
+  /// • يدعم مسح الباركود مباشرة (USB/Bluetooth) بالبحث المطابق للـ SKU وإضافته فوراً للسلة.
+  /// • يدعم الترقيم السريع: `7` + Enter يضيف حبة واحدة، و `7*3` أو `7×3` يضيف 3 حبات.
+  /// • يدعم الأرقام العربية/الفارسية تلقائياً عبر التطبيع.
+  bool _handleQuickIndex(String raw, [List<Item>? itemsList]) {
+    final q = Fmt.normArabic(raw).replaceAll('×', '*').trim();
+    if (q.isEmpty) return false;
+
+    final items =
+        itemsList ?? (ref.read(itemsProvider).valueOrNull ?? const <Item>[]);
+
+    // أولاً: فحص مطابقة باركود صنف (قارئات الباركود الخارجية USB / Bluetooth)
+    Item? barcodeHit;
+    for (final it in items) {
+      if (it.sku.trim().isNotEmpty &&
+          it.sku.trim().toLowerCase() == q.toLowerCase()) {
+        barcodeHit = it;
+        break;
+      }
+    }
+    if (barcodeHit != null) {
+      _addItem(barcodeHit, quantity: 1);
+      _searchCtrl.clear();
+      setState(() => _searchQuery = '');
+      _searchFocus.requestFocus();
+      showSnack(
+        context,
+        'أُضيف 1 ${barcodeHit.unit} من «${barcodeHit.name}» (باركود)',
+        silent: true,
+      );
+      return true;
+    }
+
+    // ثانياً: مطابقة نمط الترقيم السريع PLU أو PLU*QTY
+    final m = RegExp(r'^(\d+)(?:\*(\d+(?:\.\d+)?))?$').firstMatch(q);
+    if (m != null) {
+      final idx = int.tryParse(m.group(1)!);
+      final qty = m.group(2) != null
+          ? (double.tryParse(m.group(2)!) ?? 1.0)
+          : 1.0;
+      if (idx != null && qty > 0) {
+        Item? hit;
+        for (final it in items) {
+          if (it.plu == idx) {
+            hit = it;
+            break;
+          }
+        }
+        if (hit != null) {
+          _addItem(hit, quantity: qty);
+          _searchCtrl.clear();
+          setState(() => _searchQuery = '');
+          _searchFocus.requestFocus();
+          showSnack(
+            context,
+            'أُضيف ${Fmt.money(qty)} ${hit.unit} من «${hit.name}» (رقم $idx)',
+            silent: true,
+          );
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /// ترتيب شبكة الأصناف — شريحة سفلية صغيرة.
+  void _openPosSortSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      useSafeArea: true,
+      builder: (ctx) => Container(
+        decoration: BoxDecoration(
+          color: AppColors.surfaceOf(ctx),
+          borderRadius: AppRadius.sheetTop,
+        ),
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 22),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 44,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: AppColors.borderOf(ctx),
+                  borderRadius: BorderRadius.circular(99),
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text('ترتيب الأصناف',
+                style: Theme.of(ctx).textTheme.titleLarge),
+            const SizedBox(height: 8),
+            for (final e in const [
+              (0, 'بالاسم', Icons.sort_by_alpha),
+              (1, 'الأعلى سعراً', Icons.trending_up),
+              (2, 'الأكثر توفراً', Icons.inventory_2_outlined),
+            ])
+              ListTile(
+                leading: Icon(e.$3),
+                title: Text(e.$2),
+                trailing: _posSort == e.$1
+                    ? Icon(Icons.check_circle,
+                        color: AppColors.primaryOf(ctx))
+                    : null,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppRadius.card),
+                ),
+                onTap: () {
+                  setState(() => _posSort = e.$1);
+                  Navigator.pop(ctx);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// شريط السلة العائم السفلي: بطاقة إحصائية بعدد الأصناف، الإجمالي
+  /// في المنتصف بخط عريض، وزر أزرق ملكي عريض لعرض السلة.
+  Widget _buildCartBottomBar() {
+    final currencies =
+        ref.watch(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
+    final cur = currencies.first;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceOf(context),
+        borderRadius: const BorderRadius.vertical(
+          top: Radius.circular(AppRadius.sheet),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: .10),
+            blurRadius: 20,
+            offset: const Offset(0, -6),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Row(
+          children: [
+            // بطاقة إحصائية: عدد الأصناف بالسلة.
+            Container(
+              width: 62,
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              decoration: BoxDecoration(
+                color: AppColors.primarySoftOf(context),
+                borderRadius: BorderRadius.circular(AppRadius.card),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.shopping_bag_outlined,
+                      size: 18, color: AppColors.primaryOf(context)),
+                  const SizedBox(height: 2),
+                  Text(
+                    '$_itemCount',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w900,
+                      color: AppColors.primaryOf(context),
+                    ),
+                  ),
+                  Text(
+                    'أصناف',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: AppColors.text2Of(context),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            // الإجمالي في المنتصف.
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'الإجمالي',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: AppColors.text2Of(context),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      '${Fmt.money(_netTotal)} ${cur.symbol}',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                        color: AppColors.greenOf(context),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            // دفع نقدي سريع + إفراغ — تبقى الاختصارات ولا تزاحم الزر الرئيسي.
+            IconButton.outlined(
+              tooltip: 'إفراغ السلة',
+              icon: Icon(Icons.delete_sweep_outlined,
+                  color: AppColors.dangerOf(context)),
+              onPressed: _clearCart,
+            ),
+            const SizedBox(width: 8),
+            // الزر الأزرق الملكي العريض: عرض السلة.
+            SizedBox(
+              height: 50,
+              child: FilledButton.icon(
+                onPressed: _openCheckoutSheet,
+                icon: const Icon(Icons.shopping_cart_checkout, size: 19),
+                label: Text('عرض السلة ($_itemCount)'),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.button),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// درج الدفع المنزلق (Slide-to-Pay): قائمة الأصناف تبقى ملء الشاشة،
+  /// وكل الإدخال المالي في درج سفلي موسع — لا تغطية من لوحة المفاتيح.
+  void _openCheckoutSheet() {
+    ref.read(repoProvider).effectivePermissions().then((p) {
+      if (mounted && p.canDiscount != _canDiscount) {
+        setState(() => _canDiscount = p.canDiscount);
+      }
+    });
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        final kb = MediaQuery.viewInsetsOf(ctx).bottom;
+        final bottomSysPad = MediaQuery.of(ctx).viewPadding.bottom;
+        final h = MediaQuery.sizeOf(ctx).height;
+        final maxH = (h - kb - 20).clamp(260.0, h * 0.78);
+        return SafeArea(
+          bottom: true,
+          child: Padding(
+            padding: EdgeInsets.only(bottom: kb + bottomSysPad),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: maxH),
+              child: StatefulBuilder(
+                builder: (context, setSheetState) {
+                  final accounts =
+                      ref.watch(allAccountsProvider).valueOrNull ?? [];
+                  final currencies =
+                      ref.watch(currenciesProvider).valueOrNull ??
+                          kDefaultCurrencies;
+                  final cur = currencies.first;
+                  final customers = accounts
+                      .where(
+                        (a) =>
+                            a.kind == AccountKind.customer ||
+                            a.kind == AccountKind.general,
+                      )
+                      .toList();
+                  final selectedAccount = customers
+                      .where((c) => c.id == _selectedCustomerId)
+                      .firstOrNull;
+                  final isGenericCashCustomer = selectedAccount != null &&
+                      (selectedAccount.name.trim() == 'عميل نقدي' ||
+                          selectedAccount.name.trim() == 'عميل نقدي عام');
+                  final needsAccount = _payment != _PosPayment.cash;
+                  final accountMissing = needsAccount &&
+                      (_selectedCustomerId == null || isGenericCashCustomer);
+                  final paidNow = _payment == _PosPayment.partial
+                      ? (Fmt.parseAmount(
+                              ThousandsFormatter.strip(_paidCtrl.text)) ??
+                          0.0)
+                      : (_payment == _PosPayment.cash ? _netTotal : 0.0);
+                  final remainingNow =
+                      (_netTotal - paidNow).clamp(0.0, double.infinity);
+                  final partialInvalid = _payment == _PosPayment.partial &&
+                      (_netTotal <= 0.01 ||
+                          paidNow < 0.01 ||
+                          paidNow > (_netTotal - 0.01) ||
+                          paidNow >= _netTotal);
+
+                  return Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            'إتمام الفاتورة 🛒',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          IconButton(
+                            visualDensity: VisualDensity.compact,
+                            icon: const Icon(Icons.close, size: 20),
+                            onPressed: () => Navigator.pop(context),
+                          ),
+                        ],
+                      ),
+                      const Divider(height: 8),
+                      Flexible(
+                        child: SingleChildScrollView(
+                          keyboardDismissBehavior:
+                              ScrollViewKeyboardDismissBehavior.onDrag,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              // قائمة أصناف السلة — الكمية قابلة للنقر لإدخال مباشر.
+                              for (final entry in _cart.values) ...[
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  entry.item.name,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                InkWell(
+                                  onTap: () async {
+                                    await _editUnitPrice(entry);
+                                    setSheetState(() {});
+                                    setState(() {});
+                                  },
+                                  borderRadius: BorderRadius.circular(4),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(vertical: 2),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          '${Fmt.money(entry.unitPrice)} ${cur.symbol} / ${entry.item.unit}',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            color: AppColors.text2Of(context),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Icon(
+                                          Icons.edit_outlined,
+                                          size: 13,
+                                          color: AppColors.text2Of(context).withValues(alpha: 0.7),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.remove_circle_outline,
+                                  size: 20,
+                                ),
+                                onPressed: () {
+                                  final q = entry.quantity - 1;
+                                  _cartCtl.setQuantity(entry.item.id!, q,
+                                      allowNegative: _allowNegative);
+                                  setSheetState(() {});
+                                  setState(() {});
+                                },
+                              ),
+                              // نقرة على الكمية = لوحة إدخال رقمي سريعة.
+                              InkWell(
+                                onTap: () async {
+                                  await _editQuantity(entry);
+                                  setSheetState(() {});
+                                  setState(() {});
+                                },
+                                borderRadius: BorderRadius.circular(8),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    border: Border.all(
+                                        color: AppColors.primaryOf(context)
+                                            .withValues(alpha: .4)),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Text(
+                                    Fmt.money(entry.quantity),
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.add_circle_outline,
+                                  size: 20,
+                                ),
+                                onPressed: () {
+                                  final ok = _cartCtl.setQuantity(
+                                      entry.item.id!, entry.quantity + 1,
+                                      allowNegative: _allowNegative);
+                                  if (!ok) {
+                                    Sfx.reject();
+                                    showSnack(
+                                      context,
+                                      'الكمية المتاحة: ${entry.item.quantity.toStringAsFixed(0)} ${entry.item.unit} فقط',
+                                      error: true,
+                                    );
+                                    return;
+                                  }
+                                  setSheetState(() {});
+                                  setState(() {});
+                                },
+                              ),
+                            ],
+                          ),
+                          SizedBox(
+                            width: 75,
+                            child: Text(
+                              '${Fmt.money(entry.total)} ${cur.symbol}',
+                              textAlign: TextAlign.end,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const Divider(height: 12),
+                    ],
+
+                    const SizedBox(height: 10),
+
+                    // طريقة الدفع أولاً — تحدد هل نحتاج حساب عميل.
+                    SegmentedButton<_PosPayment>(
+                      segments: _PosPayment.values
+                          .map(
+                            (p) =>
+                                ButtonSegment(value: p, label: Text(p.label)),
+                          )
+                          .toList(),
+                      selected: {_payment},
+                      onSelectionChanged: (set) {
+                        _cartCtl.setPayment(set.first.code);
+                        setSheetState(() {});
+                        setState(() {});
+                      },
+                    ),
+
+                    const SizedBox(height: 12),
+
+                    // اختيار العميل — يتوهج بالأحمر إذا كان الدفع آجلاً
+                    // بلا حساب محدد (تنبيه بصري لا نصي فقط).
+                    Container(
+                      decoration: accountMissing
+                          ? BoxDecoration(
+                              border: Border.all(
+                                  color: AppColors.dangerOf(context),
+                                  width: 2),
+                              borderRadius: BorderRadius.circular(10),
+                            )
+                          : null,
+                      padding:
+                          accountMissing ? const EdgeInsets.all(6) : null,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (accountMissing)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 6),
+                              child: Text(
+                                'يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل',
+                                style: TextStyle(
+                                  color: AppColors.dangerOf(context),
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 12.5,
+                                ),
+                              ),
+                            ),
+                          // آخر 3 مدينين — اختيار بنقرة واحدة في وضع الآجل.
+                          if (needsAccount)
+                            FutureBuilder<List<Account>>(
+                              future: _recentDebtors(customers),
+                              builder: (c, snap) {
+                                final recents = snap.data ?? const <Account>[];
+                                if (recents.isEmpty) {
+                                  return const SizedBox.shrink();
+                                }
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 8),
+                                  child: SizedBox(
+                                    height: 38,
+                                    child: ListView(
+                                      scrollDirection: Axis.horizontal,
+                                      children: [
+                                        for (final a in recents)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                                left: 6),
+                                            child: ChoiceChip(
+                                              label: Text(a.name,
+                                                  overflow:
+                                                      TextOverflow.ellipsis),
+                                              selected:
+                                                  _selectedCustomerId == a.id,
+                                              onSelected: (_) {
+                                                _cartCtl.setCustomer(a.id);
+                                                setSheetState(() {});
+                                                setState(() {});
+                                              },
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          DropdownButtonFormField<int?>(
+                            initialValue: _selectedCustomerId,
+                            decoration: const InputDecoration(
+                              isDense: true,
+                              labelText: 'العميل',
+                              prefixIcon: Icon(Icons.person_outline),
+                            ),
+                            items: [
+                              const DropdownMenuItem<int?>(
+                                value: null,
+                                child: Text('عميل نقدي (بدون حساب)'),
+                              ),
+                              for (final c in customers)
+                                DropdownMenuItem<int?>(
+                                  value: c.id,
+                                  child: Text(
+                                    '${c.name} (${c.phone.isNotEmpty ? c.phone : 'بدون هاتف'})',
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                            ],
+                            onChanged: (val) {
+                              _cartCtl.setCustomer(val);
+                              setSheetState(() {});
+                              setState(() {});
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    // تحذير تجاوز حد الائتمان — قبل السماح بالتأكيد.
+                    if (needsAccount && _selectedCustomerId != null)
+                      FutureBuilder<_CreditCheck?>(
+                        future: _checkCreditLimit(),
+                        builder: (c, snap) {
+                          final chk = snap.data;
+                          if (chk == null || !chk.exceeded) {
+                            return const SizedBox.shrink();
+                          }
+                          return Container(
+                            margin: const EdgeInsets.only(top: 10),
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: AppColors.dangerOf(context)
+                                  .withValues(alpha: .1),
+                              border: Border.all(
+                                  color: AppColors.dangerOf(context)),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              '🚨 هذه الفاتورة تتجاوز حد الائتمان للعميل!\n'
+                              'الحد: ${Fmt.money(chk.limit)} ${cur.symbol} — '
+                              'الدين الحالي: ${Fmt.money(chk.currentDebt)} ${cur.symbol}\n'
+                              'المتبقي من الحد: ${Fmt.money(chk.remaining)} ${cur.symbol}',
+                              style: TextStyle(
+                                color: AppColors.dangerOf(context),
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12.5,
+                                height: 1.6,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+
+                    if (_payment == _PosPayment.partial) ...[
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: _paidCtrl,
+                        autovalidateMode: AutovalidateMode.always,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        inputFormatters: const [ThousandsFormatter()],
+                        validator: (val) {
+                          final raw = ThousandsFormatter.strip(val ?? '').trim();
+                          final p = Fmt.parseAmount(raw);
+                          if (p == null || !p.isFinite) {
+                            return 'أدخل المبلغ المدفوع مقدماً (من 0.01 إلى ${Fmt.money((_netTotal - 0.01).clamp(0.01, double.infinity), 2)})';
+                          }
+                          if (p < 0) {
+                            return 'لا يُسمح بإدخال مبلغ مدفوع بالسالب';
+                          }
+                          if (p < 0.01) {
+                            return 'المبلغ المدفوع يجب أن يكون 0.01 على الأقل (أو اختر آجل كامل)';
+                          }
+                          if (p > (_netTotal - 0.01) || p >= _netTotal) {
+                            return 'المبلغ المدفوع يجب أن يكون أقل من الصافي (${Fmt.money((_netTotal - 0.01).clamp(0.01, double.infinity), 2)}) — أو اختر نقداً';
+                          }
+                          return null;
+                        },
+                        decoration: InputDecoration(
+                          labelText: 'المبلغ المدفوع مقدماً',
+                          prefixIcon: const Icon(Icons.payments_outlined),
+                          isDense: true,
+                          // أزرار الأصفار السريعة داخل الحقل.
+                          suffixIcon: _ZeroButtons(controller: _paidCtrl,
+                              onChanged: () {
+                            _cartCtl.setPaid(_paidCtrl.text);
+                            setSheetState(() {});
+                            setState(() {});
+                          }),
+                        ),
+                        onChanged: (v) {
+                          _cartCtl.setPaid(v);
+                          setSheetState(() {});
+                          setState(() {});
+                        },
+                      ),
+                      AmountWords(controller: _paidCtrl),
+                    ],
+
+                    const SizedBox(height: 12),
+
+                    // الخصم المزدوج: نسبة % أو مبلغ مقطوع — صلاحية الخصم مع تخطي المشرف (Supervisor Override)
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(12),
+                            onTap: _hasDiscountPermission
+                                ? null
+                                : () => _promptSupervisorOverride(setSheetState),
+                            child: IgnorePointer(
+                              ignoring: !_hasDiscountPermission,
+                              child: TextField(
+                                controller: _discountCtrl,
+                                enabled: _hasDiscountPermission,
+                                keyboardType:
+                                    const TextInputType.numberWithOptions(
+                                        decimal: true),
+                                inputFormatters: _draft.discountIsPercent
+                                    ? null
+                                    : const [ThousandsFormatter()],
+                                decoration: InputDecoration(
+                                  labelText: _draft.discountIsPercent
+                                      ? 'نسبة الخصم %'
+                                      : 'مبلغ الخصم',
+                                  prefixIcon:
+                                      const Icon(Icons.discount_outlined),
+                                  suffixIcon: !_hasDiscountPermission
+                                      ? Tooltip(
+                                          message:
+                                              'طلب إذن المشرف لتطبيق الخصم',
+                                          child: IconButton(
+                                            icon: const Icon(
+                                              Icons.lock_outline_rounded,
+                                              color: Colors.amber,
+                                            ),
+                                            onPressed: () =>
+                                                _promptSupervisorOverride(
+                                                    setSheetState),
+                                          ),
+                                        )
+                                      : (_supervisorOverride
+                                          ? const Icon(Icons.verified,
+                                              color: Colors.green)
+                                          : null),
+                                  helperText: !_hasDiscountPermission
+                                      ? 'الخصم مقفل — انقر لطلب إذن المشرف برمز PIN'
+                                      : (_supervisorOverride
+                                          ? 'معتمد من المشرف ✅'
+                                          : null),
+                                  helperStyle: !_hasDiscountPermission
+                                      ? const TextStyle(
+                                          color: Colors.amber, fontSize: 11)
+                                      : const TextStyle(
+                                          color: Colors.green, fontSize: 11),
+                                  isDense: true,
+                                  filled: !_hasDiscountPermission,
+                                  fillColor: !_hasDiscountPermission
+                                      ? (Theme.of(context).brightness ==
+                                              Brightness.dark
+                                          ? Colors.white10
+                                          : Colors.black.withValues(alpha: .04))
+                                      : null,
+                                ),
+                                onChanged: (v) {
+                                  _cartCtl.setDiscount(v);
+                                  setSheetState(() {});
+                                  setState(() {});
+                                },
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Opacity(
+                          opacity: _hasDiscountPermission ? 1.0 : 0.5,
+                          child: IgnorePointer(
+                            ignoring: !_hasDiscountPermission,
+                            child: SegmentedButton<bool>(
+                              style: const ButtonStyle(
+                                visualDensity: VisualDensity.compact,
+                              ),
+                              segments: const [
+                                ButtonSegment(value: false, label: Text('مبلغ')),
+                                ButtonSegment(value: true, label: Text('٪')),
+                              ],
+                              selected: {_draft.discountIsPercent},
+                              onSelectionChanged: (set) {
+                                _cartCtl.setDiscountIsPercent(set.first);
+                                setSheetState(() {});
+                                setState(() {});
+                              },
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 10),
+                  ],
+                ),
+              ),
+            ),
+            // الملخص المالي وزر التأكيد مثبتان أسفل النافذة وفوق الكيبورد دائماً
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: AppColors.primarySoftOf(context),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('المجموع الفرعي:',
+                          style: TextStyle(fontSize: 12.5)),
+                      Text('${Fmt.money(_subtotal)} ${cur.symbol}',
+                          style: const TextStyle(fontSize: 12.5)),
+                    ],
+                  ),
+                  if (_discount > 0) ...[
+                    const SizedBox(height: 2),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          _draft.discountIsPercent
+                              ? 'الخصم (${_draft.discountText.trim()}٪):'
+                              : 'الخصم:',
+                          style: const TextStyle(
+                              color: AppColors.red, fontSize: 12.5),
+                        ),
+                        Text(
+                          '-${Fmt.money(_discount)} ${cur.symbol}',
+                          style: const TextStyle(
+                              color: AppColors.red, fontSize: 12.5),
+                        ),
+                      ],
+                    ),
+                  ],
+                  const Divider(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'الصافي الإجمالي:',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                      ),
+                      Text(
+                        '${Fmt.money(_netTotal)} ${cur.symbol}',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w900,
+                          fontSize: 17,
+                          color: AppColors.primaryOf(context),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (_payment == _PosPayment.partial) ...[
+                    const Divider(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          'المبلغ المدفوع مقدماً:',
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.green,
+                          ),
+                        ),
+                        Text(
+                          '${Fmt.money(paidNow, cur.decimal)} ${cur.symbol}',
+                          style: const TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w800,
+                            color: AppColors.green,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          'المبلغ المتبقي (آجل):',
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.red,
+                          ),
+                        ),
+                        Text(
+                          '${Fmt.money(remainingNow, cur.decimal)} ${cur.symbol}',
+                          style: const TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w800,
+                            color: AppColors.red,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            // زر تأكيد عريض مع قفل فوري ضد النقر المزدوج وحظر عند غياب العميل أو عدم صحة الدفعة الجزئية.
+            SizedBox(
+              width: double.infinity,
+              height: 46,
+              child: FilledButton.icon(
+                onPressed: (_saving || accountMissing || partialInvalid)
+                    ? null
+                    : () => _executeSale(ctx),
+                icon: _saving
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.check_circle_outline, size: 20),
+                label: Text(
+                  _saving ? 'جارٍ الحفظ…' : 'تأكيد وإصدار الفاتورة',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    },
+  ),
+),
+),
+);
+      },
+    );
+  }
+
+  /// أحدث 3 عملاء لهم مبيعات آجلة — للاختيار بنقرة واحدة بدون مسح جدول العمليات كاملاً.
+  Future<List<Account>> _recentDebtors(List<Account> customers) async {
+    try {
+      final repo = ref.read(repoProvider);
+      final ids = await repo.recentDebtorAccountIds(limit: 3);
+      final out = <Account>[];
+      for (final id in ids) {
+        final a = customers.where((c) => c.id == id).firstOrNull;
+        if (a != null) out.add(a);
+        if (out.length >= 3) break;
+      }
+      return out;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// فحص حد الائتمان للعميل المحدد مقابل صافي الفاتورة الحالية.
+  Future<_CreditCheck?> _checkCreditLimit() async {
+    final id = _selectedCustomerId;
+    if (id == null) return null;
+    try {
+      final repo = ref.read(repoProvider);
+      final acc = await repo.account(id);
+      if (acc == null || acc.creditLimit == null || acc.creditLimit! <= 0) {
+        return null;
+      }
+      final balance = await repo.balanceOf(acc);
+      // الرصيد الموجب = دين على العميل. الجزئي يضيف المتبقي فقط.
+      final debt = balance > 0 ? balance : 0.0;
+      var added = _netTotal;
+      if (_payment == _PosPayment.partial) {
+        final paid =
+            Fmt.parseAmount(ThousandsFormatter.strip(_paidCtrl.text)) ?? 0.0;
+        added = (_netTotal - paid).clamp(0.0, double.infinity);
+      }
+      final limit = acc.creditLimit!;
+      return _CreditCheck(
+        limit: limit,
+        currentDebt: debt,
+        exceeded: debt + added > limit,
+        remaining: (limit - debt).clamp(0.0, double.infinity),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// ينفّذ البيع. [sheetCtx] سياق درج الدفع ليُغلق بعد النجاح —
+  /// null عند التنفيذ المباشر (اختصارات سطح المكتب F1/F2) بلا درج.
+  Future<void> _executeSale(BuildContext? sheetCtx) async {
+    if (_cart.isEmpty || _saving) return;
+
+    final repo = ref.read(repoProvider);
+    if (_payment == _PosPayment.credit || _payment == _PosPayment.partial) {
+      if (_selectedCustomerId == null) {
+        Sfx.reject();
+        showSnack(
+          context,
+          'يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل',
+          error: true,
+          silent: true,
+        );
+        return;
+      }
+      final acc = await repo.account(_selectedCustomerId!);
+      final accName = acc?.name.trim() ?? '';
+      if (acc == null || accName == 'عميل نقدي' || accName == 'عميل نقدي عام') {
+        Sfx.reject();
+        if (!mounted) return;
+        showSnack(
+          context,
+          'يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل',
+          error: true,
+          silent: true,
+        );
+        return;
+      }
+      // (منع صارم) تجاوز حد الائتمان يوقف إتمام الفاتورة الآجلة/الجزئية —
+      // كان مجرد تحذير بصري في درج الدفع لا يمنع التنفيذ إطلاقًا.
+      final creditLimit = acc.creditLimit ?? 0;
+      if (creditLimit > 0) {
+        final balance = await repo.balanceOf(acc);
+        final debtNow = balance > 0 ? balance : 0.0;
+        var added = _netTotal;
+        if (_payment == _PosPayment.partial) {
+          final paidNow = Fmt.parseAmount(
+              ThousandsFormatter.strip(_paidCtrl.text));
+          final paidVal = paidNow ?? 0.0;
+          added = (_netTotal - paidVal).clamp(0.0, double.infinity);
+        }
+        if (debtNow + added > creditLimit) {
+          Sfx.reject();
+          if (!mounted) return;
+          showSnack(
+            context,
+            '🚨 تجاوز حد الائتمان للعميل «${acc.name}»: الحد ${Fmt.money(creditLimit)} — '
+            'الدين الحالي ${Fmt.money(debtNow)} — المتاح من الحد '
+            '${Fmt.money((creditLimit - debtNow).clamp(0.0, double.infinity))}. '
+            'عدّل حد الائتمان أو اختر الدفع النقدي.',
+            error: true,
+            silent: true,
+          );
+          return;
+        }
+      }
+      if (_payment == _PosPayment.partial) {
+        final paidRaw =
+            Fmt.parseAmount(ThousandsFormatter.strip(_paidCtrl.text));
+        if (paidRaw == null || !paidRaw.isFinite || paidRaw < 0) {
+          Sfx.reject();
+          if (!mounted) return;
+          showSnack(
+            context,
+            'لا يمكن إدخال مبلغ مدفوع سالب أو غير صالح في الدفع الجزئي',
+            error: true,
+            silent: true,
+          );
+          return;
+        }
+        if (paidRaw < 0.01) {
+          Sfx.reject();
+          if (!mounted) return;
+          showSnack(
+            context,
+            'في الدفع الجزئي يجب أن يكون المبلغ المدفوع 0.01 على الأقل (أو اختر البيع الآجل الكامل)',
+            error: true,
+            silent: true,
+          );
+          return;
+        }
+        if (paidRaw > (_netTotal - 0.01) || paidRaw >= _netTotal) {
+          Sfx.reject();
+          if (!mounted) return;
+          showSnack(
+            context,
+            'المبلغ المدفوع يساوي أو يتجاوز إجمالي الفاتورة — اختر الدفع النقدي الكامل أو أدخل مبلغاً أقل من الإجمالي',
+            error: true,
+            silent: true,
+          );
+          return;
+        }
+      }
+    }
+
+    setState(() => _saving = true);
+
+    try {
+      final currencies = await repo.currencies();
+      final cur = currencies.first;
+      // رقم فاتورة تسلسلي رقمي بحت (بدون أحرف)
+      final refNum = await repo.nextTxNumber();
+
+      // 1. تجهيز أسطر الفاتورة
+      final lines = _cart.values.map((e) {
+        return InvoiceLine(
+          itemId: e.item.id,
+          name: e.item.name,
+          unit: e.item.unit,
+          quantity: e.quantity,
+          unitPrice: e.unitPrice,
+          total: e.total,
+        );
+      }).toList();
+
+      // 2. حفظ الفاتورة وخصم المخزون في معاملة ذرية موحدة (Single DB Transaction)
+      // إذا فشل خصم أي صنف (بسبب نفاد الكمية أو غيره)، يتم التراجع عن المعاملة بالكامل (Rollback) تلقائياً.
+      late final int txId;
+      final now = DateTime.now();
+      final user = ref.read(currentUserProvider).valueOrNull;
+      final int? creatorId = user?.id;
+      final cashierName = user?.name.trim().isNotEmpty == true ? user!.name : 'الكاشير';
+      final discountNote = _discount > 0
+          ? '\nالخصم: ${Fmt.money(_discount)} ${cur.symbol}'
+          : '';
+      final supNote = _supervisorOverride
+          ? '\n[تم اعتماد الخصم بواسطة المشرف]'
+          : '';
+      final selectedAcc = _selectedCustomerId == null
+          ? null
+          : await repo.account(_selectedCustomerId!);
+      final selectedAccKind = selectedAcc?.kind ?? AccountKind.customer;
+
+      if (_payment == _PosPayment.cash) {
+        // مبيعات نقدية: إيراد بصفر أثر على مديونية العميل (فاتورة نقدية مدفوعة)
+        final tx = Tx(
+          accountId: _selectedCustomerId,
+          accountKind: selectedAccKind,
+          amount: _netTotal,
+          currency: cur.code,
+          type: OpType.revenue,
+          date: now,
+          description: 'فاتورة نقدية مدفوعة رقم #$refNum',
+          reference: refNum,
+          notes:
+              'طريقة الدفع: مدفوع نقداً\nالمبلغ المدفوع: ${Fmt.money(_netTotal)} ${cur.symbol}\nالمتبقي: 0.00 ر.ي$discountNote$supNote',
+          createdByUserId: creatorId,
+          cashierName: cashierName,
+          createdAt: now,
+          updatedAt: now,
+        );
+        txId = await repo.saveTx(tx, items: lines, deductStock: true);
+      } else if (_payment == _PosPayment.credit) {
+        // مبيعات آجلة: قيد مدين على العميل (عليه)
+        final tx = Tx(
+          accountId: _selectedCustomerId!,
+          accountKind: selectedAccKind,
+          amount: _netTotal,
+          currency: cur.code,
+          type: OpType.debit,
+          date: now,
+          description: 'فاتورة مبيعات آجلة رقم #$refNum',
+          reference: refNum,
+          notes:
+              'طريقة الدفع: آجل (على الحساب)\nالمبلغ المدفوع: 0.00 ${cur.symbol}\nالمبلغ المتبقي: ${Fmt.money(_netTotal)} ${cur.symbol}$discountNote$supNote',
+          createdByUserId: creatorId,
+          cashierName: cashierName,
+          createdAt: now,
+          updatedAt: now,
+        );
+        txId = await repo.saveTx(tx, items: lines, deductStock: true);
+      } else {
+        // مبيعات جزئية: قيد بالباقي + قبض بالمقدم + خصم المخزون في معاملة ذرية واحدة
+        final paid =
+            Fmt.parseAmount(ThousandsFormatter.strip(_paidCtrl.text)) ?? 0.0;
+        final remainder = (_netTotal - paid).clamp(0.0, double.infinity);
+
+        final debitTx = Tx(
+          accountId: _selectedCustomerId!,
+          accountKind: selectedAccKind,
+          amount: _netTotal,
+          currency: cur.code,
+          type: OpType.debit,
+          date: now,
+          description:
+              'فاتورة مبيعات جزئية رقم #$refNum (إجمالي ${Fmt.money(_netTotal)} ${cur.symbol} — مدفوع ${Fmt.money(paid)} ${cur.symbol} — متبقي ${Fmt.money(remainder)} ${cur.symbol})',
+          reference: refNum,
+          notes:
+              'طريقة الدفع: جزئي (مقدم + آجل)\nالمبلغ المدفوع: ${Fmt.money(paid)} ${cur.symbol}\nالمبلغ المتبقي: ${Fmt.money(remainder)} ${cur.symbol}$discountNote$supNote',
+          createdByUserId: creatorId,
+          cashierName: cashierName,
+          createdAt: now,
+          updatedAt: now,
+        );
+
+        final payTx = Tx(
+          accountId: _selectedCustomerId!,
+          accountKind: selectedAccKind,
+          amount: paid,
+          currency: cur.code,
+          type: OpType.inflow,
+          date: now,
+          description:
+              'دفعة مقدمة من فاتورة #$refNum (المتبقي: ${Fmt.money(remainder)} ${cur.symbol})',
+          reference: '',
+          createdByUserId: creatorId,
+          cashierName: cashierName,
+          createdAt: now,
+          updatedAt: now,
+        );
+
+        txId = await repo.saveTx(
+          debitTx,
+          items: lines,
+          deductStock: true,
+          companionTx: payTx,
+        );
+      }
+
+      // تحديث البيانات
+      bump(ref);
+      if (mounted && (await repo.settings())['warnLowStock'] != '0') {
+        final low = <String>[];
+        for (final line in lines) {
+          if (line.itemId == null) continue;
+          final it = await repo.item(line.itemId!);
+          if (it != null &&
+              it.minQuantity > 0 &&
+              it.quantity <= it.minQuantity) {
+            low.add(
+              '${it.name} (${it.quantity.toStringAsFixed(0)} ${it.unit})',
+            );
+          }
+        }
+        if (low.isNotEmpty && mounted) {
+          Sfx.warning();
+          showSnack(
+            context,
+            '⚠️ أصناف وصلت حد إعادة الطلب:\n${low.join('، ')}',
+            error: true,
+            silent: true,
+          );
+        }
+      }
+
+      if (mounted) {
+        final isPartialSale = _payment == _PosPayment.partial;
+        final paidAmt = isPartialSale
+            ? (Fmt.parseAmount(ThousandsFormatter.strip(_paidCtrl.text)) ?? 0.0)
+            : (_payment == _PosPayment.cash ? _netTotal : 0.0);
+        final remAmt = (_netTotal - paidAmt).clamp(0.0, double.infinity);
+        final totAmt = _netTotal;
+        final sym = cur.symbol;
+        if (sheetCtx != null && sheetCtx.mounted) Navigator.pop(sheetCtx);
+        Sfx.opCreated(); // صوت الدفع + اهتزاز طويل (1.5 ث) عند إنشاء العملية.
+        _showSuccessDialog(
+          txId,
+          refNum,
+          lines,
+          totalAmount: totAmt,
+          paidAmount: isPartialSale ? paidAmt : null,
+          remainingAmount: isPartialSale ? remAmt : null,
+          currencySymbol: sym,
+        );
+        _clearCart();
+      }
+    } catch (e) {
+      if (mounted) {
+        Sfx.error();
+        final msg = e is StateError ? e.message : 'تعذّر إتمام الفاتورة: $e';
+        showSnack(
+          context,
+          msg,
+          error: true,
+          silent: true,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  void _showSuccessDialog(
+    int txId,
+    String refNum,
+    List<InvoiceLine> lines, {
+    double? totalAmount,
+    double? paidAmount,
+    double? remainingAmount,
+    String currencySymbol = '',
+  }) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.check_circle, color: AppColors.green),
+              SizedBox(width: 8),
+              Text('تمت العملية بنجاح ✅'),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('رقم الفاتورة: $refNum'),
+              Text('عدد الأصناف: ${lines.length}'),
+              if (totalAmount != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  'إجمالي الفاتورة: ${Fmt.money(totalAmount)} $currencySymbol',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ],
+              if (paidAmount != null && remainingAmount != null) ...[
+                const SizedBox(height: 6),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: Colors.orange.withValues(alpha: 0.4),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '✅ المبلغ المدفوع: ${Fmt.money(paidAmount)} $currencySymbol',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          color: AppColors.green,
+                          fontSize: 13,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '🔴 المبلغ المتبقي (آجل): ${Fmt.money(remainingAmount)} $currencySymbol',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          color: AppColors.red,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              const Text(
+                'يمكنك طباعة الإيصال الحراري أو مشاركة الفاتورة عبر واتساب مباشرة:',
+              ),
+            ],
+          ),
+          actions: [
+            OutlinedButton.icon(
+              icon: const Icon(Icons.print_outlined),
+              label: const Text('طباعة إيصال حراري (80mm)'),
+              onPressed: () async {
+                final repo = ref.read(repoProvider);
+                final tx = await repo.transactionById(txId);
+                if (tx == null) return;
+                final acc = tx.accountId == null
+                    ? null
+                    : await repo.account(tx.accountId!);
+                final stamp = await featureNeedsStamp(
+                    ref, Feature.reportsExport);
+                if (context.mounted) {
+                  await _printThermalInvoice(tx, acc, lines, stamp: stamp);
+                }
+              },
+            ),
+            FilledButton.icon(
+              icon: const Icon(Icons.send_outlined),
+              label: const Text('إرسال واتساب'),
+              onPressed: () async {
+                final repo = ref.read(repoProvider);
+                final tx = await repo.transactionById(txId);
+                if (!mounted || tx == null) return;
+                final acc = tx.accountId == null
+                    ? null
+                    : await repo.account(tx.accountId!);
+                if (!mounted) return;
+                if (acc == null || acc.phone.isEmpty) {
+                  showSnack(
+                    context,
+                    'لا يوجد رقم هاتف مسجل للعميل',
+                    error: true,
+                  );
+                  return;
+                }
+                await TxShare.sendNow(context, ref, tx: tx, account: acc);
+              },
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('فاتورة جديدة'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _printThermalInvoice(
+    Tx tx,
+    Account? account,
+    List<InvoiceLine> lines, {
+    bool stamp = false,
+  }) async {
+    final repo = ref.read(repoProvider);
+    final st = await repo.settings();
+    final orgName = (st['businessName'] ?? 'المتجر').trim();
+    final orgPhone = (st['phone'] ?? '').trim();
+    final footer = (st['voucherFooter'] ?? 'شكراً لزيارتكم!').trim();
+    final logoPath = (st['logo'] ??
+            st['logoPath'] ??
+            st['account.photoPath'] ??
+            '')
+        .trim();
+    final logoBase64 =
+        (st['org.icon.b64'] ?? st['logoBase64'] ?? '').trim();
+
+    // (2026-09-24) بناء الفاتورة انتقل إلى thermal_invoice_doc.dart: المستند
+    // صار يحمل الخط العربي المدمج (Cairo) واتجاه RTL، بدل مستند بلا ثيم
+    // الذي كان يُخرج الحروف العربية مربعات «▯» في المعاينة والطباعة.
+    final bytes = await buildThermalInvoicePdf(
+      tx: tx,
+      account: account,
+      lines: lines,
+      orgName: orgName,
+      orgPhone: orgPhone,
+      footer: footer,
+      logoPath: logoPath,
+      logoBase64: logoBase64,
+      stamp: stamp,
+    );
+
+    await Printing.layoutPdf(
+      onLayout: (_) async => bytes,
+      name: 'invoice-${tx.reference}.pdf',
+    );
+  }
+}
+/// تبويب سجل فواتير المبيعات
+class _PosHistoryTab extends ConsumerWidget {
+  const _PosHistoryTab();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final txData = ref.watch(txPageProvider);
+
+    return txData.when(
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (e, _) => EmptyState(
+        icon: Icons.error_outline,
+        title: 'تعذّر تحميل سجل المبيعات',
+        message: '$e',
+      ),
+      data: (page) {
+        // تصفية فواتير المبيعات فقط (وصفها فاتورة، نستثني الدفعات المقدمة)
+        final posTxs = page.items
+            .where(
+              (t) =>
+                  (t.description.contains('فاتورة') &&
+                      !t.description.startsWith('دفعة مقدمة')) ||
+                  t.type == OpType.revenue,
+            )
+            .toList();
+
+        if (posTxs.isEmpty) {
+          return const EmptyState(
+            icon: Icons.receipt_long_outlined,
+            title: 'لا توجد فواتير مبيعات مسجلة',
+            message: 'قم بإجراء عمليات بيع من تبويب نقطة البيع وستظهر هنا.',
+          );
+        }
+
+        return ListView.separated(
+          padding: const EdgeInsets.all(12),
+          itemCount: posTxs.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 8),
+          itemBuilder: (context, i) {
+            final tx = posTxs[i];
+            final account = page.accounts[tx.accountId];
+            final isCash = tx.type == OpType.revenue;
+            final isPartial = !isCash && tx.notes.contains('طريقة الدفع: جزئي');
+            final customerName = account?.name.trim().isNotEmpty == true
+                ? account!.name
+                : (isCash ? 'عميل نقدي' : 'عميل مسجل');
+            final customerPhone = account?.phone.trim().isNotEmpty == true
+                ? ' • ${account!.phone}'
+                : '';
+            final badgeText = isCash
+                ? 'مدفوع نقداً'
+                : (isPartial ? 'جزئي (عليه)' : 'آجل (عليه)');
+            final badgeColor = isCash
+                ? AppColors.greenOf(context)
+                : (isPartial ? Colors.deepOrange : AppColors.dangerOf(context));
+
+            return Card(
+              child: ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: badgeColor.withValues(alpha: 0.14),
+                  child: Icon(
+                    isCash
+                        ? Icons.payments_outlined
+                        : (isPartial
+                            ? Icons.pie_chart_outline
+                            : Icons.receipt_long_outlined),
+                    color: badgeColor,
+                  ),
+                ),
+                title: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        tx.reference.isNotEmpty
+                            ? 'فاتورة #${tx.reference}'
+                            : tx.description,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: badgeColor.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                            color: badgeColor.withValues(alpha: 0.35)),
+                      ),
+                      child: Text(
+                        badgeText,
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w800,
+                          color: badgeColor,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 2),
+                    Text(
+                      '$customerName$customerPhone • ${Fmt.date(tx.date)}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.text2Of(context),
+                      ),
+                    ),
+                    if (tx.notes.trim().isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          tx.notes
+                              .split('\n')
+                              .where((l) =>
+                                  l.contains('المبلغ المدفوع:') ||
+                                  l.contains('المبلغ المتبقي:') ||
+                                  l.contains('المتبقي:'))
+                              .join(' | '),
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w700,
+                            color: isCash
+                                ? AppColors.greenOf(context)
+                                : Colors.deepOrange,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                trailing: Text(
+                  '${Fmt.money(tx.amount)} ${tx.currency}',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: 14,
+                    color: AppColors.primaryOf(context),
+                  ),
+                ),
+                onTap: () => showTxDetails(
+                  context,
+                  ref,
+                  tx: tx,
+                  account: account,
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+/// نتيجة فحص حد الائتمان للعميل قبل تأكيد فاتورة آجلة.
+class _CreditCheck {
+  final double limit;
+  final double currentDebt;
+  final double remaining;
+  final bool exceeded;
+  const _CreditCheck({
+    required this.limit,
+    required this.currentDebt,
+    required this.remaining,
+    required this.exceeded,
+  });
+}
+
+/// زرا «+00» و«+000» المدمجان في حقول المبالغ لتسريع الإدخال.
+class _ZeroButtons extends StatelessWidget {
+  final TextEditingController controller;
+  final VoidCallback onChanged;
+  const _ZeroButtons({required this.controller, required this.onChanged});
+
+  void _append(String zeros) {
+    final raw = ThousandsFormatter.strip(controller.text);
+    if (raw.isEmpty || raw == '0' || raw.contains('.')) return;
+    controller.value = const ThousandsFormatter().formatEditUpdate(
+      controller.value,
+      TextEditingValue(text: '$raw$zeros'),
+    );
+    Sfx.click();
+    onChanged();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        TextButton(
+          style: TextButton.styleFrom(
+            minimumSize: const Size(38, 32),
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+          ),
+          onPressed: () => _append('00'),
+          child: const Text('+00',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
+        ),
+        TextButton(
+          style: TextButton.styleFrom(
+            minimumSize: const Size(38, 32),
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+          ),
+          onPressed: () => _append('000'),
+          child: const Text('+000',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
+        ),
+      ],
+    );
+  }
+}

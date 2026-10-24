@@ -1,0 +1,173 @@
+name: Build License Admin APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Admin APK (arm64 + armv7)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: admin_app
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.x'
+          channel: stable
+          cache: true
+
+      - name: Decode release keystore & create signing config
+        env:
+          ADMIN_KEYSTORE_B64: ${{ secrets.ADMIN_KEYSTORE_B64 }}
+          ADMIN_KEYSTORE_PASSWORD: ${{ secrets.ADMIN_KEYSTORE_PASSWORD }}
+          ADMIN_KEY_PASSWORD: ${{ secrets.ADMIN_KEY_PASSWORD }}
+          ADMIN_KEY_ALIAS: ${{ secrets.ADMIN_KEY_ALIAS }}
+        run: |
+          DEFAULT_B64="MIIKugIBAzCCCnAGCSqGSIb3DQEHAaCCCmEEggpdMIIKWTCCBKIGCSqGSIb3DQEHBqCCBJMwggSPAgEAMIIEiAYJKoZIhvcNAQcBMFcGCSqGSIb3DQEFDTBKMCkGCSqGSIb3DQEFDDAcBAg88dkwr4+4hAICCAAwDAYIKoZIhvcNAgkFADAdBglghkgBZQMEASoEEF7D3pwEfFnjvetN9bhCYtWAggQgGJhHS1+MHEIA4iH3f+fyNcwgjFdEpEgSpbSL8PswMPaPI5+Rguh2JfZtnoig775Y5MVJ4E8Rk7oApguKf/emUaA2fT6YlUv45oItN/QK4inC9s/0sOVqpmXwtKa2CnRKoIOC2QtVP82bMfmkFJitnKzg/aoYJD9l53gdZizXb5YSxgOL6qT9LmrEsrnK3A2OtwGqK75AmyfX6/L/PfruAbZ+riMwW9YC+BhcdQ7MiQdI0yKKcH6L97Fize5q6SvN/huwiZq14MCSofOx97o8+XwtfRPL0PFdy6RPRyTm3D2f7Nuz3ubOnH7+uyw4VwU/GpwRIKUjAzKXtrfNd+AE1mZSyMTz08YjYWF4zGy9OLOuP3xIO5kOgO07X/PVltKasmuO9jjtMx62dumGbUAqrn2MCPh0cyjiUhH5SClNFsB55vYAphMcqHPPqA+4BqQD9m/YtDdOHu/Iyl6dUYFI6Z/iiQTdJwWr8Rj0k17UxJgLo4W0vltApa5lsLN17z2HoLwXT/3FwjisFQupmKmBclG9HxrPHWkeMM2Z7Mxw0ofixJ1pLTdCxn0JP/equERsUh0USb1wJdNPlMhYnn5EE9oQL943r5kPxdyNJ8Q93N/E43wi1k5E+jbFSmvgWqM9Y5uDL/ot2IeoiLLH3+U38Q8gPsJ52OA+tbmX149u+8GbYs0JI/5saSTBE/ZhKdMrPEg25jpup+qp8uAlI4pe1UexSLwwBIV/Zr5p1jklQX6T3LZDDw7rm2D/JwD0Jgn5itficHkwfVLa1HQog7mgoEghZaGK5FFRKcvQaulDUoJdqPvijaIuoB3KWS5g4YbUT04hlAiyYHMQaJe0slU9Wkx2+/yQCm8lv7BYYhxz2DvIi3I+M3KrG5lRhDvFC7ARoI+LNx5Ecv8qD+5H0LUaDamV8CqB80QQccG2k+NUNKmGi6XxaS3vKB5HgHYtmPsZFDAlaFTfKXxjotxEzuC7CLhIV2uxTaMmgoU8xuACMAgVJG9SlmJpJHRxeyg9YKqRxDn1qHd07YiDBmAyCUMWXlXqQx+JTY0iSvyBlyjojueeUPqV/KSQT4tMWI4WNoE+LmFOhMRf7ah98dIuoOKPTO/3go7+a4aRaW7RvEGIwmfXJROrv29Znkt5laRykJOXsG6kwLNET54qhc0kbHqu/rVqZ70R46K2VmDI2HNsNn4O8JveHSVfKAGzACEq8ehpyq80AWFfOeaIwD3Vs+z/9DCloVnWrL7B9fEDEy7kE1WgWwV/EPjt6um3sq/1r0Qf16+kfey7tzhwtpJdAXNMkjSOcL4V1tiMJxGmjq/0eCoUQ+Y+8YqLCGVY7mtDv131acez/WQqF3f9YitaTq6NiGoziWbDgdJsmPF/x6LFyclrsJJceNmFalPGmZTBoU2KMIIFrwYJKoZIhvcNAQcBoIIFoASCBZwwggWYMIIFlAYLKoZIhvcNAQwKAQKgggUxMIIFLTBXBgkqhkiG9w0BBQ0wSjApBgkqhkiG9w0BBQwwHAQI25iBAv+QQJsCAggAMAwGCCqGSIb3DQIJBQAwHQYJYIZIAWUDBAEqBBCAOg5/CPgdHYxgIvFB/sg2BIIE0FAnnO0i2KKQ3jisCqt3Neh17KgkCBtBL8KXq/AcLBejVTKQBdGG3GdDl/bYYLSUeMzHcD4ROK2320fTZF7IrS8cNDz/XCaPZR08eOUE2Iing4uIWz92PhRQrTQlzAsq+Q2gmZlbCuqc4jJbdZULo9hHqUoOgYJBDnDAcD9HTIJLFoawvY2/kYX+bszo9Q1CT62gptbiQh4+rqN1ZW7MyWuSd90EpWjkznBXU9iCLqytMxmSzx35nZ+JAlepzoG2gjWyFjBYDawlFlvDV8fZVHOep/93SeAt025KMCx0kOWhINv+ImTzmYyi/LspNXfMQtNHnzocA/VxMUAUAyMYs2ag8WK5ySmPFdCMym/kDHXXDNFOyMpg3IUUt6uB1AZIE8vpNtHwFUCFy++XP9G8pJYBXtZ8ArB1ePjXZakOUHJq2l2hO66PPhtuBtLySZJ0ABRi7ySdgvDkSFk8IQ2Yeb7FA7pATt/0tYF04AYe5aRTZpSOLbjaJDuFOA9wRDCn65dFB/oFSZYz20JImPJuO567Nbmr+lBnPQYFHSa/JZibExc6dTgMOM5IBau212Jwi3mG39vhVqvUunBO60VdBwQ6k/3lWB1c395NX2hIpuchVbcoTvjL3keUkae/liBiZPtF8uHFsIqEYp7g/GRdlfr/LbLqMM5eCQV418IZY8tIVhxsr0P6ghjskQEbyKdCib9SpeGDY3gJJQT4Zf8DIiRP1amCyw88jbz+gZraJEixwMkuxh9lfTI4shqtaukM7bMbcB3pnv52B8V9fgVLKMOjnvoiyFkKlgYsfjyADslNhXysd1Ye1NWt+JLbMvno9oFqQZ8BPFZhItz5FfXIfBlOHRtcr+SkRkPrIgOt2gIw/1uS3q0giWYNU5qNzohMYnvWu8Knn+TZ4oP7dncDBNKcn5+VmVJf2gfCYdU6LZt3cXG0P7MYP99Ohjfu3rfuTDOC2JgiivU42yEmFuvntQcf1AiTKmCi7FkYarfq+VL9hvruhQByDf0w3VpcrUfgJJXXClSey+dooAI5QahWCnNaY8Klw1qTxoMLCYvtuCA9mL5JR2eUIhi1GheJJHtvSIQ+DrI45/Rn1pR9WQA4B35q1S8lx3ijGDa+crC/Dp5KUPD9v/lB/NSJoHCVN/zc433fQMdosspXs0dZ/Z46uJJfp4W28UPesgUGA8kmg68dXgr0DwMquMjgiCnH+rHsmmPMbZA7Ahi8H2qOxXpeKO5IagVbRgaVWnBMMK42wsAE0PAXo61MMKJqoSA+xfqvqmJKGe8jZB/O76egJDQdx1CF0JrtFJzLs398wj/AzmdQEh+b2JfR3BFY5ghF9iBkVCw4KVZvg9C2Q7hScY79pk9WzJ7/GqBbuXOAFIQGWCYSykwX56xlj4iBL0t8PMH0Z8hfXtvOhQEKrGuPGxMTGmYEOt+IS2Ht7fNxN17t4+Af/kEIk1BXGm9OgVuowoHS5j4u0h6jCaBrflubiKf5toppsL3BWNtcRAX4lD/SQb7/8ovTAdwgk5UqPz+RvyKHl5AVMIsVLJAJdPh/7nlroPiefAH4M40UVspN6SV59ALxHpXR3ofHd8Ya0mjBT2R12yKM5pbSv5bNxZ6hPnbtSHgyjvr5kJIozAK/G5u1alptMVAwIwYJKoZIhvcNAQkVMRYEFKrdNg3l1BWDmRHpmX583SPaHx0OMCkGCSqGSIb3DQEJFDEcHhoAbgBlAHgAbwByAGEALQB1AHAAbABvAGEAZDBBMDEwDQYJYIZIAWUDBAIBBQAEIKhr+stFDO0BBPHugIHKDlP6LsCHwloQyCaRNvNWiIHXBAg4Q+7to3hNAQICCAA="
+          B64="${ADMIN_KEYSTORE_B64:-$DEFAULT_B64}"
+          SPASS="${ADMIN_KEYSTORE_PASSWORD:-nexora2026}"
+          KPASS="${ADMIN_KEY_PASSWORD:-nexora2026}"
+          KALIAS="${ADMIN_KEY_ALIAS:-nexora-upload}"
+          echo "$B64" | base64 -d > android/app/license-admin.jks
+          cat > android/key.properties <<EOF
+          storeFile=license-admin.jks
+          storePassword=$SPASS
+          keyPassword=$KPASS
+          keyAlias=$KALIAS
+          storeType=PKCS12
+          EOF
+          # تحقق مبكر: إن تعذّر فتح المفتاح نفشل هنا برسالة واضحة بدل فشل
+          # غامض داخل Gradle («Given final block not properly padded»).
+          keytool -list -v -keystore android/app/license-admin.jks \
+            -storepass "$SPASS" -alias "$KALIAS" \
+            | grep -E "Owner|Entry type"
+          echo "تم تجهيز مفتاح التوقيع الثابت"
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Ensure admin_updater.dart matches pubspec.yaml
+        run: |
+          VER=$(grep -E '^version:' pubspec.yaml | awk '{print $2}')
+          NAME="${VER%%+*}"; BUILD="${VER##*+}"
+          IFS='.' read -r MAJ MIN PAT <<< "$NAME"
+          sed -i "s/const String kAdminAppVersion = .*/const String kAdminAppVersion = '$NAME';/" lib/admin_updater.dart
+          sed -i "s/const int kAdminAppBuild = .*/const int kAdminAppBuild = $BUILD;/" lib/admin_updater.dart
+          sed -i "s/AdminSemVer([0-9]*, [0-9]*, [0-9]*, kAdminAppBuild)/AdminSemVer($MAJ, $MIN, $PAT, kAdminAppBuild)/" lib/admin_updater.dart
+          echo "Verified admin_updater.dart matches $NAME+$BUILD"
+
+      - name: Static analysis (flutter analyze)
+        run: flutter analyze
+
+      - name: Run tests
+        run: flutter test
+
+      - name: "Build APK (arm64 modern + armv7 old)"
+        run: |
+          flutter build apk --release --split-per-abi \
+            --target-platform android-arm,android-arm64 \
+            --obfuscate --split-debug-info=build/app/symbols \
+            --dart-define=ADMIN_REFRESH_TOKEN=${{ secrets.ADMIN_REFRESH_TOKEN }}
+          cp build/app/outputs/apk/release/app-arm64-v8a-release.apk ../license-admin.apk
+          cp build/app/outputs/apk/release/app-armeabi-v7a-release.apk ../license-admin-armv7.apk
+          ls -lh ../license-admin.apk ../license-admin-armv7.apk
+
+      - name: Generate admin version manifest (admin_version.json)
+        env:
+          ADMIN_RTDB_REFRESH_TOKEN: ${{ secrets.ADMIN_RTDB_REFRESH_TOKEN }}
+          ADMIN_REFRESH_TOKEN: ${{ secrets.ADMIN_REFRESH_TOKEN }}
+        run: |
+          VER=$(grep -E '^version:' pubspec.yaml | awk '{print $2}')
+          NAME="${VER%%+*}"; BUILD="${VER##*+}"
+          SHA_ARM64=$(sha256sum ../license-admin.apk | awk '{print $1}')
+          SHA_ARMV7=$(sha256sum ../license-admin-armv7.apk | awk '{print $1}')
+          NOTES=$(python3 -c "import json,os; p='release_notes.txt'; lines=[l.strip() for l in open(p,encoding='utf-8').read().splitlines() if l.strip()] if os.path.exists(p) else ['تحديث تطبيق تراخيص المحاسب']; lines=lines[:3]; t='\\n'.join(lines); print(json.dumps(t,ensure_ascii=False)[1:-1])")
+          cat > ../admin_version.json <<EOF
+          {
+            "version": "$NAME+$BUILD",
+            "sha256": "$SHA_ARM64",
+            "sha256Variants": {
+              "arm64": "$SHA_ARM64",
+              "armv7": "$SHA_ARMV7"
+            },
+            "releaseUrl": "https://github.com/${{ github.repository }}/releases/tag/admin-latest",
+            "downloads": {
+              "android": "https://github.com/${{ github.repository }}/releases/download/admin-latest/license-admin.apk",
+              "androidVariants": {
+                "arm64": "https://github.com/${{ github.repository }}/releases/download/admin-latest/license-admin.apk",
+                "armv7": "https://github.com/${{ github.repository }}/releases/download/admin-latest/license-admin-armv7.apk"
+              }
+            },
+            "publishedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "notes": "$NOTES"
+          }
+          EOF
+          cat ../admin_version.json
+          # (متانة النشر) توكن مشرف اختياري + فشل ظاهر بدل الابتلاع الصامت؛
+          # وحُذف نشر قاعدة nexora-ledger الميتة (لا قارئ له إطلاقًا).
+          AUTH_SUFFIX=""
+          ADMIN_TOKEN="${ADMIN_RTDB_REFRESH_TOKEN:-$ADMIN_REFRESH_TOKEN}"
+          if [ -n "$ADMIN_TOKEN" ]; then
+            IDTOK=$(curl -s -X POST \
+              "https://securetoken.googleapis.com/v1/token?key=AIzaSyAh6_kGvoPvse3Mt3Yy06dmDaCpTKHp0F4" \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              --data-urlencode "grant_type=refresh_token" \
+              --data-urlencode "refresh_token=$ADMIN_TOKEN" \
+              | python3 -c "import json,sys;print(json.load(sys.stdin).get('id_token',''))" 2>/dev/null || true)
+            if [ -n "$IDTOK" ]; then AUTH_SUFFIX="?auth=$IDTOK"; fi
+          fi
+          publish_admin_manifest() {
+            if ! curl -s -f -X PUT -H "Content-Type: application/json; charset=utf-8" -d @../admin_version.json "$1$AUTH_SUFFIX"; then
+              echo "::warning::فشل نشر بيان تحديث الأدمن إلى ${1##*/} — راجع سر ADMIN_RTDB_REFRESH_TOKEN وقواعد القاعدة"
+            fi
+          }
+          publish_admin_manifest "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/admin_version_manifest.json"
+          publish_admin_manifest "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/admin_version_manifest.json"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-admin-apk
+          path: |
+            license-admin.apk
+            license-admin-armv7.apk
+            admin_version.json
+          retention-days: 30
+
+      - name: Attach to admin release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: admin-latest
+          name: 🔑 تراخيص المحاسب — أحدث إصدار (للمالك فقط)
+          body: |
+            ## ⚠️ تطبيق خاص بمالك النظام فقط — لا يوزَّع للعملاء
+
+            ### 📱 نسختان فقط حسب نوع الهاتف:
+            1. **للهواتف الحديثة (64-بت):** حمّل **`license-admin.apk`** *(متوافقة مع أحدث إصدارات أندرويد)*.
+            2. **للهواتف القديمة (32-بت):** حمّل **`license-admin-armv7.apk`**.
+          files: |
+            license-admin.apk
+            license-admin-armv7.apk
+            admin_version.json
+          fail_on_unmatched_files: true
+          prerelease: false
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
