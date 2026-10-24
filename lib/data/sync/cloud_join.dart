@@ -2048,6 +2048,26 @@ class CloudJoin {
           final evCheck = await _getJson(
               '$root/evictions/${Uri.encodeComponent(devIdStr)}.json');
           if (evCheck != null) {
+            final nowIso = DateTime.now().toIso8601String();
+            try {
+              await db.update(
+                'devices',
+                {
+                  'is_paired': 0,
+                  'revoked_at': nowIso,
+                  'expelled_at': nowIso,
+                  'updated_at': nowIso,
+                },
+                where: 'id = ?',
+                whereArgs: [devIdStr],
+              );
+              await db.insert(
+                'sync_meta',
+                {'key': 'selfRevoked', 'value': '1'},
+                conflictAlgorithm: ConflictAlgorithm.replace,
+              );
+              changed = true;
+            } catch (_) {}
             continue;
           }
         }
@@ -3454,18 +3474,9 @@ class CloudJoin {
         'reason': 'expelled_by_manager',
       }, timeout: const Duration(seconds: 15));
     } catch (_) {}
-    // 1) وسم عقدة السجل (roster) بالطرد والحظر الصريح (بدل تركها غائبة فيعيد العضو رفع نفسه)
+    // 1) حذف عقدة السجل (roster) نهائياً (مع بقاء الشاهدة في /evictions لمنع إعادة الرفع)
     try {
-      await _putJson('$root/roster/$enc.json', {
-        'id': deviceId,
-        'deviceId': deviceId,
-        'is_paired': 0,
-        'is_owner': 0,
-        'revoked_at': nowIso,
-        'expelled_at': nowIso,
-        'updated_at': nowIso,
-        'status': 'expelled',
-      }, timeout: const Duration(seconds: 15));
+      await _delete('$root/roster/$enc.json');
     } catch (_) {}
     // 2) طلبات الانضمام: بمفتاح الجهاز + مطابقة الحقل (دفاع مزدوج).
     try {

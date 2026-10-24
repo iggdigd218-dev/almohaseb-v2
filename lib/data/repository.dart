@@ -1038,8 +1038,6 @@ class Repo {
     _workspaceId = freshWs;
     try {
       await setSetting('sync.workspaceId', freshWs);
-      await setSetting('has_completed_onboarding', '0');
-      await setSetting('onboardingCompleted', '0');
     } catch (_) {}
     _currentUserId = null;
     final me = await currentUser();
