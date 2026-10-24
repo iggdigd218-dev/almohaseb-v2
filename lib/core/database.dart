@@ -369,9 +369,11 @@ class AppDatabase {
 
   /// حذف ملف قاعدة بيانات منشأة معينة من القرص (يُستخدم عند طرد العضو أو خروجه من منشأة لا يملكها).
   Future<void> deleteWorkspaceDatabaseFile(String workspaceId) async {
-    final clean = sanitizeWorkspaceId(workspaceId);
+    final clean = workspaceId.trim();
     if (clean.isEmpty || clean == defaultWorkspaceIdConst) return;
-    if (Platform.environment.containsKey('FLUTTER_TEST')) return;
+    if (_isTestOverride || Platform.environment.containsKey('FLUTTER_TEST')) {
+      return;
+    }
     try {
       if (_db != null && _activeWorkspaceId == clean) {
         try {
@@ -380,8 +382,8 @@ class AppDatabase {
         _db = null;
         _opening = null;
       }
-      final dir = await getApplicationDocumentsDirectory();
-      final dbPath = p.join(dir.path, _dbFileNameForWorkspace(clean));
+      final dirPath = await databaseDirectory();
+      final dbPath = p.join(dirPath, dbFileNameFor(clean));
       for (final suffix in const ['', '-wal', '-shm']) {
         final f = File('$dbPath$suffix');
         if (await f.exists()) {

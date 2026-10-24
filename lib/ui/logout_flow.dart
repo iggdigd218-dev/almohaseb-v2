@@ -357,7 +357,7 @@ Future<void> performCompleteSessionPurge(
         prevStore != 'منشأتي';
     if (wasMemberWorkspace && prevWs.isNotEmpty) {
       final url = effectiveBackendUrl(stBefore['cloudBackendUrl']);
-      final myDevId = repo.deviceId.trim();
+      final myDevId = (repo.deviceId ?? '').trim();
       if (url.isNotEmpty && myDevId.isNotEmpty) {
         try {
           await CloudJoin.expelMemberCompletely(

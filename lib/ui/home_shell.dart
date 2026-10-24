@@ -46,6 +46,7 @@ import '../data/sync/sync_service.dart';
 import 'group_management_screen.dart';
 import 'notifications_sheet.dart';
 import 'gemini_assistant_sheet.dart';
+import 'onboarding_screen.dart';
 import 'app_notice.dart';
 import '../core/sfx.dart';
 import '../core/keep_alive_service.dart';

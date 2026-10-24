@@ -1233,9 +1233,9 @@ class AccountWorkspace {
         final diskList =
             await AppDatabase.instance.scanWorkspaceDatabasesOnDisk();
         for (final item in diskList) {
-          if ('${item['workspaceId'] ?? ''}'.trim() == toWorkspaceId) {
-            final stName = '${item['storeName'] ?? ''}'.trim();
-            final accCount = (item['accountsCount'] as int?) ?? 0;
+          if ((item['workspaceId'] ?? '').trim() == toWorkspaceId) {
+            final stName = (item['storeName'] ?? '').trim();
+            final accCount = int.tryParse(item['accountsCount'] ?? '0') ?? 0;
             if (accCount > 0 ||
                 (stName.isNotEmpty &&
                     stName != 'متجري' &&
@@ -1915,27 +1915,25 @@ class AccountWorkspace {
         final diskWorkspaces =
             await AppDatabase.instance.scanWorkspaceDatabasesOnDisk();
         for (final item in diskWorkspaces) {
-          final wsId = '${item['workspaceId'] ?? ''}'.trim();
+          final wsId = (item['workspaceId'] ?? '').trim();
           if (wsId.isEmpty || wsId == 'default') continue;
-          final storeName = '${item['storeName'] ?? ''}'.trim();
+          final storeName = (item['storeName'] ?? '').trim();
           final accountsCount =
-              int.tryParse('${item['accountsCount'] ?? 0}') ?? 0;
+              int.tryParse(item['accountsCount'] ?? '0') ?? 0;
           final isConfigured = (storeName.isNotEmpty &&
                   storeName != 'متجري' &&
                   storeName != 'منشأتي') ||
               accountsCount > 0;
           if (!isConfigured) continue;
           final ownerEmail =
-              '${item['ownerEmail'] ?? ''}'.trim().toLowerCase();
+              (item['ownerEmail'] ?? '').trim().toLowerCase();
+          final defCurr = (item['defaultCurrency'] ?? 'YER').trim();
           final info = WorkspaceInfo(
             workspaceId: wsId,
             storeName: storeName.isEmpty ? 'منشأة ($wsId)' : storeName,
-            businessActivity: '${item['businessActivity'] ?? ''}'.trim(),
-            defaultCurrency:
-                '${item['defaultCurrency'] ?? 'YER'}'.trim().isEmpty
-                    ? 'YER'
-                    : '${item['defaultCurrency'] ?? 'YER'}'.trim(),
-            phone: '${item['phone'] ?? ''}'.trim(),
+            businessActivity: (item['businessActivity'] ?? '').trim(),
+            defaultCurrency: defCurr.isEmpty ? 'YER' : defCurr,
+            phone: (item['phone'] ?? '').trim(),
             ownerEmail: ownerEmail,
             role: 'owner',
             isCurrent: wsId == currentWorkspaceId,

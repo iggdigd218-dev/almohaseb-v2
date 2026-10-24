@@ -1234,6 +1234,7 @@ class _JoinMemberDialogState extends ConsumerState<_JoinMemberDialog> {
       }
     }
 
+    if (!mounted) return;
     if (tokenOrPin.isEmpty) {
       showSnack(context, 'أدخل رمز الدعوة (6 أرقام) أو امسح باركود QR أولاً',
           error: true);
