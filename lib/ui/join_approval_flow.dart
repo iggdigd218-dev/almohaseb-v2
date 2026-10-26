@@ -18,7 +18,6 @@ import '../data/sync/cloud_join.dart'
     show CloudJoin, CloudJoinException, JoinRequestWatcher, kCloudOpTimeout;
 import '../data/sync/device_id.dart';
 import 'home_shell.dart';
-import 'lock_gate.dart';
 import 'qr_pair_scanner.dart' show scanQrPair;
 
 /// نقطة الدخول: تفتح معالج الانضمام التفاعلي كاملاً.
@@ -440,45 +439,50 @@ class _JoinApprovalScreenState extends ConsumerState<JoinApprovalScreen> {
     }
   }
 
-  // ---------- خطوة 4: الترطيب النظيف — إشعار فوري بلا انتظار ----------
+  // ---------- خطوة 4: الترطيب النظيف — حفظ الجلسة أولاً ثم الانتقال الفوري ----------
   Future<void> _hydrate() async {
     if (_busy || !mounted) return;
-    // ممنوع وقت انتظار عند الموافقة: نظهر «تم الارتباط» فوراً
-    if (mounted) {
-      setState(() {
-        _step = _JoinStep.done;
-        _busy = true;
-        _error = '';
-      });
-      Sfx.pair();
-      // إشعار فوري صريح
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ تم الارتباط والمزامنة فيما بعد',
-              style: TextStyle(fontWeight: FontWeight.w800)),
-          backgroundColor: Color(0xFF16A34A),
-          duration: Duration(seconds: 3),
-        ),
-      );
-    }
+    setState(() {
+      _busy = true;
+      _error = '';
+    });
     final container = ProviderScope.containerOf(context, listen: false);
     try {
       final repo = container.read(repoProvider);
+      // 1) حفظ وتثبيت معرّف المساحة وبيانات العضو محلياً في SQLite وSharedPreferences أولاً
       await CloudJoin.completeApprovedJoin(
         repo,
         backendUrl: _joinUrl,
         token: _joinToken,
         workspaceId: _joinWs,
       );
+      await repo.setSetting('has_completed_onboarding', '1');
+      await repo.setSetting('onboardingCompleted', '1');
+
+      // 2) بدء محرك المزامنة في الخلفية دون حجز خيط الواجهة
       final engine = container.read(syncEngineProvider);
       engine.stop();
-      await engine.start();
+      unawaited(engine.start());
       container.read(refreshProvider.notifier).state++;
+
       if (!mounted) return;
-      // انتقال فوري للرئيسية بعد الربط — المزامنة تتم في الخلفية
+      setState(() {
+        _step = _JoinStep.done;
+      });
+      Sfx.pair();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✅ تم الربط بنجاح والمزامنة فيما بعد',
+              style: TextStyle(fontWeight: FontWeight.w800)),
+          backgroundColor: Color(0xFF16A34A),
+          duration: Duration(seconds: 3),
+        ),
+      );
+
+      // 3) انتقال نظيف وحاسم إلى الشاشة الرئيسية وإزالة مكدس البداية بالكامل
       Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const LockGate(child: HomeShell())),
-        (_) => false,
+        MaterialPageRoute(builder: (_) => const HomeShell()),
+        (route) => false,
       );
     } catch (e) {
       if (!mounted) return;
@@ -549,39 +553,42 @@ class _JoinApprovalScreenState extends ConsumerState<JoinApprovalScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('الانضمام إلى مجموعة')),
-      body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 520),
-            child: ListView(
-              padding: const EdgeInsets.all(22),
-              shrinkWrap: true,
-              children: [
-                switch (_step) {
-                  _JoinStep.naming => _namingStep(),
-                  _JoinStep.method => _methodStep(),
-                  _JoinStep.waiting => _waitingStep(),
-                  _JoinStep.done => _doneStep(),
-                  _JoinStep.rejected => _rejectedStep(),
-                },
-                if (_error.isNotEmpty) ...[
-                  const SizedBox(height: 14),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Colors.red.withValues(alpha: .08),
-                      borderRadius: BorderRadius.circular(10),
-                      border:
-                          Border.all(color: Colors.red.withValues(alpha: .3)),
+    return PopScope(
+      canPop: false,
+      child: Scaffold(
+        appBar: AppBar(title: const Text('الانضمام إلى مجموعة')),
+        body: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: ListView(
+                padding: const EdgeInsets.all(22),
+                shrinkWrap: true,
+                children: [
+                  switch (_step) {
+                    _JoinStep.naming => _namingStep(),
+                    _JoinStep.method => _methodStep(),
+                    _JoinStep.waiting => _waitingStep(),
+                    _JoinStep.done => _doneStep(),
+                    _JoinStep.rejected => _rejectedStep(),
+                  },
+                  if (_error.isNotEmpty) ...[
+                    const SizedBox(height: 14),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withValues(alpha: .08),
+                        borderRadius: BorderRadius.circular(10),
+                        border:
+                            Border.all(color: Colors.red.withValues(alpha: .3)),
+                      ),
+                      child: Text(_error,
+                          style: const TextStyle(
+                              color: Colors.red, fontSize: 12.5, height: 1.5)),
                     ),
-                    child: Text(_error,
-                        style: const TextStyle(
-                            color: Colors.red, fontSize: 12.5, height: 1.5)),
-                  ),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),

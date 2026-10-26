@@ -391,8 +391,31 @@ class Repo {
   ///    في جهاز المدير، وبقية الأعضاء هم فقط أعضاء وتسجيلهم بدون بريد إلكتروني.
   /// يتم التثبيت التلقائي والصامت لصفة المالك (is_owner=1) ووضع المساحة (host)
   /// ورتبة المدير (admin) في الخلفية للمنشأة والمنشئ فقط.
+  /// يتحقق مما إذا كانت المساحة المحلية موسومة بالطرد أو الإلغاء القسري.
+  Future<bool> isWorkspaceExpelledOrRevoked() async {
+    try {
+      final db = await _db;
+      final rows = await db.query(
+        'sync_meta',
+        where: "key IN ('selfRevoked', 'workspaceStatus')",
+      );
+      for (final r in rows) {
+        final k = '${r['key'] ?? ''}';
+        final v = '${r['value'] ?? ''}'.trim();
+        if (k == 'selfRevoked' && v == '1') return true;
+        if (k == 'workspaceStatus' && (v == 'expelled' || v == 'revoked')) {
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
   Future<bool> checkAndAutoPromoteManager() async {
     try {
+      if (await isWorkspaceExpelledOrRevoked()) {
+        return false;
+      }
       final ownId = _deviceId;
       final st = await settings();
       final isIndiv = (st['account.type'] ?? '') == 'individual';
@@ -629,9 +652,12 @@ class Repo {
       return 'member';
     }
 
-    // ══ التئام ذاتي لدور المدير في وضع المؤسسة فقط ══
+    // ══ التئام ذاتي لدور المدير في وضع المؤسسة فقط (مع حظر الأجهزة المطرودة) ══
     if (mode == 'standalone') {
       try {
+        if (await isWorkspaceExpelledOrRevoked()) {
+          return 'standalone';
+        }
         final st = await settings();
         final isEnterprise = (st['account.type'] ?? '') == 'enterprise';
         if (isEnterprise && _deviceId != null) {
@@ -660,6 +686,9 @@ class Repo {
 
   Future<bool> isWorkspaceOwner() async {
     try {
+      if (await isWorkspaceExpelledOrRevoked()) {
+        return false;
+      }
       final st = await settings();
       final isIndiv = (st['account.type'] ?? '') == 'individual';
       if (isIndiv) return true;
@@ -891,7 +920,7 @@ class Repo {
 
   /// العودة إلى الوضع المستقل (يُستخدم فقط بعد طرد المدير لنا أو كخطة استرداد).
   /// ملاحظة: لا يستطيع العضو طلب الخروج بنفسه — الطرد بيد المدير فقط.
-  Future<void> _resetToStandalone() async {
+  Future<void> _resetToStandalone({bool expelled = false}) async {
     String oldWs = (_workspaceId ?? '').trim();
     try {
       final stPrev = await settings();
@@ -902,8 +931,9 @@ class Repo {
 
     final devName = await deviceName(this);
     final adminPerms = defaultPerms(UserRole.admin);
-    final permStr =
-        adminPerms.entries.where((e) => e.value).map((e) => e.key).join(',');
+    final permStr = expelled
+        ? ''
+        : adminPerms.entries.where((e) => e.value).map((e) => e.key).join(',');
     final newSecret = await SecretStore.protect(generateDeviceSecret());
     // (عزل المساحات) مساحة جديدة معزولة تماماً: البقاء على معرف مساحة
     // المجموعة السابقة كان يُبقي هذا الجهاز يكتب في مسارها السحابي.
@@ -955,6 +985,7 @@ class Repo {
         'conversations',
         'messages',
         'users',
+        'user_permissions',
         'notifications',
         'templates',
         'trash',
@@ -992,11 +1023,11 @@ class Repo {
           'workspace_id': freshWs,
           'name': devName,
           'platform': Platform.operatingSystem,
-          'is_paired': 1,
-          'is_owner': 1,
+          'is_paired': expelled ? 0 : 1,
+          'is_owner': expelled ? 0 : 1,
           'auth_secret': newSecret,
-          'revoked_at': '',
-          'expelled_at': '',
+          'revoked_at': expelled ? now : '',
+          'expelled_at': expelled ? now : '',
           'last_seen_at': now,
           'last_sync_at': '',
           'created_at': now,
@@ -1005,8 +1036,8 @@ class Repo {
       } catch (_) {}
       try {
         await txn.insert('users', {
-          'name': 'المدير',
-          'role': 'admin',
+          'name': expelled ? 'مستخدم' : 'المدير',
+          'role': expelled ? 'viewer' : 'admin',
           'pin': '',
           'password': '',
           'permissions': permStr,
@@ -1033,6 +1064,15 @@ class Repo {
               'value': 'standalone',
             },
             conflictAlgorithm: ConflictAlgorithm.replace);
+        if (expelled) {
+          await txn.insert(
+              'sync_meta',
+              {
+                'key': 'workspaceStatus',
+                'value': 'expelled',
+              },
+              conflictAlgorithm: ConflictAlgorithm.replace);
+        }
       } catch (_) {}
     });
     _workspaceId = freshWs;
@@ -4567,7 +4607,8 @@ class Repo {
 
   /// يُعيد الجهاز إلى الوضع المستقل بعد الطرد من قِبل المدير.
   /// يستدعيها العضو عندما يكتشف أنه مطرود (من استجابة 410 في /ops).
-  Future<void> resetToStandaloneAfterExpulsion() => _resetToStandalone();
+  Future<void> resetToStandaloneAfterExpulsion() =>
+      _resetToStandalone(expelled: true);
 
   // ==================== تهيئة المجموعة من الصفر (المدير فقط) ====================
 
@@ -6263,27 +6304,30 @@ class Repo {
         where: 'name = ?', whereArgs: [generalSectionName], limit: 1);
     if (existing.isNotEmpty) return existing.first['id'] as int;
     final now = DateTime.now();
-    final id = await db.insert('sections', {
-      'id': newGlobalId(),
-      'name': generalSectionName,
-      'icon': 'apps',
-      'sort_order': 0,
-      'deleted_at': '',
-      'created_at': now.toIso8601String(),
-      'updated_at': now.toIso8601String(),
-    });
-    await queueOperation(
-      entityType: EntityKind.section,
-      entityId: '$id',
-      opType: OpKind.create,
-      payload: {
-        'id': id,
+    return await db.transaction((txn) async {
+      final id = await txn.insert('sections', {
+        'id': newGlobalId(),
         'name': generalSectionName,
         'icon': 'apps',
         'sort_order': 0,
-      },
-    );
-    return id;
+        'deleted_at': '',
+        'created_at': now.toIso8601String(),
+        'updated_at': now.toIso8601String(),
+      });
+      await queueOperation(
+        entityType: EntityKind.section,
+        entityId: '$id',
+        opType: OpKind.create,
+        payload: {
+          'id': id,
+          'name': generalSectionName,
+          'icon': 'apps',
+          'sort_order': 0,
+        },
+        executor: txn,
+      );
+      return id;
+    });
   }
 
   Future<int> saveSection(Section section) async {
@@ -7413,6 +7457,9 @@ class Repo {
   /// يعيد فوراً لجهاز المستخدم صفة المالك (is_owner=1) ووضع المساحة (host)
   /// ودور المدير الكامل (admin) مع كل الصلاحيات.
   Future<void> restoreManagerOwnership({bool syncToCloud = true}) async {
+    if (await isWorkspaceExpelledOrRevoked()) {
+      return;
+    }
     final db = await _db;
     final now = DateTime.now().toIso8601String();
     final ownId = requireDeviceId;

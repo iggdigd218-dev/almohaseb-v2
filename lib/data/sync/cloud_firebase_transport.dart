@@ -250,16 +250,23 @@ class CloudFirebaseTransport implements SyncTransport {
     } on DatabaseException catch (_) {}
 
     final uri = Uri.parse(_opPath(op.id));
-    // 2. حظر تضمين الوسائط والبيانات الثقيلة (Base64 / صور الفواتير / وسائط الدردشة)
-    // داخل عقد operations، ورفع العملية كحركة إلحاقية مفردة (Atomic Append)
-    // مع وسم `server_time = ServerValue.TIMESTAMP`.
-    final sanitizedPayload = sanitizeOperationPayload(
+    // 2. حظر تضمين الوسائط الثقيلة مع السماح بمرفقات الدردشة (preserveChatAttachment: true)
+    // عند الرفع إلى Firebase RTDB لكي تتمكن أجهزة الأعضاء من تنزيل المرفق وتجسيده محلياً،
+    // ثم تقليم file_b64 من جدول operations المحلي بعد تأكيد الرفع.
+    final cloudPayload = sanitizeOperationPayload(
       op.payload,
       entityType: op.entityType,
       entityId: op.entityId,
+      preserveChatAttachment: true,
+    );
+    final localSanitizedPayload = sanitizeOperationPayload(
+      op.payload,
+      entityType: op.entityType,
+      entityId: op.entityId,
+      preserveChatAttachment: false,
     );
     final rawMap = Map<String, Object?>.from(jsonDecode(op.toJson()) as Map)
-      ..['payload'] = jsonEncode(sanitizedPayload)
+      ..['payload'] = jsonEncode(cloudPayload)
       ..['server_time'] = kServerValueTimestamp
       ..['server_ts'] = kServerValueTimestamp
       ..['is_synced'] = 1
@@ -317,7 +324,7 @@ class CloudFirebaseTransport implements SyncTransport {
           'server_time': resolvedServerTime,
           'synced': 1,
           'is_synced': 1,
-          'payload': jsonEncode(sanitizedPayload),
+          'payload': jsonEncode(localSanitizedPayload),
         },
         where: 'id = ?',
         whereArgs: [op.id],
@@ -328,7 +335,7 @@ class CloudFirebaseTransport implements SyncTransport {
         {
           'server_time': resolvedServerTime,
           'synced': 1,
-          'payload': jsonEncode(sanitizedPayload),
+          'payload': jsonEncode(localSanitizedPayload),
         },
         where: 'id = ?',
         whereArgs: [op.id],

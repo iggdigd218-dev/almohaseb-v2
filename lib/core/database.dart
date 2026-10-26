@@ -939,11 +939,20 @@ class AppDatabase {
   /// 3) ترميم اسم المالك الحقيقي فوراً ومنع تلوّثه باسم أي جهاز عضو.
   static Future<void> repairOwnerAdminStatus(Database db) async {
     try {
-      final metaMode = await db.query('sync_meta',
-          where: "key = 'workspaceMode'", limit: 1);
-      final isMember =
-          metaMode.isNotEmpty && metaMode.first['value'] == 'member';
-      if (isMember) return; // أجهزة الأعضاء تتبع ما يُعيّنه المالك
+      final metaRows = await db.query(
+        'sync_meta',
+        where: "key IN ('workspaceMode', 'selfRevoked', 'workspaceStatus')",
+      );
+      final metaMap = <String, String>{
+        for (final r in metaRows)
+          '${r['key'] ?? ''}': '${r['value'] ?? ''}'.trim(),
+      };
+      if (metaMap['workspaceMode'] == 'member' ||
+          metaMap['selfRevoked'] == '1' ||
+          metaMap['workspaceStatus'] == 'expelled' ||
+          metaMap['workspaceStatus'] == 'revoked') {
+        return; // أجهزة الأعضاء أو الأجهزة المطرودة/الملغاة لا تُرقّى تلقائياً إلى مدير النظام أبداً
+      }
 
       const adminPerms =
           'manage_users,edit_tx,delete_tx,view_reports,manage_backup,approve_vouchers,manage_catalog';

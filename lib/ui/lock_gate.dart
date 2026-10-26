@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/security.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
+import 'onboarding_screen.dart';
 
 /// بوابة القفل — تعترض التطبيق قبل عرضه إن كانت البصمة مفعّلة.
 ///
@@ -20,6 +21,7 @@ class _LockGateState extends ConsumerState<LockGate>
     with WidgetsBindingObserver {
   bool _checking = true;
   bool _locked = false;
+  bool _expelled = false;
   bool _autoLock = false;
   bool _prompting = false;
 
@@ -38,16 +40,32 @@ class _LockGateState extends ConsumerState<LockGate>
 
   Future<void> _init() async {
     var enabled = false;
+    var expelled = false;
     try {
       // نستخدم نفس الـ Repo المُهيّأ في main.dart عبر Riverpod — لا ننشئ اتصالاً جديدًا.
       final repo = ref.read(repoProvider);
-      final st = await repo.settings().timeout(const Duration(seconds: 3));
-      enabled = st['biometric'] == '1';
-      _autoLock = st['autoLock'] == '1';
+      if (await repo.amIExpelled()) {
+        await repo.resetToStandaloneAfterExpulsion();
+        expelled = true;
+      } else if (await repo.isWorkspaceExpelledOrRevoked()) {
+        expelled = true;
+      } else {
+        final st = await repo.settings().timeout(const Duration(seconds: 3));
+        enabled = st['biometric'] == '1';
+        _autoLock = st['autoLock'] == '1';
+      }
     } catch (_) {
       enabled = false;
     }
     if (!mounted) return;
+    if (expelled) {
+      setState(() {
+        _checking = false;
+        _expelled = true;
+        _locked = true;
+      });
+      return;
+    }
     if (!enabled) {
       setState(() {
         _checking = false;
@@ -81,6 +99,44 @@ class _LockGateState extends ConsumerState<LockGate>
   Widget build(BuildContext context) {
     if (_checking) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    if (_expelled) {
+      return Scaffold(
+        backgroundColor: AppColors.bgOf(context),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.block, size: 56, color: Colors.redAccent),
+                const SizedBox(height: 16),
+                const Text(
+                  'تم إلغاء الوصول / ارتباطك ملغى من قِبل المنشأة',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 20),
+                FilledButton.icon(
+                  onPressed: () {
+                    Navigator.of(context).pushAndRemoveUntil(
+                      MaterialPageRoute(
+                        builder: (_) => const OnboardingScreen(
+                          initialNotice:
+                              'تم إلغاء الوصول / ارتباطك ملغى من قِبل المنشأة',
+                        ),
+                      ),
+                      (_) => false,
+                    );
+                  },
+                  icon: const Icon(Icons.exit_to_app),
+                  label: const Text('العودة لشاشة البداية'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
     }
     if (!_locked) return widget.child;
 

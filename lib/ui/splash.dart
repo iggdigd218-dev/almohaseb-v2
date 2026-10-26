@@ -49,6 +49,22 @@ class _SplashScreenState extends State<SplashScreen>
         try {
           final container = ProviderScope.containerOf(context, listen: false);
           final repo = container.read(repoProvider);
+
+          // (حماية ضد المدير الشبح بعد الطرد) فحص الطرد أو الإلغاء قبل أي ترقية محلية
+          if (await repo.amIExpelled()) {
+            await repo.resetToStandaloneAfterExpulsion();
+            nextTarget = const OnboardingScreen(
+              initialNotice: 'تم إلغاء الوصول / ارتباطك ملغى من قِبل المنشأة',
+            );
+            return;
+          }
+          if (await repo.isWorkspaceExpelledOrRevoked()) {
+            nextTarget = const OnboardingScreen(
+              initialNotice: 'تم إلغاء الوصول / ارتباطك ملغى من قِبل المنشأة',
+            );
+            return;
+          }
+
           final st = await repo.settings();
           final mode = await repo.workspaceMode();
 

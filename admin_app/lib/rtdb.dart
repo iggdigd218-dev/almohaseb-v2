@@ -2524,6 +2524,19 @@ class Rtdb {
     try {
       await _delete('support_chats/$enc');
     } catch (_) {}
+    try {
+      final invIdx = await _get('workspaces/_registry/invite_index');
+      if (invIdx is Map) {
+        for (final entry in invIdx.entries) {
+          final v = entry.value;
+          if (v is Map &&
+              ('${v['ws'] ?? v['workspaceId'] ?? ''}'.trim() == cleanWs)) {
+            final codeKey = Uri.encodeComponent('${entry.key}');
+            await _delete('workspaces/_registry/invite_index/$codeKey');
+          }
+        }
+      }
+    } catch (_) {}
     if (ownerEmail.isNotEmpty) {
       final emailKey = ownerEmail.replaceAll('.', ',').replaceAll(RegExp(r'[#\$\[\]/]'), '_');
       try {

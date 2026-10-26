@@ -18,6 +18,7 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
+import '../core/app_error_mapper.dart';
 import '../core/sfx.dart';
 import '../core/platform_info.dart';
 
@@ -270,32 +271,14 @@ class UpdateInstaller {
       return;
     }
 
-    // 3) متابعة التقدم — وإن علق DownloadManager أو كان بطيئاً جداً ننتقل للتنزيل المتوازي السريع.
+    // 3) متابعة التقدم — نترك DownloadManager يعمل دون إلغاء مبكر لأنه يدير الاستئناف والشبكات الضعيفة بكفاءة.
     var stuckCount = 0;
-    var zeroByteTicks = 0;
-    var stalledTicks = 0;
-    var totalTicks = 0;
-    var lastBytes = -1;
     while (true) {
       await Future<void>.delayed(const Duration(milliseconds: 500));
-      totalTicks++;
       final st = await _query(id);
       final status = '${st['status']}';
       final bytes = (st['bytes'] as num?)?.toInt() ?? 0;
       final total = (st['total'] as num?)?.toInt() ?? -1;
-      if (bytes <= 0) {
-        zeroByteTicks++;
-      } else {
-        zeroByteTicks = 0;
-        if (bytes == lastBytes) {
-          stalledTicks++;
-        } else {
-          stalledTicks = 0;
-          lastBytes = bytes;
-        }
-      }
-      // إذا كان التنزيل أبطأ من 20KB/s بعد 6 ثوانٍ (أقل من 120KB) ننتقل للمنزّل المتوازي السريع
-      final tooSlow = totalTicks >= 12 && bytes < 120 * 1024;
       switch (status) {
         case 'done':
           final path = '${st['path']}';
@@ -322,21 +305,12 @@ class UpdateInstaller {
           );
           return;
         case 'paused':
-          if (zeroByteTicks >= 10 || stalledTicks >= 16 || tooSlow) {
-            await _cancelDownload(id);
-            await _saveDownload(null, null);
-            yield* _fallbackHttpDownload(
-              url,
-              expectedSha256: targetSha256,
-              fallbackUrl: fallbackUrl,
-            );
-            return;
-          }
+          stuckCount = 0;
           yield InstallProgress(InstallPhase.downloading,
               progress: (total > 0) ? bytes / total : 0.0);
           break;
         case 'unknown':
-          if (++stuckCount >= 6) {
+          if (++stuckCount >= 20) {
             await _cancelDownload(id);
             await _saveDownload(null, null);
             yield* _fallbackHttpDownload(
@@ -349,16 +323,6 @@ class UpdateInstaller {
           break;
         default: // running / pending
           stuckCount = 0;
-          if (zeroByteTicks >= 10 || stalledTicks >= 16 || tooSlow) {
-            await _cancelDownload(id);
-            await _saveDownload(null, null);
-            yield* _fallbackHttpDownload(
-              url,
-              expectedSha256: targetSha256,
-              fallbackUrl: fallbackUrl,
-            );
-            return;
-          }
           yield InstallProgress(InstallPhase.downloading,
               progress: (total > 0) ? bytes / total : 0.0);
       }
@@ -553,14 +517,13 @@ class UpdateInstaller {
     if (dir == null) {
       final cache = await getTemporaryDirectory();
       final d = Directory('${cache.path}/updates');
-      if (d.existsSync()) d.deleteSync(recursive: true);
-      d.createSync(recursive: true);
+      if (!d.existsSync()) d.createSync(recursive: true);
       dir = d;
     }
-    // نظّف ملفات التحديث القديمة حتى لا تتراكم وتهدر مساحة الهاتف.
+    // نظّف ملفات التحديث المكتملة القديمة مع الحفاظ على ملفات .part لاستئناف التنزيل (HTTP 206).
     try {
       await for (final e in dir.list()) {
-        if (e is File) {
+        if (e is File && !e.path.endsWith('.part')) {
           await e.delete();
         }
       }
@@ -747,50 +710,78 @@ class UpdateInstaller {
         }
       } catch (_) {}
 
-      // 2) المسار المتسلسل القياسي إذا لم يدعم الخادم Range
+      // 2) المسار المتسلسل مع دعم استئناف التنزيل (HTTP 206 Partial Content / Range-Resume)
       if (!downloadedOk) {
-        final client = _clientFactory();
-        IOSink? sink;
-        try {
-          final req = http.Request('GET', Uri.parse(candidateUrl));
-          final res =
-              await client.send(req).timeout(const Duration(seconds: 25));
-          if (res.statusCode < 200 || res.statusCode >= 300) {
-            lastError = 'الخادم أعاد الرمز ${res.statusCode}.';
-          } else {
-            final total = res.contentLength;
-            var received = 0;
-            sink = apk.openWrite();
-            var lastYield = DateTime.now();
-            await for (final chunk
-                in res.stream.timeout(const Duration(seconds: 45))) {
-              sink.add(chunk);
-              received += chunk.length;
-              final now = DateTime.now();
-              if (now.difference(lastYield).inMilliseconds > 120) {
-                lastYield = now;
-                yield InstallProgress(
-                  InstallPhase.downloading,
-                  progress: (total != null && total > 0)
-                      ? (received / total).clamp(0.0, 1.0)
-                      : (received / (22 * 1024 * 1024)).clamp(0.01, 0.95),
-                );
+        final partFile = File('${apk.path}.part');
+        for (var resumeAttempt = 0; resumeAttempt < 3 && !downloadedOk; resumeAttempt++) {
+          final client = _clientFactory();
+          IOSink? sink;
+          try {
+            final existingBytes =
+                partFile.existsSync() ? partFile.lengthSync() : 0;
+            final req = http.Request('GET', Uri.parse(candidateUrl));
+            if (existingBytes > 0) {
+              req.headers['Range'] = 'bytes=$existingBytes-';
+            }
+            final res =
+                await client.send(req).timeout(const Duration(seconds: 25));
+            if (res.statusCode == 416) {
+              // Range Not Satisfiable — إعادة ضبط ملف الجزء والمحاولة من جديد
+              try {
+                if (partFile.existsSync()) await partFile.delete();
+              } catch (_) {}
+              continue;
+            }
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+              lastError = 'الخادم أعاد الرمز ${res.statusCode}.';
+              break;
+            } else {
+              final isPartial = res.statusCode == 206 && existingBytes > 0;
+              final contentLen = res.contentLength;
+              final total = (contentLen != null && contentLen > 0)
+                  ? (isPartial ? existingBytes + contentLen : contentLen)
+                  : null;
+              var received = isPartial ? existingBytes : 0;
+              sink = partFile.openWrite(
+                mode: isPartial ? FileMode.append : FileMode.write,
+              );
+              var lastYield = DateTime.now();
+              await for (final chunk
+                  in res.stream.timeout(const Duration(seconds: 45))) {
+                sink.add(chunk);
+                received += chunk.length;
+                final now = DateTime.now();
+                if (now.difference(lastYield).inMilliseconds > 120) {
+                  lastYield = now;
+                  yield InstallProgress(
+                    InstallPhase.downloading,
+                    progress: (total != null && total > 0)
+                        ? (received / total).clamp(0.0, 1.0)
+                        : (received / (22 * 1024 * 1024)).clamp(0.01, 0.95),
+                  );
+                }
+              }
+              await sink.flush();
+              await sink.close();
+              sink = null;
+              if (partFile.existsSync() && partFile.lengthSync() > 0) {
+                try {
+                  if (apk.existsSync()) await apk.delete();
+                } catch (_) {}
+                await partFile.rename(apk.path);
+                downloadedOk = true;
               }
             }
-            await sink.flush();
-            await sink.close();
-            sink = null;
-            downloadedOk = true;
+          } on TimeoutException {
+            lastError = 'انقطع الاتصال أثناء التنزيل. جاري استئناف التحميل تلقائياً...';
+          } catch (e) {
+            lastError = AppErrorMapper.toUserFriendlyMessage(e);
+          } finally {
+            try {
+              await sink?.close();
+            } catch (_) {}
+            client.close();
           }
-        } on TimeoutException {
-          lastError = 'انقطع الاتصال أثناء التنزيل. أعد المحاولة.';
-        } catch (e) {
-          lastError = 'فشل التنزيل: $e';
-        } finally {
-          try {
-            await sink?.close();
-          } catch (_) {}
-          client.close();
         }
       }
 
