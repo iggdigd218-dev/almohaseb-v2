@@ -39,8 +39,32 @@ class InstallProgress {
   /// نسبة التنزيل 0..1 (أو null إذا كان الحجم مجهولاً).
   final double? progress;
   final String? error;
+  final int bytes;
+  final int total;
+  final double speedBps;
+  final String? sourceName;
+  final String? statusMessage;
 
-  const InstallProgress(this.phase, {this.progress, this.error});
+  const InstallProgress(
+    this.phase, {
+    this.progress,
+    this.error,
+    this.bytes = 0,
+    this.total = -1,
+    this.speedBps = 0.0,
+    this.sourceName,
+    this.statusMessage,
+  });
+
+  String? get formattedSpeed {
+    if (speedBps <= 0) return null;
+    final mb = speedBps / (1024 * 1024);
+    if (mb >= 1.0) {
+      return '${mb.toStringAsFixed(2)} MB/s';
+    }
+    final kb = speedBps / 1024;
+    return '${kb.toStringAsFixed(0)} KB/s';
+  }
 }
 
 class UpdateInstaller {
@@ -50,6 +74,13 @@ class UpdateInstaller {
 
   UpdateInstaller({http.Client Function()? clientFactory})
       : _clientFactory = clientFactory ?? (() => http.Client());
+
+  static String sourceLabelFor(String url) {
+    final u = url.toLowerCase();
+    if (u.contains('github.io')) return 'مرآة Fastly السريعة';
+    if (u.contains('raw.githubusercontent.com')) return 'خادم GitHub السريع';
+    return 'خادم التحديث الرئيسي';
+  }
 
   /// يحسب بصمة التجزئة SHA-256 للملف المنزّل.
   static Future<String> computeFileSha256(File file) async {
@@ -215,15 +246,21 @@ class UpdateInstaller {
       }
     }
 
-    yield const InstallProgress(InstallPhase.downloading, progress: 0);
+    final primarySource = sourceLabelFor(url);
+    yield InstallProgress(
+      InstallPhase.downloading,
+      progress: 0,
+      bytes: 0,
+      sourceName: primarySource,
+      statusMessage: 'جاري تهيئة الاتصال وتجهيز الرابط السريع...',
+    );
 
-    // 1) استئناف تنزيل سابق إن وُجد وكان لنفس الرابط المطلوب حصراً ويتحرك فعلياً
+    // 1) استئناف تنزيل سابق إن وُجد وكان لنفس الرابط المطلوب حصراً (دون إلغاء عند 0 بايت أثناء المصافحة)
     var saved = await _savedDownload();
     int? id;
     if (saved != null && saved.url == url) {
       final st = await _query(saved.id);
       final status = '${st['status']}';
-      final bytes = (st['bytes'] as num?)?.toInt() ?? 0;
       if (status == 'done' && '${st['path']}'.isNotEmpty) {
         final apk = File('${st['path']}');
         if (await _canReadFile(apk)) {
@@ -233,8 +270,7 @@ class UpdateInstaller {
           return;
         }
       }
-      // لا نستأنف تنزيلاً عالقاً على صفر بايت أو paused/pending عند طلب المستخدم الصريح
-      if (status == 'running' && bytes > 0) {
+      if (status == 'running' || status == 'pending' || status == 'paused') {
         id = saved.id;
       } else {
         await _cancelDownload(saved.id);
@@ -271,14 +307,33 @@ class UpdateInstaller {
       return;
     }
 
-    // 3) متابعة التقدم — نترك DownloadManager يعمل دون إلغاء مبكر لأنه يدير الاستئناف والشبكات الضعيفة بكفاءة.
+    // 3) متابعة التقدم بصبر كامل أثناء المصافحة (Zero-Byte Patience):
+    // نبقي DownloadManager حياً طوال حالات running / pending / paused دون أي مؤقت قاتل.
     var stuckCount = 0;
+    var lastBytes = 0;
+    var lastSampleTime = DateTime.now();
+    var currentSpeedBps = 0.0;
     while (true) {
       await Future<void>.delayed(const Duration(milliseconds: 500));
       final st = await _query(id);
       final status = '${st['status']}';
       final bytes = (st['bytes'] as num?)?.toInt() ?? 0;
       final total = (st['total'] as num?)?.toInt() ?? -1;
+      final now = DateTime.now();
+      final elapsedMs = now.difference(lastSampleTime).inMilliseconds;
+      if (elapsedMs >= 800) {
+        final delta = bytes - lastBytes;
+        if (delta > 0) {
+          final instantBps = (delta * 1000.0) / elapsedMs;
+          currentSpeedBps = currentSpeedBps <= 0
+              ? instantBps
+              : (currentSpeedBps * 0.6 + instantBps * 0.4);
+        } else if (bytes == 0) {
+          currentSpeedBps = 0.0;
+        }
+        lastBytes = bytes;
+        lastSampleTime = now;
+      }
       switch (status) {
         case 'done':
           final path = '${st['path']}';
@@ -306,8 +361,17 @@ class UpdateInstaller {
           return;
         case 'paused':
           stuckCount = 0;
-          yield InstallProgress(InstallPhase.downloading,
-              progress: (total > 0) ? bytes / total : 0.0);
+          yield InstallProgress(
+            InstallPhase.downloading,
+            progress: (total > 0) ? bytes / total : 0.0,
+            bytes: bytes,
+            total: total,
+            speedBps: currentSpeedBps,
+            sourceName: primarySource,
+            statusMessage: bytes == 0
+                ? 'جاري تهيئة الاتصال وتجهيز الرابط السريع...'
+                : null,
+          );
           break;
         case 'unknown':
           if (++stuckCount >= 20) {
@@ -323,8 +387,17 @@ class UpdateInstaller {
           break;
         default: // running / pending
           stuckCount = 0;
-          yield InstallProgress(InstallPhase.downloading,
-              progress: (total > 0) ? bytes / total : 0.0);
+          yield InstallProgress(
+            InstallPhase.downloading,
+            progress: (total > 0) ? bytes / total : 0.0,
+            bytes: bytes,
+            total: total,
+            speedBps: currentSpeedBps,
+            sourceName: primarySource,
+            statusMessage: bytes == 0
+                ? 'جاري تهيئة الاتصال وتجهيز الرابط السريع...'
+                : null,
+          );
       }
     }
   }
