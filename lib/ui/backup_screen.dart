@@ -112,9 +112,11 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     } catch (e) {
       cloudError = '$e';
     }
+    if (!mounted) return;
     String? accountEmail;
     try {
       final db = await ref.read(repoProvider).database;
+      if (!mounted) return;
       accountEmail = (await GoogleAuthService(db).currentUserFromDb())?.email;
     } catch (_) {
       accountEmail = null;

@@ -179,7 +179,7 @@ void main() {
         ),
       );
       await tester.runAsync(() async {
-        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await Future<void>.delayed(const Duration(milliseconds: 200));
       });
       await tester.pumpAndSettle();
 
@@ -224,7 +224,7 @@ void main() {
         ),
       );
       await tester.runAsync(() async {
-        await Future<void>.delayed(const Duration(milliseconds: 100));
+        await Future<void>.delayed(const Duration(milliseconds: 250));
       });
       await tester.pumpAndSettle();
 
@@ -240,9 +240,12 @@ void main() {
       expect(restoreBtn.onPressed, isNull,
           reason: 'Restore button must be disabled when live cloud sync is active');
 
+      await tester.pumpWidget(const SizedBox.shrink());
       await tester.runAsync(() async {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
         await db.close();
       });
+      await tester.pump(const Duration(seconds: 11));
     });
   });
 
