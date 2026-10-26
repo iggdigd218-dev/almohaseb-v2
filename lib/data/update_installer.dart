@@ -670,7 +670,14 @@ class UpdateInstaller {
         break;
       }
 
-      yield const InstallProgress(InstallPhase.downloading, progress: 0.0);
+      final srcName = sourceLabelFor(candidateUrl);
+      yield InstallProgress(
+        InstallPhase.downloading,
+        progress: 0.0,
+        bytes: 0,
+        sourceName: srcName,
+        statusMessage: 'جاري تهيئة الاتصال وتجهيز الرابط السريع...',
+      );
 
       // 1) محاولة التنزيل المتوازي السريع (6 اتصالات Range) إذا كان الخادم يدعمه
       var downloadedOk = false;
@@ -689,14 +696,25 @@ class UpdateInstaller {
               acceptsRanges &&
               totalLen > 2 * 1024 * 1024) {
             final progressController = StreamController<InstallProgress>();
+            final startPar = DateTime.now();
             final future = _downloadParallelRanges(
               candidateUrl,
               apk,
               totalLen,
               (p) {
                 if (!progressController.isClosed) {
-                  progressController
-                      .add(InstallProgress(InstallPhase.downloading, progress: p));
+                  final got = (p * totalLen).round();
+                  final elapsedSec =
+                      DateTime.now().difference(startPar).inMilliseconds / 1000.0;
+                  final bps = elapsedSec > 0.2 ? got / elapsedSec : 0.0;
+                  progressController.add(InstallProgress(
+                    InstallPhase.downloading,
+                    progress: p,
+                    bytes: got,
+                    total: totalLen,
+                    speedBps: bps,
+                    sourceName: srcName,
+                  ));
                 }
               },
             ).whenComplete(() => progressController.close());
@@ -742,6 +760,8 @@ class UpdateInstaller {
                   ? (isPartial ? existingBytes + contentLen : contentLen)
                   : null;
               var received = isPartial ? existingBytes : 0;
+              var sessionReceived = 0;
+              final sessionStart = DateTime.now();
               sink = partFile.openWrite(
                 mode: isPartial ? FileMode.append : FileMode.write,
               );
@@ -750,14 +770,23 @@ class UpdateInstaller {
                   in res.stream.timeout(const Duration(seconds: 45))) {
                 sink.add(chunk);
                 received += chunk.length;
+                sessionReceived += chunk.length;
                 final now = DateTime.now();
                 if (now.difference(lastYield).inMilliseconds > 120) {
                   lastYield = now;
+                  final elapsedSec =
+                      now.difference(sessionStart).inMilliseconds / 1000.0;
+                  final bps =
+                      elapsedSec > 0.2 ? sessionReceived / elapsedSec : 0.0;
                   yield InstallProgress(
                     InstallPhase.downloading,
                     progress: (total != null && total > 0)
                         ? (received / total).clamp(0.0, 1.0)
                         : (received / (22 * 1024 * 1024)).clamp(0.01, 0.95),
+                    bytes: received,
+                    total: total ?? -1,
+                    speedBps: bps,
+                    sourceName: srcName,
                   );
                 }
               }

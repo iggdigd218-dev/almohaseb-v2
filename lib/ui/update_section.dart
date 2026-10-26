@@ -98,8 +98,13 @@ class _OneClickUpdateDialogState extends State<_OneClickUpdateDialog> {
 
   void _start() {
     _sub?.cancel();
-    setState(
-        () => _state = const InstallProgress(InstallPhase.downloading, progress: 0.0));
+    setState(() => _state = InstallProgress(
+          InstallPhase.downloading,
+          progress: 0.0,
+          bytes: 0,
+          sourceName: UpdateInstaller.sourceLabelFor(widget.url),
+          statusMessage: 'جاري تهيئة الاتصال وتجهيز الرابط السريع...',
+        ));
     _sub = widget.installer
         .downloadAndInstall(
           widget.url,
@@ -157,6 +162,9 @@ class _OneClickUpdateDialogState extends State<_OneClickUpdateDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final isZeroByteHandshake = _state.phase == InstallPhase.downloading &&
+        _state.bytes == 0 &&
+        (_state.progress == null || _state.progress == 0);
     final (title, subtitle) = switch (_state.phase) {
       InstallPhase.awaitingPermission => (
           'إذن مطلوب لمرة واحدة',
@@ -165,15 +173,18 @@ class _OneClickUpdateDialogState extends State<_OneClickUpdateDialog> {
         ),
       InstallPhase.downloading => (
           'جارٍ تنزيل التحديث…',
-          PlatformInfo.isWindows
-              ? (_state.progress != null
-                  ? '${(_state.progress! * 100).round()}٪ — أبقِ التطبيق '
-                      'مفتوحاً حتى يكتمل التنزيل'
-                  : 'أبقِ التطبيق مفتوحاً حتى يكتمل التنزيل')
-              : (_state.progress != null
-                  ? '${(_state.progress! * 100).round()}٪ — التنزيل يستمر في '
-                      'الخلفية حتى لو خرجت من التطبيق'
-                  : 'التنزيل يستمر في الخلفية حتى لو خرجت من التطبيق'),
+          isZeroByteHandshake
+              ? (_state.statusMessage ??
+                  'جاري تهيئة الاتصال وتجهيز الرابط السريع...')
+              : PlatformInfo.isWindows
+                  ? (_state.progress != null
+                      ? '${(_state.progress! * 100).round()}٪ — أبقِ التطبيق '
+                          'مفتوحاً حتى يكتمل التنزيل'
+                      : 'أبقِ التطبيق مفتوحاً حتى يكتمل التنزيل')
+                  : (_state.progress != null
+                      ? '${(_state.progress! * 100).round()}٪ — التنزيل يستمر في '
+                          'الخلفية حتى لو خرجت من التطبيق'
+                      : 'التنزيل يستمر في الخلفية حتى لو خرجت من التطبيق'),
         ),
       InstallPhase.launchingInstaller || InstallPhase.done => (
           'اكتمل التنزيل ✅',
@@ -187,6 +198,8 @@ class _OneClickUpdateDialogState extends State<_OneClickUpdateDialog> {
     };
     final failed = _state.phase == InstallPhase.failed;
     final downloading = _state.phase == InstallPhase.downloading;
+    final speedText = _state.formattedSpeed;
+    final sourceText = _state.sourceName;
     return PopScope(
       // أثناء التنزيل يمكن إغلاق الحوار بأمان: مدير تنزيلات النظام يواصل
       // في الخلفية، وعند فتح «تحديث الآن» لاحقاً يُستأنف من حيث وصل.
@@ -203,17 +216,62 @@ class _OneClickUpdateDialogState extends State<_OneClickUpdateDialog> {
             Text(subtitle, style: const TextStyle(height: 1.6)),
             if (_state.phase == InstallPhase.downloading) ...[
               const SizedBox(height: 14),
-              LinearProgressIndicator(value: _state.progress),
+              LinearProgressIndicator(
+                value: isZeroByteHandshake ? null : _state.progress,
+              ),
+              if (sourceText != null || speedText != null) ...[
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    if (sourceText != null)
+                      Flexible(
+                        child: Text(
+                          'المصدر: $sourceText',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: AppColors.text3Of(context),
+                            fontWeight: FontWeight.w600,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    if (speedText != null)
+                      Directionality(
+                        textDirection: TextDirection.ltr,
+                        child: Text(
+                          speedText,
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: AppColors.primaryOf(context),
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
             ],
           ],
         ),
         actions: [
           // على أندرويد يواصل مدير تنزيلات النظام في الخلفية؛ على ويندوز
-          // التنزيل داخل التطبيق فلا نعرض زر «متابعة في الخلفية».
+          // نتيح أيضاً خيار الفتح الخارجي لالتقاط التنزيل عبر IDM / FDM.
           if (downloading && !PlatformInfo.isWindows)
             TextButton(
               onPressed: () => Navigator.of(context).pop(),
               child: const Text('متابعة في الخلفية'),
+            ),
+          if (downloading && PlatformInfo.isWindows)
+            OutlinedButton.icon(
+              onPressed: () async {
+                final uri = Uri.tryParse(widget.url);
+                if (uri != null) {
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                }
+              },
+              icon: const Icon(Icons.open_in_browser, size: 16),
+              label: const Text('تنزيل عبر المتصفح / داونلود مانجر'),
             ),
           if (failed) ...[
             TextButton(
@@ -228,7 +286,11 @@ class _OneClickUpdateDialogState extends State<_OneClickUpdateDialog> {
                 }
               },
               icon: const Icon(Icons.open_in_new, size: 16),
-              label: const Text('تنزيل عبر المتصفح'),
+              label: Text(
+                PlatformInfo.isWindows
+                    ? 'تنزيل عبر المتصفح / داونلود مانجر'
+                    : 'تنزيل عبر المتصفح',
+              ),
             ),
             FilledButton.icon(
               onPressed: _start,
@@ -353,8 +415,23 @@ class _UpdateBody extends ConsumerWidget {
           FilledButton.icon(
             onPressed: () => startOneClickUpdate(context, ref, info),
             icon: const Icon(Icons.download_outlined),
-            label: const Text('تحديث الآن'),
+            label: Text(
+              PlatformInfo.isWindows ? 'تحديث تلقائي مباشر' : 'تحديث الآن',
+            ),
           ),
+          if (PlatformInfo.isWindows) ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () async {
+                final ok = await openUpdateLink(info);
+                if (!ok && context.mounted) {
+                  showSnack(context, 'تعذّر فتح رابط التحديث');
+                }
+              },
+              icon: const Icon(Icons.open_in_browser),
+              label: const Text('تنزيل عبر المتصفح / داونلود مانجر'),
+            ),
+          ],
         ],
       ],
     );
@@ -431,13 +508,27 @@ Future<void> showUpdateDialog(
               onPressed: () => Navigator.pop(ctx),
               child: const Text('لاحقًا'),
             ),
+          if (PlatformInfo.isWindows)
+            OutlinedButton.icon(
+              onPressed: () async {
+                if (!info.isMandatory) Navigator.pop(ctx);
+                final ok = await openUpdateLink(info);
+                if (!ok && context.mounted) {
+                  showSnack(context, 'تعذّر فتح رابط التحديث');
+                }
+              },
+              icon: const Icon(Icons.open_in_browser, size: 16),
+              label: const Text('تنزيل عبر المتصفح / داونلود مانجر'),
+            ),
           FilledButton.icon(
             onPressed: () async {
               if (!info.isMandatory) Navigator.pop(ctx);
               await startOneClickUpdate(context, ref, info);
             },
             icon: const Icon(Icons.download_outlined),
-            label: const Text('تحديث الآن'),
+            label: Text(
+              PlatformInfo.isWindows ? 'تحديث تلقائي مباشر' : 'تحديث الآن',
+            ),
           ),
         ],
       ),
