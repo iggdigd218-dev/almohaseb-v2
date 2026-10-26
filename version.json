@@ -1,33 +1,33 @@
 {
-  "version": "3.97.28+295",
+  "version": "3.97.29+296",
   "minSupported": "3.13.0",
   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/latest",
-  "download_url": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.28-295/nexora-arm64.apk",
+  "download_url": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.29-296/nexora-arm64.apk",
   "downloads": {
-    "android": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.28-295/nexora-arm64.apk",
+    "android": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.29-296/nexora-arm64.apk",
     "androidVariants": {
-      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.28-295/nexora-arm64.apk",
-      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.28-295/nexora-armv7.apk",
-      "x64": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.28-295/nexora-x64.apk"
+      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.29-296/nexora-arm64.apk",
+      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.29-296/nexora-armv7.apk",
+      "x64": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.29-296/nexora-x64.apk"
     },
-    "windows": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.28-295/NexoraSetup.exe"
+    "windows": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.29-296/NexoraSetup.exe"
   },
   "downloadsMirror": {
-    "android": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.28-295/nexora-arm64.apk",
+    "android": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.29-296/nexora-arm64.apk",
     "androidVariants": {
-      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.28-295/nexora-arm64.apk",
-      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.28-295/nexora-armv7.apk"
+      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.29-296/nexora-arm64.apk",
+      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.29-296/nexora-armv7.apk"
     },
-    "windows": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.28-295/NexoraSetup.exe"
+    "windows": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.29-296/NexoraSetup.exe"
   },
   "downloadsFallbackGithub": {
-    "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-arm64.apk?v=3.97.28-295",
+    "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-arm64.apk?v=3.97.29-296",
     "androidVariants": {
-      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-arm64.apk?v=3.97.28-295",
-      "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-armv7.apk?v=3.97.28-295"
+      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-arm64.apk?v=3.97.29-296",
+      "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-armv7.apk?v=3.97.29-296"
     },
-    "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe?v=3.97.28-295"
+    "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe?v=3.97.29-296"
   },
   "publishedAt": "2026-10-26T15:00:00Z",
   "notes": "• تطوير جذري لمحرك التحديث مع دعم صبر المصافحة (Zero-Byte Patience)، واستئناف HTTP Range، وخيار التحميل عبر داونلود مانجر على ويندوز.\n• إصلاح تعليق شاشة ربط العضو، ومنع تسرب صلاحيات الإدارة بعد الطرد، وإضافة الحذف الجماعي للمنشآت في تطبيق الإدارة.\n• توحيد رسائل الأخطاء باللغة العربية وحجب الأكواد التقنية الخام ومزامنة إعدادات المؤسسة ومرفقات الدردشة."

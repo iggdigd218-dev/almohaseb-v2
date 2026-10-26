@@ -773,11 +773,10 @@ final isOwnerProvider = FutureProvider<bool>((ref) async {
   ref.watch(refreshProvider);
   final repo = ref.read(repoProvider);
   try {
-    return await repo.isWorkspaceOwner().timeout(const Duration(seconds: 3));
+    return await repo.isWorkspaceOwner();
   } catch (_) {
     try {
-      return (await repo.workspaceMode().timeout(const Duration(seconds: 2))) ==
-          'host';
+      return (await repo.workspaceMode()) == 'host';
     } catch (_) {
       return false;
     }
@@ -789,7 +788,7 @@ final canManageGroupProvider = FutureProvider<bool>((ref) async {
   ref.watch(refreshProvider);
   final repo = ref.read(repoProvider);
   try {
-    return await repo.canManageGroup().timeout(const Duration(seconds: 3));
+    return await repo.canManageGroup();
   } catch (_) {
     return false;
   }

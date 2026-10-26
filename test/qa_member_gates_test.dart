@@ -175,8 +175,11 @@ void main() {
       } finally {
         tester.view.resetPhysicalSize();
         tester.view.resetDevicePixelRatio();
-        await tester.pumpWidget(const SizedBox.shrink());
         engine.stop();
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester
+            .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+        await tester.pump(const Duration(seconds: 15));
         await tester.runAsync(disposeRepo);
       }
     });
@@ -243,8 +246,11 @@ void main() {
       } finally {
         tester.view.resetPhysicalSize();
         tester.view.resetDevicePixelRatio();
-        await tester.pumpWidget(const SizedBox.shrink());
         engine.stop();
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester
+            .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+        await tester.pump(const Duration(seconds: 15));
         await tester.runAsync(disposeRepo);
       }
     });
