@@ -1,0 +1,18 @@
+{
+  "version": "1.7.9+49",
+  "sha256": "3f2be2fb4dd7fbafea0ccfb4912f608f9e9c2a509aac701baeb385eb0a66cf1c",
+  "sha256Variants": {
+    "arm64": "3f2be2fb4dd7fbafea0ccfb4912f608f9e9c2a509aac701baeb385eb0a66cf1c",
+    "armv7": "c854e5b77862db617f5f817bf5cd80bd076e6a4696eb08c156487aefe55d50c5"
+  },
+  "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/admin-latest",
+  "downloads": {
+    "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk",
+    "androidVariants": {
+      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk",
+      "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin-armv7.apk"
+    }
+  },
+  "publishedAt": "2026-10-25T15:00:00Z",
+  "notes": "• إضافة التحديد المتعدد والحذف الجماعي المتماثل للمنشآت والتراخيص السحابية في تطبيق الإدارة."
+}

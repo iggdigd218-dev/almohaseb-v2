@@ -1,0 +1,301 @@
+name: Mirror Release to GitHub Pages
+
+# ══════════════════════════════════════════════════════════════════
+# (2026-10-25 — مرآة التحديث السريعة لليمن: GitHub Pages افتراضياً + Firebase اختيارياً)
+#
+# المشكلة: أصول إصدارات GitHub تُقدَّم عبر release-assets.githubusercontent.com
+# (خلفية Azure Blob Storage) — وهذا المسار مختنق من اليمن (5–15KB/s للاتصال):
+# تنزيل حزمة 21.8MB يستغرق 40+ دقيقة، بينما المصدر نفسه يخدم 34MB/s عالمياً.
+#
+# الحل على مرحلتين — كلاهما بلا أي إعداد إضافي من المالك:
+#   1) الافتراضي: رفع الحزم إلى فرع `releases` يتيم تخدمه GitHub Pages
+#      (https://<owner>.github.io/almohaseb-v2 — شبكة Fastly) — يحتاج GITHUB_TOKEN فقط.
+#   2) الأفضل عند توفره: إن أُضيف سر FIREBASE_HOSTING_TOKEN (من firebase
+#      login:ci) تُرفع الحزم إلى Firebase Hosting (شبكة جوجل — نفس بنية
+#      RTDB التي تعمل لدى مستخدمينا بسرعة كاملة) وتُقدَّم روابطه أولوية.
+# ══════════════════════════════════════════════════════════════════
+
+on:
+  release:
+    types: [published]
+  workflow_run:
+    workflows: ["Build Flutter Android APK", "Build Windows EXE"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: mirror-release-hosting
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Mirror assets + publish fast manifest
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.event_name == 'release' ||
+        github.event_name == 'workflow_dispatch' ||
+        github.event.workflow_run.conclusion == 'success'
+      }}
+    steps:
+      # ── 1) تنزيل أصول إصدار latest (ما هو متاح منها الآن) ──────────
+      - name: Download latest release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          mkdir -p assets && cd assets
+          for f in version.json nexora-arm64.apk nexora-armv7.apk NexoraSetup.exe; do
+            gh release download latest --repo "$GITHUB_REPOSITORY" --pattern "$f" --clobber || true
+          done
+          echo "الأصول المتاحة:"; ls -lh . || true
+          if [ ! -s version.json ]; then
+            echo "::warning::لا يوجد version.json على إصدار latest بعد — لا شيء للمرآة."
+            exit 0
+          fi
+
+      # ── 2) قراءة رقم الإصدار وتجهيز مسار مُصدَّر ────────────────────
+      - name: Read version
+        id: ver
+        working-directory: assets
+        run: |
+          VER=$(python3 -c "import json;print(json.load(open('version.json',encoding='utf-8')).get('version',''))")
+          if [ -z "$VER" ]; then
+            echo "::error::version.json بلا رقم إصدار صالح."
+            exit 1
+          fi
+          VDIR=$(printf '%s' "$VER" | sed 's/+/-/' | tr -cd 'A-Za-z0-9.-')
+          echo "ver=$VER"   >> "$GITHUB_OUTPUT"
+          echo "vdir=$VDIR" >> "$GITHUB_OUTPUT"
+          echo "الإصدار: $VER → releases/$VDIR/"
+
+      # ── 3) المسار الأفضل (اختياري): Firebase Hosting بتوكن إن وُجد ──
+      - name: Upload to Firebase Hosting (optional fast path)
+        id: fb
+        env:
+          FIREBASE_HOSTING_TOKEN: ${{ secrets.FIREBASE_HOSTING_TOKEN }}
+          FIREBASE_PROJECT: nexora-broker
+          VDIR: ${{ steps.ver.outputs.vdir }}
+        run: |
+          set -uo pipefail
+          if [ -z "${FIREBASE_HOSTING_TOKEN}" ]; then
+            echo "deployed=false" >> "$GITHUB_OUTPUT"
+            echo "لا سر FIREBASE_HOSTING_TOKEN — نستخدم GitHub Pages (الافتراضي بلا إعداد)."
+            exit 0
+          fi
+          npm install -g firebase-tools --no-fund --no-audit >/dev/null 2>&1
+          mkdir -p "site/releases/$VDIR"
+          cp -f assets/nexora-arm64.apk assets/nexora-armv7.apk assets/NexoraSetup.exe "site/releases/$VDIR/" 2>/dev/null || true
+          cat > site/firebase.json <<'EOF'
+          {
+            "hosting": {
+              "public": "releases",
+              "ignore": [],
+              "headers": [
+                {
+                  "source": "**",
+                  "headers": [
+                    { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+                  ]
+                }
+              ]
+            }
+          }
+          EOF
+          cd site
+          if firebase deploy --only hosting --project "$FIREBASE_PROJECT" --token "$FIREBASE_HOSTING_TOKEN" --non-interactive; then
+            echo "deployed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::فشل رفع المرآة إلى Firebase Hosting — سنجرب GitHub Pages."
+            echo "deployed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 4) الافتراضي: فرع releases يتيم تخدمه GitHub Pages ──────────
+      - name: Publish releases branch (GitHub Pages mirror)
+        id: pages
+        if: steps.fb.outputs.deployed != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VDIR: ${{ steps.ver.outputs.vdir }}
+          VER: ${{ steps.ver.outputs.ver }}
+        run: |
+          set -uo pipefail
+          git config --global user.name  "nexora-mirror-bot"
+          git config --global user.email "actions@users.noreply.github.com"
+          git init -q mrepo && cd mrepo
+          mkdir -p "releases/$VDIR"
+          cp -f ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk \
+                ../assets/NexoraSetup.exe ../assets/version.json "releases/$VDIR/" 2>/dev/null || true
+          cp -f ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk \
+                ../assets/NexoraSetup.exe ../assets/version.json . 2>/dev/null || true
+          touch .nojekyll
+          echo "محتويات الفرع:"; ls -lh "releases/$VDIR/"
+          git add -A
+          git commit -qm "mirror: $VER"
+          if git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/releases; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+            echo "✔ دُفع فرع releases — GitHub Pages سيبنيه تلقائياً."
+          else
+            echo "::warning::فشل دفع فرع releases."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 5) تحقق فعلي أن الملفات تُخدَم قبل نشر البيان ───────────────
+      - name: Verify mirrored URLs respond
+        id: verify
+        env:
+          VDIR: ${{ steps.ver.outputs.vdir }}
+        run: |
+          set -uo pipefail
+          if [ "${{ steps.fb.outputs.deployed }}" = "true" ]; then
+            BASE="https://nexora-broker.web.app/releases/$VDIR"
+            PROVIDER="firebase-hosting"
+          elif [ "${{ steps.pages.outputs.pushed }}" = "true" ]; then
+            BASE="https://${{ github.repository_owner }}.github.io/almohaseb-v2/releases/$VDIR"
+            PROVIDER="github-pages"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::لم تنجح أي مرآة — لن ننشر بياناً جديداً (بيان GitHub يبقى الفعّال)."
+            exit 0
+          fi
+          echo "المزوّد: $PROVIDER → $BASE"
+          fail=0
+          for f in nexora-arm64.apk nexora-armv7.apk NexoraSetup.exe; do
+            [ -s "assets/$f" ] || continue
+            code=""
+            for i in $(seq 1 18); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 -L "$BASE/$f")
+              [ "$code" = "200" ] && break
+              echo "$f: HTTP $code — انتظار بناء المرآة ($i/18)…"
+              sleep 20
+            done
+            echo "$f → HTTP $code"
+            [ "$code" = "200" ] || fail=1
+          done
+          if [ "$fail" = "0" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "base=$BASE"   >> "$GITHUB_OUTPUT"
+            echo "provider=$PROVIDER" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::بعض الملفات لم تُخدَم من المرآة — لن ننشر بيان المرآة حفاظاً على المستخدمين."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 6) بيان محسّن: روابط المرآة + بصمة ويندوز المفقودة ──────────
+      - name: Publish fast manifest (mirror URLs + windows sha256)
+        if: steps.verify.outputs.ok == 'true'
+        env:
+          ADMIN_RTDB_REFRESH_TOKEN: ${{ secrets.ADMIN_RTDB_REFRESH_TOKEN }}
+          ADMIN_REFRESH_TOKEN: ${{ secrets.ADMIN_REFRESH_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          MIRROR_BASE: ${{ steps.verify.outputs.base }}
+          MIRROR_PROVIDER: ${{ steps.verify.outputs.provider }}
+          VDIR: ${{ steps.ver.outputs.vdir }}
+        run: |
+          set -uo pipefail
+          python3 - <<'PY'
+          import datetime
+          import hashlib
+          import json
+          import os
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          base = os.environ['MIRROR_BASE']
+          provider = os.environ['MIRROR_PROVIDER']
+          vdir = os.environ.get('VDIR', '')
+          v_suffix = f'?v={vdir}' if vdir else ''
+
+          def gh(f):
+              return f'https://github.com/{repo}/releases/download/latest/{f}{v_suffix}'
+
+          def have(f):
+              try:
+                  return os.path.getsize(f'assets/{f}') > 1024
+              except OSError:
+                  return False
+
+          def sha(f):
+              h = hashlib.sha256()
+              with open(f'assets/{f}', 'rb') as fp:
+                  for b in iter(lambda: fp.read(1 << 20), b''):
+                      h.update(b)
+              return h.hexdigest()
+
+          man = json.load(open('assets/version.json', encoding='utf-8'))
+          dl = man.setdefault('downloads', {})
+          sv = man.setdefault('sha256Variants', {})
+
+          if have('nexora-arm64.apk'):
+              man['download_url'] = f'{base}/nexora-arm64.apk'
+              dl['android'] = f'{base}/nexora-arm64.apk'
+              dl.setdefault('androidVariants', {})['arm64'] = f'{base}/nexora-arm64.apk'
+              sv['arm64'] = sha('nexora-arm64.apk')
+              man['sha256'] = sv['arm64']
+          if have('nexora-armv7.apk'):
+              dl.setdefault('androidVariants', {})['armv7'] = f'{base}/nexora-armv7.apk'
+              sv['armv7'] = sha('nexora-armv7.apk')
+          if have('NexoraSetup.exe'):
+              dl['windows'] = f'{base}/NexoraSetup.exe'
+              sv['windows'] = sha('NexoraSetup.exe')
+
+          man['downloadsMirror'] = {
+              'android': f'{base}/nexora-arm64.apk',
+              'androidVariants': {
+                  'arm64': f'{base}/nexora-arm64.apk',
+                  'armv7': f'{base}/nexora-armv7.apk',
+              },
+              'windows': f'{base}/NexoraSetup.exe',
+          }
+          man['downloadsFallbackGithub'] = {
+              'android': gh('nexora-arm64.apk'),
+              'androidVariants': {
+                  'arm64': gh('nexora-arm64.apk'),
+                  'armv7': gh('nexora-armv7.apk'),
+              },
+              'windows': gh('NexoraSetup.exe'),
+          }
+          man['mirror'] = {
+              'provider': provider,
+              'baseUrl': base,
+              'reason': 'fastly-pages-mirror primary + github-release-assets fallback',
+          }
+          man['publishedAt'] = datetime.datetime.now(
+              datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+          with open('manifest.json', 'w', encoding='utf-8') as fp:
+              json.dump(man, fp, ensure_ascii=False)
+          print('البيان المُنعكس:')
+          print(json.dumps(man, ensure_ascii=False, indent=2)[:1500])
+          PY
+
+          cp -f manifest.json version.json
+          GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh release upload latest version.json --clobber --repo "$GITHUB_REPOSITORY" || true
+
+          AUTH_SUFFIX=""
+          ADMIN_TOKEN="${ADMIN_RTDB_REFRESH_TOKEN:-$ADMIN_REFRESH_TOKEN}"
+          if [ -n "$ADMIN_TOKEN" ]; then
+            IDTOK=$(curl -s -X POST \
+              "https://securetoken.googleapis.com/v1/token?key=AIzaSyAh6_kGvoPvse3Mt3Yy06dmDaCpTKHp0F4" \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              --data-urlencode "grant_type=refresh_token" \
+              --data-urlencode "refresh_token=$ADMIN_TOKEN" \
+              | python3 -c "import json,sys;print(json.load(sys.stdin).get('id_token',''))" 2>/dev/null || true)
+            if [ -n "$IDTOK" ]; then AUTH_SUFFIX="?auth=$IDTOK"; fi
+          fi
+          if [ -z "$AUTH_SUFFIX" ]; then
+            echo "::warning::لا توكن مشرف متاح — تعذّر نشر بيان المرآة إلى RTDB (بيان GitHub يبقى الفعّال)."
+            exit 0
+          fi
+          publish() {
+            if ! curl -s -f -X "$1" -H "Content-Type: application/json; charset=utf-8" -d @manifest.json "$2$AUTH_SUFFIX"; then
+              echo "::warning::فشل نشر بيان المرآة إلى ${2##*/}"
+            fi
+          }
+          publish PUT   "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/version_manifest.json"
+          publish PATCH "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/force_update.json"
+          echo "✔ نُشر بيان المرآة — روابط $MIRROR_PROVIDER فعّالة الآن."

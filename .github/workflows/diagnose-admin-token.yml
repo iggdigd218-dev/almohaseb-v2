@@ -1,0 +1,43 @@
+name: Diagnose admin token
+# أداة تشخيص تشغيلية (يدوية): تتحقق من صلاحية توكن المشرف المستخدم لنشر
+# بيانات التحديث، وتجرب كتابة موثقة إلى /system ثم تحذف عقدة الفحص فورًا.
+# لا تطبع قيمة التوكن مطلقًا — فقط نتيجة الصلاحية.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate admin refresh token against nexora-broker
+        env:
+          ADMIN_RTDB_REFRESH_TOKEN: ${{ secrets.ADMIN_RTDB_REFRESH_TOKEN }}
+          ADMIN_REFRESH_TOKEN: ${{ secrets.ADMIN_REFRESH_TOKEN }}
+        run: |
+          TOKEN="${ADMIN_RTDB_REFRESH_TOKEN:-$ADMIN_REFRESH_TOKEN}"
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::لا يوجد أي سر لتوكن المشرف (ADMIN_RTDB_REFRESH_TOKEN أو ADMIN_REFRESH_TOKEN)"
+            exit 0
+          fi
+          RESP=$(curl -s -X POST \
+            "https://securetoken.googleapis.com/v1/token?key=AIzaSyAh6_kGvoPvse3Mt3Yy06dmDaCpTKHp0F4" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=refresh_token" \
+            --data-urlencode "refresh_token=$TOKEN")
+          IDTOK=$(echo "$RESP" | python3 -c "import json,sys;print(json.load(sys.stdin).get('id_token',''))" 2>/dev/null || true)
+          if [ -z "$IDTOK" ]; then
+            ERRMSG=$(echo "$RESP" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('error',{}).get('message','?'))" 2>/dev/null || echo '?')
+            echo "::error::توكن المشرف غير صالح أو منتهٍ — securetoken رفضه: $ERRMSG"
+            exit 1
+          fi
+          echo "✅ توكن المشرف صالح — تبادل securetoken نجح."
+          PROJ=$(echo "$RESP" | python3 -c "import json,sys;print(json.load(sys.stdin).get('project_id','?'))")
+          echo "✅ المشروع: $PROJ"
+          # كتابة موثقة إلى عقدة فحص ثم حذفها — يثبت أن نشر CI سيعمل بعد تقفيل القواعد
+          PROBE="https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/ci_token_probe.json"
+          if curl -s -f -X PUT -H "Content-Type: application/json" -d '{"ok":true}' "$PROBE?auth=$IDTOK" >/dev/null; then
+            echo "✅ الكتابة الموثقة إلى /system ناجحة — نشر CI سيستمر عملًا بعد نشر القواعد المحصّنة."
+            curl -s -f -X DELETE "$PROBE?auth=$IDTOK" >/dev/null && echo "✅ عقدة الفحص حُذفت (لا أثر في القاعدة)."
+          else
+            echo "::warning::التوكن صالح لكن الكتابة الموثقة إلى /system رُفضت — راجع قواعد العقدة."
+          fi
