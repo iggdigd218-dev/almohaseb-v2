@@ -6,13 +6,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/app_version.dart';
-import '../core/sfx.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
 import '../data/update_installer.dart';
 import '../data/update_service.dart';
 import 'widgets.dart';
-import '../core/platform_info.dart';
 
 /// خدمة التحديث (قابلة للاستبدال في الاختبارات).
 final updateServiceProvider = Provider<UpdateService>((ref) => UpdateService());
@@ -27,280 +25,41 @@ final updateCheckProvider = FutureProvider.autoDispose<UpdateInfo>((ref) async {
 final updateInstallerProvider =
     Provider<UpdateInstaller>((ref) => UpdateInstaller());
 
-/// يفتح صفحة التنزيل المناسبة (المسار الاحتياطي: المتصفح).
+/// يفتح الرابط المباشر للحزمة من المستودع الرسمي خارج التطبيق (المتصفح / التنزيلات العادية).
 Future<bool> openUpdateLink(UpdateInfo info) async {
-  final target = info.downloadUrl ?? info.releaseUrl;
-  if (target == null) return false;
-  final uri = Uri.tryParse(target);
-  if (uri == null) return false;
-  try {
-    return await launchUrl(uri, mode: LaunchMode.externalApplication);
-  } catch (_) {
-    return false;
+  final candidates = <String>[
+    if (info.downloadUrl != null && info.downloadUrl!.trim().isNotEmpty)
+      info.downloadUrl!.trim(),
+    if (info.fallbackDownloadUrl != null &&
+        info.fallbackDownloadUrl!.trim().isNotEmpty)
+      info.fallbackDownloadUrl!.trim(),
+    if (info.releaseUrl != null && info.releaseUrl!.trim().isNotEmpty)
+      info.releaseUrl!.trim(),
+  ];
+  for (final target in candidates) {
+    final uri = Uri.tryParse(target);
+    if (uri == null) continue;
+    try {
+      final launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (launched) return true;
+    } catch (_) {}
   }
+  return false;
 }
 
-/// يبدأ التحديث بنقرة واحدة: تنزيل مباشر داخل التطبيق ثم شاشة تثبيت النظام
-/// (أندرويد) أو تشغيل مُثبّت ويندوز. على المنصات الأخرى (أو بلا رابط مباشر)
-/// يتراجع تلقائياً لفتح المتصفح.
+/// يبدأ التحديث بفتح الرابط المباشر للحزمة من المستودع خارج التطبيق بشكل عادي
+/// (عبر المتصفح أو مدير التنزيلات الخارجي للنظام دون حوار تحميل داخلي).
 Future<void> startOneClickUpdate(
   BuildContext context,
   WidgetRef ref,
   UpdateInfo info,
 ) async {
-  final url = info.downloadUrl;
-  final oneClick = PlatformInfo.supportsSelfUpdate;
-  if (!oneClick || url == null) {
-    final ok = await openUpdateLink(info);
-    if (!ok && context.mounted) showSnack(context, 'تعذّر فتح رابط التحديث');
-    return;
-  }
-  final installer = ref.read(updateInstallerProvider);
-  if (!context.mounted) return;
-  await showDialog<void>(
-    context: context,
-    barrierDismissible: false,
-    builder: (_) => _OneClickUpdateDialog(
-      installer: installer,
-      url: url,
-      fallbackUrl: info.fallbackDownloadUrl,
-      sha256: info.sha256,
-    ),
-  );
-}
-
-/// حوار التنزيل التلقائي: شريط تقدم ثم إطلاق شاشة تثبيت النظام.
-class _OneClickUpdateDialog extends StatefulWidget {
-  final UpdateInstaller installer;
-  final String url;
-  final String? fallbackUrl;
-  final String? sha256;
-  const _OneClickUpdateDialog({
-    required this.installer,
-    required this.url,
-    this.fallbackUrl,
-    this.sha256,
-  });
-
-  @override
-  State<_OneClickUpdateDialog> createState() => _OneClickUpdateDialogState();
-}
-
-class _OneClickUpdateDialogState extends State<_OneClickUpdateDialog> {
-  InstallProgress _state = const InstallProgress(InstallPhase.idle);
-  StreamSubscription<InstallProgress>? _sub;
-
-  @override
-  void initState() {
-    super.initState();
-    _start();
-  }
-
-  void _start() {
-    _sub?.cancel();
-    setState(() => _state = InstallProgress(
-          InstallPhase.downloading,
-          progress: 0.0,
-          bytes: 0,
-          sourceName: UpdateInstaller.sourceLabelFor(widget.url),
-          statusMessage: 'جاري تهيئة الاتصال وتجهيز الرابط السريع...',
-        ));
-    _sub = widget.installer
-        .downloadAndInstall(
-          widget.url,
-          expectedSha256: widget.sha256,
-          fallbackUrl: widget.fallbackUrl,
-        )
-        .listen(
-      (p) {
-        if (!mounted) return;
-        setState(() => _state = p);
-        if (p.phase == InstallPhase.done) {
-          Sfx.success();
-          // شاشة تثبيت النظام انفتحت — نغلق الحوار بعد لحظة.
-          Future.delayed(const Duration(milliseconds: 600), () {
-            if (mounted) Navigator.of(context).pop();
-          });
-        } else if (p.phase == InstallPhase.failed) {
-          Sfx.error();
-        }
-      },
-      // (دفعة 65) بلا onError/onDone كان أي استثناء هارب من المُثبِّت
-      // يُسقط الحدث كخطأ غير معالَج، فيبقى الحوار جاثماً على
-      // «جارٍ تنزيل التحديث…» بلا رسالة خطأ ولا زر إعادة محاولة —
-      // تجمّد تام لا مخرج منه. نردّ الحالة إلى `failed` فيُعرض
-      // السبب ويصبح الحوار قابلاً للإغلاق وإعادة المحاولة.
-      onError: (Object e, StackTrace _) {
-        if (!mounted) return;
-        Sfx.error();
-        setState(
-          () => _state = InstallProgress(InstallPhase.failed,
-              error: 'تعذّر تنزيل التحديث: $e'),
-        );
-      },
-      onDone: () {
-        if (!mounted) return;
-        // أُغلق المجرى قبل بلوغ حالة ختامية (done/failed): نُظهر الفشل
-        // صراحةً بدل إبقاء المستخدم أمام شريط تقدم لا ينتهي أبداً.
-        final phase = _state.phase;
-        if (phase != InstallPhase.done && phase != InstallPhase.failed) {
-          Sfx.error();
-          setState(
-            () => _state = const InstallProgress(InstallPhase.failed,
-                error: 'انتهت عملية التحديث دون نتيجة. أعد المحاولة.'),
-          );
-        }
-      },
-    );
-  }
-
-  @override
-  void dispose() {
-    _sub?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final isZeroByteHandshake = _state.phase == InstallPhase.downloading &&
-        _state.bytes == 0 &&
-        (_state.progress == null || _state.progress == 0);
-    final (title, subtitle) = switch (_state.phase) {
-      InstallPhase.awaitingPermission => (
-          'إذن مطلوب لمرة واحدة',
-          'فعّل «السماح من هذا المصدر» في الشاشة التي فُتحت، ثم عد إلى التطبيق '
-              'وسيتابع التحديث تلقائياً.',
-        ),
-      InstallPhase.downloading => (
-          'جارٍ تنزيل التحديث…',
-          isZeroByteHandshake
-              ? (_state.statusMessage ??
-                  'جاري تهيئة الاتصال وتجهيز الرابط السريع...')
-              : PlatformInfo.isWindows
-                  ? (_state.progress != null
-                      ? '${(_state.progress! * 100).round()}٪ — أبقِ التطبيق '
-                          'مفتوحاً حتى يكتمل التنزيل'
-                      : 'أبقِ التطبيق مفتوحاً حتى يكتمل التنزيل')
-                  : (_state.progress != null
-                      ? '${(_state.progress! * 100).round()}٪ — التنزيل يستمر في '
-                          'الخلفية حتى لو خرجت من التطبيق'
-                      : 'التنزيل يستمر في الخلفية حتى لو خرجت من التطبيق'),
-        ),
-      InstallPhase.launchingInstaller || InstallPhase.done => (
-          'اكتمل التنزيل ✅',
-          PlatformInfo.isWindows
-              ? 'سيُفتح معالج التثبيت الآن — اتبع خطواته وسيُغلق التطبيق '
-                  'تلقائياً لإتمام التحديث. بياناتك محفوظة.'
-              : 'اضغط «تثبيت» في شاشة النظام لإتمام التحديث. بياناتك محفوظة.',
-        ),
-      InstallPhase.failed => ('تعذّر التحديث', _state.error ?? ''),
-      InstallPhase.idle => ('لحظة…', ''),
-    };
-    final failed = _state.phase == InstallPhase.failed;
-    final downloading = _state.phase == InstallPhase.downloading;
-    final speedText = _state.formattedSpeed;
-    final sourceText = _state.sourceName;
-    return PopScope(
-      // أثناء التنزيل يمكن إغلاق الحوار بأمان: مدير تنزيلات النظام يواصل
-      // في الخلفية، وعند فتح «تحديث الآن» لاحقاً يُستأنف من حيث وصل.
-      canPop: failed || downloading,
-      child: AlertDialog(
-        icon: failed
-            ? Icon(Icons.error_outline, color: AppColors.dangerOf(context))
-            : const Icon(Icons.system_update_alt),
-        title: Text(title),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(subtitle, style: const TextStyle(height: 1.6)),
-            if (_state.phase == InstallPhase.downloading) ...[
-              const SizedBox(height: 14),
-              LinearProgressIndicator(
-                value: isZeroByteHandshake ? null : _state.progress,
-              ),
-              if (sourceText != null || speedText != null) ...[
-                const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    if (sourceText != null)
-                      Flexible(
-                        child: Text(
-                          'المصدر: $sourceText',
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            color: AppColors.text3Of(context),
-                            fontWeight: FontWeight.w600,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    if (speedText != null)
-                      Directionality(
-                        textDirection: TextDirection.ltr,
-                        child: Text(
-                          speedText,
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            color: AppColors.primaryOf(context),
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ],
-            ],
-          ],
-        ),
-        actions: [
-          // على أندرويد يواصل مدير تنزيلات النظام في الخلفية؛ على ويندوز
-          // نتيح أيضاً خيار الفتح الخارجي لالتقاط التنزيل عبر IDM / FDM.
-          if (downloading && !PlatformInfo.isWindows)
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('متابعة في الخلفية'),
-            ),
-          if (downloading && PlatformInfo.isWindows)
-            OutlinedButton.icon(
-              onPressed: () async {
-                final uri = Uri.tryParse(widget.url);
-                if (uri != null) {
-                  await launchUrl(uri, mode: LaunchMode.externalApplication);
-                }
-              },
-              icon: const Icon(Icons.open_in_browser, size: 16),
-              label: const Text('تنزيل عبر المتصفح / داونلود مانجر'),
-            ),
-          if (failed) ...[
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('إغلاق'),
-            ),
-            OutlinedButton.icon(
-              onPressed: () async {
-                final uri = Uri.tryParse(widget.url);
-                if (uri != null) {
-                  await launchUrl(uri, mode: LaunchMode.externalApplication);
-                }
-              },
-              icon: const Icon(Icons.open_in_new, size: 16),
-              label: Text(
-                PlatformInfo.isWindows
-                    ? 'تنزيل عبر المتصفح / داونلود مانجر'
-                    : 'تنزيل عبر المتصفح',
-              ),
-            ),
-            FilledButton.icon(
-              onPressed: _start,
-              icon: const Icon(Icons.refresh),
-              label: const Text('إعادة المحاولة'),
-            ),
-          ],
-        ],
-      ),
-    );
+  final ok = await openUpdateLink(info);
+  if (!ok && context.mounted) {
+    showSnack(context, 'تعذّر فتح رابط التحديث المباشر');
   }
 }
 
@@ -414,24 +173,9 @@ class _UpdateBody extends ConsumerWidget {
           const SizedBox(height: 10),
           FilledButton.icon(
             onPressed: () => startOneClickUpdate(context, ref, info),
-            icon: const Icon(Icons.download_outlined),
-            label: Text(
-              PlatformInfo.isWindows ? 'تحديث تلقائي مباشر' : 'تحديث الآن',
-            ),
+            icon: const Icon(Icons.open_in_browser),
+            label: const Text('تنزيل التحديث (رابط مباشر)'),
           ),
-          if (PlatformInfo.isWindows) ...[
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              onPressed: () async {
-                final ok = await openUpdateLink(info);
-                if (!ok && context.mounted) {
-                  showSnack(context, 'تعذّر فتح رابط التحديث');
-                }
-              },
-              icon: const Icon(Icons.open_in_browser),
-              label: const Text('تنزيل عبر المتصفح / داونلود مانجر'),
-            ),
-          ],
         ],
       ],
     );
@@ -508,27 +252,13 @@ Future<void> showUpdateDialog(
               onPressed: () => Navigator.pop(ctx),
               child: const Text('لاحقًا'),
             ),
-          if (PlatformInfo.isWindows)
-            OutlinedButton.icon(
-              onPressed: () async {
-                if (!info.isMandatory) Navigator.pop(ctx);
-                final ok = await openUpdateLink(info);
-                if (!ok && context.mounted) {
-                  showSnack(context, 'تعذّر فتح رابط التحديث');
-                }
-              },
-              icon: const Icon(Icons.open_in_browser, size: 16),
-              label: const Text('تنزيل عبر المتصفح / داونلود مانجر'),
-            ),
           FilledButton.icon(
             onPressed: () async {
               if (!info.isMandatory) Navigator.pop(ctx);
               await startOneClickUpdate(context, ref, info);
             },
-            icon: const Icon(Icons.download_outlined),
-            label: Text(
-              PlatformInfo.isWindows ? 'تحديث تلقائي مباشر' : 'تحديث الآن',
-            ),
+            icon: const Icon(Icons.open_in_browser),
+            label: const Text('تنزيل التحديث (رابط مباشر)'),
           ),
         ],
       ),

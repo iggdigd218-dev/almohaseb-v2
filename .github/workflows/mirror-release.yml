@@ -211,7 +211,7 @@ jobs:
           v_suffix = f'?v={vdir}' if vdir else ''
 
           def gh(f):
-              return f'https://github.com/{repo}/releases/download/latest/{f}{v_suffix}'
+              return f'https://github.com/{repo}/releases/download/latest/{f}'
 
           def have(f):
               try:
@@ -231,16 +231,16 @@ jobs:
           sv = man.setdefault('sha256Variants', {})
 
           if have('nexora-arm64.apk'):
-              man['download_url'] = f'{base}/nexora-arm64.apk'
-              dl['android'] = f'{base}/nexora-arm64.apk'
-              dl.setdefault('androidVariants', {})['arm64'] = f'{base}/nexora-arm64.apk'
+              man['download_url'] = gh('nexora-arm64.apk')
+              dl['android'] = gh('nexora-arm64.apk')
+              dl.setdefault('androidVariants', {})['arm64'] = gh('nexora-arm64.apk')
               sv['arm64'] = sha('nexora-arm64.apk')
               man['sha256'] = sv['arm64']
           if have('nexora-armv7.apk'):
-              dl.setdefault('androidVariants', {})['armv7'] = f'{base}/nexora-armv7.apk'
+              dl.setdefault('androidVariants', {})['armv7'] = gh('nexora-armv7.apk')
               sv['armv7'] = sha('nexora-armv7.apk')
           if have('NexoraSetup.exe'):
-              dl['windows'] = f'{base}/NexoraSetup.exe'
+              dl['windows'] = gh('NexoraSetup.exe')
               sv['windows'] = sha('NexoraSetup.exe')
 
           man['downloadsMirror'] = {

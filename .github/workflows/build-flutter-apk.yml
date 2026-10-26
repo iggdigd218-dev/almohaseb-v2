@@ -140,14 +140,14 @@ jobs:
               "armv7": "$SHA_ARMV7"
             },
             "releaseUrl": "https://github.com/${{ github.repository }}/releases/tag/latest",
-            "download_url": "${PAGES_BASE}/nexora-arm64.apk",
+            "download_url": "${GH_REL_BASE}/nexora-arm64.apk",
             "downloads": {
-              "android": "${PAGES_BASE}/nexora-arm64.apk",
+              "android": "${GH_REL_BASE}/nexora-arm64.apk",
               "androidVariants": {
-                "arm64": "${PAGES_BASE}/nexora-arm64.apk",
-                "armv7": "${PAGES_BASE}/nexora-armv7.apk"
+                "arm64": "${GH_REL_BASE}/nexora-arm64.apk",
+                "armv7": "${GH_REL_BASE}/nexora-armv7.apk"
               },
-              "windows": "${PAGES_BASE}/NexoraSetup.exe"
+              "windows": "${GH_REL_BASE}/NexoraSetup.exe"
             },
             "downloadsMirror": {
               "android": "${PAGES_BASE}/nexora-arm64.apk",
@@ -158,12 +158,12 @@ jobs:
               "windows": "${PAGES_BASE}/NexoraSetup.exe"
             },
             "downloadsFallbackGithub": {
-              "android": "${GH_REL_BASE}/nexora-arm64.apk?v=${VDIR}",
+              "android": "${GH_REL_BASE}/nexora-arm64.apk",
               "androidVariants": {
-                "arm64": "${GH_REL_BASE}/nexora-arm64.apk?v=${VDIR}",
-                "armv7": "${GH_REL_BASE}/nexora-armv7.apk?v=${VDIR}"
+                "arm64": "${GH_REL_BASE}/nexora-arm64.apk",
+                "armv7": "${GH_REL_BASE}/nexora-armv7.apk"
               },
-              "windows": "${GH_REL_BASE}/NexoraSetup.exe?v=${VDIR}"
+              "windows": "${GH_REL_BASE}/NexoraSetup.exe"
             },
             "publishedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "notes": "$NOTES"

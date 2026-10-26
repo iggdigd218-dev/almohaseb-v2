@@ -403,6 +403,26 @@ class UpdateService {
         }
       }
     }
+    // إعطاء الأولوية للرابط المباشر من المستودع الرسمي (GitHub Releases)
+    // حتى يتم التحميل خارج التطبيق عبر المتصفح أو مدير التنزيلات بدون تعليق.
+    if (downloadUrl != null &&
+        (downloadUrl.contains('iggdigd218-dev.github.io/') ||
+            downloadUrl.contains('nexora-broker.web.app/'))) {
+      final previousMirror = downloadUrl;
+      if (platform == UpdatePlatform.windows ||
+          downloadUrl.endsWith('NexoraSetup.exe')) {
+        downloadUrl =
+            'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe';
+      } else {
+        final apkName = downloadUrl.endsWith('nexora-armv7.apk') ||
+                abiKey == 'armv7'
+            ? 'nexora-armv7.apk'
+            : 'nexora-arm64.apk';
+        downloadUrl =
+            'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/$apkName';
+      }
+      fallbackDownloadUrl = previousMirror;
+    }
     if (fallbackDownloadUrl == null &&
         platform == UpdatePlatform.android &&
         downloadUrl != null) {
@@ -412,14 +432,16 @@ class UpdateService {
         fallbackDownloadUrl =
             'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/$apkName';
       } else if (downloadUrl.contains('github.com/')) {
-        final vdir = '${latest.major}.${latest.minor}.${latest.patch}-${latest.build}';
+        final vdir =
+            '${latest.major}.${latest.minor}.${latest.patch}-${latest.build}';
         fallbackDownloadUrl =
             'https://iggdigd218-dev.github.io/almohaseb-v2/releases/$vdir/$apkName';
       }
     }
     // احتياطي لويندوز: إذا كان البيان بلا رابط مباشر لويندوز
     if (downloadUrl == null && platform == UpdatePlatform.windows) {
-      downloadUrl = 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe';
+      downloadUrl =
+          'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe';
     }
     final release = map['releaseUrl'];
     final releaseUrl = (release is String && release.startsWith('https://'))

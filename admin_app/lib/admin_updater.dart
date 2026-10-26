@@ -10,10 +10,10 @@ import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
 /// إصدار تطبيق مدير التراخيص الحالي (يطابق admin_app/pubspec.yaml).
-const String kAdminAppVersion = '1.7.9';
+const String kAdminAppVersion = '1.8.1';
 
 /// رقم بناء تطبيق مدير التراخيص (ما بعد + في admin_app/pubspec.yaml).
-const int kAdminAppBuild = 49;
+const int kAdminAppBuild = 51;
 
 String get adminFullVersion => '$kAdminAppVersion+$kAdminAppBuild';
 
@@ -25,7 +25,7 @@ class AdminSemVer implements Comparable<AdminSemVer> {
 
   const AdminSemVer(this.major, this.minor, this.patch, [this.build = 0]);
 
-  static const AdminSemVer current = AdminSemVer(1, 7, 9, kAdminAppBuild);
+  static const AdminSemVer current = AdminSemVer(1, 8, 1, kAdminAppBuild);
 
   static AdminSemVer? tryParse(String? raw) {
     if (raw == null) return null;
@@ -503,11 +503,9 @@ Future<void> startAdminOneClickUpdate(
 ) async {
   final url = info.downloadUrl ?? AdminUpdateService.kDefaultApkUrl;
   try {
-    if (!Platform.isAndroid) {
-      final uri = Uri.parse(info.releaseUrl ?? url);
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-      return;
-    }
+    final uri = Uri.parse(url);
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (launched) return;
   } catch (_) {}
 
   if (!context.mounted) return;
