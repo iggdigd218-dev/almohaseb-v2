@@ -1,0 +1,1040 @@
+// التحديث بنقرة واحدة (أندرويد وويندوز) + التنزيل المباشر الفوري عبر المتصفح:
+// 1) خيار التنزيل داخل التطبيق: ينزّل ملف الـ APK/EXE عبر DownloadManager أو
+//    محرك HTTP المتوازي الداعم لـ Range-Resume (HTTP 206) ثم يتحقق من بصمة SHA-256
+//    ويفتح شاشة تثبيت النظام مباشرةً.
+// 2) خيار التنزيل المباشر عبر المتصفح: يحلّ رابط التحويل (302 Location) إلى رابط
+//    الملف الثنائي المباشر (release-assets.githubusercontent.com أو github.io)
+//    ويفتحه في المتصفح حصراً (Chrome/المتصفح الافتراضي) ليبدأ تحميل ملف الـ APK/EXE
+//    فوراً دون إدخال المستخدم إلى صفحة المستودع أو تطبيق GitHub.
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:crypto/crypto.dart' as crypto;
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import '../core/app_error_mapper.dart';
+import '../core/platform_info.dart';
+import '../core/sfx.dart';
+
+/// مراحل عملية التحديث بنقرة واحدة.
+enum InstallPhase {
+  idle,
+  downloading,
+  launchingInstaller,
+  awaitingPermission,
+  failed,
+  done,
+}
+
+/// حالة لحظية تُبث أثناء التنزيل/التثبيت لعرض شريط التقدم.
+class InstallProgress {
+  final InstallPhase phase;
+
+  /// نسبة التنزيل 0..1 (أو null إذا كان الحجم مجهولاً).
+  final double? progress;
+  final String? error;
+  final int bytes;
+  final int total;
+  final double speedBps;
+  final String? sourceName;
+  final String? statusMessage;
+
+  const InstallProgress(
+    this.phase, {
+    this.progress,
+    this.error,
+    this.bytes = 0,
+    this.total = -1,
+    this.speedBps = 0.0,
+    this.sourceName,
+    this.statusMessage,
+  });
+
+  String? get formattedSpeed {
+    if (speedBps <= 0) return null;
+    final mb = speedBps / (1024 * 1024);
+    if (mb >= 1.0) {
+      return '${mb.toStringAsFixed(2)} MB/s';
+    }
+    final kb = speedBps / 1024;
+    return '${kb.toStringAsFixed(0)} KB/s';
+  }
+}
+
+class UpdateInstaller {
+  static const _channel = MethodChannel('nexora/updates');
+  final http.Client Function() _clientFactory;
+
+  UpdateInstaller({http.Client Function()? clientFactory})
+      : _clientFactory = clientFactory ?? (() => http.Client());
+
+  static String sourceLabelFor(String url) {
+    final u = url.toLowerCase();
+    if (u.contains('github.io')) return 'مرآة Fastly السريعة';
+    if (u.contains('githubusercontent.com')) return 'خادم الملفات المباشر';
+    return 'خادم التحديث الرئيسي';
+  }
+
+  /// يحلّ رابط التحديث إلى رابط الملف الثنائي المباشر (Direct Binary Stream URL)
+  /// بحيث يبدأ التحميل في المتصفح أو مدير التنزيلات فوراً دون فتح صفحة المستودع
+  /// أو اعتراض الرابط من تطبيق GitHub على أندرويد.
+  static Future<String> resolveDirectBinaryUrl(
+    String primaryUrl, {
+    String? fallbackUrl,
+  }) async {
+    final candidates = <String>[
+      if (primaryUrl.trim().isNotEmpty) primaryUrl.trim(),
+      if (fallbackUrl != null && fallbackUrl.trim().isNotEmpty)
+        fallbackUrl.trim(),
+    ];
+
+    for (final candidate in candidates) {
+      final uri = Uri.tryParse(candidate);
+      if (uri == null || !uri.isScheme('https')) continue;
+
+      // إذا كان الرابط على github.com/.../releases/download/... نستخرج رابط CDN
+      // المباشر (release-assets.githubusercontent.com) من ترويسة 302 Location:
+      // هذا الرابط يحمل Content-Disposition: attachment; filename=nexora-arm64.apk
+      // ولا يعترضه تطبيق GitHub إطلاقاً بل يبدأ المتصفح بتنزيل الملف فوراً.
+      if (uri.host.toLowerCase() == 'github.com' &&
+          uri.path.contains('/releases/download/')) {
+        final client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 5);
+        try {
+          final req = await client
+              .getUrl(uri)
+              .timeout(const Duration(seconds: 5));
+          req.followRedirects = false;
+          final res = await req.close().timeout(const Duration(seconds: 5));
+          final loc = res.headers.value(HttpHeaders.locationHeader);
+          await res.drain<void>();
+          if (loc != null && loc.startsWith('https://')) {
+            return loc;
+          }
+        } catch (_) {
+          // في حال تعذر الاستعلام المسبق نكمل بالمرآة أو الرابط المباشر
+        } finally {
+          client.close(force: true);
+        }
+      }
+
+      // إذا كان الرابط على github.io نتأكد أنه متاح (200 OK)
+      if (uri.host.toLowerCase().endsWith('github.io')) {
+        final client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 4);
+        try {
+          final req = await client
+              .headUrl(uri)
+              .timeout(const Duration(seconds: 4));
+          final res = await req.close().timeout(const Duration(seconds: 4));
+          await res.drain<void>();
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            return candidate;
+          }
+        } catch (_) {
+        } finally {
+          client.close(force: true);
+        }
+      }
+    }
+
+    // إن لم ينجح الجلب المسبق نعيد أول رابط ملف مباشر (.apk أو .exe)
+    for (final c in candidates) {
+      if (!c.contains('/releases/tag/') && !c.endsWith('/releases/latest')) {
+        return c;
+      }
+    }
+    return PlatformInfo.isWindows
+        ? 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe'
+        : 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-arm64.apk';
+  }
+
+  /// يفتح رابط الملف المباشر في متصفح الويب حصراً ليبدأ التنزيل فوراً دون فتح المستودع.
+  static Future<bool> launchDirectBrowserDownload(
+    String primaryUrl, {
+    String? fallbackUrl,
+  }) async {
+    final directUrl = await resolveDirectBinaryUrl(
+      primaryUrl,
+      fallbackUrl: fallbackUrl,
+    );
+    if (PlatformInfo.isAndroid) {
+      try {
+        final ok = await _channel.invokeMethod<bool>(
+          'openBrowserDownload',
+          {'url': directUrl},
+        );
+        if (ok == true) return true;
+      } catch (_) {}
+    }
+    final uri = Uri.tryParse(directUrl);
+    if (uri == null) return false;
+    try {
+      return await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// يحسب بصمة التجزئة SHA-256 للملف المنزّل.
+  static Future<String> computeFileSha256(File file) async {
+    final digest = await crypto.sha256.bind(file.openRead()).first;
+    return digest.toString().toLowerCase();
+  }
+
+  /// يتحقق من تطابق بصمة التجزئة SHA-256 للملف المنزّل مع البصمة المرفقة في بيان التحديث.
+  static Future<bool> verifyFileSha256(
+    File file,
+    String? expectedSha256,
+  ) async {
+    final expected = expectedSha256?.trim().toLowerCase() ?? '';
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(expected)) {
+      return false;
+    }
+    try {
+      if (!file.existsSync()) return false;
+      final actual = await computeFileSha256(file);
+      return actual == expected;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// يتحقق من إمكانية قراءة ملف الـ APK المنزّل فعلياً على أندرويد 11+ (Scoped Storage).
+  static Future<bool> _canReadFile(File file) async {
+    try {
+      if (!file.existsSync() || file.lengthSync() <= 1024 * 1024) return false;
+      await file.openRead(0, 16).first;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// هل منح المستخدم إذن «تثبيت التطبيقات غير المعروفة» لهذا التطبيق؟
+  Future<bool> canInstall() async {
+    if (PlatformInfo.isWindows) return true;
+    if (!PlatformInfo.isAndroid) return false;
+    try {
+      return await _channel.invokeMethod<bool>('canInstall') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// يفتح صفحة إعدادات النظام لمنح إذن التثبيت (مرة واحدة فقط).
+  Future<void> openInstallSettings() async {
+    try {
+      await _channel.invokeMethod('openInstallSettings');
+    } catch (_) {}
+  }
+
+  // ------- تذكّر معرّف التنزيل والرابط بين تشغيلات التطبيق (للاستئناف الدقيق) -------
+
+  Future<File> _idFile() async {
+    final dir = await getApplicationSupportDirectory();
+    return File('${dir.path}/update_download_state.json');
+  }
+
+  Future<File> _legacyIdFile() async {
+    final dir = await getApplicationSupportDirectory();
+    return File('${dir.path}/update_download_id.txt');
+  }
+
+  Future<({int id, String url})?> _savedDownload() async {
+    try {
+      final leg = await _legacyIdFile();
+      if (leg.existsSync()) await leg.delete();
+
+      final f = await _idFile();
+      if (!f.existsSync()) return null;
+      final raw = await f.readAsString();
+      final map = jsonDecode(raw);
+      if (map is Map) {
+        final id = (map['id'] is int)
+            ? map['id'] as int
+            : int.tryParse('${map['id']}');
+        final u = map['url']?.toString();
+        if (id != null && u != null && u.isNotEmpty) {
+          return (id: id, url: u);
+        }
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _saveDownload(int? id, String? url) async {
+    try {
+      final f = await _idFile();
+      if (id == null || url == null) {
+        if (f.existsSync()) await f.delete();
+      } else {
+        await f.writeAsString(jsonEncode({'id': id, 'url': url}));
+      }
+    } catch (_) {}
+  }
+
+  Future<Map<String, Object?>> _query(int id) async {
+    try {
+      final r = await _channel
+          .invokeMapMethod<String, Object?>('queryDownload', {'id': id});
+      return r ?? const {'status': 'unknown'};
+    } catch (_) {
+      return const {'status': 'unknown'};
+    }
+  }
+
+  Future<void> _cancelDownload(int id) async {
+    try {
+      await _channel.invokeMethod('cancelDownload', {'id': id});
+    } catch (_) {}
+  }
+
+  /// ينزّل APK/EXE من [url] ويبث التقدم، ثم يتحقق من بصمة SHA-256 ويفتح شاشة تثبيت النظام.
+  /// لا يرمي استثناءً — يبث InstallPhase.failed مع سبب عربي مفهوم.
+  Stream<InstallProgress> downloadAndInstall(
+    String url, {
+    String? expectedSha256,
+    String? sha256,
+    String? fallbackUrl,
+  }) async* {
+    final targetSha256 = (expectedSha256 ?? sha256)?.trim();
+    if (targetSha256 == null ||
+        !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(targetSha256)) {
+      yield const InstallProgress(
+        InstallPhase.failed,
+        error:
+            'تعذّر بدء التحديث: بصمة التحقق الرقمية (sha256) مفقودة أو غير صالحة في البيان.',
+      );
+      return;
+    }
+
+    if (PlatformInfo.isWindows) {
+      yield* _windowsDownloadAndInstall(
+        url,
+        expectedSha256: targetSha256,
+        fallbackUrl: fallbackUrl,
+      );
+      return;
+    }
+    if (!PlatformInfo.isAndroid) {
+      yield const InstallProgress(
+        InstallPhase.failed,
+        error: 'التحديث المباشر متاح على أندرويد وويندوز فقط.',
+      );
+      return;
+    }
+
+    // 0) إذن «المصادر غير المعروفة»: إن لم يُمنح نفتح إعداداته وننتظر المستخدم.
+    if (!await canInstall()) {
+      yield const InstallProgress(InstallPhase.awaitingPermission);
+      await openInstallSettings();
+      for (var i = 0; i < 60; i++) {
+        await Future<void>.delayed(const Duration(seconds: 1));
+        if (await canInstall()) break;
+      }
+      if (!await canInstall()) {
+        yield const InstallProgress(
+          InstallPhase.failed,
+          error: 'لم يُمنح إذن تثبيت التحديثات. فعّله من إعدادات النظام '
+              'ثم أعد المحاولة.',
+        );
+        return;
+      }
+    }
+
+    final primarySource = sourceLabelFor(url);
+    yield InstallProgress(
+      InstallPhase.downloading,
+      progress: 0,
+      bytes: 0,
+      sourceName: primarySource,
+      statusMessage: 'جاري تهيئة الاتصال وتجهيز الرابط السريع...',
+    );
+
+    // 1) استئناف تنزيل سابق إن وُجد وكان لنفس الرابط المطلوب حصراً
+    final saved = await _savedDownload();
+    int? id;
+    if (saved != null && saved.url == url) {
+      final st = await _query(saved.id);
+      final status = '${st['status']}';
+      final bytes = (st['bytes'] as num?)?.toInt() ?? 0;
+      if (status == 'done' && '${st['path']}'.isNotEmpty) {
+        final apk = File('${st['path']}');
+        if (await _canReadFile(apk)) {
+          _notifyDownloadComplete('${st['path']}');
+          yield* _install('${st['path']}', expectedSha256: targetSha256);
+          return;
+        }
+      }
+      if ((status == 'running' || status == 'pending' || status == 'paused') &&
+          bytes > 0) {
+        id = saved.id;
+      } else {
+        await _cancelDownload(saved.id);
+      }
+    } else if (saved != null) {
+      await _cancelDownload(saved.id);
+    }
+
+    if (id == null) {
+      await _saveDownload(null, null);
+    }
+
+    // 2) بدء تنزيل جديد عبر مدير تنزيلات النظام.
+    if (id == null) {
+      try {
+        final r = await _channel
+            .invokeMethod<Object?>('startDownload', {'url': url});
+        final started = (r is int) ? r : int.tryParse('$r') ?? -1;
+        if (started >= 0) {
+          id = started;
+          await _saveDownload(id, url);
+        }
+      } catch (_) {}
+    }
+
+    if (id == null) {
+      yield* _fallbackHttpDownload(
+        url,
+        expectedSha256: targetSha256,
+        fallbackUrl: fallbackUrl,
+      );
+      return;
+    }
+
+    // 3) متابعة التقدم مع التحويل التلقائي الذكي إلى محرك HTTP المتوازي
+    // إذا بقي DownloadManager عالقاً عند 0 بايت لأكثر من 15 ثانية (30 دورة فحص).
+    var stuckCount = 0;
+    var zeroByteTicks = 0;
+    var lastBytes = 0;
+    var lastSampleTime = DateTime.now();
+    var currentSpeedBps = 0.0;
+
+    while (true) {
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      final st = await _query(id);
+      final status = '${st['status']}';
+      final bytes = (st['bytes'] as num?)?.toInt() ?? 0;
+      final total = (st['total'] as num?)?.toInt() ?? -1;
+
+      if (bytes == 0) {
+        zeroByteTicks++;
+        if (zeroByteTicks >= 30) {
+          // DownloadManager عالق عند 0 بايت — ننتقل تلقائياً لمحرك التنزيل المتوازي داخل التطبيق
+          await _cancelDownload(id);
+          await _saveDownload(null, null);
+          yield* _fallbackHttpDownload(
+            url,
+            expectedSha256: targetSha256,
+            fallbackUrl: fallbackUrl,
+          );
+          return;
+        }
+      } else {
+        zeroByteTicks = 0;
+      }
+
+      final now = DateTime.now();
+      final elapsedMs = now.difference(lastSampleTime).inMilliseconds;
+      if (elapsedMs >= 800) {
+        final delta = bytes - lastBytes;
+        if (delta > 0) {
+          final instantBps = (delta * 1000.0) / elapsedMs;
+          currentSpeedBps = currentSpeedBps <= 0
+              ? instantBps
+              : (currentSpeedBps * 0.6 + instantBps * 0.4);
+        } else if (bytes == 0) {
+          currentSpeedBps = 0.0;
+        }
+        lastBytes = bytes;
+        lastSampleTime = now;
+      }
+
+      switch (status) {
+        case 'done':
+          final path = '${st['path']}';
+          await _saveDownload(null, null);
+          if (path.isEmpty || !await _canReadFile(File(path))) {
+            yield* _fallbackHttpDownload(
+              url,
+              expectedSha256: targetSha256,
+              fallbackUrl: fallbackUrl,
+            );
+            return;
+          }
+          _notifyDownloadComplete(path);
+          yield* _install(path, expectedSha256: targetSha256);
+          return;
+        case 'failed':
+          await _cancelDownload(id);
+          await _saveDownload(null, null);
+          yield* _fallbackHttpDownload(
+            url,
+            expectedSha256: targetSha256,
+            fallbackUrl: fallbackUrl,
+          );
+          return;
+        case 'paused':
+          stuckCount = 0;
+          yield InstallProgress(
+            InstallPhase.downloading,
+            progress: (total > 0) ? bytes / total : 0.0,
+            bytes: bytes,
+            total: total,
+            speedBps: currentSpeedBps,
+            sourceName: primarySource,
+            statusMessage: bytes == 0
+                ? 'جاري تهيئة الاتصال وتجهيز الرابط السريع...'
+                : null,
+          );
+          break;
+        case 'unknown':
+          if (++stuckCount >= 20) {
+            await _cancelDownload(id);
+            await _saveDownload(null, null);
+            yield* _fallbackHttpDownload(
+              url,
+              expectedSha256: targetSha256,
+              fallbackUrl: fallbackUrl,
+            );
+            return;
+          }
+          break;
+        default: // running / pending
+          stuckCount = 0;
+          yield InstallProgress(
+            InstallPhase.downloading,
+            progress: (total > 0) ? bytes / total : 0.0,
+            bytes: bytes,
+            total: total,
+            speedBps: currentSpeedBps,
+            sourceName: primarySource,
+            statusMessage: bytes == 0
+                ? 'جاري تهيئة الاتصال وتجهيز الرابط السريع...'
+                : null,
+          );
+      }
+    }
+  }
+
+  /// إشعار نظام بعد اكتمال تنزيل التحديث — نقرته تفتح مجلد التنزيلات العام.
+  void _notifyDownloadComplete(String path) {
+    Sfx.systemNotify(
+      title: 'اكتمل تنزيل التحديث',
+      body: 'الملف محفوظ في Download/Nexora — اضغط لفتح مجلد التنزيلات.',
+      entityType: 'update_download',
+      entityId: path,
+    );
+  }
+
+  /// يفتح مجلد التنزيلات العام الذي يحفظ فيه التطبيق ملفات التحديث.
+  static Future<bool> openDownloadsFolder(String path) async {
+    try {
+      if (PlatformInfo.isAndroid) {
+        final r = await _channel.invokeMethod<bool>('openDownloadsFolder');
+        return r ?? false;
+      }
+      if (PlatformInfo.isWindows && path.isNotEmpty) {
+        await Process.start(
+          'explorer.exe',
+          ['/select,', path],
+          mode: ProcessStartMode.detached,
+        );
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  /// يتحقق من الملف وبصمة SHA-256 ثم يطلق شاشة تثبيت النظام.
+  Stream<InstallProgress> _install(
+    String path, {
+    required String expectedSha256,
+  }) async* {
+    final apk = File(path);
+    if (!apk.existsSync() || apk.lengthSync() < 1024 * 1024) {
+      await _saveDownload(null, null);
+      yield const InstallProgress(
+        InstallPhase.failed,
+        error: 'الملف المنزَّل غير مكتمل. أعد المحاولة.',
+      );
+      return;
+    }
+    final validHash = await verifyFileSha256(apk, expectedSha256);
+    if (!validHash) {
+      try {
+        await apk.delete();
+      } catch (_) {}
+      await _saveDownload(null, null);
+      yield const InstallProgress(
+        InstallPhase.failed,
+        error:
+            'فشل التحقق من بصمة التجزئة (sha256) لملف التحديث. تم حظر التثبيت لحمايتك.',
+      );
+      return;
+    }
+    yield const InstallProgress(InstallPhase.launchingInstaller, progress: 1);
+    try {
+      final r =
+          await _channel.invokeMethod<String>('installApk', {'path': path});
+      await _saveDownload(null, null);
+      if (r == 'ok') {
+        yield const InstallProgress(InstallPhase.done, progress: 1);
+      } else {
+        yield InstallProgress(
+          InstallPhase.failed,
+          error: switch (r) {
+            'file_missing' => 'ملف التحديث اختفى بعد التنزيل.',
+            'uri_failed' => 'تعذّر تجهيز ملف التثبيت.',
+            _ => 'تعذّر فتح شاشة التثبيت.',
+          },
+        );
+      }
+    } catch (e) {
+      await _saveDownload(null, null);
+      yield InstallProgress(
+        InstallPhase.failed,
+        error: 'تعذّر فتح شاشة التثبيت: $e',
+      );
+    }
+  }
+
+  // ------------------------- مسار ويندوز -------------------------
+
+  Stream<InstallProgress> _windowsDownloadAndInstall(
+    String url, {
+    required String expectedSha256,
+    String? fallbackUrl,
+  }) async* {
+    yield const InstallProgress(InstallPhase.downloading, progress: 0);
+    final segs = Uri.tryParse(url)?.pathSegments ?? const <String>[];
+    final name = segs.isEmpty ? '' : segs.last;
+    final isExe = name.toLowerCase().endsWith('.exe');
+    final fileName = isExe ? 'NexoraSetup.exe' : 'nexora-update.zip';
+
+    yield* _httpDownload(
+      url,
+      fileName,
+      (file) async* {
+        if (file.lengthSync() < 512 * 1024) {
+          yield const InstallProgress(
+            InstallPhase.failed,
+            error: 'الملف المنزَّل غير مكتمل. أعد المحاولة.',
+          );
+          return;
+        }
+        final validHash = await verifyFileSha256(file, expectedSha256);
+        if (!validHash) {
+          try {
+            await file.delete();
+          } catch (_) {}
+          yield const InstallProgress(
+            InstallPhase.failed,
+            error:
+                'فشل التحقق من بصمة التجزئة (sha256) لملف التحديث. تم حظر التثبيت لحمايتك.',
+          );
+          return;
+        }
+        yield const InstallProgress(
+          InstallPhase.launchingInstaller,
+          progress: 1,
+        );
+        try {
+          if (isExe) {
+            try {
+              await Process.start(
+                'powershell.exe',
+                [
+                  '-NoProfile',
+                  '-NonInteractive',
+                  '-Command',
+                  "Start-Process -FilePath '${file.path}' -Verb RunAs",
+                ],
+                mode: ProcessStartMode.detached,
+                runInShell: false,
+              );
+            } catch (_) {
+              await Process.start(
+                'cmd.exe',
+                ['/c', 'start', '', file.path],
+                mode: ProcessStartMode.detached,
+                runInShell: false,
+              );
+            }
+          } else {
+            await Process.start(
+              'explorer.exe',
+              ['/select,', file.path],
+              mode: ProcessStartMode.detached,
+            );
+          }
+          yield const InstallProgress(InstallPhase.done, progress: 1);
+        } catch (e) {
+          yield InstallProgress(
+            InstallPhase.failed,
+            error: 'تعذّر تشغيل المُثبّت: $e',
+          );
+        }
+      },
+      fallbackUrl: fallbackUrl,
+    );
+  }
+
+  /// مسار احتياطي: تنزيل http داخل التطبيق إذا تعذّر أو علق مدير تنزيلات النظام.
+  Stream<InstallProgress> _fallbackHttpDownload(
+    String url, {
+    required String expectedSha256,
+    String? fallbackUrl,
+  }) async* {
+    yield* _httpDownload(
+      url,
+      'nexora-update.apk',
+      (f) => _install(f.path, expectedSha256: expectedSha256),
+      fallbackUrl: fallbackUrl,
+    );
+  }
+
+  Future<Directory> _downloadDir(String fileName) async {
+    Directory? dir;
+    if (PlatformInfo.isAndroid) {
+      try {
+        final cacheDirPath =
+            await _channel.invokeMethod<String>('cacheUpdateDir');
+        if (cacheDirPath != null && cacheDirPath.isNotEmpty) {
+          final d = Directory(cacheDirPath);
+          await d.create(recursive: true);
+          dir = d;
+        }
+      } catch (_) {}
+      if (dir == null) {
+        try {
+          final ext = await getExternalStorageDirectory();
+          if (ext != null) {
+            final d = Directory('${ext.path}/updates');
+            await d.create(recursive: true);
+            dir = d;
+          }
+        } catch (_) {}
+      }
+    }
+    if (dir == null) {
+      final cache = await getTemporaryDirectory();
+      final d = Directory('${cache.path}/updates');
+      if (!d.existsSync()) d.createSync(recursive: true);
+      dir = d;
+    }
+    try {
+      await for (final e in dir.list()) {
+        if (e is File && !e.path.endsWith('.part')) {
+          await e.delete();
+        }
+      }
+    } catch (_) {}
+    return dir;
+  }
+
+  List<String> _buildFastCandidateUrls(String primary, String? fallback) {
+    final rawSet = <String>{
+      if (primary.trim().isNotEmpty) primary.trim(),
+      if (fallback != null && fallback.trim().isNotEmpty) fallback.trim(),
+    };
+    final fastMirrors = <String>[];
+    final others = <String>[];
+    for (final u in rawSet) {
+      if (u.contains('github.io/almohaseb-v2/releases/')) {
+        fastMirrors.add(u);
+        final idx = u.indexOf('/releases/');
+        if (idx >= 0) {
+          final tail = u.substring(idx + 1).split('?').first;
+          fastMirrors.add(
+            'https://raw.githubusercontent.com/iggdigd218-dev/almohaseb-v2/releases/$tail',
+          );
+        }
+      } else {
+        others.add(u);
+      }
+    }
+    return <String>{...fastMirrors, ...others}.toList();
+  }
+
+  Future<bool> _downloadParallelRanges(
+    String candidateUrl,
+    File targetFile,
+    int totalBytes,
+    void Function(double progress) onProgress,
+  ) async {
+    const chunkCount = 6;
+    final dir = targetFile.parent;
+    final partFiles = List<File>.generate(
+      chunkCount,
+      (i) => File('${dir.path}/part_$i.tmp'),
+    );
+    final receivedPerChunk = List<int>.filled(chunkCount, 0);
+    final chunkSize = (totalBytes / chunkCount).ceil();
+    var lastReport = DateTime.now();
+
+    Future<bool> downloadPart(int index) async {
+      final start = index * chunkSize;
+      if (start >= totalBytes) return true;
+      final end = ((index + 1) * chunkSize - 1).clamp(start, totalBytes - 1);
+      final expectedLen = end - start + 1;
+
+      for (var retry = 0; retry < 2; retry++) {
+        final client = _clientFactory();
+        IOSink? sink;
+        try {
+          receivedPerChunk[index] = 0;
+          final req = http.Request('GET', Uri.parse(candidateUrl));
+          req.headers['Range'] = 'bytes=$start-$end';
+          final res =
+              await client.send(req).timeout(const Duration(seconds: 20));
+          if (res.statusCode != 206) {
+            return false;
+          }
+          sink = partFiles[index].openWrite();
+          var partGot = 0;
+          await for (final chunk
+              in res.stream.timeout(const Duration(seconds: 30))) {
+            sink.add(chunk);
+            partGot += chunk.length;
+            receivedPerChunk[index] = partGot;
+            final now = DateTime.now();
+            if (now.difference(lastReport).inMilliseconds > 120) {
+              lastReport = now;
+              final sum = receivedPerChunk.fold<int>(0, (a, b) => a + b);
+              onProgress((sum / totalBytes).clamp(0.0, 0.99));
+            }
+          }
+          await sink.flush();
+          await sink.close();
+          sink = null;
+          if (partGot == expectedLen) return true;
+        } catch (_) {
+          // retry
+        } finally {
+          try {
+            await sink?.close();
+          } catch (_) {}
+          client.close();
+        }
+      }
+      return false;
+    }
+
+    try {
+      final results =
+          await Future.wait(List.generate(chunkCount, downloadPart));
+      if (results.any((ok) => !ok)) return false;
+
+      final outSink = targetFile.openWrite();
+      try {
+        for (final pf in partFiles) {
+          if (pf.existsSync()) {
+            await outSink.addStream(pf.openRead());
+          }
+        }
+        await outSink.flush();
+      } finally {
+        await outSink.close();
+      }
+      onProgress(1.0);
+      return targetFile.existsSync() && targetFile.lengthSync() == totalBytes;
+    } catch (_) {
+      return false;
+    } finally {
+      for (final pf in partFiles) {
+        try {
+          if (pf.existsSync()) await pf.delete();
+        } catch (_) {}
+      }
+    }
+  }
+
+  Stream<InstallProgress> _httpDownload(
+    String url,
+    String fileName,
+    Stream<InstallProgress> Function(File file) onDone, {
+    String? fallbackUrl,
+  }) async* {
+    final urlsToTry = _buildFastCandidateUrls(url, fallbackUrl);
+    String? lastError;
+
+    for (var attempt = 0; attempt < urlsToTry.length; attempt++) {
+      final candidateUrl = urlsToTry[attempt];
+      File? apk;
+      try {
+        final dir = await _downloadDir(fileName);
+        apk = File('${dir.path}/$fileName');
+      } catch (e) {
+        lastError = 'تعذّر تجهيز مجلد التنزيل: $e';
+        break;
+      }
+
+      final srcName = sourceLabelFor(candidateUrl);
+      yield InstallProgress(
+        InstallPhase.downloading,
+        progress: 0.0,
+        bytes: 0,
+        sourceName: srcName,
+        statusMessage: 'جاري تهيئة الاتصال وتجهيز الرابط السريع...',
+      );
+
+      // 1) محاولة التنزيل المتوازي السريع (6 اتصالات Range) إذا كان الخادم يدعمه
+      var downloadedOk = false;
+      try {
+        final probeClient = _clientFactory();
+        try {
+          final headReq = http.Request('HEAD', Uri.parse(candidateUrl));
+          final headRes = await probeClient
+              .send(headReq)
+              .timeout(const Duration(seconds: 12));
+          final totalLen = headRes.contentLength ?? -1;
+          final acceptsRanges =
+              (headRes.headers['accept-ranges'] ?? '').toLowerCase() == 'bytes';
+          if (headRes.statusCode >= 200 &&
+              headRes.statusCode < 300 &&
+              acceptsRanges &&
+              totalLen > 2 * 1024 * 1024) {
+            final progressController = StreamController<InstallProgress>();
+            final startPar = DateTime.now();
+            final future = _downloadParallelRanges(
+              candidateUrl,
+              apk,
+              totalLen,
+              (p) {
+                if (!progressController.isClosed) {
+                  final got = (p * totalLen).round();
+                  final elapsedSec =
+                      DateTime.now().difference(startPar).inMilliseconds /
+                          1000.0;
+                  final bps = elapsedSec > 0.2 ? got / elapsedSec : 0.0;
+                  progressController.add(InstallProgress(
+                    InstallPhase.downloading,
+                    progress: p,
+                    bytes: got,
+                    total: totalLen,
+                    speedBps: bps,
+                    sourceName: srcName,
+                  ));
+                }
+              },
+            ).whenComplete(() => progressController.close());
+
+            await for (final ev in progressController.stream) {
+              yield ev;
+            }
+            downloadedOk = await future;
+          }
+        } finally {
+          probeClient.close();
+        }
+      } catch (_) {}
+
+      // 2) المسار المتسلسل مع دعم استئناف التنزيل (HTTP 206 Partial Content / Range-Resume)
+      if (!downloadedOk) {
+        final partFile = File('${apk.path}.part');
+        for (var resumeAttempt = 0;
+            resumeAttempt < 3 && !downloadedOk;
+            resumeAttempt++) {
+          final client = _clientFactory();
+          IOSink? sink;
+          try {
+            final existingBytes =
+                partFile.existsSync() ? partFile.lengthSync() : 0;
+            final req = http.Request('GET', Uri.parse(candidateUrl));
+            if (existingBytes > 0) {
+              req.headers['Range'] = 'bytes=$existingBytes-';
+            }
+            final res =
+                await client.send(req).timeout(const Duration(seconds: 25));
+            if (res.statusCode == 416) {
+              try {
+                if (partFile.existsSync()) await partFile.delete();
+              } catch (_) {}
+              continue;
+            }
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+              lastError = 'الخادم أعاد الرمز ${res.statusCode}.';
+              break;
+            } else {
+              final isPartial = res.statusCode == 206 && existingBytes > 0;
+              final contentLen = res.contentLength;
+              final total = (contentLen != null && contentLen > 0)
+                  ? (isPartial ? existingBytes + contentLen : contentLen)
+                  : null;
+              var received = isPartial ? existingBytes : 0;
+              var sessionReceived = 0;
+              final sessionStart = DateTime.now();
+              sink = partFile.openWrite(
+                mode: isPartial ? FileMode.append : FileMode.write,
+              );
+              var lastYield = DateTime.now();
+              await for (final chunk
+                  in res.stream.timeout(const Duration(seconds: 45))) {
+                sink.add(chunk);
+                received += chunk.length;
+                sessionReceived += chunk.length;
+                final now = DateTime.now();
+                if (now.difference(lastYield).inMilliseconds > 120) {
+                  lastYield = now;
+                  final elapsedSec =
+                      now.difference(sessionStart).inMilliseconds / 1000.0;
+                  final bps =
+                      elapsedSec > 0.2 ? sessionReceived / elapsedSec : 0.0;
+                  yield InstallProgress(
+                    InstallPhase.downloading,
+                    progress: (total != null && total > 0)
+                        ? (received / total).clamp(0.0, 1.0)
+                        : (received / (22 * 1024 * 1024)).clamp(0.01, 0.95),
+                    bytes: received,
+                    total: total ?? -1,
+                    speedBps: bps,
+                    sourceName: srcName,
+                  );
+                }
+              }
+              await sink.flush();
+              await sink.close();
+              sink = null;
+              if (partFile.existsSync() && partFile.lengthSync() > 0) {
+                try {
+                  if (apk.existsSync()) await apk.delete();
+                } catch (_) {}
+                await partFile.rename(apk.path);
+                downloadedOk = true;
+              }
+            }
+          } on TimeoutException {
+            lastError =
+                'انقطع الاتصال أثناء التنزيل. جاري استئناف التحميل تلقائياً...';
+          } catch (e) {
+            lastError = AppErrorMapper.toUserFriendlyMessage(e);
+          } finally {
+            try {
+              await sink?.close();
+            } catch (_) {}
+            client.close();
+          }
+        }
+      }
+
+      if (downloadedOk && apk.existsSync() && apk.lengthSync() > 0) {
+        yield* onDone(apk);
+        return;
+      }
+    }
+
+    yield InstallProgress(
+      InstallPhase.failed,
+      error:
+          lastError ?? 'تعذّر تنزيل التحديث. تحقق من الاتصال ثم أعد المحاولة.',
+    );
+  }
+}

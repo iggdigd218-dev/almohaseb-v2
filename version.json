@@ -1,5 +1,5 @@
 {
-  "version": "3.97.31+298",
+  "version": "3.97.32+299",
   "minSupported": "3.13.0",
   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/latest",
@@ -14,12 +14,12 @@
     "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe"
   },
   "downloadsMirror": {
-    "android": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.31-298/nexora-arm64.apk",
+    "android": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.32-299/nexora-arm64.apk",
     "androidVariants": {
-      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.31-298/nexora-arm64.apk",
-      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.31-298/nexora-armv7.apk"
+      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.32-299/nexora-arm64.apk",
+      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.32-299/nexora-armv7.apk"
     },
-    "windows": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.31-298/NexoraSetup.exe"
+    "windows": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.32-299/NexoraSetup.exe"
   },
   "downloadsFallbackGithub": {
     "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-arm64.apk",
@@ -29,6 +29,6 @@
     },
     "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe"
   },
-  "publishedAt": "2026-10-26T16:20:00Z",
-  "notes": "• تحويل نظام التحديث إلى التحميل المباشر من المستودع الرسمي خارج التطبيق عبر المتصفح/مدير التنزيلات العادي دون تعليق.\n• إصلاح تعليق شاشة ربط العضو، ومنع تسرب صلاحيات الإدارة بعد الطرد، وإضافة الحذف الجماعي للمنشآت في تطبيق الإدارة.\n• توحيد رسائل الأخطاء باللغة العربية وحجب الأكواد التقنية الخام ومزامنة إعدادات المؤسسة ومرفقات الدردشة."
+  "publishedAt": "2026-10-27T01:30:00Z",
+  "notes": "• توفير خيارَي التحديث معاً: (التنزيل والتثبيت المباشر داخل التطبيق) و(التنزيل المباشر عبر المتصفح دون فتح صفحة المستودع).\n• إعادة تصميم شاشة المبيعات ونقطة البيع (POS) بالكامل بتلوين باستيل ديناميكي للأيقونات وإزالة قسم المفضلة."
 }

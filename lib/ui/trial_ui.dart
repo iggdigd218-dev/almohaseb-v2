@@ -7,14 +7,18 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../core/app_version.dart';
 import '../core/cloud_config.dart';
 import '../core/license_model.dart';
+import '../core/platform_info.dart';
 import '../core/sfx.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
 import '../data/sync/cloud_control_service.dart';
 import '../data/sync/device_id.dart';
 import '../data/sync/subscription_guard.dart';
+import '../data/update_service.dart';
+import 'update_section.dart';
 import 'widgets.dart' show showSnack;
 
 /// رقم التواصل المباشر للتفعيل (واتساب المدير/الدعم).
@@ -1892,11 +1896,21 @@ class FrozenAccountBarrier extends StatelessWidget {
 }
 
 /// شاشة التحديث الإجباري عن بعد (Force Update Barrier).
-class ForceUpdateBarrier extends StatelessWidget {
+class ForceUpdateBarrier extends ConsumerWidget {
   const ForceUpdateBarrier({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final updateInfo = ref.watch(updateCheckProvider).valueOrNull;
+    final fallbackInfo = UpdateInfo(
+      status: UpdateStatus.required_,
+      current: AppSemVer.current,
+      downloadUrl: PlatformInfo.isWindows
+          ? 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe'
+          : 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-arm64.apk',
+    );
+    final info = updateInfo ?? fallbackInfo;
+
     return Scaffold(
       backgroundColor: Colors.white,
       body: Center(
@@ -1912,7 +1926,11 @@ class ForceUpdateBarrier extends StatelessWidget {
                   color: const Color(0xFF2563EB).withValues(alpha: .12),
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(Icons.system_update_rounded, size: 50, color: Color(0xFF2563EB)),
+                child: const Icon(
+                  Icons.system_update_rounded,
+                  size: 50,
+                  color: Color(0xFF2563EB),
+                ),
               ),
               const SizedBox(height: 22),
               const Text(
@@ -1927,23 +1945,44 @@ class ForceUpdateBarrier extends StatelessWidget {
               const Text(
                 'أصبح إصدار التطبيق المثبت قديماً ولم يعد متوافقاً مع المنظومة السحابية.\nيرجى تنزيل الإصدار الأحدث لمتابعة العمل بأمان.',
                 textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 14, height: 1.6, color: Color(0xFF4B5563)),
+                style: TextStyle(
+                  fontSize: 14,
+                  height: 1.6,
+                  color: Color(0xFF4B5563),
+                ),
               ),
               const SizedBox(height: 28),
               FilledButton.icon(
                 style: FilledButton.styleFrom(
                   backgroundColor: const Color(0xFF2563EB),
-                  padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
                 ),
-                onPressed: () async {
-                  final uri = Uri.parse('https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/latest');
-                  try {
-                    await launchUrl(uri, mode: LaunchMode.externalApplication);
-                  } catch (_) {}
-                },
+                onPressed: () => startOneClickUpdate(context, ref, info),
                 icon: const Icon(Icons.download_rounded),
-                label: const Text('تنزيل التحديث الآن', style: TextStyle(fontWeight: FontWeight.w800)),
+                label: const Text(
+                  'التنزيل والتثبيت داخل التطبيق',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                onPressed: () => openUpdateLink(info),
+                icon: const Icon(Icons.open_in_browser),
+                label: const Text(
+                  'التنزيل المباشر عبر المتصفح',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
               ),
             ],
           ),

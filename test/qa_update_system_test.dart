@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nexora_app/core/app_version.dart';
+import 'package:nexora_app/core/update_installer.dart';
 import 'package:nexora_app/data/update_service.dart';
 
 const String kSampleSha256 =
@@ -274,5 +275,39 @@ void main() {
       current: const AppSemVer(3, 49, 0, 85),
     ).check();
     expect(older.status, UpdateStatus.upToDate);
+  });
+
+  group('UpdateInstaller — التحقق الصارم من البصمة الرقمية SHA-256', () {
+    test('يرفض التثبيت فوراً عند غياب expectedSha256', () async {
+      final installer = UpdateInstaller();
+      InstallProgress? last;
+      final ok = await installer.downloadAndInstall(
+        url: 'https://example.com/app.apk',
+        versionTag: '3.97.32',
+        expectedSha256: null,
+        onProgress: (p) => last = p,
+      );
+      expect(ok, isFalse);
+      expect(last?.phase, InstallPhase.failed);
+      expect(last?.error, contains('البصمة الرقمية'));
+    });
+
+    test('يحذف الملف فوراً ويرفض التثبيت عند عدم تطابق SHA-256', () async {
+      final tmp = await Directory.systemTemp.createTemp('nexora_sha_test_');
+      addTearDown(() async {
+        if (await tmp.exists()) await tmp.delete(recursive: true);
+      });
+      final fakeApk = File('${tmp.path}/corrupted.apk');
+      await fakeApk.writeAsBytes('corrupted-payload-bytes'.codeUnits);
+
+      final verified = await UpdateInstaller.verifyAndGuardFile(
+        file: fakeApk,
+        expectedSha256:
+            '0000000000000000000000000000000000000000000000000000000000000000',
+      );
+      expect(verified, isFalse);
+      expect(await fakeApk.exists(), isFalse,
+          reason: 'يجب حذف الملف غير المطابق للبصمة فوراً');
+    });
   });
 }
