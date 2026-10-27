@@ -26,7 +26,9 @@ class ReceiptData {
   final DateTime date;
   final double? balanceAfter;
   final String orgName;
+  final String orgAddress;
   final String orgPhone;
+  final String sellerOrDevice;
   final String logoPath;
   final String logoBase64;
   final String footer;
@@ -46,7 +48,9 @@ class ReceiptData {
     required this.date,
     this.balanceAfter,
     this.orgName = '',
+    this.orgAddress = '',
     this.orgPhone = '',
+    this.sellerOrDevice = '',
     this.logoPath = '',
     this.logoBase64 = '',
     this.footer = '',
@@ -54,6 +58,24 @@ class ReceiptData {
     this.isDebit = true,
     this.isCashSale = false,
   });
+
+  static String _resolveSellerOrDevice(
+    String cashierName,
+    Map<String, String> settings,
+  ) {
+    final c = cashierName.trim();
+    final devName = (settings['sync.deviceName'] ?? '').trim();
+    final rawDevId = (settings['sync.deviceId'] ?? '').trim();
+    final shortDev = rawDevId.replaceFirst('DEVICE-', '').trim();
+    final devCode = shortDev.length >= 4 ? shortDev.substring(0, 4) : shortDev;
+    if (c.isNotEmpty && devCode.isNotEmpty && !c.contains(devCode)) {
+      return '$c ($devCode)';
+    }
+    if (c.isNotEmpty) return c;
+    if (devName.isNotEmpty) return devName;
+    if (devCode.isNotEmpty) return devCode;
+    return 'المدير';
+  }
 
   factory ReceiptData.fromTx({
     required Tx tx,
@@ -80,8 +102,10 @@ class ReceiptData {
         notes: tx.notes,
         date: tx.date,
         balanceAfter: balanceAfter,
-        orgName: settings['businessName'] ?? '',
-        orgPhone: settings['phone'] ?? '',
+        orgName: (settings['businessName'] ?? settings['org.name'] ?? '').trim(),
+        orgAddress: (settings['address'] ?? settings['org.address'] ?? '').trim(),
+        orgPhone: (settings['phone'] ?? '').trim(),
+        sellerOrDevice: _resolveSellerOrDevice(tx.cashierName, settings),
         logoPath: (settings['logo'] ??
                 settings['logoPath'] ??
                 settings['account.photoPath'] ??
@@ -117,8 +141,10 @@ class ReceiptData {
         notes: v.notes,
         date: v.date,
         balanceAfter: balanceAfter,
-        orgName: settings['businessName'] ?? '',
-        orgPhone: settings['phone'] ?? '',
+        orgName: (settings['businessName'] ?? settings['org.name'] ?? '').trim(),
+        orgAddress: (settings['address'] ?? settings['org.address'] ?? '').trim(),
+        orgPhone: (settings['phone'] ?? '').trim(),
+        sellerOrDevice: _resolveSellerOrDevice(v.cashierName, settings),
         logoPath: (settings['logo'] ??
                 settings['logoPath'] ??
                 settings['account.photoPath'] ??
@@ -152,38 +178,6 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     }
   }
 
-  // تخطيط مستوحى من سندات «تدوين الحسابات» و«نكسورا»:
-  // ترويسة خضراء (اسم المنشأة/الهاتف/الشعار) ← شريط «سند عملية» مع الرقم
-  // ← بيانات الحساب ← كبسولة المبلغ الكبيرة (عليه بالأحمر/له بالأخضر)
-  // ← جدول الأصناف (صنف/كمية/سعر/إجمالي) مع الإجمالي ← التفاصيل والتاريخ
-  // ← «الرصيد بعد العملية» ← تذييل الشكر.
-  const headerH = 150.0;
-  const bandH = 66.0;
-  const rowH = 58.0;
-  const amountH = 128.0;
-  final infoRows = 1 + // اسم الحساب
-      (d.accountPhone.isNotEmpty ? 1 : 0) +
-      1; // التاريخ والوقت (يُرسم لاحقاً في قسم التفاصيل)
-  final partialRows =
-      (paidVal != null && paidVal.isNotEmpty ? 1 : 0) +
-      (remainVal != null && remainVal.isNotEmpty ? 1 : (d.isCashSale ? 1 : 0));
-  final detailRows = (d.statement.isNotEmpty ? 1 : 0) + partialRows + 1;
-  final itemsBlock =
-      d.items.isEmpty ? 0.0 : (54.0 + d.items.length * 52.0 + 56.0 + 24.0);
-  final balanceBlock = d.balanceAfter != null ? 96.0 : 0.0;
-  final height = headerH +
-      bandH +
-      (infoRows - 1) * rowH + // صفوف بيانات الحساب (بدون صف التاريخ)
-      24 +
-      amountH +
-      24 +
-      itemsBlock +
-      detailRows * rowH +
-      16 +
-      balanceBlock +
-      110 + // تذييل الشكر
-      40;
-
   ui.Image? logo;
   Uint8List? logoBytes;
   if (d.logoBase64.trim().isNotEmpty) {
@@ -210,6 +204,37 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     }
   }
 
+  final hasSubHeaderInfo =
+      d.orgAddress.trim().isNotEmpty || d.orgPhone.trim().isNotEmpty;
+  final headerH = (logo != null ? 214.0 : 138.0) + (hasSubHeaderInfo ? 28.0 : 0.0);
+  const bandH = 66.0;
+  const rowH = 58.0;
+  const amountH = 128.0;
+  final infoRows = 1 + // اسم الحساب
+      (d.accountPhone.isNotEmpty ? 1 : 0) +
+      1; // التاريخ والوقت (يُرسم لاحقاً في قسم التفاصيل)
+  final partialRows =
+      (paidVal != null && paidVal.isNotEmpty ? 1 : 0) +
+      (remainVal != null && remainVal.isNotEmpty ? 1 : (d.isCashSale ? 1 : 0));
+  final showStatement = d.statement.isNotEmpty &&
+      !(d.items.isNotEmpty && d.statement.contains('فاتورة'));
+  final detailRows = (showStatement ? 1 : 0) + partialRows + 1;
+  final itemsBlock =
+      d.items.isEmpty ? 0.0 : (54.0 + d.items.length * 52.0 + 56.0 + 24.0);
+  final balanceBlock = d.balanceAfter != null ? 96.0 : 0.0;
+  final height = headerH +
+      bandH +
+      (infoRows - 1) * rowH + // صفوف بيانات الحساب (بدون صف التاريخ)
+      24 +
+      amountH +
+      24 +
+      itemsBlock +
+      detailRows * rowH +
+      16 +
+      balanceBlock +
+      148 + // تذييل الموظف/الجهاز + الشكر
+      40;
+
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w, height));
 
@@ -221,13 +246,14 @@ Future<String> buildReceiptImage(ReceiptData d) async {
 
   canvas.drawRect(Rect.fromLTWH(0, 0, w, height), Paint()..color = Colors.white);
 
-  // ===== 1) الترويسة الخضراء: اسم المنشأة + الهاتف + الشعار يميناً =====
+  // ===== 1) الترويسة: توسيط الشعار أعلى المنتصف + اسم المنشأة تحته + العنوان والهاتف =====
   canvas.drawRect(
-      const Rect.fromLTWH(0, 0, w, headerH), Paint()..color = green);
+      Rect.fromLTWH(0, 0, w, headerH), Paint()..color = green);
+  var headerY = 18.0;
   if (logo != null) {
     final logoBox = RRect.fromRectAndRadius(
-      const Rect.fromLTWH(w - pad - 96, (headerH - 96) / 2, 96, 96),
-      const Radius.circular(14),
+      Rect.fromLTWH((w - 88) / 2, headerY, 88, 88),
+      const Radius.circular(18),
     );
     canvas.drawRRect(logoBox, Paint()..color = Colors.white);
     canvas.drawImageRect(
@@ -236,24 +262,51 @@ Future<String> buildReceiptImage(ReceiptData d) async {
       logoBox.outerRect.deflate(6),
       Paint()..filterQuality = ui.FilterQuality.high,
     );
+    headerY += 98.0;
+  } else {
+    headerY = 26.0;
   }
-  final orgX = logo != null ? w - pad - 116 : w - pad;
-  _text(canvas, d.orgName.isEmpty ? 'سجل الحسابات' : d.orgName, orgX, 26, 36,
-      Colors.white, bold: true, alignEnd: true, maxWidth: w * .7);
-  if (d.orgPhone.isNotEmpty) {
-    _text(canvas, d.orgPhone, orgX, 78, 24, Colors.white70,
-        alignEnd: true);
+  _text(
+    canvas,
+    d.orgName.isEmpty ? 'سجل الحسابات' : d.orgName,
+    w / 2,
+    headerY,
+    36,
+    Colors.white,
+    bold: true,
+    center: true,
+    maxWidth: w - pad * 2,
+  );
+  headerY += 50.0;
+  if (hasSubHeaderInfo) {
+    final parts = <String>[
+      if (d.orgAddress.trim().isNotEmpty) '📍 ${d.orgAddress.trim()}',
+      if (d.orgPhone.trim().isNotEmpty) '📞 ${d.orgPhone.trim()}',
+    ];
+    _text(
+      canvas,
+      parts.join('  •  '),
+      w / 2,
+      headerY,
+      23,
+      Colors.white.withValues(alpha: 0.92),
+      center: true,
+      maxWidth: w - pad * 2,
+    );
   }
 
   var y = headerH;
 
-  // ===== 2) شريط «سند عملية» + الرقم المرجعي يساراً =====
+  // ===== 2) شريط «سند عملية / فاتورة» + الرقم المرجعي مع بادئة الجهاز يساراً =====
   canvas.drawRect(
       Rect.fromLTWH(0, y, w, bandH), Paint()..color = const Color(0xFFF3F4F6));
   _text(canvas, d.title, w - pad, y + 16, 28, ink,
       bold: true, alignEnd: true);
   if (d.number.isNotEmpty) {
-    _text(canvas, d.number, pad, y + 20, 24, muted, alignStart: true);
+    final formattedNum =
+        d.number.startsWith('#') ? d.number : '#${d.number}';
+    _text(canvas, formattedNum, pad, y + 18, 24, muted,
+        bold: true, alignStart: true);
   }
   y += bandH + 18;
 
@@ -378,7 +431,7 @@ Future<String> buildReceiptImage(ReceiptData d) async {
       big: true,
     );
   }
-  if (d.statement.isNotEmpty) infoRow('التفاصيل', d.statement);
+  if (showStatement) infoRow('التفاصيل', d.statement);
   infoRow('التاريخ والوقت', Fmt.dateTime(d.date));
   y += 4;
 
@@ -407,21 +460,35 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     y += 96;
   }
 
-  // ===== 8) تذييل الشكر =====
+  // ===== 8) التذييل الرسمي: هوية البائع / الجهاز + رسالة الشكر =====
   canvas.drawRect(
       Rect.fromLTWH(pad, y, w - pad * 2, 2), Paint()..color = line);
-  y += 20;
+  y += 18;
+  final sellerIdentity =
+      d.sellerOrDevice.trim().isEmpty ? 'المدير' : d.sellerOrDevice.trim();
+  _text(
+    canvas,
+    'الموظف / الجهاز: $sellerIdentity',
+    w / 2,
+    y,
+    21,
+    ink,
+    bold: true,
+    center: true,
+    maxWidth: w - pad * 2,
+  );
+  y += 36;
   _text(
     canvas,
     'شكراً لتعاملكم معنا — نتمنى لكم أطيب الأوقات',
     w / 2,
     y,
-    23,
+    22,
     green,
     bold: true,
     center: true,
   );
-  y += 40;
+  y += 38;
   _text(
     canvas,
     d.footer.isEmpty ? 'هذا السند آلي ولا يحتاج إلى ختم أو توقيع.' : d.footer,

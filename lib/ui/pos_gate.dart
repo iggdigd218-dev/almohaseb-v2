@@ -419,7 +419,7 @@ class PosSectionsStrip extends StatelessWidget {
           ),
         ),
         SizedBox(
-          height: 88,
+          height: 92,
           child: ListView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsetsDirectional.fromSTEB(12, 2, 12, 2),
@@ -487,12 +487,10 @@ class _HorizontalSectionTile extends StatelessWidget {
         ? (dark
             ? activeBlue.withValues(alpha: 0.22)
             : const Color(0xFFEAF3FF))
-        : (dark
-            ? tone.foreground.withValues(alpha: 0.15)
-            : tone.background);
+        : (dark ? AppColors.surfaceOf(context) : Colors.white);
     final borderColor = active
         ? activeBlue
-        : tone.foreground.withValues(alpha: 0.18);
+        : AppColors.borderOf(context);
     final iconColor = active ? activeBlue : tone.foreground;
 
     return Padding(
@@ -506,7 +504,7 @@ class _HorizontalSectionTile extends StatelessWidget {
           borderRadius: BorderRadius.circular(14),
           child: Container(
             width: 90,
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(14),
               border: Border.all(
@@ -517,23 +515,30 @@ class _HorizontalSectionTile extends StatelessWidget {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(icon, size: 23, color: iconColor),
-                const SizedBox(height: 4),
+                Container(
+                  padding: const EdgeInsets.all(5),
+                  decoration: BoxDecoration(
+                    color: iconColor.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(icon, size: 19, color: iconColor),
+                ),
+                const SizedBox(height: 3),
                 Text(
                   label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    fontSize: 11,
+                    fontSize: 10.5,
                     fontWeight: FontWeight.w800,
                     color: AppColors.textOf(context),
                   ),
                 ),
-                const SizedBox(height: 3),
+                const SizedBox(height: 2),
                 Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 7, vertical: 1.5),
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                   decoration: BoxDecoration(
                     color: active
                         ? activeBlue.withValues(alpha: 0.14)
@@ -545,7 +550,7 @@ class _HorizontalSectionTile extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 9.5,
+                      fontSize: 9,
                       fontWeight: FontWeight.w700,
                       color: active ? activeBlue : tone.foreground,
                     ),
@@ -595,7 +600,7 @@ class PosCategoryStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final strip = SizedBox(
-      height: 82,
+      height: 86,
       child: ListView(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsetsDirectional.fromSTEB(12, 2, 12, 2),
@@ -636,7 +641,7 @@ class PosCategoryStrip extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsetsDirectional.fromSTEB(12, 6, 12, 4),
+          padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 12, 3),
           child: Row(
             children: [
               const Icon(
@@ -882,7 +887,7 @@ class _CatChip extends StatelessWidget {
         ? (dark
             ? activeBlue.withValues(alpha: 0.22)
             : const Color(0xFFEAF4FF))
-        : AppColors.surfaceOf(context);
+        : (dark ? AppColors.surfaceOf(context) : Colors.white);
     final borderColor = active ? activeBlue : AppColors.borderOf(context);
     final iconColor = active ? activeBlue : tone.foreground;
 
@@ -896,8 +901,8 @@ class _CatChip extends StatelessWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(14),
           child: Container(
-            width: 96,
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+            width: 90,
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(14),
               border: Border.all(
@@ -908,15 +913,22 @@ class _CatChip extends StatelessWidget {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(icon, size: 21, color: iconColor),
-                const SizedBox(height: 3),
+                Container(
+                  padding: const EdgeInsets.all(4.5),
+                  decoration: BoxDecoration(
+                    color: iconColor.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                  child: Icon(icon, size: 18, color: iconColor),
+                ),
+                const SizedBox(height: 2.5),
                 Text(
                   label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    fontSize: 11,
+                    fontSize: 10.5,
                     fontWeight: FontWeight.w800,
                     color: AppColors.textOf(context),
                   ),
@@ -924,7 +936,7 @@ class _CatChip extends StatelessWidget {
                 const SizedBox(height: 2),
                 Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                   decoration: BoxDecoration(
                     color: active
                         ? activeBlue.withValues(alpha: 0.14)
@@ -936,7 +948,7 @@ class _CatChip extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 9.5,
+                      fontSize: 9,
                       fontWeight: FontWeight.w700,
                       color: active ? activeBlue : AppColors.text2Of(context),
                     ),

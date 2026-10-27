@@ -782,6 +782,9 @@ class _PosScreenState extends ConsumerState<PosScreen>
                 ref.watch(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
             final cur = currencies.first;
 
+            final allAccounts =
+                ref.watch(allAccountsProvider).valueOrNull ?? const <Account>[];
+
             return SafeArea(
               child: ConstrainedBox(
                 constraints: BoxConstraints(
@@ -831,12 +834,52 @@ class _PosScreenState extends ConsumerState<PosScreen>
                             separatorBuilder: (_, __) => const SizedBox(height: 8),
                             itemBuilder: (c, i) {
                               final d = held[i];
+                              final custName = d.customerId == null
+                                  ? null
+                                  : allAccounts
+                                      .where((a) => a.id == d.customerId)
+                                      .firstOrNull
+                                      ?.name;
                               final label = (d.holdLabel != null && d.holdLabel!.trim().isNotEmpty)
                                   ? d.holdLabel!
                                   : 'فاتورة معلقة #${i + 1}';
                               final timeStr = d.heldAt != null ? Fmt.dateTime(d.heldAt!) : '';
 
-                              return Container(
+                              return InkWell(
+                                borderRadius: BorderRadius.circular(AppRadius.card),
+                                onTap: () async {
+                                  if (_cart.isNotEmpty) {
+                                    final switchOk = await showDialog<bool>(
+                                      context: context,
+                                      builder: (dCtx) => AlertDialog(
+                                        title: const Text('السلة الحالية غير فارغة'),
+                                        content: const Text(
+                                            'هل تريد تعليق الفاتورة الحالية واستئناف هذه الفاتورة المعلقة؟'),
+                                        actions: [
+                                          TextButton(
+                                            onPressed: () =>
+                                                Navigator.of(dCtx).pop(false),
+                                            child: const Text('إلغاء'),
+                                          ),
+                                          FilledButton(
+                                            onPressed: () =>
+                                                Navigator.of(dCtx).pop(true),
+                                            child: const Text('تعليق الحالية واستئناف'),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                    if (switchOk == true) {
+                                      _cartCtl.holdCurrentDraft();
+                                      if (ctx.mounted) Navigator.pop(ctx);
+                                      _resumeHeld(i);
+                                    }
+                                  } else {
+                                    Navigator.pop(ctx);
+                                    _resumeHeld(i);
+                                  }
+                                },
+                                child: Container(
                                 padding: const EdgeInsets.all(12),
                                 decoration: BoxDecoration(
                                   color: AppColors.surfaceOf(context),
@@ -852,7 +895,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                                       width: 40,
                                       height: 40,
                                       decoration: BoxDecoration(
-                                        color: AppTone.blue.background,
+                                        color: AppTone.blue.foreground.withValues(alpha: 0.14),
                                         borderRadius: BorderRadius.circular(10),
                                       ),
                                       child: const Icon(
@@ -875,6 +918,19 @@ class _PosScreenState extends ConsumerState<PosScreen>
                                             maxLines: 1,
                                             overflow: TextOverflow.ellipsis,
                                           ),
+                                          if (custName != null && custName.trim().isNotEmpty) ...[
+                                            const SizedBox(height: 2),
+                                            Text(
+                                              '👤 العميل: $custName',
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w700,
+                                                color: AppColors.text2Of(context),
+                                              ),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ],
                                           const SizedBox(height: 3),
                                           Wrap(
                                             spacing: 8,
@@ -983,6 +1039,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                                     ),
                                   ],
                                 ),
+                              ),
                               );
                             },
                           ),
@@ -1380,13 +1437,13 @@ class _PosScreenState extends ConsumerState<PosScreen>
       },
       child: Column(
         children: [
-          // 1) شريط العنوان العلوي الكحلي الملكي الداكن (مطابق للتصميم المرفق)
+          // 1) شريط العنوان العلوي الكحلي الملكي الداكن المدمج
           _buildPosHeader(),
 
           // 2) حقل البحث المستقل تحت الشريط العلوي
           Container(
             color: AppColors.surfaceOf(context),
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 5),
             child: _buildPillSearch(),
           ),
 
@@ -1658,211 +1715,240 @@ class _PosScreenState extends ConsumerState<PosScreen>
         : sectionId == _selectedSectionId;
   }
 
-  /// الشريط العلوي الكحلي الملكي الداكن لنقطة البيع (مطابق للصورة المرفقة).
+  void _openMainDrawer(BuildContext ctx) {
+    ScaffoldState? drawerScaffold;
+    ctx.visitAncestorElements((element) {
+      if (element is StatefulElement && element.state is ScaffoldState) {
+        final s = element.state as ScaffoldState;
+        if (s.hasDrawer) {
+          drawerScaffold = s;
+          return false;
+        }
+      }
+      return true;
+    });
+    if (drawerScaffold != null) {
+      drawerScaffold!.openDrawer();
+    } else if (Scaffold.maybeOf(ctx)?.hasDrawer == true) {
+      Scaffold.of(ctx).openDrawer();
+    } else {
+      ShellNav.go(ShellNav.home);
+    }
+  }
+
+  /// الشريط العلوي الكحلي الملكي الداكن المدمج لنقطة البيع (toolbarHeight: 48.0).
   Widget _buildPosHeader() {
     final held = ref.watch(heldInvoicesProvider);
     final hasCartItems = _cart.isNotEmpty;
     return Container(
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topRight,
-          end: Alignment.bottomLeft,
-          colors: [Color(0xFF0F3E78), Color(0xFF154B8E)],
-        ),
+        color: const Color(0xFF0F3E78),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF0F3E78).withValues(alpha: .20),
-            blurRadius: 10,
-            offset: const Offset(0, 3),
+            color: const Color(0xFF0F3E78).withValues(alpha: .18),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
           ),
         ],
       ),
       child: SafeArea(
         bottom: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-          child: Row(
-            children: [
-              // جهة اليمين (في RTL): أيقونة السلة + عنوان "المبيعات" ومسار التتبع الهرمي
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        InkWell(
-                          borderRadius: BorderRadius.circular(8),
-                          onTap: _openCheckoutSheet,
-                          child: Stack(
-                            clipBehavior: Clip.none,
-                            children: [
-                              const Icon(
-                                Icons.shopping_cart_outlined,
-                                color: Colors.white,
-                                size: 23,
-                              ),
-                              if (_itemCount > 0)
-                                PositionedDirectional(
-                                  top: -5,
-                                  end: -5,
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 4.5,
-                                      vertical: 1,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFFF59E0B),
-                                      borderRadius: BorderRadius.circular(10),
-                                    ),
-                                    child: Text(
-                                      '$_itemCount',
-                                      style: const TextStyle(
-                                        color: Colors.black,
-                                        fontSize: 9.5,
-                                        fontWeight: FontWeight.w900,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        const Text(
-                          'المبيعات',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.w900,
-                            height: 1.15,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      'الأقسام  ←  الفئات  ←  الأصناف',
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: .82),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
+        child: SizedBox(
+          height: 48.0,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(
+              children: [
+                // أقصى اليمين (RTL Leading): أيقونة القائمة الجانبية لفتح Drawer التطبيق
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                  tooltip: 'القائمة الجانبية',
+                  icon: const Icon(Icons.menu, color: Colors.white, size: 22),
+                  onPressed: () => _openMainDrawer(context),
                 ),
-              ),
-
-              // جهة اليسار (في RTL): أيقونة التصفية، البحث، القائمة الإضافية، والرئيسية
-              _headerIconButton(
-                icon: Icons.tune_rounded,
-                tooltip: 'ترتيب وتصفية الأصناف',
-                onTap: _openPosSortSheet,
-              ),
-              _headerIconButton(
-                icon: Icons.search_rounded,
-                tooltip: 'بحث سريع',
-                onTap: () => _searchFocus.requestFocus(),
-              ),
-              PopupMenuButton<String>(
-                tooltip: 'خيارات إضافية',
-                icon: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    const Icon(Icons.more_vert, color: Colors.white, size: 22),
-                    if (held.isNotEmpty)
-                      PositionedDirectional(
-                        top: -3,
-                        end: -3,
-                        child: Container(
-                          width: 8,
-                          height: 8,
-                          decoration: const BoxDecoration(
-                            color: Color(0xFFF59E0B),
-                            shape: BoxShape.circle,
-                          ),
+                const SizedBox(width: 4),
+                // بجوارها مباشرة: عنوان "المبيعات" (15dp) وتحته مباشرة "الأقسام ← الفئات ← الأصناف" (9.5dp)
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        'المبيعات',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w900,
+                          height: 1.05,
                         ),
                       ),
-                  ],
-                ),
-                onSelected: (val) {
-                  switch (val) {
-                    case 'new_hold':
-                      _quickHoldAndNewBill();
-                    case 'name_hold':
-                      if (hasCartItems) _promptHoldInvoice();
-                    case 'held_list':
-                      _showHeldSheet();
-                    case 'history':
-                      setState(() => _tabController.animateTo(1));
-                    case 'sections_gate':
-                      setState(() => _atSectionsGate = !_atSectionsGate);
-                  }
-                },
-                itemBuilder: (ctx) => [
-                  PopupMenuItem<String>(
-                    value: 'new_hold',
-                    child: ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(
-                        hasCartItems
-                            ? Icons.post_add_rounded
-                            : Icons.note_add_outlined,
+                      const SizedBox(height: 1),
+                      Text(
+                        'الأقسام ← الفئات ← الأصناف',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: .82),
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w600,
+                          height: 1.05,
+                        ),
                       ),
-                      title: Text(
-                        hasCartItems
-                            ? 'تعليق الفاتورة وبدء فاتورة جديدة'
-                            : 'فاتورة جديدة فارغة',
-                      ),
-                    ),
+                    ],
                   ),
-                  if (hasCartItems)
-                    const PopupMenuItem<String>(
-                      value: 'name_hold',
+                ),
+
+                // الجهة اليسرى (Actions): أيقونة السلة مع العداد، الفلترة، الخيارات، والرئيسية
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                  tooltip: 'سلة المبيعات',
+                  onPressed: _openCheckoutSheet,
+                  icon: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      const Icon(
+                        Icons.shopping_cart_outlined,
+                        color: Colors.white,
+                        size: 21,
+                      ),
+                      if (_itemCount > 0)
+                        PositionedDirectional(
+                          top: -5,
+                          end: -5,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 4.5,
+                              vertical: 1,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF59E0B),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              '$_itemCount',
+                              style: const TextStyle(
+                                color: Colors.black,
+                                fontSize: 9.5,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                _headerIconButton(
+                  icon: Icons.tune_rounded,
+                  tooltip: 'ترتيب وتصفية الأصناف',
+                  onTap: _openPosSortSheet,
+                ),
+                PopupMenuButton<String>(
+                  tooltip: 'خيارات إضافية',
+                  padding: EdgeInsets.zero,
+                  icon: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      const Icon(Icons.more_vert, color: Colors.white, size: 21),
+                      if (held.isNotEmpty)
+                        PositionedDirectional(
+                          top: -3,
+                          end: -3,
+                          child: Container(
+                            width: 8,
+                            height: 8,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFFF59E0B),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  onSelected: (val) {
+                    switch (val) {
+                      case 'new_hold':
+                        _quickHoldAndNewBill();
+                      case 'name_hold':
+                        if (hasCartItems) _promptHoldInvoice();
+                      case 'held_list':
+                        _showHeldSheet();
+                      case 'history':
+                        setState(() => _tabController.animateTo(1));
+                      case 'sections_gate':
+                        setState(() => _atSectionsGate = !_atSectionsGate);
+                    }
+                  },
+                  itemBuilder: (ctx) => [
+                    PopupMenuItem<String>(
+                      value: 'new_hold',
                       child: ListTile(
                         dense: true,
                         contentPadding: EdgeInsets.zero,
-                        leading: Icon(Icons.bookmark_add_outlined),
-                        title: Text('تعليق الفاتورة باسم...'),
+                        leading: Icon(
+                          hasCartItems
+                              ? Icons.post_add_rounded
+                              : Icons.note_add_outlined,
+                        ),
+                        title: Text(
+                          hasCartItems
+                              ? 'تعليق الفاتورة وبدء فاتورة جديدة'
+                              : 'فاتورة جديدة فارغة',
+                        ),
                       ),
                     ),
-                  PopupMenuItem<String>(
-                    value: 'held_list',
-                    child: ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.pause_circle_outline_rounded),
-                      title: Text('الفواتير المعلقة (${held.length})'),
+                    if (hasCartItems)
+                      const PopupMenuItem<String>(
+                        value: 'name_hold',
+                        child: ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(Icons.bookmark_add_outlined),
+                          title: Text('تعليق الفاتورة باسم...'),
+                        ),
+                      ),
+                    PopupMenuItem<String>(
+                      value: 'held_list',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.pause_circle_outline_rounded),
+                        title: Text('الفواتير المعلقة (${held.length})'),
+                      ),
                     ),
-                  ),
-                  const PopupMenuItem<String>(
-                    value: 'history',
-                    child: ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(Icons.receipt_long_outlined),
-                      title: Text('سجل المبيعات والمرتجعات'),
+                    const PopupMenuItem<String>(
+                      value: 'history',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.receipt_long_outlined),
+                        title: Text('سجل المبيعات والمرتجعات'),
+                      ),
                     ),
-                  ),
-                  const PopupMenuItem<String>(
-                    value: 'sections_gate',
-                    child: ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(Icons.grid_view_rounded),
-                      title: Text('تصفح شبكة الأقسام'),
+                    const PopupMenuItem<String>(
+                      value: 'sections_gate',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.grid_view_rounded),
+                        title: Text('تصفح شبكة الأقسام'),
+                      ),
                     ),
-                  ),
-                ],
-              ),
-              _headerIconButton(
-                icon: Icons.home_rounded,
-                tooltip: 'الرئيسية',
-                onTap: () => ShellNav.go(ShellNav.home),
-              ),
-            ],
+                  ],
+                ),
+                _headerIconButton(
+                  icon: Icons.home_rounded,
+                  tooltip: 'الرئيسية',
+                  onTap: () => ShellNav.go(ShellNav.home),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -2286,6 +2372,8 @@ class _PosScreenState extends ConsumerState<PosScreen>
                           paidNow > (_netTotal - 0.01) ||
                           paidNow >= _netTotal);
 
+                  final heldCount = ref.watch(heldInvoicesProvider).length;
+
                   return Padding(
                     padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
                     child: Column(
@@ -2293,15 +2381,61 @@ class _PosScreenState extends ConsumerState<PosScreen>
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                       Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           const Text(
                             'إتمام الفاتورة 🛒',
                             style: TextStyle(
-                              fontSize: 16,
+                              fontSize: 15,
                               fontWeight: FontWeight.bold,
                             ),
                           ),
+                          const Spacer(),
+                          // زر فاتورة جديدة (+): يعلّق الفاتورة الحالية تلقائياً ويفتح سلة جديدة فارغة
+                          FilledButton.tonalIcon(
+                            style: FilledButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 9,
+                                vertical: 5,
+                              ),
+                              textStyle: const TextStyle(
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            onPressed: () {
+                              _quickHoldAndNewBill();
+                              setSheetState(() {});
+                              setState(() {});
+                              if (_cart.isEmpty && Navigator.canPop(ctx)) {
+                                Navigator.pop(ctx);
+                              }
+                            },
+                            icon: const Icon(Icons.add_circle_outline_rounded, size: 15),
+                            label: const Text('فاتورة جديدة (+)'),
+                          ),
+                          const SizedBox(width: 6),
+                          // زر / شارة الفواتير المعلقة ⏸️ المعلقة (X)
+                          OutlinedButton.icon(
+                            style: OutlinedButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 9,
+                                vertical: 5,
+                              ),
+                              textStyle: const TextStyle(
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            onPressed: () {
+                              Navigator.pop(ctx);
+                              _showHeldSheet();
+                            },
+                            icon: const Icon(Icons.pause_circle_outline_rounded, size: 15),
+                            label: Text('⏸️ المعلقة ($heldCount)'),
+                          ),
+                          const SizedBox(width: 2),
                           IconButton(
                             visualDensity: VisualDensity.compact,
                             icon: const Icon(Icons.close, size: 20),
@@ -3327,7 +3461,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
             ),
             FilledButton.icon(
               icon: const Icon(Icons.send_outlined),
-              label: const Text('إرسال واتساب'),
+              label: const Text('مشاركة / واتساب'),
               onPressed: () async {
                 final repo = ref.read(repoProvider);
                 final tx = await repo.transactionById(txId);
@@ -3336,14 +3470,6 @@ class _PosScreenState extends ConsumerState<PosScreen>
                     ? null
                     : await repo.account(tx.accountId!);
                 if (!mounted) return;
-                if (acc == null || acc.phone.isEmpty) {
-                  showSnack(
-                    context,
-                    'لا يوجد رقم هاتف مسجل للعميل',
-                    error: true,
-                  );
-                  return;
-                }
                 await TxShare.sendNow(context, ref, tx: tx, account: acc);
               },
             ),
@@ -3367,6 +3493,19 @@ class _PosScreenState extends ConsumerState<PosScreen>
     final st = await repo.settings();
     final orgName = (st['businessName'] ?? 'المتجر').trim();
     final orgPhone = (st['phone'] ?? '').trim();
+    final orgAddress =
+        (st['address'] ?? st['businessAddress'] ?? st['orgAddress'] ?? '')
+            .trim();
+    var sellerOrDevice = (st['user.name'] ??
+            st['currentUserName'] ??
+            st['cashierName'] ??
+            st['ownerName'] ??
+            st['devicePrefix'] ??
+            '')
+        .trim();
+    if (sellerOrDevice.isEmpty) {
+      sellerOrDevice = 'الجهاز الرئيسي';
+    }
     final footer = (st['voucherFooter'] ?? 'شكراً لزيارتكم!').trim();
     final logoPath = (st['logo'] ??
             st['logoPath'] ??
@@ -3386,6 +3525,8 @@ class _PosScreenState extends ConsumerState<PosScreen>
       orgName: orgName,
       orgPhone: orgPhone,
       footer: footer,
+      orgAddress: orgAddress,
+      sellerOrDevice: sellerOrDevice,
       logoPath: logoPath,
       logoBase64: logoBase64,
       stamp: stamp,

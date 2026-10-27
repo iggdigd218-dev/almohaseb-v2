@@ -8,6 +8,7 @@ library;
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/format.dart';
 import '../core/icon_catalog.dart';
@@ -116,7 +117,12 @@ class PosItemTile extends StatelessWidget {
         ),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
-          onTap: enabled ? onAdd : null,
+          onTap: enabled
+              ? () {
+                  HapticFeedback.lightImpact();
+                  onAdd();
+                }
+              : null,
           onLongPress: onLongPress,
           child: Stack(
             children: [
@@ -192,7 +198,7 @@ class PosItemTile extends StatelessWidget {
                                   fontSize: 11.5,
                                   color: isOut
                                       ? AppColors.dangerOf(context)
-                                      : const Color(0xFF059669),
+                                      : const Color(0xFF00897B),
                                 ),
                               ),
                             ),
@@ -212,7 +218,12 @@ class PosItemTile extends StatelessWidget {
                   borderRadius: BorderRadius.circular(999),
                   clipBehavior: Clip.antiAlias,
                   child: InkWell(
-                    onTap: enabled ? onAdd : null,
+                    onTap: enabled
+                        ? () {
+                            HapticFeedback.lightImpact();
+                            onAdd();
+                          }
+                        : null,
                     child: Container(
                       constraints: const BoxConstraints(
                         minWidth: 22,
@@ -314,7 +325,7 @@ class PosItemsGrid extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(10, 4, 10, 96),
       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: cross,
-        childAspectRatio: .72,
+        childAspectRatio: .78,
         crossAxisSpacing: 8,
         mainAxisSpacing: 8,
       ),

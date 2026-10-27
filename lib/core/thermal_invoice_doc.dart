@@ -43,6 +43,8 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
   required String orgName,
   required String orgPhone,
   required String footer,
+  String orgAddress = '',
+  String sellerOrDevice = '',
   String logoPath = '',
   String logoBase64 = '',
   bool stamp = false,
@@ -107,8 +109,8 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
             children: [
               if (logoImg != null) ...[
                 pw.Container(
-                  width: 48,
-                  height: 48,
+                  width: 52,
+                  height: 52,
                   padding: const pw.EdgeInsets.all(3),
                   decoration: pw.BoxDecoration(
                     border: pw.Border.all(color: PdfColors.grey400, width: 0.6),
@@ -120,15 +122,23 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
               ],
               pw.Text(
                 orgName,
+                textAlign: pw.TextAlign.center,
                 style: pw.TextStyle(
                   fontSize: 16,
                   font: fonts.bold,
                   fontWeight: pw.FontWeight.bold,
                 ),
               ),
+              if (orgAddress.trim().isNotEmpty)
+                pw.Text(
+                  orgAddress.trim(),
+                  textAlign: pw.TextAlign.center,
+                  style: const pw.TextStyle(fontSize: 9.5),
+                ),
               if (orgPhone.isNotEmpty)
                 pw.Text(
                   'هاتف: $orgPhone',
+                  textAlign: pw.TextAlign.center,
                   style: const pw.TextStyle(fontSize: 10),
                 ),
               pw.Divider(thickness: 1),
@@ -269,7 +279,20 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                   ],
                 ),
               ],
-              pw.SizedBox(height: 8),
+              pw.SizedBox(height: 6),
+              pw.Divider(thickness: 0.6),
+              if (sellerOrDevice.trim().isNotEmpty) ...[
+                pw.Text(
+                  'الموظف / الجهاز: ${sellerOrDevice.trim()}',
+                  style: pw.TextStyle(
+                    fontSize: 9,
+                    font: fonts.bold,
+                    fontWeight: pw.FontWeight.bold,
+                  ),
+                  textAlign: pw.TextAlign.center,
+                ),
+                pw.SizedBox(height: 3),
+              ],
               pw.Text(
                 footer,
                 style: const pw.TextStyle(fontSize: 9),
@@ -306,6 +329,8 @@ Future<Uint8List> buildThermalInvoicePdf({
   required String orgName,
   required String orgPhone,
   required String footer,
+  String orgAddress = '',
+  String sellerOrDevice = '',
   String logoPath = '',
   String logoBase64 = '',
   bool stamp = false,
@@ -317,6 +342,8 @@ Future<Uint8List> buildThermalInvoicePdf({
       orgName: orgName,
       orgPhone: orgPhone,
       footer: footer,
+      orgAddress: orgAddress,
+      sellerOrDevice: sellerOrDevice,
       logoPath: logoPath,
       logoBase64: logoBase64,
       stamp: stamp,

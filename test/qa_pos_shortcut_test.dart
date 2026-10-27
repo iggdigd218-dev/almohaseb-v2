@@ -97,7 +97,7 @@ void main() {
       await tester.ensureVisible(tile);
       await tester.pump();
       await tester.tap(tile);
-      for (var i = 0; i < 4; i++) {
+      for (var i = 0; i < 8; i++) {
         await tester.runAsync(
             () => Future<void>.delayed(const Duration(milliseconds: 60)));
         await tester.pump(const Duration(milliseconds: 120));

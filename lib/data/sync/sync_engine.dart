@@ -80,7 +80,7 @@ class SyncEngine {
   Future<Database> get _db async {
     final db = await dbProvider();
     try {
-      if (!db.isOpen) return repo.database;
+      if (!db.isOpen) return await repo.database;
     } catch (_) {}
     return db;
   }

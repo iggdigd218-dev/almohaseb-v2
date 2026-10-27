@@ -943,8 +943,9 @@ Future<void> showJoinApprovalSheet(
     // (دفعة 58 — متطلب 11) طلب مغادرة عضو يمر من نفس القناة بوسم kind=leave
     // — له حوار خاص (موافقة = طرد نظيف، رفض = بقاء العضو).
     if ('${request['kind'] ?? ''}' == 'leave') {
-      return showLeaveApprovalDialog(context, ref, request,
+      await showLeaveApprovalDialog(context, ref, request,
           backendUrl: backendUrl);
+      return;
     }
     final repo = ref.read(repoProvider);
     final engine = ref.read(syncEngineProvider);

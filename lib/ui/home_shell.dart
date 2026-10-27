@@ -1654,7 +1654,9 @@ class _HomeShellState extends ConsumerState<HomeShell>
                   onPopInvokedWithResult: (didPop, _) => _handleRootPop(didPop),
                   child: Scaffold(
                     key: _scaffoldKey,
-        appBar: AppBar(
+        appBar: _screen == AppScreen.pos
+            ? null
+            : AppBar(
           leading: Builder(
             builder: (ctx) {
               final isDark = Theme.of(ctx).brightness == Brightness.dark;
@@ -1928,7 +1930,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
           ],
         ),
         floatingActionButton: _fab(),
-        bottomNavigationBar: desktop
+        bottomNavigationBar: (desktop || _screen == AppScreen.pos)
             ? null
             : _MarkedBottomBar(
                 currentScreen: _screen,

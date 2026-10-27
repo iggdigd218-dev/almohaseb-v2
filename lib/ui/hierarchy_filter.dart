@@ -214,11 +214,10 @@ class _HierarchySheetState extends State<_HierarchySheet> {
   @override
   Widget build(BuildContext context) {
     final items = _visible;
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.surfaceOf(context),
-        borderRadius: AppRadius.sheetTop,
-      ),
+    return Material(
+      color: AppColors.surfaceOf(context),
+      borderRadius: AppRadius.sheetTop,
+      clipBehavior: Clip.antiAlias,
       child: SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
