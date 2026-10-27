@@ -2,12 +2,10 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nexora_app/core/app_version.dart';
-import 'package:nexora_app/data/update_installer.dart';
 import 'package:nexora_app/data/update_service.dart';
 
 const String kSampleSha256 =
@@ -228,33 +226,6 @@ void main() {
       expect(
         UpdateService.kDefaultManifestUrl,
         isNot(contains('workspaces/_registry')),
-      );
-    });
-
-    test('R2: UpdateInstaller يحسب بصمة SHA-256 للملف المنزّل ويطابقها قبل التثبيت', () async {
-      final tmpDir = await Directory.systemTemp.createTemp('nexora_upd_test_');
-      addTearDown(() async {
-        if (tmpDir.existsSync()) await tmpDir.delete(recursive: true);
-      });
-      final fakeApk = File('${tmpDir.path}/sample.apk');
-      final bytes = List<int>.generate(2048, (i) => i % 256);
-      await fakeApk.writeAsBytes(bytes);
-
-      final expectedDigest = crypto.sha256.convert(bytes).toString();
-      final computed = await UpdateInstaller.computeFileSha256(fakeApk);
-      expect(computed, equals(expectedDigest));
-
-      expect(
-        await UpdateInstaller.verifyFileSha256(fakeApk, expectedDigest),
-        isTrue,
-      );
-      expect(
-        await UpdateInstaller.verifyFileSha256(fakeApk, '0' * 64),
-        isFalse,
-      );
-      expect(
-        await UpdateInstaller.verifyFileSha256(fakeApk, ''),
-        isFalse,
       );
     });
   });

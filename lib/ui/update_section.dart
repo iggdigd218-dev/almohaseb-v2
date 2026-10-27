@@ -8,7 +8,6 @@ import 'package:url_launcher/url_launcher.dart';
 import '../core/app_version.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
-import '../data/update_installer.dart';
 import '../data/update_service.dart';
 import 'widgets.dart';
 
@@ -20,10 +19,6 @@ final updateCheckProvider = FutureProvider.autoDispose<UpdateInfo>((ref) async {
   ref.watch(refreshProvider);
   return ref.read(updateServiceProvider).check();
 });
-
-/// مثبّت التحديثات (قابل للاستبدال في الاختبارات).
-final updateInstallerProvider =
-    Provider<UpdateInstaller>((ref) => UpdateInstaller());
 
 /// يفتح الرابط المباشر للحزمة من المستودع الرسمي خارج التطبيق (المتصفح / التنزيلات العادية).
 Future<bool> openUpdateLink(UpdateInfo info) async {

@@ -16,7 +16,6 @@ import '../core/app_version.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
 import '../data/sync/device_registry.dart';
-import '../data/update_installer.dart';
 import '../data/sync/cloud_join.dart';
 import '../data/update_service.dart';
 import 'update_section.dart';
@@ -469,9 +468,10 @@ class _HomeShellState extends ConsumerState<HomeShell>
         await showCloudAlertsSheet(context, ref);
         return true;
       case 'update_download':
-        // (2026-09-22) إشعار اكتمال تنزيل التحديث: نقرة تفتح مجلد
-        // التنزيلات العام (Download/Nexora) ليصل المستخدم للملف مباشرة.
-        await UpdateInstaller.openDownloadsFolder(id);
+        try {
+          await const MethodChannel('nexora/updates')
+              .invokeMethod<bool>('openDownloadsFolder');
+        } catch (_) {}
         return true;
     }
     // نوع بلا وجهة معروفة: نافذة توضيحية بدل تجاهل النقرة.

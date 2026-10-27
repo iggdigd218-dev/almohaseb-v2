@@ -831,11 +831,12 @@ class SyncEngine {
     final db = await _db;
     final ourId = (await repo.settings())['sync.deviceId'] ?? '';
     if (ourId.isEmpty) return;
-    // (1) تجريد base64 من أي عملية في جدول operations (حتى لو لم تُرفع بعد)
-    // التزاماً بحظر تضمين الوسائط والبيانات الثقيلة داخل RTDB.
+    // (1) تجريد base64 من العمليات المتزامنة فقط مع حماية العمليات المعلقة:
+    // AND op_id NOT IN (SELECT op_id FROM sync_queue WHERE status IN ('pending', 'syncing'))
     final fat = await db.rawQuery('''
       SELECT id, payload FROM operations
       WHERE payload LIKE '%"file_b64"%'
+        AND id NOT IN (SELECT operation_id FROM sync_queue WHERE status IN ('pending', 'syncing'))
       LIMIT 200
     ''');
     for (final r in fat) {

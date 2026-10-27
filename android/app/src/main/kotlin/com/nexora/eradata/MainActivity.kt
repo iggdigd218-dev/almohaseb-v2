@@ -251,7 +251,7 @@ class MainActivity : FlutterFragmentActivity() {
                 }
             }
 
-        // قناة التحديث بنقرة واحدة: تفتح شاشة تثبيت النظام لملف APK منزَّل.
+        // قناة التحديث: فحص أذونات تثبيت الحزم وفتح مجلد التنزيلات.
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, updateChannel)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -273,27 +273,6 @@ class MainActivity : FlutterFragmentActivity() {
                                 )
                             } else true
                         )
-                    }
-                    // يطلق شاشة تثبيت النظام لملف الـ APK المحدد.
-                    "installApk" -> {
-                        val path = call.argument<String>("path") ?: ""
-                        result.success(installApk(path))
-                    }
-                    // تنزيل عبر مدير تنزيلات النظام: يستمر في الخلفية حتى لو
-                    // أُغلق التطبيق، ويستأنف تلقائياً عند انقطاع الشبكة.
-                    "startDownload" -> {
-                        val url = call.argument<String>("url") ?: ""
-                        result.success(startUpdateDownload(url))
-                    }
-                    // حالة التنزيل الجاري (status/bytes/total/path).
-                    "queryDownload" -> {
-                        val id = (call.argument<Number>("id") ?: -1L).toLong()
-                        result.success(queryUpdateDownload(id))
-                    }
-                    // إلغاء مهمة تنزيل عالقة في DownloadManager.
-                    "cancelDownload" -> {
-                        val id = (call.argument<Number>("id") ?: -1L).toLong()
-                        result.success(cancelUpdateDownload(id))
                     }
                     // مسار مجلد الكاش الداخلي للتنزيل المباشر الاحتياطي.
                     "cacheUpdateDir" -> {
@@ -504,79 +483,6 @@ class MainActivity : FlutterFragmentActivity() {
     } catch (e: Exception) { false }
 
     /**
-     * يبدأ تنزيل التحديث عبر DownloadManager (خدمة نظام):
-     * - يستمر في الخلفية حتى بعد إغلاق التطبيق نهائياً.
-     * - يستأنف تلقائياً بعد انقطاع الشبكة (يدعم HTTP Range).
-     * - أسرع من تنزيل داخل عملية التطبيق لأنه لا يتأثر بخمول/كبح التطبيق.
-     * يعيد معرّف التنزيل، أو -1 عند الفشل.
-     */
-    /** (2026-09-22) مجلد التحديثات العام في الهاتف: Download/Nexora. */
-    private fun publicUpdateDir(): File = File(
-        android.os.Environment.getExternalStoragePublicDirectory(
-            android.os.Environment.DIRECTORY_DOWNLOADS
-        ),
-        "Nexora"
-    )
-
-    private fun cancelUpdateDownload(id: Long): Boolean = try {
-        val dm = getSystemService(android.content.Context.DOWNLOAD_SERVICE)
-            as android.app.DownloadManager
-        if (id >= 0) {
-            dm.remove(id)
-        }
-        true
-    } catch (_: Exception) { false }
-
-    private fun startUpdateDownload(url: String): Long = try {
-        val dm = getSystemService(android.content.Context.DOWNLOAD_SERVICE)
-            as android.app.DownloadManager
-        // إلغاء أي مهام تنزيل سابقة عالقة في طابور DownloadManager لهذا التطبيق
-        // حتى لا تحجب بدء التنزيل الجديد في حالة STATUS_PENDING/STATUS_PAUSED.
-        try {
-            val staleIds = mutableListOf<Long>()
-            val c = dm.query(android.app.DownloadManager.Query())
-            c?.use {
-                val idIdx = it.getColumnIndex(android.app.DownloadManager.COLUMN_ID)
-                if (idIdx >= 0) {
-                    while (it.moveToNext()) {
-                        staleIds.add(it.getLong(idIdx))
-                    }
-                }
-            }
-            if (staleIds.isNotEmpty()) {
-                dm.remove(*staleIds.toLongArray())
-            }
-        } catch (_: Exception) {}
-        // نظّف ملفات تحديث قديمة حتى لا تتراكم.
-        try {
-            getExternalFilesDir("updates")?.listFiles()?.forEach { it.delete() }
-        } catch (_: Exception) {}
-        try {
-            File(cacheDir, "updates").listFiles()?.forEach { it.delete() }
-        } catch (_: Exception) {}
-        val req = android.app.DownloadManager.Request(Uri.parse(url)).apply {
-            setTitle("تحديث المحاسب")
-            setDescription("جارٍ تنزيل التحديث…")
-            setMimeType("application/vnd.android.package-archive")
-            setNotificationVisibility(
-                android.app.DownloadManager.Request
-                    .VISIBILITY_VISIBLE_NOTIFY_COMPLETED
-            )
-            setAllowedOverMetered(true)
-            setAllowedOverRoaming(true)
-            // الحفظ في مجلد التطبيق الخارجي الخاص (externalFilesDir/updates) لتفادي
-            // خطأ صلاحيات Scoped Storage (errno = 13 Permission denied) على أندرويد 11+
-            // عند فحص بصمة SHA-256 وفتح الحزمة عبر FileProvider.
-            setDestinationInExternalFilesDir(
-                this@MainActivity,
-                "updates",
-                "nexora-update.apk"
-            )
-        }
-        dm.enqueue(req)
-    } catch (e: Exception) { -1L }
-
-    /**
      * (2026-09-22) يفتح مجلد التنزيلات في مستندات النظام — سلسلة محاولات:
      * مجلد Nexora مباشرة، ثم Downloads، ثم إعدادات التخزين كحل أخير.
      */
@@ -601,87 +507,6 @@ class MainActivity : FlutterFragmentActivity() {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         } catch (_: Exception) { false }
-    }
-
-    /** حالة تنزيل جارٍ: خريطة {status, bytes, total, path, reason}. */
-    private fun queryUpdateDownload(id: Long): Map<String, Any> {
-        val out = mutableMapOf<String, Any>(
-            "status" to "unknown", "bytes" to 0L, "total" to -1L, "path" to ""
-        )
-        if (id < 0) return out
-        try {
-            val dm = getSystemService(android.content.Context.DOWNLOAD_SERVICE)
-                as android.app.DownloadManager
-            val c = dm.query(android.app.DownloadManager.Query().setFilterById(id))
-            c?.use {
-                if (!it.moveToFirst()) return out
-                val status = it.getInt(
-                    it.getColumnIndexOrThrow(android.app.DownloadManager.COLUMN_STATUS)
-                )
-                out["bytes"] = it.getLong(
-                    it.getColumnIndexOrThrow(
-                        android.app.DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR
-                    )
-                )
-                out["total"] = it.getLong(
-                    it.getColumnIndexOrThrow(
-                        android.app.DownloadManager.COLUMN_TOTAL_SIZE_BYTES
-                    )
-                )
-                out["reason"] = it.getInt(
-                    it.getColumnIndexOrThrow(android.app.DownloadManager.COLUMN_REASON)
-                )
-                out["status"] = when (status) {
-                    android.app.DownloadManager.STATUS_SUCCESSFUL -> "done"
-                    android.app.DownloadManager.STATUS_FAILED -> "failed"
-                    android.app.DownloadManager.STATUS_PAUSED -> "paused"
-                    android.app.DownloadManager.STATUS_PENDING -> "pending"
-                    else -> "running"
-                }
-                if (status == android.app.DownloadManager.STATUS_SUCCESSFUL) {
-                    val priv = File(getExternalFilesDir("updates"), "nexora-update.apk")
-                    val pub = File(publicUpdateDir(), "nexora-update.apk")
-                    var resolved: File? = when {
-                        priv.exists() && priv.canRead() && priv.length() > 0L -> priv
-                        pub.exists() && pub.canRead() && pub.length() > 0L -> pub
-                        else -> null
-                    }
-                    if (resolved == null) {
-                        try {
-                            dm.openDownloadedFile(id)?.use { pfd ->
-                                val cacheUpdates = File(cacheDir, "updates").apply { mkdirs() }
-                                val dst = File(cacheUpdates, "nexora-update.apk")
-                                android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input ->
-                                    dst.outputStream().use { output -> input.copyTo(output) }
-                                }
-                                if (dst.exists() && dst.length() > 0L) {
-                                    resolved = dst
-                                }
-                            }
-                        } catch (_: Exception) {}
-                    }
-                    if (resolved != null) out["path"] = resolved!!.absolutePath
-                }
-            }
-        } catch (e: Exception) { /* تُعاد "unknown" */ }
-        return out
-    }
-
-    /** يفتح شاشة تثبيت النظام لملف APK عبر FileProvider (لا تثبيت صامت). */
-    private fun installApk(path: String): String {
-        val file = File(path)
-        if (!file.exists() || file.length() == 0L) return "file_missing"
-        val uri: Uri = try {
-            FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
-        } catch (e: Exception) {
-            return "uri_failed"
-        }
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        return if (launch(intent)) "ok" else "launch_failed"
     }
 
     private fun installedPackages(): List<String> =
