@@ -6,6 +6,7 @@ import 'package:printing/printing.dart';
 import '../core/accounting.dart';
 import '../core/desktop.dart';
 import '../core/format.dart';
+import '../core/icon_catalog.dart';
 import '../core/models.dart';
 import '../core/thermal_invoice_doc.dart';
 import '../core/shell_nav.dart';
@@ -60,40 +61,6 @@ class _PosScreenState extends ConsumerState<PosScreen>
 
   /// الوضع المدمج التدريجي للترويسة العلوية عند تمرير شبكة الأصناف لأسفل.
   bool _isScrolledCompact = false;
-
-  /// معرّف تبويب المفضلة في شريط الفئات.
-  static const int kFavoritesCategoryId = -999;
-
-  /// قائمة معرفات الأصناف المثبتة يدوياً في المفضلة.
-  final Set<int> _pinnedItemIds = <int>{};
-
-  void _loadPinnedFavorites() {
-    final st = ref.read(settingsProvider).valueOrNull ?? const {};
-    final raw = st['pos_pinned_items'] ?? '';
-    if (raw.isNotEmpty) {
-      _pinnedItemIds.clear();
-      for (final part in raw.split(',')) {
-        final id = int.tryParse(part.trim());
-        if (id != null) _pinnedItemIds.add(id);
-      }
-    }
-  }
-
-  Future<void> _togglePinItem(Item it) async {
-    final id = it.id;
-    if (id == null) return;
-    setState(() {
-      if (_pinnedItemIds.contains(id)) {
-        _pinnedItemIds.remove(id);
-        showSnack(context, 'تمت إزالة «${it.name}» من المفضلة');
-      } else {
-        _pinnedItemIds.add(id);
-        showSnack(context, 'تم تثبيت «${it.name}» في المفضلة ⭐');
-      }
-    });
-    final repo = ref.read(repoProvider);
-    await repo.setSetting('pos_pinned_items', _pinnedItemIds.join(','));
-  }
 
   String _searchQuery = '';
 
@@ -217,7 +184,6 @@ class _PosScreenState extends ConsumerState<PosScreen>
     _tabController.addListener(() {
       if (mounted) setState(() {});
     });
-    _loadPinnedFavorites();
     // (2026-09-24) بيع من الزر العائم ⇒ حدّث الأرصدة والمسودة فوراً.
     dataChangeTick.addListener(_onExternalDataChange);
     // (3.70 — المرحلة 4) RBAC محلي Offline-Ready: حقل الخصم يظهر فقط
@@ -684,7 +650,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
     // عرضي بين التبويبات) يعيد بناء الشريط السفلي فوراً.
     ref.watch(posDraftProvider);
     // سطح المكتب (>900dp): مركز قيادة ثنائي اللوحين مع اختصارات لوحة
-    // المفاتيح؛ الهاتف يبقى على التبويبات المعتادة.
+    // المفاتيح؛ الهاتف يعرض واجهة المبيعات المرجعية مباشرة.
     if (isDesktopLayout(context)) {
       return Focus(
         focusNode: _shortcutFocus,
@@ -693,48 +659,30 @@ class _PosScreenState extends ConsumerState<PosScreen>
         child: _buildDesktopPos(),
       );
     }
-    return Scaffold(
-      appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(38),
-        child: Container(
-          color: Theme.of(context).colorScheme.surface,
-          child: TabBar(
-            controller: _tabController,
-            labelPadding: const EdgeInsets.symmetric(horizontal: 8),
-            tabs: const [
-              Tab(
-                height: 36,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.point_of_sale_outlined, size: 17),
-                    SizedBox(width: 6),
-                    Text('نقطة البيع'),
-                  ],
-                ),
-              ),
-              Tab(
-                height: 36,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.history_edu_outlined, size: 17),
-                    SizedBox(width: 6),
-                    Text('سجل المبيعات'),
-                  ],
-                ),
-              ),
-            ],
+    if (_tabController.index == 1) {
+      return Scaffold(
+        appBar: AppBar(
+          backgroundColor: const Color(0xFF0F3E78),
+          foregroundColor: Colors.white,
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
+            onPressed: () => _tabController.animateTo(0),
+          ),
+          title: const Text(
+            'سجل فواتير المبيعات',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 17,
+              fontWeight: FontWeight.w800,
+            ),
           ),
         ),
-      ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [_buildPosSaleTab(), const _PosHistoryTab()],
-      ),
-      bottomNavigationBar: _tabController.index == 0 && _cart.isNotEmpty
-          ? _buildCartBottomBar()
-          : null,
+        body: const _PosHistoryTab(),
+      );
+    }
+    return Scaffold(
+      body: _buildPosSaleTab(),
+      bottomNavigationBar: _buildCartBottomBar(),
     );
   }
 
@@ -1325,13 +1273,11 @@ class _PosScreenState extends ConsumerState<PosScreen>
 
     final catsInSection = <int>{
       for (final c in categories)
-        if (_sectionMatches(c.sectionId)) c.id!,
+        if (_sectionMatches(c.sectionId) && c.id != null) c.id!,
     };
 
     final allowedCatIds = <int>{};
-    if (!hasSearch &&
-        _selectedCategoryId != null &&
-        _selectedCategoryId != kFavoritesCategoryId) {
+    if (!hasSearch && _selectedCategoryId != null) {
       allowedCatIds.add(_selectedCategoryId!);
       for (final c in categories) {
         if (c.parentId == _selectedCategoryId && c.id != null) {
@@ -1348,11 +1294,6 @@ class _PosScreenState extends ConsumerState<PosScreen>
         final matchNameCat =
             Fmt.smartContains('${item.name} ${item.category}', _searchQuery);
         return matchPlu || matchSku || matchNameCat;
-      }
-
-      if (_selectedCategoryId == kFavoritesCategoryId) {
-        if (_pinnedItemIds.isNotEmpty) return _pinnedItemIds.contains(item.id);
-        return item.quantity > 0;
       }
 
       if (_selectedCategoryId != null) {
@@ -1395,21 +1336,26 @@ class _PosScreenState extends ConsumerState<PosScreen>
   Widget _buildPosSaleTab() {
     final categories = ref.watch(itemCategoriesProvider).valueOrNull ?? [];
     final allItems = ref.watch(itemsProvider).valueOrNull ?? [];
+    final sections =
+        ref.watch(sectionsProvider).valueOrNull ?? const <Section>[];
+    final roots =
+        ref.watch(itemCategoryTreeProvider).valueOrNull ?? const <ItemCategory>[];
     final currencies =
         ref.watch(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
     final cur = currencies.first;
 
     final hasSearch = _searchQuery.trim().isNotEmpty;
-
-    final favorites = allItems.where((i) {
-      if (!i.isActive || i.isDeleted) return false;
-      if (_pinnedItemIds.isNotEmpty) {
-        return _pinnedItemIds.contains(i.id);
-      }
-      return i.quantity > 0;
-    }).take(10).toList();
-
     final filteredItems = _computeFilteredItems(allItems, categories);
+    final sectionCategories = _categoriesOfSection(roots, categories);
+
+    final catById = <int, ItemCategory>{
+      for (final c in categories)
+        if (c.id != null) c.id!: c,
+    };
+    final secById = <int, Section>{
+      for (final s in sections)
+        if (s.id != null) s.id!: s,
+    };
 
     return PopScope(
       canPop: !hasSearch &&
@@ -1434,11 +1380,17 @@ class _PosScreenState extends ConsumerState<PosScreen>
       },
       child: Column(
         children: [
-          // الشريط العلوي المدمج: تدرّج أزرق ملكي + بحث بيضاوي (Enter = PLU).
+          // 1) شريط العنوان العلوي الكحلي الملكي الداكن (مطابق للتصميم المرفق)
           _buildPosHeader(),
 
+          // 2) حقل البحث المستقل تحت الشريط العلوي
+          Container(
+            color: AppColors.surfaceOf(context),
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+            child: _buildPillSearch(),
+          ),
+
           if (!hasSearch) ...[
-            // الوضع المدمج التدريجي: عند التمرير لأسفل تتقلص أشرطة الأقسام والمفضلة لتوفير أقصى مساحة للأصناف.
             AnimatedSize(
               duration: const Duration(milliseconds: 180),
               curve: Curves.easeOutCubic,
@@ -1447,71 +1399,120 @@ class _PosScreenState extends ConsumerState<PosScreen>
                   : Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // شريط القسم النشط مع أزرار التنقل والطي السريع:
-                        Consumer(
-                          builder: (ctx, rref, _) {
-                            final sections = rref
-                                    .watch(sectionsProvider)
-                                    .valueOrNull ??
-                                const <Section>[];
-                            return _buildSectionBar(sections, categories);
-                          },
+                        // 3) شريط الأقسام الأفقي ببطاقات الباستيل الملونة
+                        PosSectionsStrip(
+                          sections: sections,
+                          roots: roots,
+                          items: allItems,
+                          selectedId: _selectedSectionId,
+                          onSelect: (sid) => setState(() {
+                            _selectedSectionId = sid;
+                            _selectedCategoryId = null;
+                            _atSectionsGate = false;
+                          }),
+                          onAllTap: () => setState(() {
+                            if (_selectedSectionId == null) {
+                              _atSectionsGate = !_atSectionsGate;
+                            } else {
+                              _selectedSectionId = null;
+                              _selectedCategoryId = null;
+                              _atSectionsGate = false;
+                            }
+                          }),
+                          onViewAll: () => setState(
+                            () => _atSectionsGate = !_atSectionsGate,
+                          ),
                         ),
 
-                        // لوحة الأقسام المنسدلة المرنة (Collapsible Top Panel — مطوية افتراضياً):
+                        // لوحة الأقسام الكاملة عند الضغط على "عرض الكل" أو "كل الأقسام"
                         if (_atSectionsGate)
                           SizedBox(
-                            height: 128,
-                            child: Consumer(
-                              builder: (ctx, rref, _) {
-                                final sections = rref
-                                        .watch(sectionsProvider)
-                                        .valueOrNull ??
-                                    const <Section>[];
-                                final roots = rref
-                                        .watch(itemCategoryTreeProvider)
-                                        .valueOrNull ??
-                                    const <ItemCategory>[];
-                                return PosSectionsGate(
-                                  sections: sections,
-                                  roots: roots,
-                                  items: allItems,
-                                  padding:
-                                      const EdgeInsets.fromLTRB(12, 4, 12, 6),
-                                  childAspectRatio: 1.25,
-                                  onOpen: (sid) => setState(() {
-                                    _selectedSectionId = sid;
-                                    _selectedCategoryId = null;
-                                    _atSectionsGate = false;
-                                  }),
-                                );
-                              },
+                            height: 132,
+                            child: PosSectionsGate(
+                              sections: sections,
+                              roots: roots,
+                              items: allItems,
+                              padding: const EdgeInsets.fromLTRB(12, 4, 12, 6),
+                              childAspectRatio: 1.25,
+                              onOpen: (sid) => setState(() {
+                                _selectedSectionId = sid;
+                                _selectedCategoryId = null;
+                                _atSectionsGate = false;
+                              }),
                             ),
                           ),
                       ],
                     ),
             ),
 
-            // شريط الفئات التابع للقسم النشط:
-            Consumer(
-              builder: (ctx, rref, _) {
-                final roots =
-                    rref.watch(itemCategoryTreeProvider).valueOrNull ??
-                        const <ItemCategory>[];
-                return PosCategoryStrip(
-                  categories: _categoriesOfSection(roots, categories),
-                  selectedId: _selectedCategoryId,
-                  onPick: (cid) => setState(() => _selectedCategoryId = cid),
-                );
-              },
+            // 4) شريط الفئات الأفقي التابع للقسم النشط
+            PosCategoryStrip(
+              categories: sectionCategories,
+              selectedId: _selectedCategoryId,
+              showHeader: true,
+              allItemsCount: _countSectionItems(allItems, categories),
+              itemCountOf: (cat) => _countCategoryItems(cat, allItems, categories),
+              onPick: (cid) => setState(() => _selectedCategoryId = cid),
+              onViewAll: () => setState(() => _selectedCategoryId = null),
             ),
-
-            // قسم / صف الأصناف المفضلة والأكثر طلباً (يطوى تلقائياً عند التمرير لأسفل):
-            if (!_isScrolledCompact)
-              _buildFavoritesRow(favorites, cur.symbol),
           ],
 
-          // شبكة الأصناف المباشرة (Single-Screen POS) مع مستشعر التمرير للوضع المدمج:
+          // 5) رأس شبكة الأصناف (الأصناف + عرض الكل ←)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.inventory_2_outlined,
+                  size: 19,
+                  color: Color(0xFF0F3E78),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  'الأصناف',
+                  style: TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w900,
+                    color: AppColors.textOf(context),
+                  ),
+                ),
+                const Spacer(),
+                InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: () => setState(() {
+                    _selectedCategoryId = null;
+                    _selectedSectionId = null;
+                    _searchQuery = '';
+                    _searchCtrl.clear();
+                  }),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'عرض الكل',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFF1565C0),
+                          ),
+                        ),
+                        SizedBox(width: 3),
+                        Icon(
+                          Icons.arrow_forward_rounded,
+                          size: 14,
+                          color: Color(0xFF1565C0),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // 6) شبكة بطاقات الأصناف (تتطابق مع التصميم المرفق)
           Expanded(
             child: filteredItems.isEmpty
                 ? const EmptyState(
@@ -1541,8 +1542,26 @@ class _PosScreenState extends ConsumerState<PosScreen>
                       quantityInCart: (it) => _cart[it.id]?.quantity ?? 0,
                       canAdd: (it) => it.quantity > 0 || _allowNegative,
                       onAdd: (it) => _addItem(it),
-                      onLongPress: (it) => _togglePinItem(it),
-                      isFavorite: (it) => _pinnedItemIds.contains(it.id),
+                      toneFor: (it) {
+                        final cat = it.categoryId != null
+                            ? catById[it.categoryId!]
+                            : null;
+                        final secId = it.sectionId ?? cat?.sectionId;
+                        final sec = secId != null ? secById[secId] : null;
+                        return IconCatalog.resolveTone(
+                          colorHex: cat?.colorHex ?? sec?.colorHex,
+                          iconKey: cat?.iconKey ?? sec?.iconKey,
+                          fallbackIndex: it.id ?? it.name.hashCode,
+                        );
+                      },
+                      iconFor: (it) {
+                        final cat = it.categoryId != null
+                            ? catById[it.categoryId!]
+                            : null;
+                        final secId = it.sectionId ?? cat?.sectionId;
+                        final sec = secId != null ? secById[secId] : null;
+                        return IconCatalog.of(cat?.iconKey ?? sec?.iconKey);
+                      },
                     ),
                   ),
           ),
@@ -1551,7 +1570,53 @@ class _PosScreenState extends ConsumerState<PosScreen>
     );
   }
 
-  /// فئات القسم النشط (بلا فروع) مرتّبة للعرض في الشريط العلوي مع تبويب المفضلة.
+  int _countSectionItems(List<Item> allItems, List<ItemCategory> categories) {
+    if (_selectedSectionId == null) return allItems.length;
+    final catsInSection = <int>{
+      for (final c in categories)
+        if (_sectionMatches(c.sectionId) && c.id != null) c.id!,
+    };
+    var count = 0;
+    for (final it in allItems) {
+      if (_selectedSectionId == kGeneralSectionId) {
+        final effectiveSecId =
+            it.sectionId ?? _sectionOfCat(categories, it.categoryId);
+        if (effectiveSecId == null ||
+            effectiveSecId == kGeneralSectionId ||
+            it.categoryId == null ||
+            catsInSection.contains(it.categoryId)) {
+          count++;
+        }
+      } else if (it.sectionId == _selectedSectionId ||
+          (it.categoryId != null && catsInSection.contains(it.categoryId))) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  int _countCategoryItems(
+    ItemCategory cat,
+    List<Item> allItems,
+    List<ItemCategory> categories,
+  ) {
+    if (cat.id == null) return 0;
+    final allowed = <int>{cat.id!};
+    for (final c in categories) {
+      if (c.parentId == cat.id && c.id != null) {
+        allowed.add(c.id!);
+      }
+    }
+    var count = 0;
+    for (final it in allItems) {
+      if (it.categoryId != null && allowed.contains(it.categoryId)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /// فئات القسم النشط مرتّبة للعرض في الشريط العلوي.
   List<ItemCategory> _categoriesOfSection(
     List<ItemCategory> roots,
     List<ItemCategory> flat,
@@ -1571,198 +1636,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
       }
     }
     out.sort((a, b) => a.name.compareTo(b.name));
-
-    // إضافة تبويب المفضلة كخيار أول مميز في الشريط:
-    out.insert(
-      0,
-      ItemCategory(
-        id: kFavoritesCategoryId,
-        name: 'المفضلة ⭐',
-        iconKey: 'star',
-        colorHex: '#F59E0B',
-        createdAt: DateTime.now(),
-        updatedAt: DateTime.now(),
-      ),
-    );
-
     return out;
-  }
-
-  /// شريط القسم النشط مع تنقّل سريع للقسم المجاور وزر طي/فتح اللوحة المنسدلة.
-  Widget _buildSectionBar(List<Section> sections, List<ItemCategory> cats) {
-    // تسلسل التنقل: [كل الأقسام] ثم [عام] دائماً للوصول السريع للأصناف غير المصنفة، ثم بقية الأقسام.
-    final seq = <(int?, String)>[
-      (null, 'كل الأقسام'),
-      (kGeneralSectionId, 'عام'),
-      for (final s in sections) (s.id, s.name),
-    ];
-    final idx = seq.indexWhere((e) => e.$1 == _selectedSectionId);
-    final prev = idx > 0 ? seq[idx - 1] : null;
-    final next = (idx >= 0 && idx < seq.length - 1) ? seq[idx + 1] : null;
-    final title = _atSectionsGate
-        ? 'تصفح الأقسام'
-        : (idx >= 0 ? seq[idx].$2 : 'كل الأقسام');
-
-    return PosSectionBar(
-      title: title,
-      isExpanded: _atSectionsGate,
-      onToggleExpand: () => setState(() => _atSectionsGate = !_atSectionsGate),
-      onBackToGate: () => setState(() {
-        _atSectionsGate = !_atSectionsGate;
-      }),
-      onPrev: prev == null
-          ? null
-          : () => setState(() {
-                _selectedSectionId = prev.$1;
-                _selectedCategoryId = null;
-              }),
-      onNext: next == null
-          ? null
-          : () => setState(() {
-                _selectedSectionId = next.$1;
-                _selectedCategoryId = null;
-              }),
-    );
-  }
-
-  /// صف / شريط أفقي مخصص للأصناف المفضلة والأكثر طلباً.
-  Widget _buildFavoritesRow(List<Item> favorites, String symbol) {
-    if (favorites.isEmpty) return const SizedBox.shrink();
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 4, 12, 6),
-      padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
-      decoration: BoxDecoration(
-        color: AppTone.blue.background.withValues(alpha: .35),
-        borderRadius: BorderRadius.circular(AppRadius.card),
-        border: Border.all(
-          color: AppColors.borderOf(context).withValues(alpha: .6),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.star_rounded, size: 16, color: Color(0xFFF59E0B)),
-              const SizedBox(width: 4),
-              Text(
-                'المفضلة والأكثر طلباً',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                  color: AppColors.textOf(context),
-                ),
-              ),
-              const Spacer(),
-              Text(
-                '${favorites.length} أصناف • نقرة للإضافة',
-                style: TextStyle(
-                  fontSize: 10,
-                  color: AppColors.text3Of(context),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          SizedBox(
-            height: 38,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: favorites.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 6),
-              itemBuilder: (ctx, i) {
-                final it = favorites[i];
-                final inCart = _cart[it.id]?.quantity ?? 0;
-                final isOut = it.quantity <= 0;
-                final isLow = !isOut &&
-                    (it.low || (it.minQuantity > 0 && it.quantity <= it.minQuantity));
-                final dotColor = isOut
-                    ? AppColors.dangerOf(context)
-                    : (isLow ? const Color(0xFFD97706) : AppColors.greenOf(context));
-
-                return Material(
-                  color: inCart > 0
-                      ? AppColors.primarySoftOf(context)
-                      : AppColors.surfaceOf(context),
-                  borderRadius: BorderRadius.circular(AppRadius.pill),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(AppRadius.pill),
-                    side: BorderSide(
-                      color: inCart > 0
-                          ? AppColors.primaryOf(context)
-                          : AppColors.borderOf(context),
-                      width: inCart > 0 ? 1.4 : .8,
-                    ),
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: InkWell(
-                    onTap: () => _addItem(it),
-                    onLongPress: () => _togglePinItem(it),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 6.5,
-                            height: 6.5,
-                            decoration: BoxDecoration(
-                              color: dotColor,
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 5),
-                          Text(
-                            it.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                              color: AppColors.textOf(context),
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            '${Fmt.money(it.sellPrice > 0 ? it.sellPrice : it.buyPrice)} $symbol',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w800,
-                              color: inCart > 0
-                                  ? AppColors.primaryOf(context)
-                                  : AppColors.greenOf(context),
-                            ),
-                          ),
-                          if (inCart > 0) ...[
-                            const SizedBox(width: 5),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                              decoration: BoxDecoration(
-                                color: AppColors.primaryOf(context),
-                                borderRadius: BorderRadius.circular(AppRadius.pill),
-                              ),
-                              child: Text(
-                                Fmt.money(inCart),
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w900,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-        ],
-      ),
-    );
   }
 
   int? _sectionOfCat(List<ItemCategory> cats, int? catId) {
@@ -1781,108 +1655,209 @@ class _PosScreenState extends ConsumerState<PosScreen>
         : sectionId == _selectedSectionId;
   }
 
-  /// الشريط العلوي المدمج لنقطة البيع (أزرق ملكي متدرّج).
+  /// الشريط العلوي الكحلي الملكي الداكن لنقطة البيع (مطابق للصورة المرفقة).
   Widget _buildPosHeader() {
-    final dark = Theme.of(context).brightness == Brightness.dark;
     final held = ref.watch(heldInvoicesProvider);
     final hasCartItems = _cart.isNotEmpty;
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 180),
+    return Container(
       decoration: BoxDecoration(
-        gradient: LinearGradient(
+        gradient: const LinearGradient(
           begin: Alignment.topRight,
           end: Alignment.bottomLeft,
-          colors: dark
-              ? const [Color(0xFF0B2A5B), Color(0xFF14407E)]
-              : [AppColors.primary2, AppColors.primary],
-        ),
-        borderRadius: BorderRadius.vertical(
-          bottom: Radius.circular(_isScrolledCompact ? 16 : 20),
+          colors: [Color(0xFF0F3E78), Color(0xFF154B8E)],
         ),
         boxShadow: [
           BoxShadow(
-            color: AppColors.primary.withValues(alpha: .22),
-            blurRadius: _isScrolledCompact ? 8 : 14,
-            offset: const Offset(0, 4),
+            color: const Color(0xFF0F3E78).withValues(alpha: .20),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
           ),
         ],
       ),
       child: SafeArea(
         bottom: false,
         child: Padding(
-          padding: EdgeInsets.fromLTRB(
-            8,
-            _isScrolledCompact ? 2 : 4,
-            8,
-            _isScrolledCompact ? 6 : 8,
-          ),
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
           child: Row(
             children: [
-              _headerCircleButton(
-                icon: Icons.home_rounded,
-                tooltip: 'الرئيسية',
-                onTap: () => ShellNav.go(ShellNav.home),
-              ),
-              const SizedBox(width: 6),
-              Expanded(child: _buildPillSearch()),
-              const SizedBox(width: 6),
-              // زر فاتورة جديدة / تعليق الفاتورة الحالية بجانب زر الفواتير المعلقة:
-              Tooltip(
-                message: hasCartItems
-                    ? 'تعليق الفاتورة الحالية وبدء فاتورة جديدة (ضغطة مطولة للتسمية)'
-                    : 'فاتورة جديدة فارغة',
-                child: Material(
-                  color: hasCartItems
-                      ? const Color(0xFFF59E0B)
-                      : Colors.white.withValues(alpha: .18),
-                  borderRadius: BorderRadius.circular(999),
-                  clipBehavior: Clip.antiAlias,
-                  child: InkWell(
-                    onTap: _quickHoldAndNewBill,
-                    onLongPress: hasCartItems ? _promptHoldInvoice : null,
-                    child: SizedBox(
-                      height: 38,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 10),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              hasCartItems
-                                  ? Icons.post_add_rounded
-                                  : Icons.note_add_outlined,
-                              color: hasCartItems ? Colors.black : Colors.white,
-                              size: 18,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              hasCartItems ? 'تعليق/جديد' : 'جديد',
-                              style: TextStyle(
-                                color:
-                                    hasCartItems ? Colors.black : Colors.white,
-                                fontSize: 11.5,
-                                fontWeight: FontWeight.w800,
+              // جهة اليمين (في RTL): أيقونة السلة + عنوان "المبيعات" ومسار التتبع الهرمي
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        InkWell(
+                          borderRadius: BorderRadius.circular(8),
+                          onTap: _openCheckoutSheet,
+                          child: Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              const Icon(
+                                Icons.shopping_cart_outlined,
+                                color: Colors.white,
+                                size: 23,
                               ),
-                            ),
-                          ],
+                              if (_itemCount > 0)
+                                PositionedDirectional(
+                                  top: -5,
+                                  end: -5,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 4.5,
+                                      vertical: 1,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFF59E0B),
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: Text(
+                                      '$_itemCount',
+                                      style: const TextStyle(
+                                        color: Colors.black,
+                                        fontSize: 9.5,
+                                        fontWeight: FontWeight.w900,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
                         ),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'المبيعات',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w900,
+                            height: 1.15,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      'الأقسام  ←  الفئات  ←  الأصناف',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: .82),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // جهة اليسار (في RTL): أيقونة التصفية، البحث، القائمة الإضافية، والرئيسية
+              _headerIconButton(
+                icon: Icons.tune_rounded,
+                tooltip: 'ترتيب وتصفية الأصناف',
+                onTap: _openPosSortSheet,
+              ),
+              _headerIconButton(
+                icon: Icons.search_rounded,
+                tooltip: 'بحث سريع',
+                onTap: () => _searchFocus.requestFocus(),
+              ),
+              PopupMenuButton<String>(
+                tooltip: 'خيارات إضافية',
+                icon: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    const Icon(Icons.more_vert, color: Colors.white, size: 22),
+                    if (held.isNotEmpty)
+                      PositionedDirectional(
+                        top: -3,
+                        end: -3,
+                        child: Container(
+                          width: 8,
+                          height: 8,
+                          decoration: const BoxDecoration(
+                            color: Color(0xFFF59E0B),
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                onSelected: (val) {
+                  switch (val) {
+                    case 'new_hold':
+                      _quickHoldAndNewBill();
+                    case 'name_hold':
+                      if (hasCartItems) _promptHoldInvoice();
+                    case 'held_list':
+                      _showHeldSheet();
+                    case 'history':
+                      setState(() => _mainTab = 1);
+                    case 'sections_gate':
+                      setState(() => _atSectionsGate = !_atSectionsGate);
+                  }
+                },
+                itemBuilder: (ctx) => [
+                  PopupMenuItem<String>(
+                    value: 'new_hold',
+                    child: ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        hasCartItems
+                            ? Icons.post_add_rounded
+                            : Icons.note_add_outlined,
+                      ),
+                      title: Text(
+                        hasCartItems
+                            ? 'تعليق الفاتورة وبدء فاتورة جديدة'
+                            : 'فاتورة جديدة فارغة',
                       ),
                     ),
                   ),
-                ),
+                  if (hasCartItems)
+                    const PopupMenuItem<String>(
+                      value: 'name_hold',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.bookmark_add_outlined),
+                        title: Text('تعليق الفاتورة باسم...'),
+                      ),
+                    ),
+                  PopupMenuItem<String>(
+                    value: 'held_list',
+                    child: ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.pause_circle_outline_rounded),
+                      title: Text('الفواتير المعلقة (${held.length})'),
+                    ),
+                  ),
+                  const PopupMenuItem<String>(
+                    value: 'history',
+                    child: ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.receipt_long_outlined),
+                      title: Text('سجل المبيعات والمرتجعات'),
+                    ),
+                  ),
+                  const PopupMenuItem<String>(
+                    value: 'sections_gate',
+                    child: ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.grid_view_rounded),
+                      title: Text('تصفح شبكة الأقسام'),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 6),
-              _headerCircleButton(
-                icon: Icons.pause_circle_outline_rounded,
-                tooltip: 'الفواتير المعلقة (Held Bills)',
-                badgeCount: held.length,
-                onTap: _showHeldSheet,
-              ),
-              const SizedBox(width: 6),
-              _headerCircleButton(
-                icon: Icons.tune_rounded,
-                tooltip: 'ترتيب الأصناف',
-                onTap: _openPosSortSheet,
+              _headerIconButton(
+                icon: Icons.home_rounded,
+                tooltip: 'الرئيسية',
+                onTap: () => ShellNav.go(ShellNav.home),
               ),
             ],
           ),
@@ -1891,116 +1866,94 @@ class _PosScreenState extends ConsumerState<PosScreen>
     );
   }
 
-  Widget _headerCircleButton({
+  Widget _headerIconButton({
     required IconData icon,
     required String tooltip,
     required VoidCallback onTap,
-    int badgeCount = 0,
   }) =>
-      SizedBox(
-        width: 38,
-        height: 38,
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            Material(
-              color: Colors.white.withValues(alpha: .18),
-              shape: const CircleBorder(),
-              clipBehavior: Clip.antiAlias,
-              child: IconButton(
-                padding: EdgeInsets.zero,
-                tooltip: tooltip,
-                icon: Icon(icon, color: Colors.white, size: 19),
-                onPressed: onTap,
-              ),
-            ),
-            if (badgeCount > 0)
-              PositionedDirectional(
-                top: -2,
-                end: -2,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFF59E0B),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: Colors.white, width: 1.5),
-                  ),
-                  child: Text(
-                    badgeCount > 99 ? '99+' : '$badgeCount',
-                    style: const TextStyle(
-                      color: Colors.black,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
+      IconButton(
+        visualDensity: VisualDensity.compact,
+        tooltip: tooltip,
+        icon: Icon(icon, color: Colors.white, size: 22),
+        onPressed: onTap,
       );
 
-  /// حقل البحث البيضاوي (Pill) بخلفية بيضاء نظيفة.
-  Widget _buildPillSearch() => SizedBox(
-        height: 38,
-        child: TextField(
-          controller: _searchCtrl,
-          focusNode: _searchFocus,
-          // على سطح المكتب: تركيز تلقائي لحقل الباركود/البحث — قارئ
-          // الباركود يكتب مباشرة بلا نقرة.
-          autofocus: isDesktopLayout(context),
-          style: const TextStyle(fontSize: 14.5, color: Color(0xFF12223A)),
-          textAlignVertical: TextAlignVertical.center,
-          decoration: InputDecoration(
-            filled: true,
-            fillColor: Colors.white,
-            hintText: 'ابحث باسم الصنف أو الباركود…',
-            hintStyle:
-                const TextStyle(color: Color(0xFF9AA6B8), fontSize: 13.5),
-            contentPadding: const EdgeInsets.symmetric(horizontal: 14),
-            prefixIcon: const Icon(Icons.search_rounded,
-                size: 20, color: Color(0xFF9AA6B8)),
-            prefixIconConstraints:
-                const BoxConstraints(minWidth: 40, minHeight: 40),
-            border: _pillBorder(Colors.transparent),
-            enabledBorder: _pillBorder(Colors.transparent),
-            focusedBorder: _pillBorder(Colors.transparent),
-            suffixIcon: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
+  /// حقل البحث بزوايا دائرية (12dp) وإطار رمادي ناعم وتلميح "ابحث عن صنف ...".
+  Widget _buildPillSearch() {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return SizedBox(
+      height: 42,
+      child: TextField(
+        controller: _searchCtrl,
+        focusNode: _searchFocus,
+        autofocus: isDesktopLayout(context),
+        style: TextStyle(
+          fontSize: 14,
+          color: dark ? Colors.white : const Color(0xFF12223A),
+        ),
+        textAlignVertical: TextAlignVertical.center,
+        decoration: InputDecoration(
+          filled: true,
+          fillColor: dark ? const Color(0xFF1E293B) : const Color(0xFFF3F6FB),
+          hintText: 'ابحث عن صنف ...',
+          hintStyle: const TextStyle(color: Color(0xFF94A3B8), fontSize: 13),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 14),
+          prefixIcon: const Icon(
+            Icons.search_rounded,
+            size: 20,
+            color: Color(0xFF94A3B8),
+          ),
+          prefixIconConstraints:
+              const BoxConstraints(minWidth: 40, minHeight: 40),
+          border: _searchBorder(
+            dark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+          ),
+          enabledBorder: _searchBorder(
+            dark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+          ),
+          focusedBorder: _searchBorder(const Color(0xFF1565C0)),
+          suffixIcon: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                tooltip: 'مسح الباركود',
+                icon: const Icon(
+                  Icons.barcode_reader,
+                  size: 19,
+                  color: Color(0xFF94A3B8),
+                ),
+                onPressed: () async {
+                  final code = await scanBarcode(context);
+                  if (code != null && code.isNotEmpty) {
+                    _searchCtrl.text = code;
+                    setState(() => _searchQuery = code.trim());
+                  }
+                },
+              ),
+              if (_searchQuery.isNotEmpty)
                 IconButton(
-                  tooltip: 'مسح الباركود',
-                  icon: const Icon(Icons.barcode_reader,
-                      size: 20, color: Color(0xFF9AA6B8)),
-                  onPressed: () async {
-                    final code = await scanBarcode(context);
-                    if (code != null && code.isNotEmpty) {
-                      _searchCtrl.text = code;
-                      setState(() => _searchQuery = code.trim());
-                    }
+                  icon: const Icon(
+                    Icons.clear,
+                    size: 19,
+                    color: Color(0xFF94A3B8),
+                  ),
+                  onPressed: () {
+                    _searchCtrl.clear();
+                    setState(() => _searchQuery = '');
                   },
                 ),
-                if (_searchQuery.isNotEmpty)
-                  IconButton(
-                    icon: const Icon(Icons.clear,
-                        size: 20, color: Color(0xFF9AA6B8)),
-                    onPressed: () {
-                      _searchCtrl.clear();
-                      setState(() => _searchQuery = '');
-                    },
-                  ),
-              ],
-            ),
+            ],
           ),
-          onChanged: (v) => setState(() => _searchQuery = v.trim()),
-          // Enter: يطابق الباركود/PLU أو يضيف أول صنف مطابق أو يفتح الدفع السريع.
-          onSubmitted: _handleSearchOrQuickSubmit,
         ),
-      );
+        onChanged: (v) => setState(() => _searchQuery = v.trim()),
+        onSubmitted: _handleSearchOrQuickSubmit,
+      ),
+    );
+  }
 
-  OutlineInputBorder _pillBorder(Color c) => OutlineInputBorder(
-        borderRadius: BorderRadius.circular(999),
-        borderSide: BorderSide(color: c),
+  OutlineInputBorder _searchBorder(Color c) => OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: BorderSide(color: c, width: 1),
       );
 
   /// (2026-09-24) **نظام الترقيم السريع (PLU) ودعم قارئ الباركود**.
@@ -2126,25 +2079,27 @@ class _PosScreenState extends ConsumerState<PosScreen>
     );
   }
 
-  /// شريط السلة العائم السفلي: بطاقة إحصائية بعدد الأصناف، الإجمالي
-  /// في المنتصف بخط عريض، وزر أزرق ملكي عريض لعرض السلة.
+  /// شريط السلة السفلي الثابت (مطابق للصورة المرفقة: عدد الأصناف يميناً، الإجمالي بالوسط، وزر عرض السلة الأزرق يساراً).
   Widget _buildCartBottomBar() {
     final currencies =
         ref.watch(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
     final cur = currencies.first;
+    final dark = Theme.of(context).brightness == Brightness.dark;
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
       decoration: BoxDecoration(
         color: AppColors.surfaceOf(context),
-        borderRadius: const BorderRadius.vertical(
-          top: Radius.circular(AppRadius.sheet),
+        border: Border(
+          top: BorderSide(
+            color: dark ? const Color(0xFF283548) : const Color(0xFFE5EAF2),
+          ),
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: .10),
-            blurRadius: 20,
-            offset: const Offset(0, -6),
+            color: Colors.black.withValues(alpha: .06),
+            blurRadius: 16,
+            offset: const Offset(0, -4),
           ),
         ],
       ),
@@ -2152,87 +2107,108 @@ class _PosScreenState extends ConsumerState<PosScreen>
         top: false,
         child: Row(
           children: [
-            // بطاقة إحصائية: عدد الأصناف بالسلة.
+            // جهة اليمين (في RTL): مربع فاتح لأيقونة الفاتورة + "عدد الأصناف" والعدد
             Container(
-              width: 62,
-              padding: const EdgeInsets.symmetric(vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
               decoration: BoxDecoration(
-                color: AppColors.primarySoftOf(context),
-                borderRadius: BorderRadius.circular(AppRadius.card),
+                color: dark ? const Color(0xFF1E293B) : const Color(0xFFF3F6FB),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: dark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+                ),
               ),
-              child: Column(
+              child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.shopping_bag_outlined,
-                      size: 18, color: AppColors.primaryOf(context)),
-                  const SizedBox(height: 2),
-                  Text(
-                    '$_itemCount',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w900,
-                      color: AppColors.primaryOf(context),
-                    ),
+                  const Icon(
+                    Icons.receipt_long_outlined,
+                    size: 20,
+                    color: Color(0xFF1565C0),
                   ),
-                  Text(
-                    'أصناف',
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: AppColors.text2Of(context),
-                    ),
+                  const SizedBox(width: 8),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        'عدد الأصناف',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                          color: AppColors.text3Of(context),
+                        ),
+                      ),
+                      Text(
+                        '$_itemCount',
+                        style: TextStyle(
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w900,
+                          color: AppColors.textOf(context),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
             ),
             const SizedBox(width: 12),
-            // الإجمالي في المنتصف.
+
+            // المنتصف: "الإجمالي" وقيمة المبلغ
             Expanded(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Text(
                     'الإجمالي',
                     style: TextStyle(
-                      fontSize: 11.5,
-                      color: AppColors.text2Of(context),
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.text3Of(context),
                     ),
                   ),
-                  const SizedBox(height: 2),
+                  const SizedBox(height: 1),
                   FittedBox(
                     fit: BoxFit.scaleDown,
                     child: Text(
                       '${Fmt.money(_netTotal)} ${cur.symbol}',
                       style: TextStyle(
-                        fontSize: 20,
+                        fontSize: 14.5,
                         fontWeight: FontWeight.w900,
-                        color: AppColors.greenOf(context),
+                        color: AppColors.textOf(context),
                       ),
                     ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(width: 8),
-            // دفع نقدي سريع + إفراغ — تبقى الاختصارات ولا تزاحم الزر الرئيسي.
-            IconButton.outlined(
-              tooltip: 'إفراغ السلة',
-              icon: Icon(Icons.delete_sweep_outlined,
-                  color: AppColors.dangerOf(context)),
-              onPressed: _clearCart,
+            const SizedBox(width: 10),
+            Container(
+              width: 1,
+              height: 30,
+              color: dark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
             ),
-            const SizedBox(width: 8),
-            // الزر الأزرق الملكي العريض: عرض السلة.
+            const SizedBox(width: 10),
+
+            // جهة اليسار (في RTL): زر أزرق بارز "عرض السلة (0)" مع أيقونة عربة التسوق
             SizedBox(
-              height: 50,
+              height: 44,
               child: FilledButton.icon(
                 onPressed: _openCheckoutSheet,
-                icon: const Icon(Icons.shopping_cart_checkout, size: 19),
-                label: Text('عرض السلة ($_itemCount)'),
+                icon: const Icon(Icons.shopping_cart_outlined, size: 18),
+                label: Text(
+                  'عرض السلة ($_itemCount)',
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
                 style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  backgroundColor: const Color(0xFF0D6EFD),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(AppRadius.button),
+                    borderRadius: BorderRadius.circular(10),
                   ),
                 ),
               ),

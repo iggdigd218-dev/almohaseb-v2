@@ -332,19 +332,248 @@ class _NavChip extends StatelessWidget {
   }
 }
 
-/// شريط الفئات (المستوى 2): صف واحد بحد أقصى 6 خانات، والباقي في منسدلة.
-///
-/// عند اختيار فئة من المنسدلة **تلتف القائمة فوراً** لتصبح صفاً واحداً
-/// يبرز الفئة المختارة: [الكل] [المختارة] [المزيد ▾].
+/// شريط الأقسام الأفقي الحديث (المستوى 1 في شاشة المبيعات) — بطاقات باستيل أفقية مع شارة عدد الفئات.
+class PosSectionsStrip extends StatelessWidget {
+  const PosSectionsStrip({
+    super.key,
+    required this.sections,
+    required this.categories,
+    required this.selectedId,
+    required this.onSelect,
+    this.onAllTap,
+    this.onShowAll,
+  });
+
+  final List<Section> sections;
+  final List<ItemCategory> categories;
+  final int? selectedId;
+  final void Function(int? sectionId) onSelect;
+  final VoidCallback? onAllTap;
+  final VoidCallback? onShowAll;
+
+  int _categoryCountOf(int? sectionId) {
+    if (sectionId == null) return categories.length;
+    final activeSecIds = sections.map((s) => s.id).toSet();
+    if (sectionId == kGeneralSectionId) {
+      return categories
+          .where((c) =>
+              c.sectionId == null || !activeSecIds.contains(c.sectionId))
+          .length;
+    }
+    return categories.where((c) => c.sectionId == sectionId).length;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final generalCatCount = _categoryCountOf(kGeneralSectionId);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsetsDirectional.fromSTEB(12, 6, 12, 4),
+          child: Row(
+            children: [
+              const Icon(
+                Icons.folder_outlined,
+                size: 18,
+                color: Color(0xFF1E3A5F),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                'الأقسام',
+                style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w800,
+                  color: AppColors.textOf(context),
+                ),
+              ),
+              const Spacer(),
+              InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: onShowAll ?? () => onSelect(null),
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'عرض الكل',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF1E88E5),
+                        ),
+                      ),
+                      SizedBox(width: 3),
+                      Icon(
+                        Icons.arrow_forward_rounded,
+                        size: 13,
+                        color: Color(0xFF1E88E5),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        SizedBox(
+          height: 88,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsetsDirectional.fromSTEB(12, 2, 12, 2),
+            children: [
+              _HorizontalSectionTile(
+                label: 'كل الأقسام',
+                icon: IconCatalog.of('basket'),
+                tone: AppTone.blue,
+                catCount: categories.length,
+                active: selectedId == null,
+                onTap: onAllTap ?? () => onSelect(null),
+              ),
+              for (var i = 0; i < sections.length; i++)
+                _HorizontalSectionTile(
+                  label: sections[i].name,
+                  icon: IconCatalog.of(sections[i].effectiveIcon),
+                  tone: IconCatalog.resolveTone(
+                    colorHex: sections[i].colorHex,
+                    iconKey: sections[i].effectiveIcon,
+                    fallbackSeed: i + 1,
+                  ),
+                  catCount: _categoryCountOf(sections[i].id),
+                  active: selectedId == sections[i].id,
+                  onTap: () => onSelect(sections[i].id),
+                ),
+              if (generalCatCount > 0 || sections.isEmpty)
+                _HorizontalSectionTile(
+                  label: 'عام',
+                  icon: IconCatalog.of('category'),
+                  tone: AppTone.sand,
+                  catCount: generalCatCount,
+                  active: selectedId == kGeneralSectionId,
+                  onTap: () => onSelect(kGeneralSectionId),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _HorizontalSectionTile extends StatelessWidget {
+  const _HorizontalSectionTile({
+    required this.label,
+    required this.icon,
+    required this.tone,
+    required this.catCount,
+    required this.active,
+    required this.onTap,
+  });
+
+  final String label;
+  final IconData icon;
+  final AppTone tone;
+  final int catCount;
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    const activeBlue = Color(0xFF1E88E5);
+    final bg = active
+        ? (dark
+            ? activeBlue.withValues(alpha: 0.22)
+            : const Color(0xFFEAF3FF))
+        : (dark
+            ? tone.foreground.withValues(alpha: 0.15)
+            : tone.background);
+    final borderColor = active
+        ? activeBlue
+        : tone.foreground.withValues(alpha: 0.18);
+    final iconColor = active ? activeBlue : tone.foreground;
+
+    return Padding(
+      padding: const EdgeInsetsDirectional.only(end: 8),
+      child: Material(
+        color: bg,
+        borderRadius: BorderRadius.circular(14),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            width: 90,
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: borderColor,
+                width: active ? 1.8 : 1.0,
+              ),
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: 23, color: iconColor),
+                const SizedBox(height: 4),
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: AppColors.textOf(context),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 1.5),
+                  decoration: BoxDecoration(
+                    color: active
+                        ? activeBlue.withValues(alpha: 0.14)
+                        : tone.foreground.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    '$catCount فئات',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w700,
+                      color: active ? activeBlue : tone.foreground,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// شريط الفئات (المستوى 2): بطاقات فئات أفقية أنيقة مع أيقونة ملونة وشارة عدد الأصناف.
 class PosCategoryStrip extends StatelessWidget {
   const PosCategoryStrip({
     super.key,
     required this.categories,
     required this.selectedId,
     required this.onPick,
+    this.itemCountOf,
+    this.allItemsCount,
+    this.showHeader = false,
+    this.onShowAll,
   });
 
-  /// فئات القسم النشط (بلا فروع) مرتّبة كما تظهر للمستخدم.
+  /// فئات القسم النشط مرتّبة كما تظهر للمستخدم.
   final List<ItemCategory> categories;
 
   final int? selectedId;
@@ -352,25 +581,21 @@ class PosCategoryStrip extends StatelessWidget {
   /// يُستدعى باختيار فئة (`null` = كل الفئات).
   final void Function(int? categoryId) onPick;
 
-  static const int _maxVisible = 5; // + «الكل» = 6 خانات كحد أقصى
+  /// دالة اختيارية لحساب عدد الأصناف في كل فئة.
+  final int Function(ItemCategory category)? itemCountOf;
+
+  /// إجمالي الأصناف في خيار «الكل».
+  final int? allItemsCount;
+
+  /// هل يظهر سطر العنوان «الفئات ... عرض الكل ←» فوق البطاقات؟
+  final bool showHeader;
+
+  final VoidCallback? onShowAll;
 
   @override
   Widget build(BuildContext context) {
-    final selected = categories
-        .cast<ItemCategory?>()
-        .firstWhere((c) => c?.id == selectedId, orElse: () => null);
-
-    // عند وجود فئة مختارة: [الكل] [المختارة] [المزيد] — صف واحد مركّز.
-    final visible = <ItemCategory>[];
-    if (selected != null) {
-      visible.add(selected);
-    } else {
-      visible.addAll(categories.take(_maxVisible));
-    }
-    final hasMore = categories.length > (selected != null ? 1 : _maxVisible);
-
-    return SizedBox(
-      height: 36,
+    final strip = SizedBox(
+      height: 82,
       child: ListView(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsetsDirectional.fromSTEB(12, 2, 12, 2),
@@ -379,27 +604,85 @@ class PosCategoryStrip extends StatelessWidget {
             label: 'الكل',
             icon: Icons.widgets_outlined,
             tone: AppTone.blue,
+            countLabel: allItemsCount != null ? '$allItemsCount صنف' : 'الكل',
             active: selectedId == null,
             onTap: () => onPick(null),
           ),
-          for (final c in visible)
+          for (var i = 0; i < categories.length; i++)
             _CatChip(
-              label: c.name,
-              icon: IconCatalog.of(c.iconKey),
-              tone: toneOf(c.colorHex.isNotEmpty ? c.colorHex : ''),
-              active: c.id == selectedId,
-              onTap: () => onPick(c.id),
-            ),
-          if (hasMore)
-            Padding(
-              padding: const EdgeInsetsDirectional.only(start: 6),
-              child: _MoreChip(
-                count: categories.length,
-                onTap: () => _openSheet(context),
+              label: categories[i].name,
+              icon: IconCatalog.of(categories[i].iconKey),
+              tone: IconCatalog.resolveTone(
+                colorHex: categories[i].colorHex,
+                iconKey: categories[i].iconKey,
+                fallbackSeed: i + 1,
               ),
+              countLabel: itemCountOf != null
+                  ? '${itemCountOf!(categories[i])} أصناف'
+                  : 'أصناف',
+              active: categories[i].id == selectedId,
+              onTap: () => onPick(categories[i].id),
             ),
         ],
       ),
+    );
+
+    if (!showHeader) return strip;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsetsDirectional.fromSTEB(12, 6, 12, 4),
+          child: Row(
+            children: [
+              const Icon(
+                Icons.grid_view_rounded,
+                size: 18,
+                color: Color(0xFF1E3A5F),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                'الفئات',
+                style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w800,
+                  color: AppColors.textOf(context),
+                ),
+              ),
+              const Spacer(),
+              InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: onShowAll ?? () => _openSheet(context),
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'عرض الكل',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF1E88E5),
+                        ),
+                      ),
+                      SizedBox(width: 3),
+                      Icon(
+                        Icons.arrow_forward_rounded,
+                        size: 13,
+                        color: Color(0xFF1E88E5),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        strip,
+      ],
     );
   }
 
@@ -413,7 +696,6 @@ class PosCategoryStrip extends StatelessWidget {
         selectedId: selectedId,
       ),
     );
-    // القيمة null هنا تعني «الكل» (اختيار صريح من الورقة).
     onPick(pick);
   }
 }
@@ -519,7 +801,11 @@ class _CategoriesSheetState extends State<_CategoriesSheet> {
                   return _CatRow(
                     label: c.name,
                     icon: IconCatalog.of(c.iconKey),
-                    tone: toneOf(c.colorHex.isNotEmpty ? c.colorHex : ''),
+                    tone: IconCatalog.resolveTone(
+                      colorHex: c.colorHex,
+                      iconKey: c.iconKey,
+                      fallbackSeed: i,
+                    ),
                     active: c.id == widget.selectedId,
                     onTap: () => Navigator.pop(context, c.id),
                   );
@@ -556,7 +842,7 @@ class _CatRow extends StatelessWidget {
         width: 38,
         height: 38,
         decoration: BoxDecoration(
-          color: tone.background,
+          color: tone.foreground.withValues(alpha: 0.13),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Icon(icon, color: tone.foreground, size: 20),
@@ -574,6 +860,7 @@ class _CatChip extends StatelessWidget {
     required this.label,
     required this.icon,
     required this.tone,
+    required this.countLabel,
     required this.active,
     required this.onTap,
   });
@@ -581,78 +868,80 @@ class _CatChip extends StatelessWidget {
   final String label;
   final IconData icon;
   final AppTone tone;
+  final String countLabel;
   final bool active;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    const activeBlue = Color(0xFF1E88E5);
+    final bg = active
+        ? (dark
+            ? activeBlue.withValues(alpha: 0.22)
+            : const Color(0xFFEAF4FF))
+        : AppColors.surfaceOf(context);
+    final borderColor = active ? activeBlue : AppColors.borderOf(context);
+    final iconColor = active ? activeBlue : tone.foreground;
+
     return Padding(
-      padding: const EdgeInsetsDirectional.only(end: 6),
+      padding: const EdgeInsetsDirectional.only(end: 8),
       child: Material(
-        color: active ? tone.foreground : AppColors.surfaceOf(context),
-        borderRadius: BorderRadius.circular(AppRadius.pill),
+        color: bg,
+        borderRadius: BorderRadius.circular(14),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsetsDirectional.fromSTEB(12, 7, 12, 7),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            width: 96,
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: borderColor,
+                width: active ? 1.8 : 1.0,
+              ),
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(icon,
-                    size: 16,
-                    color: active ? Colors.white : tone.foreground),
-                const SizedBox(width: 6),
+                Icon(icon, size: 21, color: iconColor),
+                const SizedBox(height: 3),
                 Text(
                   label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
                   style: TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w700,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: AppColors.textOf(context),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
+                  decoration: BoxDecoration(
                     color: active
-                        ? Colors.white
-                        : AppColors.textOf(context),
+                        ? activeBlue.withValues(alpha: 0.14)
+                        : AppColors.surface2Of(context),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    countLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w700,
+                      color: active ? activeBlue : AppColors.text2Of(context),
+                    ),
                   ),
                 ),
               ],
             ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MoreChip extends StatelessWidget {
-  const _MoreChip({required this.count, required this.onTap});
-
-  final int count;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: AppColors.primaryOf(context).withValues(alpha: .12),
-      borderRadius: BorderRadius.circular(AppRadius.pill),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsetsDirectional.fromSTEB(12, 7, 12, 7),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.expand_more_rounded,
-                  size: 16, color: AppColors.primaryOf(context)),
-              const SizedBox(width: 4),
-              Text(
-                'المزيد ($count)',
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.primaryOf(context),
-                ),
-              ),
-            ],
           ),
         ),
       ),

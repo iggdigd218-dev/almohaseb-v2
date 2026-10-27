@@ -282,6 +282,63 @@ class IconCatalog {
     return all.where((i) => i.group == group).toList();
   }
 
+  /// يحدّد النغمة اللونية (الباستيل + اللون الحي) المناسبة لمجموعة الأيقونات.
+  static AppTone toneOfGroup(String group) {
+    return switch (group) {
+      'بقالة وتموين' => AppTone.blue,
+      'مشروبات' => AppTone.orange,
+      'منظفات ومنزل' => AppTone.green,
+      'عناية شخصية وصحة' => AppTone.violet,
+      'هواتف وإلكترونيات' => AppTone.teal,
+      'صيانة وأدوات' => AppTone.red,
+      'معلبات ومحفوظات' => AppTone.blue,
+      'بهارات وتوابل' => AppTone.sand,
+      'ملابس وأزياء' => AppTone.pink,
+      'أثاث ومفروشات' => AppTone.sand,
+      'قرطاسية ومكتبية' => AppTone.violet,
+      'مطبخ ومخبوزات' => AppTone.orange,
+      'رياضة ولياقة' => AppTone.green,
+      'أطفال وألعاب' => AppTone.pink,
+      'سيارات ومركبات' => AppTone.red,
+      'بناء ومواد' => AppTone.orange,
+      'زراعة وحيوانات' => AppTone.green,
+      'مجوهرات وإكسسوارات' => AppTone.violet,
+      _ => AppTone.blue,
+    };
+  }
+
+  /// يعيد نغمة الباستيل الحية الخاصة بمفتاح أيقونة معيّن.
+  static AppTone toneOfKey(String? key, {int fallbackIndex = 0}) {
+    if (key != null && key.isNotEmpty) {
+      for (var idx = 0; idx < all.length; idx++) {
+        final item = all[idx];
+        if (item.key == key) {
+          final groupTone = toneOfGroup(item.group);
+          // تنويع لوني ناعم داخل المجموعة الواحدة لإضفاء حيوية بصرية
+          if (fallbackIndex == 0) return groupTone;
+          return AppTone.all[(idx + fallbackIndex) % AppTone.all.length];
+        }
+      }
+    }
+    return AppTone.all[fallbackIndex.abs() % AppTone.all.length];
+  }
+
+  /// يحسم نغمة العرض لأي قسم أو فئة أو صنف (اللون المخصّص أولاً ثم لون الأيقونة ثم التدرج التلقائي).
+  static AppTone resolveTone({
+    String? colorHex,
+    String? iconKey,
+    int fallbackSeed = 0,
+  }) {
+    final c = (colorHex ?? '').trim();
+    if (c.isNotEmpty) {
+      return c.startsWith('#') ? AppTone.fromHex(c) : AppTone.byKey(c);
+    }
+    if (iconKey != null && iconKey.trim().isNotEmpty) {
+      return toneOfKey(iconKey.trim());
+    }
+    return AppTone.all[fallbackSeed.abs() % AppTone.all.length];
+  }
+
   /// بحث بالاسم أو المفتاح (عربي/إنجليزي).
   static List<CatalogIcon> search(String query, {String group = 'الكل'}) {
     final q = query.trim().toLowerCase();
@@ -447,6 +504,14 @@ class _IconPickerSheetState extends State<_IconPickerSheet> {
                       itemBuilder: (context, i) {
                         final it = items[i];
                         final active = it.key == _selected;
+                        final tone = IconCatalog.toneOfGroup(it.group);
+                        final tileBg = active
+                            ? tone.foreground
+                            : (dark
+                                ? tone.foreground.withValues(alpha: 0.18)
+                                : tone.foreground.withValues(alpha: 0.12));
+                        final iconColor =
+                            active ? Colors.white : tone.foreground;
                         return InkWell(
                           borderRadius: BorderRadius.circular(14),
                           onTap: () {
@@ -455,12 +520,14 @@ class _IconPickerSheetState extends State<_IconPickerSheet> {
                           },
                           child: Container(
                             decoration: BoxDecoration(
-                              color: active
-                                  ? scheme.primary
-                                  : (dark
-                                      ? AppColors.dSurface2
-                                      : AppColors.surface2),
+                              color: tileBg,
                               borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                color: active
+                                    ? tone.foreground
+                                    : tone.foreground.withValues(alpha: 0.24),
+                                width: active ? 1.8 : 1.0,
+                              ),
                               boxShadow: active ? AppShadows.card(scheme) : null,
                             ),
                             child: Column(
@@ -469,11 +536,7 @@ class _IconPickerSheetState extends State<_IconPickerSheet> {
                                 Icon(
                                   it.icon,
                                   size: 24,
-                                  color: active
-                                      ? Colors.white
-                                      : (dark
-                                          ? AppColors.dText
-                                          : AppColors.text),
+                                  color: iconColor,
                                 ),
                                 const SizedBox(height: 4),
                                 Text(
@@ -482,9 +545,10 @@ class _IconPickerSheetState extends State<_IconPickerSheet> {
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                     fontSize: 9.5,
+                                    fontWeight: FontWeight.w700,
                                     color: active
                                         ? Colors.white
-                                        : AppColors.text3Of(context),
+                                        : AppColors.textOf(context),
                                   ),
                                 ),
                               ],

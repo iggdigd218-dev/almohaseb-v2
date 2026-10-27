@@ -2798,9 +2798,9 @@ class _BrandPickers extends StatelessWidget {
   final ValueChanged<String> onIcon;
   final ValueChanged<String> onColor;
 
-  /// النغمة الفعالة: مفتاح باستيل أو لون HEX مخصّص.
+  /// النغمة الفعالة: مفتاح باستيل أو لون HEX مخصّص أو نغمة الأيقونة التلقائية.
   AppTone get _tone =>
-      color.startsWith('#') ? AppTone.fromHex(color) : AppTone.byKey(color);
+      IconCatalog.resolveTone(colorHex: color, iconKey: iconKey);
 
   @override
   Widget build(BuildContext context) {
@@ -2824,10 +2824,10 @@ class _BrandPickers extends StatelessWidget {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
                 decoration: BoxDecoration(
-                  color: tone.background,
+                  color: tone.foreground.withValues(alpha: 0.13),
                   borderRadius: BorderRadius.circular(12),
                   border:
-                      Border.all(color: tone.foreground.withValues(alpha: .28)),
+                      Border.all(color: tone.foreground.withValues(alpha: .30)),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -2878,7 +2878,7 @@ class _BrandPickers extends StatelessWidget {
   }
 }
 
-/// صورة الصنف أعلى بطاقة الشبكة (ملف محلي) مع بديل أيقوني آمن.
+/// صورة الصنف أعلى بطاقة الشبكة (ملف محلي) مع بديل أيقوني باستيل ملون وحي.
 class _ItemThumb extends StatelessWidget {
   const _ItemThumb({required this.image});
 
@@ -2887,15 +2887,22 @@ class _ItemThumb extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasImage = image.isNotEmpty && MediaPaths.exists(image);
-    final dark = Theme.of(context).brightness == Brightness.dark;
+    final tone = AppTone.blue;
     final placeholder = Container(
-      color: dark ? AppColors.dSurface2 : AppColors.surface2,
+      color: tone.foreground.withValues(alpha: 0.12),
       child: Center(
-        child: Icon(
-          Icons.inventory_2_outlined,
-          size: 30,
-          color:
-              (dark ? AppColors.dText3 : AppColors.text3).withValues(alpha: .55),
+        child: Container(
+          width: 46,
+          height: 46,
+          decoration: BoxDecoration(
+            color: tone.foreground.withValues(alpha: 0.14),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Icon(
+            Icons.inventory_2_outlined,
+            size: 26,
+            color: tone.foreground,
+          ),
         ),
       ),
     );
@@ -2927,7 +2934,7 @@ class _Thumb extends StatelessWidget {
       width: radius == 0 ? null : 52,
       height: radius == 0 ? null : 52,
       decoration: BoxDecoration(
-        color: AppColors.primarySoftOf(context),
+        color: AppTone.blue.foreground.withValues(alpha: 0.13),
         borderRadius: BorderRadius.circular(radius),
       ),
       child: ClipRRect(
@@ -2947,7 +2954,7 @@ class _Thumb extends StatelessWidget {
         child: Icon(
           Icons.inventory_2_outlined,
           size: size,
-          color: AppColors.primaryOf(context),
+          color: AppTone.blue.foreground,
         ),
       );
 }

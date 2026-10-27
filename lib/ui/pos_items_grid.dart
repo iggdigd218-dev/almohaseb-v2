@@ -10,6 +10,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../core/format.dart';
+import '../core/icon_catalog.dart';
 import '../core/media_paths.dart';
 import '../core/models.dart';
 import '../core/theme.dart';
@@ -17,7 +18,7 @@ import '../core/theme.dart';
 /// اسم بديل قياسي لبطاقة الصنف في شبكة نقطة البيع.
 typedef PosItemCard = PosItemTile;
 
-/// بطاقة صنف داخل شبكة نقطة البيع.
+/// بطاقة صنف داخل شبكة نقطة البيع — مطابقة للتصميم المرجعي الحديث.
 class PosItemTile extends StatelessWidget {
   const PosItemTile({
     super.key,
@@ -28,6 +29,8 @@ class PosItemTile extends StatelessWidget {
     required this.onAdd,
     this.onLongPress,
     this.isFavorite = false,
+    this.tone,
+    this.fallbackIcon,
   });
 
   final Item item;
@@ -42,20 +45,40 @@ class PosItemTile extends StatelessWidget {
   final VoidCallback? onLongPress;
   final bool isFavorite;
 
+  /// نغمة الباستيل المشتقة من فئة أو قسم الصنف (لتلوين الأيقونة البديلة عند غياب الصورة).
+  final AppTone? tone;
+
+  /// الأيقونة البديلة المشتقة من الفئة أو القسم عند غياب صورة الصنف.
+  final IconData? fallbackIcon;
+
+  AppTone get _resolvedTone =>
+      tone ??
+      IconCatalog.resolveTone(
+        fallbackSeed: (item.categoryId ?? item.sectionId ?? item.id ?? item.name.hashCode),
+      );
+
+  IconData get _resolvedIcon => fallbackIcon ?? Icons.inventory_2_outlined;
+
   Widget _buildThumb(BuildContext context) {
     if (item.image.isEmpty) return _fallback(context);
     if (item.image.startsWith('http')) {
-      return Image.network(
-        item.image,
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => _fallback(context),
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(6, 6, 6, 2),
+        child: Image.network(
+          item.image,
+          fit: BoxFit.contain,
+          errorBuilder: (_, __, ___) => _fallback(context),
+        ),
       );
     }
     if (MediaPaths.exists(item.image)) {
-      return Image.file(
-        File(MediaPaths.toAbsolute(item.image)),
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => _fallback(context),
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(6, 6, 6, 2),
+        child: Image.file(
+          File(MediaPaths.toAbsolute(item.image)),
+          fit: BoxFit.contain,
+          errorBuilder: (_, __, ___) => _fallback(context),
+        ),
       );
     }
     return _fallback(context);
@@ -68,239 +91,159 @@ class PosItemTile extends StatelessWidget {
     final isLow = !isOut &&
         (item.low || (item.minQuantity > 0 && item.quantity <= item.minQuantity));
 
-    // المؤشرات المرئية الثلاثية لحالة المخزون:
-    // • أخضر (متوفر): الكمية أعلى من الحد الأدنى.
-    // • أصفر/برتقالي (منخفض): الرصيد قارب الحد الأدنى.
-    // • أحمر (نفد): الرصيد صفر أو أقل.
-    final tone = isOut
-        ? AppTone.red
-        : (isLow ? AppTone.orange : AppTone.green);
     final statusLabel = isOut ? 'نفد' : (isLow ? 'منخفض' : 'متوفر');
+    final statusBg = isOut
+        ? const Color(0xFFFFE4E6)
+        : (isLow ? const Color(0xFFFEF3C7) : const Color(0xFFE6F7F2));
+    final statusFg = isOut
+        ? const Color(0xFFE11D48)
+        : (isLow ? const Color(0xFFD97706) : const Color(0xFF00897B));
 
     final scheme = Theme.of(context).colorScheme;
+    const actionBlue = Color(0xFF1E88E5);
 
     return Opacity(
-      opacity: enabled ? 1 : .55,
+      opacity: enabled ? 1 : .58,
       child: Container(
         decoration: BoxDecoration(
           color: AppColors.surfaceOf(context),
-          borderRadius: BorderRadius.circular(AppRadius.card),
+          borderRadius: BorderRadius.circular(14),
           boxShadow: AppShadows.card(scheme),
-          border: inCart > 0
-              ? Border.all(color: AppColors.primaryOf(context), width: 2)
-              : null,
+          border: Border.all(
+            color: inCart > 0 ? actionBlue : AppColors.borderOf(context),
+            width: inCart > 0 ? 1.8 : 0.9,
+          ),
         ),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: enabled ? onAdd : null,
           onLongPress: onLongPress,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+          child: Stack(
             children: [
-              // 1) الجزء العلوي: الصورة/الأيقونة + مؤشر المخزون + شارة الكمية + نجمة المفضلة.
-              Expanded(
-                flex: 4,
-                child: Stack(
-                  fit: StackFit.expand,
+              Padding(
+                padding: const EdgeInsets.fromLTRB(6, 6, 6, 6),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Container(
-                      color: AppTone.blue.background,
-                      width: double.infinity,
-                      child: _buildThumb(context),
+                    // 1) منطقة الصورة أو الأيقونة الملونة بتأثير الباستيل في النصف العلوي.
+                    Expanded(
+                      flex: 5,
+                      child: Center(
+                        child: _buildThumb(context),
+                      ),
                     ),
-                    // مؤشر حالة المخزون (أعلى اليسار في RTL).
-                    PositionedDirectional(
-                      top: 4,
-                      end: 4,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 4.5, vertical: 1.5),
-                        decoration: BoxDecoration(
-                          color: AppColors.surfaceOf(context)
-                              .withValues(alpha: .94),
-                          borderRadius: BorderRadius.circular(AppRadius.pill),
-                          border: Border.all(
-                            color: tone.foreground.withValues(alpha: .35),
-                            width: .8,
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(
-                              width: 5.5,
-                              height: 5.5,
-                              decoration: BoxDecoration(
-                                color: tone.foreground,
-                                shape: BoxShape.circle,
-                              ),
+                    const SizedBox(height: 3),
+                    // 2) اسم الصنف عريض في المنتصف + الوحدة/الكمية تحته بالرمادي الهادئ.
+                    Text(
+                      item.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 11.5,
+                        height: 1.15,
+                        color: AppColors.textOf(context),
+                      ),
+                    ),
+                    const SizedBox(height: 1),
+                    Text(
+                      '${Fmt.money(item.quantity)} ${item.unit}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.text3Of(context),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    // 3) الصف السفلي: شارة التوفر يميناً + السعر بخط عريض يساراً.
+                    SizedBox(
+                      height: 20,
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: statusBg,
+                              borderRadius: BorderRadius.circular(999),
                             ),
-                            const SizedBox(width: 3),
-                            Text(
+                            child: Text(
                               statusLabel,
                               style: TextStyle(
                                 fontSize: 8.5,
                                 fontWeight: FontWeight.w800,
-                                color: tone.foreground,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    // شارة الكمية المتوفرة (أسفل اليمين على الصورة لتفريغ المساحة السفلية للاسم).
-                    PositionedDirectional(
-                      bottom: 4,
-                      start: 4,
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 72),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 4.5, vertical: 1.5),
-                          decoration: BoxDecoration(
-                            color: AppColors.surfaceOf(context)
-                                .withValues(alpha: .92),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            alignment: AlignmentDirectional.centerStart,
-                            child: Text(
-                              '${Fmt.money(item.quantity)} ${item.unit}',
-                              style: TextStyle(
-                                fontSize: 9,
-                                fontWeight:
-                                    isLow ? FontWeight.w800 : FontWeight.w600,
-                                color: isOut
-                                    ? AppColors.dangerOf(context)
-                                    : (isLow
-                                        ? const Color(0xFFD97706)
-                                        : AppColors.text2Of(context)),
+                                color: statusFg,
                               ),
                             ),
                           ),
-                        ),
-                      ),
-                    ),
-                    // نجمة التثبيت في المفضلة.
-                    if (isFavorite)
-                      PositionedDirectional(
-                        top: 4,
-                        start: 4,
-                        child: Container(
-                          padding: const EdgeInsets.all(2),
-                          decoration: BoxDecoration(
-                            color: AppColors.surfaceOf(context)
-                                .withValues(alpha: .94),
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color:
-                                  const Color(0xFFF59E0B).withValues(alpha: .4),
-                              width: .8,
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: AlignmentDirectional.centerEnd,
+                              child: Text(
+                                '${Fmt.money(price)} $symbol',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 11.5,
+                                  color: isOut
+                                      ? AppColors.dangerOf(context)
+                                      : const Color(0xFF059669),
+                                ),
+                              ),
                             ),
                           ),
-                          child: const Icon(
-                            Icons.star_rounded,
-                            size: 12,
-                            color: Color(0xFFF59E0B),
-                          ),
-                        ),
+                        ],
                       ),
+                    ),
                   ],
                 ),
               ),
-              // 2) الجزء السفلي: اسم الصنف بعرض البطاقة الكامل (سطرين كحد أقصى) + شريط السعر وزر (+) المستقل.
-              Expanded(
-                flex: 6,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(6, 5, 6, 5),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      // اسم الصنف واضح ومقروء بالكامل دون أي تداخل مع الأزرار.
-                      Expanded(
-                        child: Align(
-                          alignment: AlignmentDirectional.topStart,
-                          child: Text(
-                            item.name,
-                            maxLines: 2,
-                            softWrap: true,
-                            overflow: TextOverflow.ellipsis,
-                            textAlign: TextAlign.start,
-                            style: TextStyle(
-                              fontWeight: FontWeight.w800,
-                              fontSize: 12,
-                              height: 1.2,
-                              color: AppColors.textOf(context),
-                            ),
-                          ),
-                        ),
+              // زر الإضافة الدائري الأزرق (+) في الزاوية العلوية اليسرى (end في RTL).
+              PositionedDirectional(
+                top: 5,
+                end: 5,
+                child: Material(
+                  color: enabled ? actionBlue : AppColors.text3Of(context),
+                  borderRadius: BorderRadius.circular(999),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: enabled ? onAdd : null,
+                    child: Container(
+                      constraints: const BoxConstraints(
+                        minWidth: 22,
+                        minHeight: 22,
                       ),
-                      const SizedBox(height: 3),
-                      // شريط سفلي مخصص للسعر وزر الإضافة (+) دون المساس بمساحة الاسم.
-                      SizedBox(
-                        height: 24,
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            Expanded(
-                              child: FittedBox(
-                                fit: BoxFit.scaleDown,
-                                alignment: AlignmentDirectional.centerStart,
-                                child: Text(
-                                  '${Fmt.money(price)} $symbol',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w900,
-                                    fontSize: 12.5,
-                                    color: isOut
-                                        ? AppColors.dangerOf(context)
-                                        : (isLow
-                                            ? const Color(0xFFD97706)
-                                            : AppColors.greenOf(context)),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 4),
-                            Material(
-                              color: enabled
-                                  ? AppColors.primaryOf(context)
-                                  : AppColors.text3Of(context),
-                              borderRadius: BorderRadius.circular(8),
-                              clipBehavior: Clip.antiAlias,
-                              child: InkWell(
-                                onTap: enabled ? onAdd : null,
-                                child: SizedBox(
-                                  height: 24,
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 5.5),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        const Icon(Icons.add,
-                                            size: 13.5, color: Colors.white),
-                                        if (inCart > 0) ...[
-                                          const SizedBox(width: 2),
-                                          Text(
-                                            Fmt.money(inCart),
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontWeight: FontWeight.w900,
-                                              fontSize: 10.5,
-                                            ),
-                                          ),
-                                        ],
-                                      ],
-                                    ),
-                                  ),
-                                ),
+                      padding: EdgeInsets.symmetric(
+                        horizontal: inCart > 0 ? 5 : 0,
+                      ),
+                      alignment: Alignment.center,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.add_rounded,
+                            size: 14,
+                            color: Colors.white,
+                          ),
+                          if (inCart > 0) ...[
+                            const SizedBox(width: 1),
+                            Text(
+                              Fmt.money(inCart),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w900,
+                                fontSize: 9.5,
                               ),
                             ),
                           ],
-                        ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
                 ),
               ),
@@ -311,13 +254,23 @@ class PosItemTile extends StatelessWidget {
     );
   }
 
-  Widget _fallback(BuildContext context) => Center(
-        child: Icon(
-          Icons.inventory_2_outlined,
-          size: 28,
-          color: AppTone.blue.foreground.withValues(alpha: .55),
-        ),
-      );
+  Widget _fallback(BuildContext context) {
+    final t = _resolvedTone;
+    return Container(
+      width: 46,
+      height: 46,
+      decoration: BoxDecoration(
+        color: t.foreground.withValues(alpha: 0.13),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      alignment: Alignment.center,
+      child: Icon(
+        _resolvedIcon,
+        size: 24,
+        color: t.foreground,
+      ),
+    );
+  }
 }
 
 /// شبكة الأصناف المتجاوبة: 4 على الجوال · 6 على التابلت · 8 على الحاسوب.
@@ -331,6 +284,8 @@ class PosItemsGrid extends StatelessWidget {
     required this.onAdd,
     this.onLongPress,
     this.isFavorite,
+    this.toneFor,
+    this.iconFor,
   });
 
   final List<Item> items;
@@ -345,6 +300,8 @@ class PosItemsGrid extends StatelessWidget {
   final void Function(Item item) onAdd;
   final void Function(Item item)? onLongPress;
   final bool Function(Item item)? isFavorite;
+  final AppTone Function(Item item)? toneFor;
+  final IconData Function(Item item)? iconFor;
 
   /// عدد الأعمدة حسب عرض الشاشة: 4 · 6 · 8.
   static int crossAxisCountFor(double width) =>
@@ -354,11 +311,10 @@ class PosItemsGrid extends StatelessWidget {
   Widget build(BuildContext context) {
     final cross = crossAxisCountFor(MediaQuery.sizeOf(context).width);
     return GridView.builder(
-      padding: const EdgeInsets.fromLTRB(8, 4, 8, 96),
+      padding: const EdgeInsets.fromLTRB(10, 4, 10, 96),
       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: cross,
-        // ارتفاع إضافي متوازن يمنح اسم الصنف (سطرين) مساحة مريحة دون اقتطاع.
-        childAspectRatio: .70,
+        childAspectRatio: .72,
         crossAxisSpacing: 8,
         mainAxisSpacing: 8,
       ),
@@ -373,6 +329,8 @@ class PosItemsGrid extends StatelessWidget {
           onAdd: () => onAdd(it),
           onLongPress: onLongPress == null ? null : () => onLongPress!(it),
           isFavorite: isFavorite?.call(it) ?? false,
+          tone: toneFor?.call(it),
+          fallbackIcon: iconFor?.call(it),
         );
       },
     );
