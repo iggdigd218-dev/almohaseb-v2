@@ -604,7 +604,9 @@ class PosCategoryStrip extends StatelessWidget {
             label: 'الكل',
             icon: Icons.widgets_outlined,
             tone: AppTone.blue,
-            countLabel: allItemsCount != null ? '$allItemsCount صنف' : 'الكل',
+            countLabel: allItemsCount != null
+                ? '$allItemsCount صنف'
+                : '${categories.length} فئة',
             active: selectedId == null,
             onTap: () => onPick(null),
           ),

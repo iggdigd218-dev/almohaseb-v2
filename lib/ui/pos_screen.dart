@@ -1426,7 +1426,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                         // لوحة الأقسام الكاملة عند الضغط على "عرض الكل" أو "كل الأقسام"
                         if (_atSectionsGate)
                           SizedBox(
-                            height: 132,
+                            height: 112,
                             child: PosSectionsGate(
                               sections: sections,
                               roots: roots,
@@ -1445,15 +1445,17 @@ class _PosScreenState extends ConsumerState<PosScreen>
             ),
 
             // 4) شريط الفئات الأفقي التابع للقسم النشط
-            PosCategoryStrip(
-              categories: sectionCategories,
-              selectedId: _selectedCategoryId,
-              showHeader: true,
-              allItemsCount: _countSectionItems(allItems, categories),
-              itemCountOf: (cat) => _countCategoryItems(cat, allItems, categories),
-              onPick: (cid) => setState(() => _selectedCategoryId = cid),
-              onShowAll: () => setState(() => _selectedCategoryId = null),
-            ),
+            if (!_atSectionsGate)
+              PosCategoryStrip(
+                categories: sectionCategories,
+                selectedId: _selectedCategoryId,
+                showHeader: true,
+                allItemsCount: _countSectionItems(allItems, categories),
+                itemCountOf: (cat) =>
+                    _countCategoryItems(cat, allItems, categories),
+                onPick: (cid) => setState(() => _selectedCategoryId = cid),
+                onShowAll: () => setState(() => _selectedCategoryId = null),
+              ),
           ],
 
           // 5) رأس شبكة الأصناف (الأصناف + عرض الكل ←)
@@ -1514,10 +1516,12 @@ class _PosScreenState extends ConsumerState<PosScreen>
           // 6) شبكة بطاقات الأصناف (تتطابق مع التصميم المرفق)
           Expanded(
             child: filteredItems.isEmpty
-                ? const EmptyState(
-                    icon: Icons.inventory_2_outlined,
-                    title: 'لا توجد أصناف مطابقة',
-                    message: 'أضف أصنافاً من شاشة المخزون أو غيّر نص البحث.',
+                ? const SingleChildScrollView(
+                    child: EmptyState(
+                      icon: Icons.inventory_2_outlined,
+                      title: 'لا توجد أصناف مطابقة',
+                      message: 'أضف أصنافاً من شاشة المخزون أو غيّر نص البحث.',
+                    ),
                   )
                 : NotificationListener<ScrollNotification>(
                     onNotification: (notif) {
