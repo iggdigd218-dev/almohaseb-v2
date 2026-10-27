@@ -1402,8 +1402,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                         // 3) شريط الأقسام الأفقي ببطاقات الباستيل الملونة
                         PosSectionsStrip(
                           sections: sections,
-                          roots: roots,
-                          items: allItems,
+                          categories: categories,
                           selectedId: _selectedSectionId,
                           onSelect: (sid) => setState(() {
                             _selectedSectionId = sid;
@@ -1419,7 +1418,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                               _atSectionsGate = false;
                             }
                           }),
-                          onViewAll: () => setState(
+                          onShowAll: () => setState(
                             () => _atSectionsGate = !_atSectionsGate,
                           ),
                         ),
@@ -1453,7 +1452,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
               allItemsCount: _countSectionItems(allItems, categories),
               itemCountOf: (cat) => _countCategoryItems(cat, allItems, categories),
               onPick: (cid) => setState(() => _selectedCategoryId = cid),
-              onViewAll: () => setState(() => _selectedCategoryId = null),
+              onShowAll: () => setState(() => _selectedCategoryId = null),
             ),
           ],
 
@@ -1551,7 +1550,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                         return IconCatalog.resolveTone(
                           colorHex: cat?.colorHex ?? sec?.colorHex,
                           iconKey: cat?.iconKey ?? sec?.iconKey,
-                          fallbackIndex: it.id ?? it.name.hashCode,
+                          fallbackSeed: it.id ?? it.name.hashCode,
                         );
                       },
                       iconFor: (it) {
@@ -1792,7 +1791,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                     case 'held_list':
                       _showHeldSheet();
                     case 'history':
-                      setState(() => _mainTab = 1);
+                      setState(() => _tabController.animateTo(1));
                     case 'sections_gate':
                       setState(() => _atSectionsGate = !_atSectionsGate);
                   }

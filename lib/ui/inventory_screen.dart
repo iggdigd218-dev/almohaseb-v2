@@ -2887,7 +2887,7 @@ class _ItemThumb extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasImage = image.isNotEmpty && MediaPaths.exists(image);
-    final tone = AppTone.blue;
+    const tone = AppTone.blue;
     final placeholder = Container(
       color: tone.foreground.withValues(alpha: 0.12),
       child: Center(
