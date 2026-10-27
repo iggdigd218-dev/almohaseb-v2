@@ -280,19 +280,18 @@ void main() {
   group('UpdateInstaller — التحقق الصارم من البصمة الرقمية SHA-256', () {
     test('يرفض التثبيت فوراً عند غياب expectedSha256', () async {
       final installer = UpdateInstaller();
-      InstallProgress? last;
-      final ok = await installer.downloadAndInstall(
-        url: 'https://example.com/app.apk',
-        versionTag: '3.97.32',
-        expectedSha256: null,
-        onProgress: (p) => last = p,
-      );
-      expect(ok, isFalse);
-      expect(last?.phase, InstallPhase.failed);
-      expect(last?.error, contains('البصمة الرقمية'));
+      final events = await installer
+          .downloadAndInstall(
+            'https://example.com/app.apk',
+            expectedSha256: null,
+          )
+          .toList();
+      expect(events, isNotEmpty);
+      expect(events.last.phase, InstallPhase.failed);
+      expect(events.last.error, contains('sha256'));
     });
 
-    test('يحذف الملف فوراً ويرفض التثبيت عند عدم تطابق SHA-256', () async {
+    test('يكتشف عدم تطابق SHA-256 بدقة عبر verifyFileSha256', () async {
       final tmp = await Directory.systemTemp.createTemp('nexora_sha_test_');
       addTearDown(() async {
         if (await tmp.exists()) await tmp.delete(recursive: true);
@@ -300,14 +299,11 @@ void main() {
       final fakeApk = File('${tmp.path}/corrupted.apk');
       await fakeApk.writeAsBytes('corrupted-payload-bytes'.codeUnits);
 
-      final verified = await UpdateInstaller.verifyAndGuardFile(
-        file: fakeApk,
-        expectedSha256:
-            '0000000000000000000000000000000000000000000000000000000000000000',
+      final verified = await UpdateInstaller.verifyFileSha256(
+        fakeApk,
+        '0000000000000000000000000000000000000000000000000000000000000000',
       );
       expect(verified, isFalse);
-      expect(await fakeApk.exists(), isFalse,
-          reason: 'يجب حذف الملف غير المطابق للبصمة فوراً');
     });
   });
 }

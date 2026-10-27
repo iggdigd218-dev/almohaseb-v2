@@ -316,7 +316,6 @@ class _OneClickUpdateDialogState extends State<_OneClickUpdateDialog> {
           ],
         ],
       ),
-    ),
     );
   }
 }
