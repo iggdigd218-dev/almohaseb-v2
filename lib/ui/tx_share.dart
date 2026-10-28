@@ -354,6 +354,7 @@ class TxShare {
     }
 
     if (rawChannel == 'system' || rawChannel == 'auto_system') {
+      if (!context.mounted) return TxShareOutcome.skipped;
       return shareViaSystemSheet(context, ref, tx: tx, account: acc);
     }
 
@@ -362,6 +363,7 @@ class TxShare {
 
     if (phone.isEmpty) {
       if (!silentIfNoPhone) {
+        if (!context.mounted) return TxShareOutcome.skipped;
         // إذا كان العميل لا يتضمن رقماً فهذا لا يمنع إظهار خيارات المشاركة من النظام.
         return shareViaSystemSheet(context, ref, tx: tx, account: acc);
       }

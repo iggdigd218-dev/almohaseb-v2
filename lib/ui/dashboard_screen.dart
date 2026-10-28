@@ -7,11 +7,6 @@ import '../core/theme.dart';
 import '../data/providers.dart';
 import 'widgets.dart';
 import 'home_shell.dart' show AppScreen;
-import 'inventory_screen.dart'
-    show
-        inventoryShortagesModeProvider,
-        isShortageItem,
-        openShortagesListSheet;
 
 
 /// لوحة التحكم الرئيسية — تصميم مبسّط:

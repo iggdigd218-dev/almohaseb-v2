@@ -669,53 +669,7 @@ class _InventoryToolbar extends ConsumerWidget {
                     child: _SortButton(
                         sort: sort, wide: wide, onChanged: onSortChanged),
                   ),
-                  const SizedBox(width: 6),
-                  Tooltip(
-                    message: 'فتح قائمة النواقص المرتبة ($shortagesCount)',
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(11),
-                      onTap: onOpenShortages,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 7),
-                        decoration: BoxDecoration(
-                          color: shortagesCount > 0
-                              ? const Color(0xFFD97706).withValues(alpha: 0.12)
-                              : Colors.transparent,
-                          border: Border.all(
-                            color: shortagesCount > 0
-                                ? const Color(0xFFD97706).withValues(alpha: 0.45)
-                                : AppColors.borderOf(context),
-                          ),
-                          borderRadius: BorderRadius.circular(11),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.assignment_late_outlined,
-                              size: 17,
-                              color: shortagesCount > 0
-                                  ? const Color(0xFFD97706)
-                                  : AppColors.text2Of(context),
-                            ),
-                            const SizedBox(width: 5),
-                            Text(
-                              'النواقص ($shortagesCount)',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w800,
-                                color: shortagesCount > 0
-                                    ? const Color(0xFFD97706)
-                                    : AppColors.text2Of(context),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
+                  const SizedBox(width: 8),
                   _ViewModeToggle(
                       mode: mode, wide: wide, onChanged: onModeChanged),
                 ],
