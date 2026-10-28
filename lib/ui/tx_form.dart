@@ -10,7 +10,6 @@ import '../core/format.dart';
 import '../core/keep_alive_service.dart';
 import '../core/media_paths.dart';
 import '../core/models.dart';
-import '../core/permission_dialog.dart';
 import '../core/sfx.dart';
 import '../core/receipt_image.dart';
 import '../core/theme.dart';
@@ -716,17 +715,7 @@ class _TxFormState extends ConsumerState<TxForm> {
       if (!await NexKeepAlive.hasPermission(NexKeepAlive.permCamera)) {
         final granted =
             await NexKeepAlive.requestPermission(NexKeepAlive.permCamera);
-        if (!granted) {
-          if (!mounted) return;
-          final retry = await showPermissionRationale(
-            context,
-            PermissionRationale.camera,
-          );
-          if (!retry) return;
-          final second =
-              await NexKeepAlive.requestPermission(NexKeepAlive.permCamera);
-          if (!second) return;
-        }
+        if (!granted) return;
       }
       final x = await ImagePicker().pickImage(
         source: ImageSource.camera,

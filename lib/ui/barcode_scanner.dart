@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import '../core/keep_alive_service.dart';
 import '../core/sfx.dart';
 import '../core/platform_info.dart';
 
@@ -14,6 +15,12 @@ Future<String?> scanBarcode(BuildContext context) async {
     );
     return null;
   }
+  if (!await NexKeepAlive.hasPermission(NexKeepAlive.permCamera)) {
+    final granted =
+        await NexKeepAlive.requestPermission(NexKeepAlive.permCamera);
+    if (!granted || !context.mounted) return null;
+  }
+  if (!context.mounted) return null;
   return Navigator.of(context)
       .push<String>(MaterialPageRoute(builder: (_) => const _BarcodeScanner()));
 }

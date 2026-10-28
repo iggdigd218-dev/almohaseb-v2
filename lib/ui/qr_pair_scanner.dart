@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import '../core/keep_alive_service.dart';
 import '../data/sync/cloud_join.dart';
 import '../core/platform_info.dart';
 
@@ -44,6 +45,12 @@ Future<PairingData?> scanQrPair(BuildContext context) async {
     );
     return null;
   }
+  if (!await NexKeepAlive.hasPermission(NexKeepAlive.permCamera)) {
+    final granted =
+        await NexKeepAlive.requestPermission(NexKeepAlive.permCamera);
+    if (!granted || !context.mounted) return null;
+  }
+  if (!context.mounted) return null;
   return Navigator.of(context).push<PairingData>(
     MaterialPageRoute(builder: (_) => const _QrPairScanner()),
   );

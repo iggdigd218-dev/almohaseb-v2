@@ -36,6 +36,9 @@ class MainActivity : FlutterFragmentActivity() {
     /** نتيجة طلب إذن نظام معلّقة (تُستوفى في onRequestPermissionsResult). */
     private var pendingPermissionResult: MethodChannel.Result? = null
 
+    /** نتيجة اختيار جهة اتصال من تطبيق جهات الاتصال الرسمي في النظام. */
+    private var pendingContactPickResult: MethodChannel.Result? = null
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -50,8 +53,124 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
 
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == CONTACT_PICK_REQ_CODE) {
+            val pending = pendingContactPickResult
+            pendingContactPickResult = null
+            if (pending == null) return
+            if (resultCode != RESULT_OK || data?.data == null) {
+                pending.success(null)
+                return
+            }
+            try {
+                pending.success(extractPickedContact(data.data!!))
+            } catch (_: Exception) {
+                pending.success(null)
+            }
+        }
+    }
+
+    private fun startSystemContactPicker(result: MethodChannel.Result) {
+        pendingContactPickResult?.success(null)
+        pendingContactPickResult = result
+        // 1) نفتح منتقي أرقام الهواتف في تطبيق جهات اتصال الهاتف مباشرة
+        val phonePickIntent = Intent(
+            Intent.ACTION_PICK,
+            android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+        )
+        try {
+            startActivityForResult(phonePickIntent, CONTACT_PICK_REQ_CODE)
+            return
+        } catch (_: Exception) {}
+
+        // 2) بديل: منتقي جهات الاتصال العام في النظام
+        val contactPickIntent = Intent(
+            Intent.ACTION_PICK,
+            android.provider.ContactsContract.Contacts.CONTENT_URI,
+        )
+        try {
+            startActivityForResult(contactPickIntent, CONTACT_PICK_REQ_CODE)
+            return
+        } catch (_: Exception) {}
+
+        pendingContactPickResult = null
+        result.success(null)
+    }
+
+    private fun extractPickedContact(uri: Uri): Map<String, String>? {
+        var name = ""
+        var phone = ""
+        var contactId = ""
+
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val nameIdx = cursor.getColumnIndex(
+                    android.provider.ContactsContract.Contacts.DISPLAY_NAME
+                )
+                if (nameIdx >= 0) {
+                    name = cursor.getString(nameIdx)?.trim() ?: ""
+                }
+                val numIdx = cursor.getColumnIndex(
+                    android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER
+                )
+                if (numIdx >= 0) {
+                    phone = cursor.getString(numIdx)?.trim() ?: ""
+                }
+                val cIdIdx = cursor.getColumnIndex(
+                    android.provider.ContactsContract.CommonDataKinds.Phone.CONTACT_ID
+                )
+                val idIdx = cursor.getColumnIndex(
+                    android.provider.ContactsContract.Contacts._ID
+                )
+                contactId = when {
+                    cIdIdx >= 0 -> cursor.getString(cIdIdx)?.trim() ?: ""
+                    idIdx >= 0 -> cursor.getString(idIdx)?.trim() ?: ""
+                    else -> ""
+                }
+            }
+        }
+
+        if (phone.isEmpty() && contactId.isNotEmpty()) {
+            try {
+                contentResolver.query(
+                    android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    arrayOf(
+                        android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER,
+                        android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                    ),
+                    "${android.provider.ContactsContract.CommonDataKinds.Phone.CONTACT_ID} = ?",
+                    arrayOf(contactId),
+                    null,
+                )?.use { pCursor ->
+                    if (pCursor.moveToFirst()) {
+                        val nIdx = pCursor.getColumnIndex(
+                            android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER
+                        )
+                        if (nIdx >= 0) {
+                            phone = pCursor.getString(nIdx)?.trim() ?: ""
+                        }
+                        if (name.isEmpty()) {
+                            val dIdx = pCursor.getColumnIndex(
+                                android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+                            )
+                            if (dIdx >= 0) {
+                                name = pCursor.getString(dIdx)?.trim() ?: ""
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        if (name.isEmpty() && phone.isEmpty()) return null
+        return mapOf("name" to name, "phone" to phone)
+    }
+
     companion object {
         private const val PERMISSION_REQ_CODE = 7801
+        private const val CONTACT_PICK_REQ_CODE = 7802
 
         /** نية تشغيل الزر العائم من بلاطة الإعدادات السريعة (الستارة). */
         const val ACTION_QUICK_POS = "com.nexora.almohaseb.QUICK_POS"
@@ -207,6 +326,10 @@ class MainActivity : FlutterFragmentActivity() {
                             perm.isNotEmpty() && checkSelfPermission(perm) ==
                                 PackageManager.PERMISSION_GRANTED
                         )
+                    }
+                    // فتح تطبيق جهات الاتصال الرسمي في الهاتف لاختيار اسم ورقم العميل.
+                    "pickContact" -> {
+                        startSystemContactPicker(result)
                     }
                     // تسجيل صوتي (رسائل الدردشة): يبدأ التسجيل إلى ملف m4a.
                     "startRecording" -> {

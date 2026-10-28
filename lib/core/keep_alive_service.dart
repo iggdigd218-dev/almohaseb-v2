@@ -64,6 +64,21 @@ class NexKeepAlive {
     }
   }
 
+  /// يفتح تطبيق جهات الاتصال الرسمي في الهاتف ويعيد {name, phone}.
+  static Future<Map<String, String>?> pickContact() async {
+    if (!_isAndroid) return null;
+    try {
+      final raw = await _channel.invokeMethod<Map<Object?, Object?>>('pickContact');
+      if (raw == null) return null;
+      return {
+        'name': '${raw['name'] ?? ''}'.trim(),
+        'phone': '${raw['phone'] ?? ''}'.trim(),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// أسماء الأذونات الشائعة.
   static const permNotifications = 'android.permission.POST_NOTIFICATIONS';
   static const permRecordAudio = 'android.permission.RECORD_AUDIO';

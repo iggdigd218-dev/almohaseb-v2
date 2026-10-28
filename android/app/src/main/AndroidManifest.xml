@@ -40,7 +40,8 @@
          التثبيت النهائي يظل بيد المستخدم (شاشة النظام) — لا تثبيت صامت. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
-    <!-- جهات الاتصال: منتقي النظام الخارجي (openExternalPick) يعمل عبر Intent النظام دون إذن قراءة جهات الاتصال -->
+    <!-- جهات الاتصال: إذن النظام الرسمي لقراءة/اختيار جهة الاتصال عند إضافة حساب جديد -->
+    <uses-permission android:name="android.permission.READ_CONTACTS"/>
 
     <!-- الصور والتخزين: اختيار صور من المعرض + حفظ/قراءة النسخ الاحتياطية -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
@@ -178,10 +179,14 @@
             <action android:name="android.intent.action.SEND_MULTIPLE"/>
             <data android:mimeType="*/*"/>
         </intent>
-        <!-- فتح منتقي جهات الاتصال الخارجي (بلا إذن قراءة) على أندرويد 11+ -->
+        <!-- فتح تطبيق جهات الاتصال الخارجي على أندرويد 11+ -->
         <intent>
             <action android:name="android.intent.action.PICK"/>
             <data android:mimeType="vnd.android.cursor.dir/contact"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.PICK"/>
+            <data android:mimeType="vnd.android.cursor.dir/phone_v2"/>
         </intent>
         <!-- اختيار ملفات/صور من التطبيقات الخارجية (منتقي الملفات والمعرض) -->
         <intent>

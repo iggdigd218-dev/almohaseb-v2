@@ -1,9 +1,5 @@
-// نافذة طلب صلاحيات مصممة بألوان التطبيق بدل نافذة النظام البسيطة.
-// تُعرض قبل طلب الإذن الفعلي لشرح سبب الحاجة إليه بشكل واضح وودّي.
+// تم إلغاء نوافذ طلب الصلاحيات الخاصة بالتطبيق؛ تُطلب الصلاحيات من النظام مباشرة.
 import 'package:flutter/material.dart';
-
-import '../core/sfx.dart';
-import '../core/theme.dart';
 
 class PermissionRationale {
   final IconData icon;
@@ -60,153 +56,10 @@ class PermissionRationale {
   );
 }
 
-/// يعرض نافذة ملونة مخصصة لشرح سبب طلب الإذن قبل استدعاء الطلب الفعلي.
-/// يُعيد true إن وافق المستخدم على المتابعة لطلب الإذن.
+/// تم إلغاء النافذة المخصصة للتطبيق لطلب الأذونات؛ يتم طلب الأذونات مباشرة من النظام.
 Future<bool> showPermissionRationale(
   BuildContext context,
   PermissionRationale rationale,
 ) async {
-  Sfx.warning(); // اهتزاز تنبيهي خفيف عند ظهور النافذة.
-  final result = await showGeneralDialog<bool>(
-    context: context,
-    barrierDismissible: false,
-    barrierLabel: 'permission',
-    transitionDuration: const Duration(milliseconds: 280),
-    pageBuilder: (_, __, ___) => const SizedBox.shrink(),
-    transitionBuilder: (ctx, anim, secAnim, child) {
-      final curved = CurvedAnimation(parent: anim, curve: Curves.easeOutBack);
-      return ScaleTransition(
-        scale: Tween<double>(begin: .85, end: 1).animate(curved),
-        alignment: Alignment.center,
-        child: FadeTransition(
-          opacity: curved,
-          child: _PermissionDialog(rationale: rationale),
-        ),
-      );
-    },
-  );
-  return result == true;
-}
-
-class _PermissionDialog extends StatelessWidget {
-  final PermissionRationale rationale;
-  const _PermissionDialog({required this.rationale});
-
-  @override
-  Widget build(BuildContext context) {
-    final primary = AppColors.primaryOf(context);
-    final surface = AppColors.surfaceOf(context);
-    final text = AppColors.textOf(context);
-    final text2 = AppColors.text2Of(context);
-    final border = AppColors.borderOf(context);
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 28),
-        child: Material(
-          color: surface,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(24),
-            side: BorderSide(color: border),
-          ),
-          elevation: 12,
-          shadowColor: Colors.black45,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(22, 26, 22, 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // أيقونة كبيرة داخل دائرة ملونة.
-                Container(
-                  width: 90,
-                  height: 90,
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      colors: [
-                        rationale.iconColor.withValues(alpha: .25),
-                        rationale.iconColor.withValues(alpha: .08),
-                      ],
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                    ),
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: rationale.iconColor.withValues(alpha: .45),
-                      width: 2,
-                    ),
-                  ),
-                  child: Icon(
-                    rationale.icon,
-                    size: 46,
-                    color: rationale.iconColor,
-                  ),
-                ),
-                const SizedBox(height: 18),
-                Text(
-                  rationale.title,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w800,
-                    height: 1.4,
-                    color: text,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  rationale.message,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 13.5,
-                    height: 1.7,
-                    color: text2,
-                  ),
-                ),
-                const SizedBox(height: 22),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: rationale.iconColor,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      elevation: 2,
-                    ),
-                    onPressed: () {
-                      Sfx.pop();
-                      Navigator.pop(context, true);
-                    },
-                    child: Text(
-                      rationale.grantLabel,
-                      style: const TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextButton(
-                  onPressed: () {
-                    Sfx.click();
-                    Navigator.pop(context, false);
-                  },
-                  child: Text(
-                    rationale.denyLabel,
-                    style: TextStyle(
-                      color: primary,
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+  return true;
 }
