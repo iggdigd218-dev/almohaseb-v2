@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
@@ -7526,6 +7527,20 @@ class Repo {
               ? '${prevOwnerRows.first['id'] ?? ''}'
               : '';
           if (prevOwnerId.isNotEmpty && prevOwnerId != ownId) {
+            final ownerEmail =
+                (stAfter['account.email'] ?? stAfter['account.lastOwnerEmail'] ?? '')
+                    .trim()
+                    .toLowerCase();
+            final ownerUid =
+                (stAfter['account.uid'] ?? stAfter['account.lastOwnerUid'] ?? '')
+                    .trim();
+            final sigPayload =
+                '$ws|$ownId|$prevOwnerId|$ownerEmail|$ownerUid';
+            final sigKey = utf8.encode(
+                'nexora-sovereign-takeover-v1:$ws:$ownerEmail:$ownerUid');
+            final takeoverSig = Hmac(sha256, sigKey)
+                .convert(utf8.encode(sigPayload))
+                .toString();
             await queueOperation(
               entityType: EntityKind.setting,
               entityId: 'ownershipTransfer',
@@ -7537,6 +7552,9 @@ class Repo {
                   'owner_user_id': _currentUserId,
                   'previous_owner_device_id': prevOwnerId,
                   'email_takeover': true,
+                  'owner_email': ownerEmail,
+                  'owner_uid': ownerUid,
+                  'takeover_signature': takeoverSig,
                   'demote_previous_to': 'agent',
                   'at': now,
                 }),

@@ -262,7 +262,7 @@ jobs:
           man['mirror'] = {
               'provider': provider,
               'baseUrl': base,
-              'reason': 'fastly-pages-mirror primary + github-release-assets fallback',
+              'reason': 'github-primary',
           }
           man['publishedAt'] = datetime.datetime.now(
               datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')

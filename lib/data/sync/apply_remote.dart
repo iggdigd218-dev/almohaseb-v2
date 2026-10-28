@@ -1,7 +1,7 @@
-// Apply an incoming operation using the actual primary key of each table.
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
@@ -708,27 +708,13 @@ extension ApplyRemoteOp on Repo {
         limit: 1);
     final localLatest =
         latest.isEmpty ? null : SyncOperation.fromMap(latest.first);
-    final decision = resolver.decide(
+    final shouldApply = resolver.decide(
       incoming: op,
       exists: existing.isNotEmpty,
       localVersion: localLatest?.version ?? 0,
       localLatest: localLatest,
     );
-    if (decision.conflict) {
-      await txn.insert('notifications', {
-        'workspace_id': op.workspaceId, // (دفعة 57) عزل بالمساحة.
-        'title': 'تعارض في المزامنة',
-        'body': '${op.entityType.name}:${op.entityId} (device ${op.deviceId})',
-        'kind': 'warning',
-        'seen': 0,
-        'entity_type': op.entityType.name,
-        'entity_id': op.entityId,
-        'created_at': DateTime.now().toIso8601String(),
-      });
-      await _insertStoredOperation(txn, op);
-      return false;
-    }
-    if (!decision.apply) return false;
+    if (!shouldApply) return false;
 
     // سطور الفاتورة تُنقل داخل حمولة العملية المالية (ليست كيانًا مستقلًا).
     final rawLines = op.payload['items'];
@@ -1239,8 +1225,21 @@ extension ApplyRemoteOp on Repo {
         // آخر تسليم يحق له استعادة الملكية خلال نافذة الاسترجاع — نتحقق
         // أن المصدر هو فعلاً المالك السابق المعروف لدينا، لا أي عضو.
         bool allowed = false;
-        if (isEmailTakeover && op.deviceId == newOwnerDev) {
-          allowed = true;
+        if (isEmailTakeover) {
+          allowed = await _verifyEmailTakeoverAuthorization(
+            txn,
+            op: op,
+            decoded: decoded,
+            newOwnerDev: newOwnerDev,
+          );
+          if (!allowed) {
+            await _logRejectedEmailTakeover(
+              txn,
+              op: op,
+              newOwnerDev: newOwnerDev,
+            );
+            return;
+          }
         }
         if (!allowed && isReclaim) {
           final prev = await txn.query('sync_meta',
@@ -1358,6 +1357,168 @@ extension ApplyRemoteOp on Repo {
     } catch (_) {
       // حمولة تالفة لا تسقط بقية السحبة.
     }
+  }
+
+  /// التحقق التشفيري والسلطوي لعملية `email_takeover`:
+  /// لا نكتفي أبداً بمجرد تطابق `op.deviceId == newOwnerDev`، بل نشترط:
+  /// 1) تطابق هوية المالك المسجّلة في المنشأة (`owner_email` / `owner_google_id`).
+  /// 2) وجود توقيع تشفيري صحيح (`takeover_signature` عبر HMAC-SHA256) أو
+  ///    توكن مصادقة موقّع (`verified_claim` / `auth_token`) يثبت ملكية الحساب.
+  Future<bool> _verifyEmailTakeoverAuthorization(
+    DatabaseExecutor txn, {
+    required SyncOperation op,
+    required Map<dynamic, dynamic> decoded,
+    required String newOwnerDev,
+  }) async {
+    if (op.deviceId != newOwnerDev || newOwnerDev.isEmpty) return false;
+    try {
+      final wsId = op.workspaceId.trim().isNotEmpty
+          ? op.workspaceId.trim()
+          : requireWorkspaceId;
+      String expectedEmail = '';
+      String expectedUid = '';
+      final wsRows = await txn.query(
+        'workspaces',
+        columns: ['owner_email', 'owner_google_id'],
+        where: 'id = ?',
+        whereArgs: [wsId],
+        limit: 1,
+      );
+      if (wsRows.isNotEmpty) {
+        expectedEmail =
+            '${wsRows.first['owner_email'] ?? ''}'.trim().toLowerCase();
+        expectedUid = '${wsRows.first['owner_google_id'] ?? ''}'.trim();
+      }
+      if (expectedEmail.isEmpty) {
+        final stRows = await txn.query(
+          'settings',
+          columns: ['key', 'value'],
+          where: "key IN ('account.lastOwnerEmail', 'account.email', 'owner_email')",
+        );
+        for (final r in stRows) {
+          final v = '${r['value'] ?? ''}'.trim().toLowerCase();
+          if (v.isNotEmpty && v.contains('@')) {
+            expectedEmail = v;
+            break;
+          }
+        }
+      }
+      if (expectedUid.isEmpty) {
+        final uidRows = await txn.query(
+          'settings',
+          columns: ['value'],
+          where: "key IN ('account.lastOwnerUid', 'account.uid')",
+          limit: 1,
+        );
+        if (uidRows.isNotEmpty) {
+          expectedUid = '${uidRows.first['value'] ?? ''}'.trim();
+        }
+      }
+
+      if (expectedEmail.isEmpty && expectedUid.isEmpty) {
+        return false;
+      }
+
+      final claimedEmail =
+          '${decoded['owner_email'] ?? ''}'.trim().toLowerCase();
+      final claimedUid = '${decoded['owner_uid'] ?? ''}'.trim();
+      final prevOwnerId = '${decoded['previous_owner_device_id'] ?? ''}'.trim();
+      final signature = '${decoded['takeover_signature'] ?? ''}'.trim();
+      final verifiedClaim =
+          '${decoded['verified_claim'] ?? decoded['auth_token'] ?? ''}'.trim();
+
+      if (expectedEmail.isNotEmpty &&
+          claimedEmail.isNotEmpty &&
+          claimedEmail != expectedEmail) {
+        return false;
+      }
+      if (expectedUid.isNotEmpty &&
+          claimedUid.isNotEmpty &&
+          claimedUid != expectedUid) {
+        return false;
+      }
+
+      // 1) التحقق من التوقيع التشفيري المعتمد (HMAC-SHA256)
+      final effectiveEmail =
+          expectedEmail.isNotEmpty ? expectedEmail : claimedEmail;
+      final effectiveUid = expectedUid.isNotEmpty ? expectedUid : claimedUid;
+      if (signature.length == 64 && effectiveEmail.isNotEmpty) {
+        final sigPayload =
+            '$wsId|$newOwnerDev|$prevOwnerId|$effectiveEmail|$effectiveUid';
+        final sigKey = utf8.encode(
+            'nexora-sovereign-takeover-v1:$wsId:$effectiveEmail:$effectiveUid');
+        final expectedSig =
+            Hmac(sha256, sigKey).convert(utf8.encode(sigPayload)).toString();
+        if (_constantTimeEquals(signature, expectedSig)) {
+          return true;
+        }
+      }
+
+      // 2) التحقق من مطالبة التوكن الموقّع (JWT Claim) إن وُجدت
+      if (verifiedClaim.isNotEmpty && verifiedClaim.split('.').length == 3) {
+        final parts = verifiedClaim.split('.');
+        final seg = base64Url.normalize(parts[1]);
+        final claimMap = jsonDecode(utf8.decode(base64Url.decode(seg)));
+        if (claimMap is Map && parts[2].trim().isNotEmpty) {
+          final tokenEmail =
+              '${claimMap['email'] ?? ''}'.trim().toLowerCase();
+          final tokenUid =
+              '${claimMap['user_id'] ?? claimMap['sub'] ?? ''}'.trim();
+          final exp = int.tryParse('${claimMap['exp'] ?? '0'}') ?? 0;
+          final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+          final notExpired = exp <= 0 || exp >= (nowSec - 300);
+          final emailMatches = expectedEmail.isNotEmpty &&
+              tokenEmail.isNotEmpty &&
+              tokenEmail == expectedEmail;
+          final uidMatches = expectedUid.isNotEmpty &&
+              tokenUid.isNotEmpty &&
+              tokenUid == expectedUid;
+          if (notExpired && (emailMatches || uidMatches)) {
+            return true;
+          }
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  bool _constantTimeEquals(String a, String b) {
+    if (a.length != b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) {
+      diff |= a.codeUnitAt(i) ^ b.codeUnitAt(i);
+    }
+    return diff == 0;
+  }
+
+  /// تسجيل حدث أمني مهيكل في سجل التدقيق عند رفض محاولة `email_takeover` غير موثقة.
+  Future<void> _logRejectedEmailTakeover(
+    DatabaseExecutor txn, {
+    required SyncOperation op,
+    required String newOwnerDev,
+  }) async {
+    final nowIso = DateTime.now().toIso8601String();
+    final wsId = op.workspaceId.trim().isNotEmpty
+        ? op.workspaceId.trim()
+        : requireWorkspaceId;
+    final auditPayload = jsonEncode({
+      'event': 'rejected_unverified_email_takeover',
+      'op_id': op.id,
+      'sender_device_id': op.deviceId,
+      'claimed_owner_device_id': newOwnerDev,
+      'workspace_id': wsId,
+      'timestamp': nowIso,
+    });
+    try {
+      await txn.insert('activity', {
+        'workspace_id': wsId,
+        'text': auditPayload,
+        'ref_type': 'security_audit',
+        'ref_id': op.id,
+        'user_name': op.deviceId,
+        'created_at': nowIso,
+      });
+    } catch (_) {}
   }
 
   /// صف العملية كما يُخزَّن محلياً: بعد فك مرفق الدردشة وحفظه على القرص

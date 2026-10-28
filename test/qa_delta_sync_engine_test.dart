@@ -355,13 +355,13 @@ void main() {
         payload: {'id': 10, 'name': 'الاسم القديم'},
       );
 
-      final decision = resolver.decide(
+      final shouldApply = resolver.decide(
         incoming: incomingOp,
         exists: true,
         localVersion: 5, // حتى لو كان الإصدار المحلي أكبر
         localLatest: localLatestOp, // ووقت الخادم المحلي أقدم
       );
-      expect(decision.apply, isTrue,
+      expect(shouldApply, isTrue,
           reason: 'يجب حسم التعارض لصالح العملية ذات وقت الخادم server_time الأحدث حصرياً');
 
       await db.close();

@@ -262,7 +262,7 @@ class SyncQueueOps {
       );
     } on DatabaseException catch (_) {
       final where = StringBuffer(
-        "status = ? AND (next_try_at = '' OR next_try_at <= ?)",
+        "status IN ('pending', 'syncing') AND status = ? AND (next_try_at = '' OR next_try_at <= ?)",
       );
       final args = <Object?>[
         SyncStatus.pending.name,

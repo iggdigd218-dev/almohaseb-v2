@@ -809,6 +809,10 @@ class SyncEngine {
         FROM operations o
         WHERE o.device_id = ?
           AND COALESCE(o.synced, 0) = 0
+          AND o.id NOT IN (
+            SELECT operation_id FROM sync_queue
+            WHERE status IN ('pending', 'syncing')
+          )
           AND NOT EXISTS (
             SELECT 1 FROM sync_queue q
             WHERE q.operation_id = o.id AND q.target = 'cloud'
@@ -857,7 +861,13 @@ class SyncEngine {
     try {
       await db.rawDelete('''
         DELETE FROM operations
-        WHERE entity_type = 'message' AND synced = 1 AND timestamp < ?
+        WHERE entity_type = 'message'
+          AND COALESCE(is_synced, synced, 0) = 1
+          AND timestamp < ?
+          AND id NOT IN (
+            SELECT operation_id FROM sync_queue
+            WHERE status IN ('pending', 'syncing')
+          )
       ''', [cutoff]);
     } catch (_) {}
     // (3) تقليم عام (Compaction): العمليات المتجاوَزة — synced، مسلَّمة لكل

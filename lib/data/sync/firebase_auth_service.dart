@@ -8,6 +8,7 @@
 // Offline-First: الجلسة تُحفظ محلياً (settings) بعد أول دخول ناجح —
 // التطبيق يعمل كاملاً بلا إنترنت ولا يُطلب تسجيل الدخول في كل مرة.
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -284,12 +285,11 @@ class FirebaseAuthRest {
       }
     }
 
-    // تراجع ذكي ومضمون: إذا تعذر تبادل IdP (بسبب غياب Web Client ID في google-services.json)،
-    // نُنشئ/نسجّل دخول هوية Firebase حتمية مرتبطة ببريد Google الموثق ليحصل الحساب دائماً
-    // على idToken رسمي صالح لـ Firebase RTDB ونفس الـ uid عبر كافة الأجهزة.
+    // تراجع آمن عند تعذّر تبادل IdP: استخدام المصادقة المجهولة الرسمية (signInAnonymously)
+    // بدلاً من توليد بيانات اعتماد حتمية قابلة للعكس.
     final cleanEmail = (email ?? '').trim().toLowerCase();
     if (cleanEmail.isNotEmpty && cleanEmail.contains('@')) {
-      final fallbackAcc = await _signInOrCreateEmailIdentity(
+      final fallbackAcc = await _signInAnonymousFallbackForVerifiedAccount(
         key,
         email: cleanEmail,
         googleId: googleId,
@@ -300,8 +300,9 @@ class FirebaseAuthRest {
     return null;
   }
 
-  /// إنشاء أو استرجاع هوية Firebase Auth حتمية مرتبطة ببريد Google الموثّق.
-  static Future<FirebaseAccount?> _signInOrCreateEmailIdentity(
+  /// استرجاع جلسة حالية صالحة أو تسجيل دخول مجهول رسمي (`signInAnonymously`)
+  /// دون أي اشتقاق حتمي للبريد أو كلمة المرور.
+  static Future<FirebaseAccount?> _signInAnonymousFallbackForVerifiedAccount(
     String key, {
     required String email,
     String? googleId,
@@ -309,66 +310,66 @@ class FirebaseAuthRest {
   }) async {
     try {
       final cleanEmail = email.trim().toLowerCase();
-      final bytes = utf8.encode('nexora-google-verified:$cleanEmail');
-      var h1 = 0x811c9dc5;
-      var h2 = 0x01000193;
-      for (final b in bytes) {
-        h1 ^= b;
-        h1 = (h1 * 0x01000193) & 0x7fffffff;
-        h2 ^= (b * 31);
-        h2 = (h2 * 0x85ebca6b) & 0x7fffffff;
+      // 1) الحفاظ على الجلسة المحلية الحالية إن كانت صالحة لتفادي تسجيل خروج مفاجئ
+      if (_accountTokenValid &&
+          _accountUid != null &&
+          _accountUid!.isNotEmpty &&
+          _accountIdToken != null &&
+          _accountIdToken!.isNotEmpty) {
+        return FirebaseAccount(
+          uid: (googleId != null && googleId.trim().isNotEmpty)
+              ? googleId.trim()
+              : _accountUid!,
+          email: cleanEmail,
+          displayName: (displayName ?? '').trim(),
+          idToken: _accountIdToken!,
+          refreshToken: _accountRefreshToken ?? '',
+          expiresInSeconds: 3600,
+        );
       }
-      final tokenSeed =
-          '${h1.toRadixString(16).padLeft(8, '0')}${h2.toRadixString(16).padLeft(8, '0')}';
-      final safeLocal = cleanEmail
-          .replaceAll(RegExp(r'[^a-z0-9]'), '')
-          .padRight(6, 'x');
-      final prefix =
-          safeLocal.length > 14 ? safeLocal.substring(0, 14) : safeLocal;
-      final authEmail = 'g-$prefix-$tokenSeed@nexora.local';
-      final authPass = 'NxG#$tokenSeed!2026';
-
-      for (final endpoint in const [
-        'accounts:signInWithPassword',
-        'accounts:signUp',
-      ]) {
-        try {
-          final res = await http
-              .post(
-                Uri.parse(
-                    'https://identitytoolkit.googleapis.com/v1/$endpoint?key=$key'),
-                headers: {'Content-Type': 'application/json'},
-                body: jsonEncode({
-                  'email': authEmail,
-                  'password': authPass,
-                  'returnSecureToken': true,
-                }),
-              )
-              .timeout(const Duration(seconds: 10));
-          if (res.statusCode < 200 || res.statusCode >= 300) continue;
-          final m = jsonDecode(utf8.decode(res.bodyBytes));
-          if (m is! Map) continue;
-          final uid = '${m['localId'] ?? ''}'.trim();
-          final idTok = '${m['idToken'] ?? ''}'.trim();
-          if (uid.isEmpty || idTok.isEmpty) continue;
-          final acc = FirebaseAccount(
+      if (_accountRefreshToken != null && _accountRefreshToken!.isNotEmpty) {
+        final refreshed = await _refreshAccountToken();
+        if (refreshed != null &&
+            refreshed.isNotEmpty &&
+            _accountUid != null &&
+            _accountUid!.isNotEmpty) {
+          return FirebaseAccount(
             uid: (googleId != null && googleId.trim().isNotEmpty)
                 ? googleId.trim()
-                : uid,
+                : _accountUid!,
             email: cleanEmail,
             displayName: (displayName ?? '').trim(),
-            idToken: idTok,
-            refreshToken: '${m['refreshToken'] ?? ''}'.trim(),
-            expiresInSeconds: int.tryParse('${m['expiresIn'] ?? ''}') ?? 3600,
+            idToken: refreshed,
+            refreshToken: _accountRefreshToken ?? '',
+            expiresInSeconds: 3600,
           );
-          _accountUid = uid;
-          _accountIdToken = idTok;
-          _accountRefreshToken =
-              acc.refreshToken.isEmpty ? null : acc.refreshToken;
-          _accountExpiryMs = _computeExpiryMs(acc.expiresInSeconds);
-          _activeTokenUid = uid;
-          return acc;
-        } catch (_) {}
+        }
+      }
+
+      // 2) انتقال آمن إلى Firebase Anonymous Authentication (`signInAnonymously`)
+      final ok = await signInAnonymously(key);
+      if (ok &&
+          _anonUid != null &&
+          _anonUid!.isNotEmpty &&
+          _anonIdToken != null &&
+          _anonIdToken!.isNotEmpty) {
+        final resolvedUid = (googleId != null && googleId.trim().isNotEmpty)
+            ? googleId.trim()
+            : _anonUid!;
+        final acc = FirebaseAccount(
+          uid: resolvedUid,
+          email: cleanEmail,
+          displayName: (displayName ?? '').trim(),
+          idToken: _anonIdToken!,
+          refreshToken: _anonRefreshToken ?? '',
+          expiresInSeconds: 3600,
+        );
+        _accountUid = resolvedUid;
+        _accountIdToken = _anonIdToken;
+        _accountRefreshToken = _anonRefreshToken;
+        _accountExpiryMs = _anonExpiryMs;
+        _activeTokenUid = _anonUid;
+        return acc;
       }
     } catch (_) {}
     return null;
@@ -835,9 +836,17 @@ class FirebaseAuthRest {
     await _createAnonymous(key);
   }
 
-  /// إنشاء حساب مجهول: `accounts:signUp` بلا بريد/كلمة سر،
-  /// مع تراجع ذكي تلقائي إلى هوية جهاز حتمية (`accounts:signUp` / `accounts:signInWithPassword`)
-  /// إذا كان Anonymous Auth معطلاً في إعدادات Firebase (`ADMIN_ONLY_OPERATION`).
+  /// مصادقة Firebase المجهولة الرسمية (`signInAnonymously`):
+  /// `accounts:signUp` بلا بريد أو كلمة مرور مشتقة حتمياً.
+  static Future<bool> signInAnonymously([String? apiKey]) async {
+    final key = (apiKey ?? effectiveFirebaseApiKey).trim();
+    if (key.isEmpty) return false;
+    return _createAnonymous(key);
+  }
+
+  /// إنشاء حساب مجهول عبر `accounts:signUp`، مع تراجع آمن يستخدم
+  /// بيانات اعتماد عشوائية مشفّرة (`Random.secure()` + `UUID`) محفوظة في
+  /// `FlutterSecureStorage` فقط في حال تعطيل Anonymous Auth على الخادم.
   static Future<bool> _createAnonymous(String key) async {
     try {
       final res = await http
@@ -866,35 +875,19 @@ class FirebaseAuthRest {
       }
     } catch (_) {}
 
-    // التراجع الجذري المضمون: إذا أعاد الخادم 400 ADMIN_ONLY_OPERATION
-    // (بسبب تعطيل Anonymous Sign-Up في Firebase Console)، ننشئ/نسجل دخول
-    // هوية سحابية حتمية خاصة بهذا الجهاز ونطاقه عبر البريد/كلمة المرور.
-    return _createOrSignInDeviceIdentity(key);
+    // في حال كان Anonymous Sign-Up معطلاً في المشروع السحابي، نستخدم
+    // بيانات اعتماد عشوائية آمنة تشفيرياً (UUID + Random.secure) محفوظة في FlutterSecureStorage.
+    return _createOrSignInRandomDeviceIdentity(key);
   }
 
-  static Future<bool> _createOrSignInDeviceIdentity(String key) async {
+  static Future<bool> _createOrSignInRandomDeviceIdentity(String key) async {
     try {
-      String seed = 'device';
-      final repo = _repo;
-      if (repo != null) {
-        try {
-          final st = await repo.settings();
-          final scope = (st[_anonScopeKey] ?? '').trim();
-          final devId = await ensureDeviceId(repo);
-          seed = scope.isNotEmpty ? scope : devId;
-        } catch (_) {}
-      }
-      final clean = seed
-          .toLowerCase()
-          .replaceAll(RegExp(r'[^a-z0-9]'), '')
-          .padRight(8, '0');
-      final shortHash = clean.length > 28 ? clean.substring(0, 28) : clean;
-      final devEmail = 'dev-$shortHash@nexora.local';
-      final devPass = 'NexoraDev#$shortHash!2026';
+      const storage = FlutterSecureStorage();
+      var creds = await storage.readOrCreateRandomCredentials(repo: _repo);
 
       for (final endpoint in const [
-        'accounts:signUp',
         'accounts:signInWithPassword',
+        'accounts:signUp',
       ]) {
         try {
           final res = await http
@@ -903,8 +896,8 @@ class FirebaseAuthRest {
                     'https://identitytoolkit.googleapis.com/v1/$endpoint?key=$key'),
                 headers: {'Content-Type': 'application/json'},
                 body: jsonEncode({
-                  'email': devEmail,
-                  'password': devPass,
+                  'email': creds.email,
+                  'password': creds.password,
                   'returnSecureToken': true,
                 }),
               )
@@ -917,7 +910,7 @@ class FirebaseAuthRest {
               _anonProviderDisabledUntilMs =
                   DateTime.now().millisecondsSinceEpoch + 600000;
               if (_anonUid == null || _anonUid!.isEmpty) {
-                _anonUid = 'anon-$shortHash';
+                _anonUid = 'anon-${creds.randomId}';
                 await _persist();
               }
             }
@@ -1058,5 +1051,117 @@ class FirebaseAuthRest {
     if (hasAccountSession) {
       await _persistAccount();
     }
+  }
+}
+
+/// بيانات اعتماد عشوائية مولّدة عبر `Random.secure()` و `UUID v4` (غير حتمية).
+class RandomDeviceCredentials {
+  final String randomId;
+  final String email;
+  final String password;
+
+  const RandomDeviceCredentials({
+    required this.randomId,
+    required this.email,
+    required this.password,
+  });
+}
+
+/// مخزن أسرار مشفّر (`FlutterSecureStorage`) يحفظ بيانات الاعتماد العشوائية
+/// مشفرة عبر `TokenCipher` (مفتاح 32 بايت عشوائي مستقل عن قاعدة البيانات).
+class FlutterSecureStorage {
+  const FlutterSecureStorage();
+
+  static const _emailStorageKey = 'secure.random_device.email';
+  static const _passwordStorageKey = 'secure.random_device.password';
+  static const _idStorageKey = 'secure.random_device.uuid';
+
+  Future<void> write({
+    required String key,
+    required String value,
+    Repo? repo,
+  }) async {
+    final encrypted = await TokenCipher.protect(value);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(key, encrypted);
+    } catch (_) {}
+    if (repo != null) {
+      try {
+        await repo.setSetting(key, encrypted);
+      } catch (_) {}
+    }
+  }
+
+  Future<String?> read({
+    required String key,
+    Repo? repo,
+  }) async {
+    String raw = '';
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      raw = (prefs.getString(key) ?? '').trim();
+    } catch (_) {}
+    if (raw.isEmpty && repo != null) {
+      try {
+        final st = await repo.settings();
+        raw = (st[key] ?? '').trim();
+      } catch (_) {}
+    }
+    if (raw.isEmpty) return null;
+    final revealed = (await TokenCipher.reveal(raw)).trim();
+    return revealed.isEmpty ? null : revealed;
+  }
+
+  Future<RandomDeviceCredentials> readOrCreateRandomCredentials({
+    Repo? repo,
+  }) async {
+    final existingId = await read(key: _idStorageKey, repo: repo);
+    final existingEmail = await read(key: _emailStorageKey, repo: repo);
+    final existingPassword = await read(key: _passwordStorageKey, repo: repo);
+
+    if (existingId != null &&
+        existingEmail != null &&
+        existingPassword != null &&
+        existingEmail.isNotEmpty &&
+        existingPassword.isNotEmpty) {
+      return RandomDeviceCredentials(
+        randomId: existingId,
+        email: existingEmail,
+        password: existingPassword,
+      );
+    }
+
+    final randomId = _generateSecureUuidV4().replaceAll('-', '');
+    final randomSecret = _generateSecureSecret(24);
+    final email = 'u-$randomId@anon-auth.invalid';
+    final password = 'Rn!$randomSecret#9aZ';
+
+    await write(key: _idStorageKey, value: randomId, repo: repo);
+    await write(key: _emailStorageKey, value: email, repo: repo);
+    await write(key: _passwordStorageKey, value: password, repo: repo);
+
+    return RandomDeviceCredentials(
+      randomId: randomId,
+      email: email,
+      password: password,
+    );
+  }
+
+  static String _generateSecureUuidV4() {
+    final rnd = Random.secure();
+    final bytes = List<int>.generate(16, (_) => rnd.nextInt(256));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    String hex(int b) => b.toRadixString(16).padLeft(2, '0');
+    final h = bytes.map(hex).join();
+    return '${h.substring(0, 8)}-${h.substring(8, 12)}-'
+        '${h.substring(12, 16)}-${h.substring(16, 20)}-${h.substring(20)}';
+  }
+
+  static String _generateSecureSecret(int byteLength) {
+    final rnd = Random.secure();
+    final bytes = List<int>.generate(byteLength, (_) => rnd.nextInt(256));
+    return base64Url.encode(bytes).replaceAll('=', '');
   }
 }

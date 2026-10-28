@@ -2,23 +2,10 @@
 // يضمن استمرار المزامنة بدون توقف وحسم أي تفاوت بين الأجهزة تلقائياً وحتمياً.
 import 'operation.dart';
 
-class ConflictInfo {
-  final String entityType;
-  final String entityId;
-  final SyncOperation localOp;
-  final SyncOperation remoteOp;
-  const ConflictInfo({
-    required this.entityType,
-    required this.entityId,
-    required this.localOp,
-    required this.remoteOp,
-  });
-}
-
 class ConflictResolver {
-  /// يقرر هل تُطبَّق العملية الواردة على الكيان المحلي.
-  /// يُعيد قرارًا: تطبيق / تجاهل — وفق مبدأ الحسم الذكي Last-Write-Wins (اعتماد الأحدث وحذف القديم).
-  ConflictDecision decide({
+  /// يقرر هل تُطبَّق العملية الواردة على الكيان المحلي (`true` = تطبيق، `false` = تجاهل)
+  /// وفق مبدأ الحسم الذكي Last-Write-Wins (اعتماد الأحدث وحذف القديم).
+  bool decide({
     required SyncOperation incoming,
     required bool exists,
     required int localVersion,
@@ -26,23 +13,20 @@ class ConflictResolver {
   }) {
     // 1. Idempotency: نفس العملية برقمها مسجلة محلياً -> تجاهل مكرر
     if (localLatest != null && localLatest.id == incoming.id) {
-      return ConflictDecision.ignore(reason: 'duplicate-id');
+      return false;
     }
 
     // 2. الكيان غير موجود محلياً
     if (!exists) {
       if (incoming.opType == OpKind.create) {
-        return ConflictDecision.apply();
+        return true;
       }
       if (incoming.opType == OpKind.delete_) {
         // حذف لكيان غير موجود أصلاً -> تجاهل آمن دون توقف
-        return ConflictDecision.ignore(reason: 'already-nonexistent');
+        return false;
       }
       // عملية تعديل لكيان غير موجود: إن توفرت بيانات كافية ننشئه محلياً (اعتماد الأحدث)
-      if (incoming.payload.isNotEmpty) {
-        return ConflictDecision.apply();
-      }
-      return ConflictDecision.ignore(reason: 'empty-payload-missing');
+      return incoming.payload.isNotEmpty;
     }
 
     // 3. الكيان موجود محلياً: الحسم الذكي وفق أحدث وقت خادم مرجعي `server_time`
@@ -52,36 +36,34 @@ class ConflictResolver {
     final locServerMs = localLatest?.serverTimeMs ?? 0;
     if (inServerMs > 0 && locServerMs > 0) {
       if (inServerMs > locServerMs) {
-        return ConflictDecision.apply();
+        return true;
       }
       if (inServerMs < locServerMs) {
-        return ConflictDecision.ignore(reason: 'older-server-time-ignored');
+        return false;
       }
       // تساوٍ تام في وقت الخادم server_time -> كسر التعادل حتمياً بـ رقم الإصدار ثم device_id
       if (incoming.version > localVersion) {
-        return ConflictDecision.apply();
+        return true;
       }
       if (incoming.version < localVersion) {
-        return ConflictDecision.ignore(reason: 'older-version-ignored');
+        return false;
       }
       if (localLatest != null && localLatest.deviceId == incoming.deviceId) {
-        return ConflictDecision.apply();
+        return true;
       }
-      if (incoming.deviceId.compareTo(localLatest?.deviceId ?? '') <= 0) {
-        return ConflictDecision.apply();
-      }
-      return ConflictDecision.ignore(reason: 'tiebreak-deterministic');
+      return incoming.deviceId.compareTo(localLatest?.deviceId ?? '') <= 0;
     }
 
     // إذا كان رقم الإصدار الوارد أكبر: تطبيق فوراً
     if (incoming.version > localVersion) {
-      return ConflictDecision.apply();
+      return true;
     }
 
     final tIn = inServerMs > 0
         ? inServerMs
         : (DateTime.tryParse(incoming.timestamp)?.millisecondsSinceEpoch ??
-            (DateTime.tryParse(incoming.deviceTime)?.millisecondsSinceEpoch ?? 0));
+            (DateTime.tryParse(incoming.deviceTime)?.millisecondsSinceEpoch ??
+                0));
     final tLocal = locServerMs > 0
         ? locServerMs
         : (DateTime.tryParse(localLatest?.timestamp ?? '')
@@ -92,32 +74,16 @@ class ConflictResolver {
 
     // إذا كانت العملية الواردة أحدث زمنياً (Last-Write-Wins): تطبيق واعتماد الأحدث
     if (tIn > tLocal) {
-      return ConflictDecision.apply();
+      return true;
     }
 
     if (incoming.version == localVersion) {
       if (localLatest != null && localLatest.deviceId == incoming.deviceId) {
-        return ConflictDecision.apply();
+        return true;
       }
-      if (incoming.deviceId.compareTo(localLatest?.deviceId ?? '') <= 0) {
-        return ConflictDecision.apply();
-      }
-      return ConflictDecision.ignore(reason: 'tiebreak-deterministic');
+      return incoming.deviceId.compareTo(localLatest?.deviceId ?? '') <= 0;
     }
 
-    return ConflictDecision.ignore(reason: 'older-version-ignored');
+    return false;
   }
-}
-
-class ConflictDecision {
-  final bool apply;
-  final bool conflict;
-  final String? reason;
-  const ConflictDecision._(this.apply, this.conflict, this.reason);
-  factory ConflictDecision.apply() =>
-      const ConflictDecision._(true, false, null);
-  factory ConflictDecision.ignore({required String reason}) =>
-      ConflictDecision._(false, false, reason);
-  factory ConflictDecision.conflict({required String reason}) =>
-      ConflictDecision._(false, true, reason);
 }
