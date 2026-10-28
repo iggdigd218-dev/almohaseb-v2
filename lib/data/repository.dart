@@ -1965,6 +1965,272 @@ class Repo {
     return rows.map(InvoiceLine.fromMap).toList();
   }
 
+  /// البحث في فواتير المبيعات (النقدية والآجلة) برقم الفاتورة أو المعرّف أو اسم العميل.
+  Future<List<Tx>> searchSalesInvoices({
+    String query = '',
+    int limit = 100,
+  }) async {
+    final db = await _db;
+    final q = query.trim();
+    final cleanNum = q.replaceAll('#', '').trim();
+    final whereParts = <String>[
+      "(t.deleted_at IS NULL OR t.deleted_at = '')",
+      "(t.type IN ('revenue', 'debit', 'inflow') OR EXISTS (SELECT 1 FROM transaction_items ti WHERE ti.tx_id = t.id))",
+      "t.description NOT LIKE 'مرتجع %'",
+    ];
+    final args = <Object?>[];
+    if (q.isNotEmpty) {
+      whereParts.add(
+        '('
+        't.reference LIKE ? OR '
+        'CAST(t.id AS TEXT) LIKE ? OR '
+        't.description LIKE ? OR '
+        't.notes LIKE ? OR '
+        'EXISTS (SELECT 1 FROM accounts a WHERE a.id = t.account_id AND (a.name LIKE ? OR a.phone LIKE ?))'
+        ')',
+      );
+      final likeClean = '%$cleanNum%';
+      final likeRaw = '%$q%';
+      args.addAll([likeClean, likeClean, likeRaw, likeRaw, likeRaw, likeRaw]);
+    }
+    final rows = await db.rawQuery(
+      'SELECT t.* FROM transactions t '
+      'WHERE ${whereParts.join(' AND ')} '
+      'ORDER BY '
+      'CASE WHEN t.reference = ? OR CAST(t.id AS TEXT) = ? THEN 0 ELSE 1 END ASC, '
+      't.date DESC, t.id DESC '
+      'LIMIT ?',
+      [...args, cleanNum, cleanNum, limit],
+    );
+    return rows.map(Tx.fromMap).toList();
+  }
+
+  /// الكميات التي سبق إرجاعها من فاتورة مبيعات محددة (مفهرسة بمعرّف الصنف أو اسمه).
+  Future<Map<String, double>> returnedQuantitiesForInvoice(int originalTxId) async {
+    final db = await _db;
+    final marker = '[ORIG_TX:$originalTxId]';
+    final txRows = await db.query(
+      'transactions',
+      columns: ['id'],
+      where: "(deleted_at IS NULL OR deleted_at = '') AND notes LIKE ?",
+      whereArgs: ['%$marker%'],
+    );
+    final result = <String, double>{};
+    for (final r in txRows) {
+      final retTxId = r['id'] as int?;
+      if (retTxId == null) continue;
+      final lines = await transactionItems(retTxId);
+      for (final line in lines) {
+        final key = line.itemId != null
+            ? 'id:${line.itemId}'
+            : 'name:${line.name.trim().toLowerCase()}';
+        result[key] = (result[key] ?? 0) + line.quantity;
+      }
+    }
+    return result;
+  }
+
+  /// تنفيذ مرتجع مبيعات (كلي أو جزئي) لفاتورة محددة بشكل ذري:
+  /// 1. يعيد الكميات المرتجعة فوراً إلى مخزون الأصناف (`StockKind.ret` => `+quantity`) لتظهر في شاشة المبيعات.
+  /// 2. يسجل القيد المالي للمرتجع (استرداد نقدي `expense` أو تخفيض مديونية العميل `credit`).
+  /// 3. يوثق الأصناف المرتجعة ويربطها بالفاتورة الأصلية لمنع تكرار الإرجاع فوق الكمية المباعة.
+  Future<int> processSalesReturn({
+    required Tx originalTx,
+    required List<InvoiceLine> returnLines,
+    bool? refundCash,
+    String reason = '',
+  }) async {
+    await _ensureCan('add_tx');
+    if (originalTx.id == null) {
+      throw ArgumentError('الفاتورة الأصلية غير صالحة لإجراء المرتجع.');
+    }
+    final validLines = returnLines.where((l) => l.quantity > 0).toList();
+    if (validLines.isEmpty) {
+      throw ArgumentError('يرجى تحديد صنف واحد على الأقل بكمية أكبر من صفر للإرجاع.');
+    }
+
+    final db = await _db;
+    final dec = await _decimalsOf(originalTx.currency);
+    final rawTotal = validLines.fold<double>(0, (s, l) => s + l.total);
+    final returnAmount = Fmt.roundMoney(rawTotal, dec);
+    final nowDt = DateTime.now();
+    final nowIso = nowDt.toIso8601String();
+    final origRef = originalTx.reference.trim().isNotEmpty
+        ? originalTx.reference.trim()
+        : '${originalTx.id}';
+    final me = await currentUser();
+    final cashier = (me?.name ?? '').trim();
+
+    // إذا كانت الفاتورة الأصلية نقدية أو بدون حساب عميل يكون المرتجع نقدياً (مصروف/استرداد)،
+    // وإذا كانت آجلة لحساب عميل يُقيد المرتجع افتراضياً «له» (credit) لتخفيض مديونيته ما لم يُختر الاسترداد النقدي.
+    final isCashRefund = refundCash ??
+        (originalTx.accountId == null || originalTx.type == OpType.revenue);
+    final returnOpType = (isCashRefund || originalTx.accountId == null)
+        ? OpType.expense
+        : OpType.credit;
+
+    late final int returnTxId;
+
+    await db.transaction((txn) async {
+      final rec = SyncRecorder(
+        db: txn,
+        deviceId: requireDeviceId,
+        workspaceId: requireWorkspaceId,
+        userId: _currentUserId,
+      );
+
+      // 1. إعادة الأصناف المرتجعة إلى المخزون والمبيعات
+      final resolvedLines = <InvoiceLine>[];
+      for (final line in validLines) {
+        int? targetItemId = line.itemId;
+        if (targetItemId != null) {
+          final check = await txn.query(
+            'items',
+            columns: ['id'],
+            where: 'id = ?',
+            whereArgs: [targetItemId],
+            limit: 1,
+          );
+          if (check.isEmpty) targetItemId = null;
+        }
+        // إن لم يكن للصنف معرّف مربوط في السطر، نبحث عنه بالاسم في جدول الأصناف
+        if (targetItemId == null && line.name.trim().isNotEmpty) {
+          final byName = await txn.query(
+            'items',
+            columns: ['id'],
+            where: 'LOWER(TRIM(name)) = LOWER(TRIM(?)) AND is_deleted = 0',
+            whereArgs: [line.name.trim()],
+            limit: 1,
+          );
+          if (byName.isNotEmpty) {
+            targetItemId = byName.first['id'] as int?;
+          }
+        }
+
+        if (targetItemId != null) {
+          // تفعيل الصنف إن كان مؤرشفاً حتى يظهر فوراً في شبكة المبيعات
+          await txn.update(
+            'items',
+            {'archived': 0, 'is_deleted': 0, 'is_active': 1, 'updated_at': nowIso},
+            where: 'id = ?',
+            whereArgs: [targetItemId],
+          );
+          await _applyStockMoveInTxn(
+            txn,
+            rec,
+            StockMove(
+              itemId: targetItemId,
+              quantity: line.quantity,
+              kind: StockKind.ret,
+              unitPrice: line.unitPrice,
+              date: nowDt,
+              createdAt: nowDt,
+              notes: 'مرتجع مبيعات الفاتورة #$origRef',
+            ),
+          );
+        }
+
+        resolvedLines.add(
+          InvoiceLine(
+            itemId: targetItemId ?? line.itemId,
+            name: line.name,
+            unit: line.unit,
+            quantity: line.quantity,
+            unitPrice: line.unitPrice,
+          ),
+        );
+      }
+
+      // 2. إنشاء عملية المرتجع المالية
+      final retRef = await _nextSequence(txn, 'counter_tx', table: 'transactions');
+      final itemsSummary = resolvedLines
+          .map((l) => '${l.name} (${Fmt.qty(l.quantity)})')
+          .join('، ');
+      final notesParts = <String>[
+        'مرتجع من الفاتورة #$origRef',
+        'الأصناف المرتجعة: $itemsSummary',
+        if (reason.trim().isNotEmpty) 'السبب: ${reason.trim()}',
+        '[ORIG_TX:${originalTx.id}]',
+      ];
+      final retTx = Tx(
+        type: returnOpType,
+        accountId: isCashRefund ? originalTx.accountId : originalTx.accountId,
+        amount: returnAmount,
+        currency: originalTx.currency,
+        date: nowDt,
+        description: 'مرتجع مبيعات فاتورة #$origRef',
+        notes: notesParts.join(' | '),
+        reference: retRef,
+        cashierName: cashier,
+        syncState: 'pending',
+        createdAt: nowDt,
+        updatedAt: nowDt,
+      );
+
+      final retMap = retTx.toMap();
+      retMap['workspace_id'] = requireWorkspaceId;
+      retMap['id'] = newGlobalId();
+      retMap['updated_at'] = nowIso;
+      returnTxId = await txn.insert('transactions', retMap);
+
+      for (final line in resolvedLines) {
+        final lm = line.toMap(transactionId: returnTxId);
+        lm['workspace_id'] = requireWorkspaceId;
+        lm['id'] = newGlobalId();
+        await txn.insert('transaction_items', lm);
+      }
+
+      final savedRet = Map<String, Object?>.from(retMap)..['id'] = returnTxId;
+      await rec.record(
+        entityType: EntityKind.tx,
+        entityId: '$returnTxId',
+        opType: OpKind.create,
+        payload: savedRet..['items'] = await _lineMaps(txn, returnTxId),
+      );
+
+      // 3. تحديث ملاحظات الفاتورة الأصلية بتوثيق المرتجع
+      final origRows = await txn.query(
+        'transactions',
+        where: 'id = ?',
+        whereArgs: [originalTx.id],
+        limit: 1,
+      );
+      if (origRows.isNotEmpty) {
+        final prevNotes = '${origRows.first['notes'] ?? ''}'.trim();
+        final returnStamp =
+            'تم إرجاع ($itemsSummary) بمبلغ ${Fmt.num(returnAmount)} في ${Fmt.date(nowDt)} (سند #$retRef)';
+        final updatedNotes =
+            prevNotes.isEmpty ? returnStamp : '$prevNotes\n$returnStamp';
+        await txn.update(
+          'transactions',
+          {'notes': updatedNotes, 'updated_at': nowIso},
+          where: 'id = ?',
+          whereArgs: [originalTx.id],
+        );
+        final updatedOrig = Map<String, Object?>.from(origRows.first)
+          ..['notes'] = updatedNotes
+          ..['updated_at'] = nowIso;
+        await rec.record(
+          entityType: EntityKind.tx,
+          entityId: '${originalTx.id}',
+          opType: OpKind.update,
+          payload: updatedOrig
+            ..['items'] = await _lineMaps(txn, originalTx.id!),
+        );
+      }
+
+      await logActivityTx(
+        txn,
+        'مرتجع مبيعات فاتورة #$origRef: $returnAmount',
+        'tx',
+        '$returnTxId',
+      );
+    });
+
+    return returnTxId;
+  }
+
+
   /// القفل التاريخي للتدقيق: إعداد `auditLockDays` (0 = معطل) يمنع غير
   /// المدير من تعديل/حذف عملية مالية أقدم من المدة المحددة — حماية دفترية
   /// من العبث بالسجلات المُقفلة محاسبياً.

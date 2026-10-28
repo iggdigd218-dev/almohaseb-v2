@@ -18,6 +18,8 @@ import '../data/sync/subscription_guard.dart' show Feature;
 import 'barcode_scanner.dart';
 import 'pos_gate.dart';
 import 'pos_items_grid.dart';
+import 'inventory_screen.dart'
+    show inventoryShortagesModeProvider, openShortagesListSheet;
 import 'transactions_screen.dart' show showTxDetails;
 import 'trial_ui.dart' show featureNeedsStamp;
 import 'tx_share.dart';
@@ -666,13 +668,13 @@ class _PosScreenState extends ConsumerState<PosScreen>
           foregroundColor: Colors.white,
           leading: IconButton(
             icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
-            onPressed: () => _tabController.animateTo(0),
+            onPressed: () => setState(() => _tabController.animateTo(0)),
           ),
           title: const Text(
-            'سجل فواتير المبيعات',
+            'المرتجعات وسجل فواتير المبيعات',
             style: TextStyle(
               color: Colors.white,
-              fontSize: 17,
+              fontSize: 16.5,
               fontWeight: FontWeight.w800,
             ),
           ),
@@ -1845,6 +1847,11 @@ class _PosScreenState extends ConsumerState<PosScreen>
                   ),
                 ),
                 _headerIconButton(
+                  icon: Icons.assignment_return_outlined,
+                  tooltip: 'المرتجعات والبحث برقم الفاتورة',
+                  onTap: () => setState(() => _tabController.animateTo(1)),
+                ),
+                _headerIconButton(
                   icon: Icons.tune_rounded,
                   tooltip: 'ترتيب وتصفية الأصناف',
                   onTap: _openPosSortSheet,
@@ -1879,8 +1886,15 @@ class _PosScreenState extends ConsumerState<PosScreen>
                         if (hasCartItems) _promptHoldInvoice();
                       case 'held_list':
                         _showHeldSheet();
+                      case 'returns':
                       case 'history':
                         setState(() => _tabController.animateTo(1));
+                      case 'shortages':
+                        openShortagesListSheet(context, ref);
+                      case 'shortages_screen':
+                        ref.read(inventoryShortagesModeProvider.notifier).state =
+                            true;
+                        ShellNav.go(ShellNav.inventory);
                       case 'sections_gate':
                         setState(() => _atSectionsGate = !_atSectionsGate);
                     }
@@ -1923,12 +1937,30 @@ class _PosScreenState extends ConsumerState<PosScreen>
                       ),
                     ),
                     const PopupMenuItem<String>(
-                      value: 'history',
+                      value: 'returns',
                       child: ListTile(
                         dense: true,
                         contentPadding: EdgeInsets.zero,
-                        leading: Icon(Icons.receipt_long_outlined),
-                        title: Text('سجل المبيعات والمرتجعات'),
+                        leading: Icon(Icons.assignment_return_outlined),
+                        title: Text('المرتجعات (البحث برقم الفاتورة)'),
+                      ),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'shortages',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.assignment_late_outlined),
+                        title: Text('قائمة النواقص (حفظ كصورة / PDF)'),
+                      ),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'shortages_screen',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.warning_amber_rounded),
+                        title: Text('قسم النواقص (الأصناف تحت حد التنبيه)'),
                       ),
                     ),
                     const PopupMenuItem<String>(
@@ -2242,42 +2274,71 @@ class _PosScreenState extends ConsumerState<PosScreen>
             ),
             const SizedBox(width: 12),
 
-            // المنتصف: "الإجمالي" وقيمة المبلغ
+            // المنتصف: "الإجمالي" وقيمة المبلغ + زر حذف السلة بجانب الإجمالي
             Expanded(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.end,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
                 children: [
-                  Text(
-                    'الإجمالي',
-                    style: TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.text3Of(context),
+                  Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          'الإجمالي',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.text3Of(context),
+                          ),
+                        ),
+                        const SizedBox(height: 1),
+                        FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            '${Fmt.money(_netTotal)} ${cur.symbol}',
+                            style: TextStyle(
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.w900,
+                              color: AppColors.textOf(context),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                  const SizedBox(height: 1),
-                  FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Text(
-                      '${Fmt.money(_netTotal)} ${cur.symbol}',
-                      style: TextStyle(
-                        fontSize: 14.5,
-                        fontWeight: FontWeight.w900,
-                        color: AppColors.textOf(context),
+                  if (_cart.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    Tooltip(
+                      message: 'حذف وإفراغ السلة',
+                      child: Material(
+                        color: AppColors.dangerOf(context).withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(9),
+                        clipBehavior: Clip.antiAlias,
+                        child: InkWell(
+                          onTap: _clearCart,
+                          child: Padding(
+                            padding: const EdgeInsets.all(7),
+                            child: Icon(
+                              Icons.delete_outline_rounded,
+                              size: 20,
+                              color: AppColors.dangerOf(context),
+                            ),
+                          ),
+                        ),
                       ),
                     ),
-                  ),
+                  ],
                 ],
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 8),
             Container(
               width: 1,
               height: 30,
               color: dark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 8),
 
             // جهة اليسار (في RTL): زر أزرق بارز "عرض السلة (0)" مع أيقونة عربة التسوق
             SizedBox(
@@ -3546,160 +3607,880 @@ class _PosScreenState extends ConsumerState<PosScreen>
     );
   }
 }
-/// تبويب سجل فواتير المبيعات
-class _PosHistoryTab extends ConsumerWidget {
+/// تبويب المرتجعات وسجل فواتير المبيعات (البحث برقم الفاتورة أو اسم العميل وإرجاع صنف أو فاتورة كاملة).
+class _PosHistoryTab extends ConsumerStatefulWidget {
   const _PosHistoryTab();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final txData = ref.watch(txPageProvider);
+  ConsumerState<_PosHistoryTab> createState() => _PosHistoryTabState();
+}
 
-    return txData.when(
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) => EmptyState(
-        icon: Icons.error_outline,
-        title: 'تعذّر تحميل سجل المبيعات',
-        message: '$e',
+class _PosHistoryTabState extends ConsumerState<_PosHistoryTab> {
+  final TextEditingController _searchCtrl = TextEditingController();
+  String _query = '';
+  int _revision = 0;
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _openReturnForInvoice(Tx tx, Account? account) async {
+    final returned = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (ctx) => FractionallySizedBox(
+        heightFactor: 0.88,
+        child: _SalesReturnSheet(tx: tx, account: account),
       ),
-      data: (page) {
-        // تصفية فواتير المبيعات فقط (وصفها فاتورة، نستثني الدفعات المقدمة)
-        final posTxs = page.items
-            .where(
-              (t) =>
-                  (t.description.contains('فاتورة') &&
-                      !t.description.startsWith('دفعة مقدمة')) ||
-                  t.type == OpType.revenue,
-            )
-            .toList();
+    );
+    if (returned == true && mounted) {
+      setState(() => _revision++);
+    }
+  }
 
-        if (posTxs.isEmpty) {
-          return const EmptyState(
-            icon: Icons.receipt_long_outlined,
-            title: 'لا توجد فواتير مبيعات مسجلة',
-            message: 'قم بإجراء عمليات بيع من تبويب نقطة البيع وستظهر هنا.',
-          );
-        }
+  @override
+  Widget build(BuildContext context) {
+    // مراقبة التغييرات العامة لتحديث قائمة الفواتير تلقائياً بعد أي بيع أو مرتجع
+    ref.watch(txPageProvider);
+    final allAccounts =
+        ref.watch(allAccountsProvider).valueOrNull ?? const <Account>[];
+    final accountById = <int, Account>{
+      for (final a in allAccounts)
+        if (a.id != null) a.id!: a,
+    };
 
-        return ListView.separated(
-          padding: const EdgeInsets.all(12),
-          itemCount: posTxs.length,
-          separatorBuilder: (_, __) => const SizedBox(height: 8),
-          itemBuilder: (context, i) {
-            final tx = posTxs[i];
-            final account = page.accounts[tx.accountId];
-            final isCash = tx.type == OpType.revenue;
-            final isPartial = !isCash && tx.notes.contains('طريقة الدفع: جزئي');
-            final customerName = account?.name.trim().isNotEmpty == true
-                ? account!.name
-                : (isCash ? 'عميل نقدي' : 'عميل مسجل');
-            final customerPhone = account?.phone.trim().isNotEmpty == true
-                ? ' • ${account!.phone}'
-                : '';
-            final badgeText = isCash
-                ? 'مدفوع نقداً'
-                : (isPartial ? 'جزئي (عليه)' : 'آجل (عليه)');
-            final badgeColor = isCash
-                ? AppColors.greenOf(context)
-                : (isPartial ? Colors.deepOrange : AppColors.dangerOf(context));
-
-            return Card(
-              child: ListTile(
-                leading: CircleAvatar(
-                  backgroundColor: badgeColor.withValues(alpha: 0.14),
-                  child: Icon(
-                    isCash
-                        ? Icons.payments_outlined
-                        : (isPartial
-                            ? Icons.pie_chart_outline
-                            : Icons.receipt_long_outlined),
-                    color: badgeColor,
+    return Column(
+      children: [
+        // شريط البحث برقم الفاتورة أو اسم العميل لعمل مرتجع سريع
+        Container(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+          decoration: BoxDecoration(
+            color: AppColors.surfaceOf(context),
+            border: Border(
+              bottom: BorderSide(color: AppColors.borderOf(context)),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Row(
+                children: [
+                  Icon(
+                    Icons.assignment_return_rounded,
+                    color: Color(0xFF0F3E78),
+                    size: 20,
+                  ),
+                  SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'البحث عن فاتورة لإرجاع صنف أو إرجاع الفاتورة بالكامل',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _searchCtrl,
+                textInputAction: TextInputAction.search,
+                decoration: InputDecoration(
+                  isDense: true,
+                  filled: true,
+                  fillColor: Theme.of(context).brightness == Brightness.dark
+                      ? const Color(0xFF1E293B)
+                      : const Color(0xFFF3F6FB),
+                  hintText: 'ادخل رقم الفاتورة (مثال: 105) أو اسم العميل...',
+                  prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                  suffixIcon: _query.isEmpty
+                      ? null
+                      : IconButton(
+                          icon: const Icon(Icons.clear, size: 18),
+                          onPressed: () {
+                            _searchCtrl.clear();
+                            setState(() => _query = '');
+                          },
+                        ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: AppColors.borderOf(context)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: AppColors.borderOf(context)),
                   ),
                 ),
-                title: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        tx.reference.isNotEmpty
-                            ? 'فاتورة #${tx.reference}'
-                            : tx.description,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontWeight: FontWeight.bold),
+                onChanged: (v) => setState(() => _query = v.trim()),
+              ),
+            ],
+          ),
+        ),
+
+        // نتائج فواتير المبيعات
+        Expanded(
+          child: FutureBuilder<List<Tx>>(
+            key: ValueKey('sales_inv_${_query}_$_revision'),
+            future: ref.read(repoProvider).searchSalesInvoices(query: _query),
+            builder: (context, snap) {
+              if (snap.connectionState == ConnectionState.waiting &&
+                  !snap.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              if (snap.hasError) {
+                return EmptyState(
+                  icon: Icons.error_outline,
+                  title: 'تعذّر تحميل سجل الفواتير',
+                  message: '${snap.error}',
+                );
+              }
+              final posTxs = snap.data ?? const <Tx>[];
+              if (posTxs.isEmpty) {
+                return EmptyState(
+                  icon: Icons.receipt_long_outlined,
+                  title: _query.isEmpty
+                      ? 'لا توجد فواتير مبيعات مسجلة'
+                      : 'لا توجد فاتورة مطابقة للرقم أو الاسم «$_query»',
+                  message: _query.isEmpty
+                      ? 'قم بإجراء عمليات بيع من نقطة البيع وستظهر هنا مع إمكانية عمل مرتجع.'
+                      : 'تأكد من رقم الفاتورة أو امسح نص البحث لعرض جميع الفواتير.',
+                );
+              }
+
+              return ListView.separated(
+                padding: const EdgeInsets.all(12),
+                itemCount: posTxs.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 8),
+                itemBuilder: (context, i) {
+                  final tx = posTxs[i];
+                  final account =
+                      tx.accountId != null ? accountById[tx.accountId!] : null;
+                  final isCash = tx.type == OpType.revenue;
+                  final isPartial =
+                      !isCash && tx.notes.contains('طريقة الدفع: جزئي');
+                  final hasReturnNote = tx.notes.contains('تم إرجاع (');
+                  final customerName = account?.name.trim().isNotEmpty == true
+                      ? account!.name
+                      : (isCash ? 'عميل نقدي' : 'عميل مسجل');
+                  final customerPhone = account?.phone.trim().isNotEmpty == true
+                      ? ' • ${account!.phone}'
+                      : '';
+                  final badgeText = isCash
+                      ? 'مدفوع نقداً'
+                      : (isPartial ? 'جزئي (عليه)' : 'آجل (عليه)');
+                  final badgeColor = isCash
+                      ? AppColors.greenOf(context)
+                      : (isPartial
+                          ? Colors.deepOrange
+                          : AppColors.dangerOf(context));
+                  final invNumber = tx.reference.trim().isNotEmpty
+                      ? tx.reference.trim()
+                      : '${tx.id ?? ''}';
+
+                  return Card(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          InkWell(
+                            borderRadius: BorderRadius.circular(8),
+                            onTap: () => showTxDetails(
+                              context,
+                              ref,
+                              tx: tx,
+                              account: account,
+                            ),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                CircleAvatar(
+                                  radius: 19,
+                                  backgroundColor:
+                                      badgeColor.withValues(alpha: 0.14),
+                                  child: Icon(
+                                    isCash
+                                        ? Icons.payments_outlined
+                                        : (isPartial
+                                            ? Icons.pie_chart_outline
+                                            : Icons.receipt_long_outlined),
+                                    color: badgeColor,
+                                    size: 20,
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child: Text(
+                                              invNumber.isNotEmpty
+                                                  ? 'فاتورة #$invNumber'
+                                                  : tx.description,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w900,
+                                                fontSize: 14.5,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 6),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 2,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: badgeColor.withValues(
+                                                  alpha: 0.12),
+                                              borderRadius:
+                                                  BorderRadius.circular(12),
+                                              border: Border.all(
+                                                color: badgeColor.withValues(
+                                                    alpha: 0.35),
+                                              ),
+                                            ),
+                                            child: Text(
+                                              badgeText,
+                                              style: TextStyle(
+                                                fontSize: 10.5,
+                                                fontWeight: FontWeight.w800,
+                                                color: badgeColor,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 3),
+                                      Text(
+                                        '$customerName$customerPhone • ${Fmt.date(tx.date)}',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                          color: AppColors.text2Of(context),
+                                        ),
+                                      ),
+                                      if (hasReturnNote)
+                                        Padding(
+                                          padding:
+                                              const EdgeInsets.only(top: 3),
+                                          child: Text(
+                                            tx.notes
+                                                .split('\n')
+                                                .where((l) =>
+                                                    l.contains('تم إرجاع ('))
+                                                .join('\n'),
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w800,
+                                              color: Color(0xFFD97706),
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  '${Fmt.money(tx.amount)} ${tx.currency}',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w900,
+                                    fontSize: 14,
+                                    color: AppColors.primaryOf(context),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              TextButton.icon(
+                                style: TextButton.styleFrom(
+                                  visualDensity: VisualDensity.compact,
+                                ),
+                                onPressed: () => showTxDetails(
+                                  context,
+                                  ref,
+                                  tx: tx,
+                                  account: account,
+                                ),
+                                icon: const Icon(
+                                    Icons.visibility_outlined, size: 16),
+                                label: const Text(
+                                  'تفاصيل الفاتورة',
+                                  style: TextStyle(fontSize: 12),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              FilledButton.tonalIcon(
+                                style: FilledButton.styleFrom(
+                                  visualDensity: VisualDensity.compact,
+                                  backgroundColor: const Color(0xFFD97706)
+                                      .withValues(alpha: 0.15),
+                                  foregroundColor: const Color(0xFFB45309),
+                                ),
+                                onPressed: () =>
+                                    _openReturnForInvoice(tx, account),
+                                icon: const Icon(
+                                  Icons.assignment_return_rounded,
+                                  size: 17,
+                                ),
+                                label: const Text(
+                                  'إرجاع صنف / الفاتورة',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
                     ),
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: badgeColor.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                            color: badgeColor.withValues(alpha: 0.35)),
-                      ),
-                      child: Text(
-                        badgeText,
-                        style: TextStyle(
-                          fontSize: 10.5,
-                          fontWeight: FontWeight.w800,
-                          color: badgeColor,
-                        ),
-                      ),
-                    ),
-                  ],
+                  );
+                },
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ReturnLineState {
+  final InvoiceLine originalLine;
+  final double previouslyReturned;
+  double returnQty;
+
+  _ReturnLineState({
+    required this.originalLine,
+    required this.previouslyReturned,
+    required this.returnQty,
+  });
+
+  double get maxReturnable {
+    final rem = originalLine.quantity - previouslyReturned;
+    return rem > 0 ? rem : 0;
+  }
+
+  double get unitNetPrice => originalLine.quantity > 0
+      ? originalLine.total / originalLine.quantity
+      : originalLine.unitPrice;
+
+  double get returnSubtotal => returnQty * unitNetPrice;
+}
+
+/// نافذة إرجاع الفاتورة (إرجاع صنف محدد أو إرجاع الفاتورة بالكامل مع إعادة الكميات للمبيعات).
+class _SalesReturnSheet extends ConsumerStatefulWidget {
+  final Tx tx;
+  final Account? account;
+
+  const _SalesReturnSheet({required this.tx, required this.account});
+
+  @override
+  ConsumerState<_SalesReturnSheet> createState() => _SalesReturnSheetState();
+}
+
+class _SalesReturnSheetState extends ConsumerState<_SalesReturnSheet> {
+  final List<_ReturnLineState> _lines = [];
+  final TextEditingController _reasonCtrl = TextEditingController();
+  bool _loading = true;
+  bool _submitting = false;
+  late bool _refundCash;
+
+  @override
+  void initState() {
+    super.initState();
+    _refundCash = widget.tx.accountId == null ||
+        widget.tx.type == OpType.revenue;
+    _loadInvoiceItems();
+  }
+
+  @override
+  void dispose() {
+    _reasonCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadInvoiceItems() async {
+    try {
+      final repo = ref.read(repoProvider);
+      final id = widget.tx.id!;
+      final items = await repo.transactionItems(id);
+      final prevMap = await repo.returnedQuantitiesForInvoice(id);
+      if (!mounted) return;
+      setState(() {
+        _lines.clear();
+        if (items.isEmpty) {
+          // في حال كانت الفاتورة مسجلة بدون تفصيل أسطر، ننشئ سطراً يمثل إجمالي الفاتورة
+          final key = 'name:${widget.tx.description.trim().toLowerCase()}';
+          final prev = prevMap[key] ?? 0;
+          _lines.add(
+            _ReturnLineState(
+              originalLine: InvoiceLine(
+                name: widget.tx.description.isNotEmpty
+                    ? widget.tx.description
+                    : 'كامل الفاتورة',
+                quantity: 1,
+                unitPrice: widget.tx.amount,
+              ),
+              previouslyReturned: prev,
+              returnQty: prev < 1 ? 1 - prev : 0,
+            ),
+          );
+        } else {
+          for (final l in items) {
+            final key = l.itemId != null
+                ? 'id:${l.itemId}'
+                : 'name:${l.name.trim().toLowerCase()}';
+            final prev = prevMap[key] ?? 0;
+            final rem = (l.quantity - prev) > 0 ? (l.quantity - prev) : 0.0;
+            _lines.add(
+              _ReturnLineState(
+                originalLine: l,
+                previouslyReturned: prev,
+                returnQty: rem, // افتراضياً محدد للإرجاع السريع مع إمكانية التعديل
+              ),
+            );
+          }
+        }
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      showSnack(context, 'تعذر قراءة أصناف الفاتورة: $e', error: true);
+    }
+  }
+
+  double get _totalReturnAmount =>
+      _lines.fold<double>(0, (s, l) => s + l.returnSubtotal);
+
+  bool get _hasReturnableItems =>
+      _lines.any((l) => l.maxReturnable > 0);
+
+  Future<void> _submitReturn() async {
+    final chosen = _lines
+        .where((l) => l.returnQty > 0 && l.returnQty <= l.maxReturnable + 1e-6)
+        .map(
+          (l) => InvoiceLine(
+            itemId: l.originalLine.itemId,
+            name: l.originalLine.name,
+            unit: l.originalLine.unit,
+            quantity: l.returnQty,
+            unitPrice: l.unitNetPrice,
+          ),
+        )
+        .toList();
+
+    if (chosen.isEmpty) {
+      showSnack(
+        context,
+        'يرجى تحديد كمية أكبر من صفر لصنف واحد على الأقل لإتمام المرتجع.',
+        error: true,
+      );
+      return;
+    }
+
+    setState(() => _submitting = true);
+    try {
+      final repo = ref.read(repoProvider);
+      await repo.processSalesReturn(
+        originalTx: widget.tx,
+        returnLines: chosen,
+        refundCash: _refundCash,
+        reason: _reasonCtrl.text.trim(),
+      );
+
+      // تحديث فوري للمخزون وشاشة المبيعات وكافة المزودات المالية
+      ref.invalidate(itemsProvider);
+      ref.invalidate(inventorySummaryProvider);
+      ref.invalidate(txPageProvider);
+      ref.invalidate(allAccountsProvider);
+      ref.invalidate(summaryProvider);
+      bump(ref);
+
+      if (!mounted) return;
+      Navigator.pop(context, true);
+      showSnack(
+        context,
+        '✅ تم تسجيل المرتجع بنجاح وإعادة الأصناف المرتجعة إلى شاشة المبيعات والمخزون',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      showSnack(context, 'تعذر تنفيذ المرتجع: $e', error: true);
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final invRef = widget.tx.reference.trim().isNotEmpty
+        ? widget.tx.reference.trim()
+        : '${widget.tx.id ?? ''}';
+
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 16,
+        right: 16,
+        top: 4,
+        bottom: MediaQuery.viewInsetsOf(context).bottom + 16,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // ترويسة نافذة المرتجع
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFD97706).withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(10),
                 ),
-                subtitle: Column(
+                child: const Icon(
+                  Icons.assignment_return_rounded,
+                  color: Color(0xFFD97706),
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const SizedBox(height: 2),
                     Text(
-                      '$customerName$customerPhone • ${Fmt.date(tx.date)}',
+                      'مرتجع مبيعات — فاتورة #$invRef',
+                      style: const TextStyle(
+                        fontSize: 16.5,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    Text(
+                      'الأصناف المرتجعة تعود تلقائياً إلى رصيد المبيعات والمخزون',
                       style: TextStyle(
                         fontSize: 12,
-                        fontWeight: FontWeight.w600,
                         color: AppColors.text2Of(context),
                       ),
                     ),
-                    if (tx.notes.trim().isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 2),
-                        child: Text(
-                          tx.notes
-                              .split('\n')
-                              .where((l) =>
-                                  l.contains('المبلغ المدفوع:') ||
-                                  l.contains('المبلغ المتبقي:') ||
-                                  l.contains('المتبقي:'))
-                              .join(' | '),
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.w700,
-                            color: isCash
-                                ? AppColors.greenOf(context)
-                                : Colors.deepOrange,
-                          ),
-                        ),
-                      ),
                   ],
                 ),
-                trailing: Text(
-                  '${Fmt.money(tx.amount)} ${tx.currency}',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w900,
-                    fontSize: 14,
-                    color: AppColors.primaryOf(context),
+              ),
+              IconButton(
+                onPressed: () => Navigator.pop(context, false),
+                icon: const Icon(Icons.close_rounded),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+
+          if (_loading)
+            const Expanded(
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (!_hasReturnableItems)
+            const Expanded(
+              child: EmptyState(
+                icon: Icons.check_circle_outline_rounded,
+                title: 'تم إرجاع هذه الفاتورة بالكامل مسبقاً',
+                message: 'لا توجد كميات متبقية قابلة للإرجاع في هذه الفاتورة.',
+              ),
+            )
+          else ...[
+            // أزرار سريعة: إرجاع الفاتورة بالكامل / تصفير التحديد
+            Row(
+              children: [
+                FilledButton.tonalIcon(
+                  style: FilledButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: () {
+                    setState(() {
+                      for (final l in _lines) {
+                        l.returnQty = l.maxReturnable;
+                      }
+                    });
+                  },
+                  icon: const Icon(Icons.select_all_rounded, size: 17),
+                  label: const Text(
+                    'إرجاع الفاتورة بالكامل',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
                   ),
                 ),
-                onTap: () => showTxDetails(
-                  context,
-                  ref,
-                  tx: tx,
-                  account: account,
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: () {
+                    setState(() {
+                      for (final l in _lines) {
+                        l.returnQty = 0;
+                      }
+                    });
+                  },
+                  icon: const Icon(Icons.deselect_outlined, size: 17),
+                  label: const Text(
+                    'تصفير الكميات',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+
+            // قائمة أصناف الفاتورة
+            Expanded(
+              child: ListView.separated(
+                itemCount: _lines.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 8),
+                itemBuilder: (context, i) {
+                  final l = _lines[i];
+                  final maxQ = l.maxReturnable;
+                  final active = l.returnQty > 0;
+                  return Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: active
+                          ? AppColors.surfaceOf(context)
+                          : AppColors.surfaceOf(context).withValues(alpha: 0.55),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: active
+                            ? const Color(0xFFD97706).withValues(alpha: 0.5)
+                            : AppColors.borderOf(context),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Checkbox(
+                          value: active,
+                          visualDensity: VisualDensity.compact,
+                          onChanged: maxQ <= 0
+                              ? null
+                              : (v) {
+                                  setState(() {
+                                    l.returnQty =
+                                        (v ?? false) ? maxQ : 0;
+                                  });
+                                },
+                        ),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                l.originalLine.name,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 13.5,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                'المباع: ${Fmt.qty(l.originalLine.quantity)} ${l.originalLine.unit}'
+                                '${l.previouslyReturned > 0 ? ' • مرتجع سابق: ${Fmt.qty(l.previouslyReturned)}' : ''}'
+                                ' • سعر الوحدة: ${Fmt.money(l.unitNetPrice)} ${widget.tx.currency}',
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  color: AppColors.text2Of(context),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (maxQ <= 0)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.grey.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Text(
+                              'مرتجع بالكامل',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          )
+                        else
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                visualDensity: VisualDensity.compact,
+                                iconSize: 20,
+                                icon: const Icon(Icons.remove_circle_outline),
+                                onPressed: l.returnQty > 0
+                                    ? () {
+                                        setState(() {
+                                          l.returnQty = (l.returnQty - 1)
+                                              .clamp(0.0, maxQ);
+                                        });
+                                      }
+                                    : null,
+                              ),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFD97706)
+                                      .withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  Fmt.qty(l.returnQty),
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w900,
+                                    fontSize: 13.5,
+                                  ),
+                                ),
+                              ),
+                              IconButton(
+                                visualDensity: VisualDensity.compact,
+                                iconSize: 20,
+                                icon: const Icon(Icons.add_circle_outline),
+                                onPressed: l.returnQty < maxQ
+                                    ? () {
+                                        setState(() {
+                                          l.returnQty = (l.returnQty + 1)
+                                              .clamp(0.0, maxQ);
+                                        });
+                                      }
+                                    : null,
+                              ),
+                            ],
+                          ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+
+            const SizedBox(height: 8),
+            // خيار طريقة التسوية المالية إذا كانت الفاتورة مرتبطة بحساب عميل
+            if (widget.tx.accountId != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: SegmentedButton<bool>(
+                  segments: const [
+                    ButtonSegment<bool>(
+                      value: false,
+                      icon: Icon(Icons.account_balance_wallet_outlined, size: 17),
+                      label: Text('خصم من حساب العميل (له)'),
+                    ),
+                    ButtonSegment<bool>(
+                      value: true,
+                      icon: Icon(Icons.payments_outlined, size: 17),
+                      label: Text('استرداد نقدي'),
+                    ),
+                  ],
+                  selected: <bool>{_refundCash},
+                  onSelectionChanged: (s) =>
+                      setState(() => _refundCash = s.first),
                 ),
               ),
-            );
-          },
-        );
-      },
+
+            TextField(
+              controller: _reasonCtrl,
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: 'سبب الإرجاع أو ملاحظة (اختياري)...',
+                prefixIcon: const Icon(Icons.notes_rounded, size: 18),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+
+            // ملخص المبلغ وزر التأكيد
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppColors.surfaceOf(context),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppColors.borderOf(context)),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'إجمالي قيمة المرتجع',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: AppColors.text2Of(context),
+                          ),
+                        ),
+                        Text(
+                          '${Fmt.money(_totalReturnAmount)} ${widget.tx.currency}',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w900,
+                            color: AppColors.dangerOf(context),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF0F3E78),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 12,
+                      ),
+                    ),
+                    onPressed: _submitting ? null : _submitReturn,
+                    icon: _submitting
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.assignment_return_rounded, size: 19),
+                    label: const Text(
+                      'تأكيد المرتجع وإعادة الأصناف',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 13.5,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }

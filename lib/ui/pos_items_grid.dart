@@ -63,22 +63,26 @@ class PosItemTile extends StatelessWidget {
   Widget _buildThumb(BuildContext context) {
     if (item.image.isEmpty) return _fallback(context);
     if (item.image.startsWith('http')) {
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(6, 6, 6, 2),
-        child: Image.network(
-          item.image,
-          fit: BoxFit.contain,
-          errorBuilder: (_, __, ___) => _fallback(context),
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: SizedBox.expand(
+          child: Image.network(
+            item.image,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => _fallback(context),
+          ),
         ),
       );
     }
     if (MediaPaths.exists(item.image)) {
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(6, 6, 6, 2),
-        child: Image.file(
-          File(MediaPaths.toAbsolute(item.image)),
-          fit: BoxFit.contain,
-          errorBuilder: (_, __, ___) => _fallback(context),
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: SizedBox.expand(
+          child: Image.file(
+            File(MediaPaths.toAbsolute(item.image)),
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => _fallback(context),
+          ),
         ),
       );
     }
@@ -127,29 +131,32 @@ class PosItemTile extends StatelessWidget {
           child: Stack(
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(6, 6, 6, 6),
+                padding: const EdgeInsets.fromLTRB(5, 5, 5, 5),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // 1) منطقة الصورة أو الأيقونة الملونة بتأثير الباستيل في النصف العلوي.
+                    // 1) منطقة الصورة أو الأيقونة الملونة تملأ النصف العلوي بالكامل.
                     Expanded(
-                      flex: 5,
-                      child: Center(
-                        child: _buildThumb(context),
-                      ),
+                      flex: 6,
+                      child: _buildThumb(context),
                     ),
-                    const SizedBox(height: 3),
-                    // 2) اسم الصنف عريض في المنتصف + الوحدة/الكمية تحته بالرمادي الهادئ.
-                    Text(
-                      item.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 11.5,
-                        height: 1.15,
-                        color: AppColors.textOf(context),
+                    const SizedBox(height: 4),
+                    // 2) اسم الصنف يظهر على سطرين لتمكين قراءة الاسم كاملاً والتفريق بين الأصناف.
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(minHeight: 25),
+                      child: Center(
+                        child: Text(
+                          item.name,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 10.5,
+                            height: 1.15,
+                            color: AppColors.textOf(context),
+                          ),
+                        ),
                       ),
                     ),
                     const SizedBox(height: 1),
@@ -159,20 +166,20 @@ class PosItemTile extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                        fontSize: 9.5,
+                        fontSize: 9.0,
                         fontWeight: FontWeight.w600,
                         color: AppColors.text3Of(context),
                       ),
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 3),
                     // 3) الصف السفلي: شارة التوفر يميناً + السعر بخط عريض يساراً.
                     SizedBox(
-                      height: 20,
+                      height: 18,
                       child: Row(
                         children: [
                           Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 2),
+                                horizontal: 5, vertical: 1.5),
                             decoration: BoxDecoration(
                               color: statusBg,
                               borderRadius: BorderRadius.circular(999),
@@ -180,13 +187,13 @@ class PosItemTile extends StatelessWidget {
                             child: Text(
                               statusLabel,
                               style: TextStyle(
-                                fontSize: 8.5,
+                                fontSize: 8.0,
                                 fontWeight: FontWeight.w800,
                                 color: statusFg,
                               ),
                             ),
                           ),
-                          const SizedBox(width: 4),
+                          const SizedBox(width: 3),
                           Expanded(
                             child: FittedBox(
                               fit: BoxFit.scaleDown,
@@ -195,7 +202,7 @@ class PosItemTile extends StatelessWidget {
                                 '${Fmt.money(price)} $symbol',
                                 style: TextStyle(
                                   fontWeight: FontWeight.w900,
-                                  fontSize: 11.5,
+                                  fontSize: 11.0,
                                   color: isOut
                                       ? AppColors.dangerOf(context)
                                       : const Color(0xFF00897B),
@@ -209,13 +216,16 @@ class PosItemTile extends StatelessWidget {
                   ],
                 ),
               ),
-              // زر الإضافة الدائري الأزرق (+) في الزاوية العلوية اليسرى (end في RTL).
+              // شارة الزاوية العلوية اليسرى: تعرض (+) قبل الإضافة، وعند الإضافة تختفي (+) ويظهر العدد فقط بحجم مدمج لا يغطي الصورة.
               PositionedDirectional(
-                top: 5,
-                end: 5,
+                top: 4,
+                end: 4,
                 child: Material(
                   color: enabled ? actionBlue : AppColors.text3Of(context),
-                  borderRadius: BorderRadius.circular(999),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(999),
+                    side: const BorderSide(color: Colors.white, width: 1.2),
+                  ),
                   clipBehavior: Clip.antiAlias,
                   child: InkWell(
                     onTap: enabled
@@ -226,34 +236,28 @@ class PosItemTile extends StatelessWidget {
                         : null,
                     child: Container(
                       constraints: const BoxConstraints(
-                        minWidth: 22,
-                        minHeight: 22,
+                        minWidth: 20,
+                        minHeight: 20,
                       ),
                       padding: EdgeInsets.symmetric(
-                        horizontal: inCart > 0 ? 5 : 0,
+                        horizontal: inCart > 9 ? 4 : 0,
                       ),
                       alignment: Alignment.center,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(
-                            Icons.add_rounded,
-                            size: 14,
-                            color: Colors.white,
-                          ),
-                          if (inCart > 0) ...[
-                            const SizedBox(width: 1),
-                            Text(
+                      child: inCart > 0
+                          ? Text(
                               Fmt.money(inCart),
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontWeight: FontWeight.w900,
-                                fontSize: 9.5,
+                                fontSize: 10.5,
+                                height: 1.0,
                               ),
+                            )
+                          : const Icon(
+                              Icons.add_rounded,
+                              size: 13,
+                              color: Colors.white,
                             ),
-                          ],
-                        ],
-                      ),
                     ),
                   ),
                 ),
@@ -268,16 +272,16 @@ class PosItemTile extends StatelessWidget {
   Widget _fallback(BuildContext context) {
     final t = _resolvedTone;
     return Container(
-      width: 46,
-      height: 46,
+      width: double.infinity,
+      height: double.infinity,
       decoration: BoxDecoration(
         color: t.foreground.withValues(alpha: 0.13),
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(10),
       ),
       alignment: Alignment.center,
       child: Icon(
         _resolvedIcon,
-        size: 24,
+        size: 28,
         color: t.foreground,
       ),
     );
@@ -325,7 +329,7 @@ class PosItemsGrid extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(10, 4, 10, 96),
       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: cross,
-        childAspectRatio: .78,
+        childAspectRatio: .72,
         crossAxisSpacing: 8,
         mainAxisSpacing: 8,
       ),

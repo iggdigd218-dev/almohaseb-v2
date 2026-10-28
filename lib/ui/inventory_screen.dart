@@ -1,15 +1,22 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../core/format.dart';
 import '../core/icon_catalog.dart';
 import '../core/media_paths.dart';
 import '../core/models.dart';
+import '../core/pdf_fonts.dart';
 import '../core/theme.dart';
 import '../data/pos_cart.dart';
 import '../data/providers.dart';
@@ -18,6 +25,14 @@ import 'barcode_scanner.dart';
 import 'hierarchy_filter.dart';
 import 'calculator.dart';
 import 'widgets.dart';
+
+/// مزود عام لتفعيل تبويب «قسم النواقص» مباشرة عند فتح شاشة المخزون.
+final inventoryShortagesModeProvider = StateProvider<bool>((ref) => false);
+
+/// هل الصنف ضمن النواقص (وصل أو نزل تحت حد التنبيه أو نفدت كميته)؟
+bool isShortageItem(Item it) =>
+    !it.isDeleted && !it.archived && (it.low || it.out);
+
 
 /// شاشة بيانات الأصناف والفئات فقط.
 ///
@@ -103,6 +118,7 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
   int? _sectionId; // القسم المختار (null = الكل، -1 = «عام/بدون قسم»)
   int? _rootId; // الفئة الرئيسية المختارة (null = الكل)
   int? _subId; // الفئة الفرعية المختارة (null = كل ما تحت الرئيسية)
+  int _shortageSubFilter = 0; // 0 = كل النواقص، 1 = تحت حد التنبيه، 2 = نافدة تماماً
   StreamSubscription<int>? _syncBusSub;
 
   @override
@@ -197,9 +213,15 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
   List<Item> _visibleItems(List<ItemCategory> roots, List<Item> items) {
     final ids = _selectedIds(roots);
     final q = ref.read(itemQueryProvider).trim().toLowerCase();
+    final onlyShortages = ref.read(inventoryShortagesModeProvider);
     final out = items.where((it) {
       // استثناء صريح للأصناف المحذوفة
       if (it.isDeleted) return false;
+      if (onlyShortages) {
+        if (!isShortageItem(it)) return false;
+        if (_shortageSubFilter == 1 && !it.low) return false;
+        if (_shortageSubFilter == 2 && !it.out) return false;
+      }
       if (ids != null) {
         if (_sectionId == kGeneralSectionId && _rootId == null) {
           final isUncategorized = it.categoryId == null || it.categoryId == 0;
@@ -219,7 +241,9 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
           it.category.toLowerCase().contains(q) ||
           it.notes.toLowerCase().contains(q);
     }).toList()
-      ..sort((a, b) => _compareItems(a, b, _sort));
+      ..sort((a, b) => onlyShortages
+          ? _compareItems(a, b, _SortKey.outFirst)
+          : _compareItems(a, b, _sort));
     return out;
   }
 
@@ -268,7 +292,10 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
     final categoriesAsync = ref.watch(itemCategoryTreeProvider);
     final itemsAsync = ref.watch(itemsProvider);
     final sectionsAsync = ref.watch(sectionsProvider);
+    final onlyShortages = ref.watch(inventoryShortagesModeProvider);
     final sections = sectionsAsync.valueOrNull ?? const <Section>[];
+    final allItems = itemsAsync.valueOrNull ?? const <Item>[];
+    final shortagesCount = allItems.where(isShortageItem).length;
 
     return Stack(
       children: [
@@ -280,6 +307,25 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
               onModeChanged: _setMode,
               onSortChanged: (k) => setState(() => _sort = k),
               onAddCategory: () => openItemCategoryForm(context, ref),
+            ),
+            // شريط قسم النواقص البارز للتنقل السريع وإنشاء قائمة النواقص (صورة / PDF)
+            _ShortagesSwitchBar(
+              onlyShortages: onlyShortages,
+              totalCount: allItems.where((i) => !i.isDeleted).length,
+              shortagesCount: shortagesCount,
+              subFilter: _shortageSubFilter,
+              lowAlertCount: allItems
+                  .where((i) => !i.isDeleted && !i.archived && i.low)
+                  .length,
+              outOfStockCount: allItems
+                  .where((i) => !i.isDeleted && !i.archived && i.out)
+                  .length,
+              onToggleShortages: (val) {
+                ref.read(inventoryShortagesModeProvider.notifier).state = val;
+                setState(() {});
+              },
+              onSubFilterChanged: (f) => setState(() => _shortageSubFilter = f),
+              onExportList: () => openShortagesListSheet(context, ref),
             ),
             categoriesAsync.when(
               skipLoadingOnReload: true,
@@ -367,22 +413,44 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
       );
     }
     final visible = _visibleItems(roots, items);
+    final onlyShortages = ref.watch(inventoryShortagesModeProvider);
     if (visible.isEmpty) {
       return EmptyState(
-        icon: Icons.search_off,
-        title: 'لا توجد نتائج',
-        message: 'جرّب كلمة بحث أخرى أو بدّل الفئة.',
-        action: FilledButton.tonalIcon(
-          onPressed: () {
-            ref.read(itemQueryProvider.notifier).state = '';
-            setState(() {
-              _rootId = null;
-              _subId = null;
-              _sectionId = null;
-            });
-          },
-          icon: const Icon(Icons.filter_alt_off_outlined, size: 18),
-          label: const Text('مسح الفلاتر'),
+        icon: onlyShortages
+            ? Icons.check_circle_outline_rounded
+            : Icons.search_off,
+        title: onlyShortages
+            ? 'لا توجد نواقص في المخزون حالياً'
+            : 'لا توجد نتائج',
+        message: onlyShortages
+            ? 'جميع الأصناف متوفرة بكميات أعلى من حد التنبيه المحدد. يمكنك أيضاً إنشاء قائمة طلب مخصصة.'
+            : 'جرّب كلمة بحث أخرى أو بدّل الفئة.',
+        action: Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          alignment: WrapAlignment.center,
+          children: [
+            if (onlyShortages)
+              FilledButton.icon(
+                onPressed: () => openShortagesListSheet(context, ref),
+                icon: const Icon(Icons.playlist_add_check_rounded, size: 18),
+                label: const Text('إنشاء قائمة نواقص مخصصة'),
+              ),
+            FilledButton.tonalIcon(
+              onPressed: () {
+                ref.read(itemQueryProvider.notifier).state = '';
+                ref.read(inventoryShortagesModeProvider.notifier).state = false;
+                setState(() {
+                  _rootId = null;
+                  _subId = null;
+                  _sectionId = null;
+                  _shortageSubFilter = 0;
+                });
+              },
+              icon: const Icon(Icons.filter_alt_off_outlined, size: 18),
+              label: Text(onlyShortages ? 'عرض كل الأصناف' : 'مسح الفلاتر'),
+            ),
+          ],
         ),
       );
     }
@@ -2958,3 +3026,1222 @@ class _Thumb extends StatelessWidget {
         ),
       );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// قسم النواقص (الأصناف تحت حد التنبيه والنافدة) + تصدير كصورة PNG أو ملف PDF
+// ═══════════════════════════════════════════════════════════════════════════
+
+class _ShortagesSwitchBar extends StatelessWidget {
+  final bool onlyShortages;
+  final int totalCount;
+  final int shortagesCount;
+  final int subFilter;
+  final int lowAlertCount;
+  final int outOfStockCount;
+  final ValueChanged<bool> onToggleShortages;
+  final ValueChanged<int> onSubFilterChanged;
+  final VoidCallback onExportList;
+
+  const _ShortagesSwitchBar({
+    required this.onlyShortages,
+    required this.totalCount,
+    required this.shortagesCount,
+    required this.subFilter,
+    required this.lowAlertCount,
+    required this.outOfStockCount,
+    required this.onToggleShortages,
+    required this.onSubFilterChanged,
+    required this.onExportList,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final dangerColor = AppColors.dangerOf(context);
+    const warnColor = Color(0xFFD97706);
+    final primaryColor = AppColors.primaryOf(context);
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 2),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: onlyShortages
+            ? warnColor.withValues(alpha: 0.08)
+            : AppColors.surfaceOf(context),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: onlyShortages
+              ? warnColor.withValues(alpha: 0.45)
+              : AppColors.borderOf(context),
+          width: onlyShortages ? 1.4 : 1.0,
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              // تبويب كل الأصناف
+              Expanded(
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: () => onToggleShortages(false),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: !onlyShortages
+                          ? primaryColor
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.inventory_2_outlined,
+                          size: 17,
+                          color: !onlyShortages
+                              ? Colors.white
+                              : AppColors.text2Of(context),
+                        ),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            'كل الأصناف ($totalCount)',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w800,
+                              color: !onlyShortages
+                                  ? Colors.white
+                                  : AppColors.textOf(context),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              // تبويب قسم النواقص
+              Expanded(
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: () => onToggleShortages(true),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: onlyShortages
+                          ? dangerColor
+                          : (shortagesCount > 0
+                              ? dangerColor.withValues(alpha: 0.10)
+                              : Colors.transparent),
+                      borderRadius: BorderRadius.circular(10),
+                      border: shortagesCount > 0 && !onlyShortages
+                          ? Border.all(
+                              color: dangerColor.withValues(alpha: 0.35),
+                            )
+                          : null,
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.warning_amber_rounded,
+                          size: 18,
+                          color: onlyShortages
+                              ? Colors.white
+                              : (shortagesCount > 0
+                                  ? dangerColor
+                                  : AppColors.text2Of(context)),
+                        ),
+                        const SizedBox(width: 5),
+                        Flexible(
+                          child: Text(
+                            'قسم النواقص ($shortagesCount)',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w900,
+                              color: onlyShortages
+                                  ? Colors.white
+                                  : (shortagesCount > 0
+                                      ? dangerColor
+                                      : AppColors.textOf(context)),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              // زر إنشاء قائمة النواقص (صورة / PDF)
+              Tooltip(
+                message: 'إنشاء قائمة النواقص وحفظها كصورة أو PDF',
+                child: FilledButton.tonalIcon(
+                  style: FilledButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    backgroundColor: warnColor.withValues(alpha: 0.16),
+                    foregroundColor: warnColor,
+                  ),
+                  onPressed: onExportList,
+                  icon: const Icon(Icons.fact_check_outlined, size: 17),
+                  label: const Text(
+                    'قائمة النواقص',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (onlyShortages) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                _subChip(
+                  context,
+                  index: 0,
+                  label: 'كل النواقص ($shortagesCount)',
+                  activeColor: dangerColor,
+                ),
+                const SizedBox(width: 6),
+                _subChip(
+                  context,
+                  index: 1,
+                  label: 'تحت حد التنبيه ($lowAlertCount)',
+                  activeColor: warnColor,
+                ),
+                const SizedBox(width: 6),
+                _subChip(
+                  context,
+                  index: 2,
+                  label: 'نافدة ($outOfStockCount)',
+                  activeColor: dangerColor,
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _subChip(
+    BuildContext context, {
+    required int index,
+    required String label,
+    required Color activeColor,
+  }) {
+    final selected = subFilter == index;
+    return Expanded(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => onSubFilterChanged(index),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 6),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: selected
+                ? activeColor.withValues(alpha: 0.16)
+                : AppColors.surfaceOf(context),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: selected
+                  ? activeColor
+                  : AppColors.borderOf(context),
+            ),
+          ),
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: selected ? FontWeight.w900 : FontWeight.w600,
+              color: selected ? activeColor : AppColors.text2Of(context),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// يفتح نافذة إنشاء وتصدير قائمة النواقص كصورة PNG أو ملف PDF.
+Future<void> openShortagesListSheet(
+  BuildContext context,
+  WidgetRef ref,
+) async {
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (ctx) => FractionallySizedBox(
+      heightFactor: 0.90,
+      child: _ShortagesListSheet(parentContext: context),
+    ),
+  );
+}
+
+class _ShortageDraftRow {
+  final Item item;
+  bool selected;
+  double requiredQty;
+
+  _ShortageDraftRow({
+    required this.item,
+    this.selected = true,
+    required this.requiredQty,
+  });
+}
+
+class _ShortagesListSheet extends ConsumerStatefulWidget {
+  final BuildContext parentContext;
+  const _ShortagesListSheet({required this.parentContext});
+
+  @override
+  ConsumerState<_ShortagesListSheet> createState() =>
+      _ShortagesListSheetState();
+}
+
+class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
+  final List<_ShortageDraftRow> _rows = [];
+  bool _initialized = false;
+  bool _busyImage = false;
+  bool _busyPdf = false;
+  String _searchAddQuery = '';
+
+  void _initRows(List<Item> allItems) {
+    if (_initialized) return;
+    _initialized = true;
+    final shortages = allItems.where(isShortageItem).toList()
+      ..sort((a, b) => _compareItems(a, b, _SortKey.outFirst));
+    for (final it in shortages) {
+      // الكمية المقترحة للطلب: الفرق للوصول إلى حد التنبيه (أو حد التنبيه نفسه إن كان > 0، وإلا 10)
+      double suggested = 1;
+      if (it.minQuantity > 0) {
+        final diff = it.minQuantity - it.quantity;
+        suggested = diff > 0 ? diff : it.minQuantity;
+      } else if (it.quantity <= 0) {
+        suggested = 5;
+      }
+      _rows.add(
+        _ShortageDraftRow(
+          item: it,
+          selected: true,
+          requiredQty: suggested,
+        ),
+      );
+    }
+  }
+
+  List<_ShortageDraftRow> get _selectedRows =>
+      _rows.where((r) => r.selected && r.requiredQty > 0).toList();
+
+  Future<void> _promptEditRequiredQty(_ShortageDraftRow row) async {
+    final ctrl = TextEditingController(
+      text: row.requiredQty == row.requiredQty.roundToDouble()
+          ? row.requiredQty.toStringAsFixed(0)
+          : row.requiredQty.toStringAsFixed(2),
+    );
+    final res = await showDialog<double>(
+      context: context,
+      builder: (dCtx) => AlertDialog(
+        title: Text('الكمية المطلوبة — ${row.item.name}'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: InputDecoration(
+            labelText: 'الكمية المطلوبة للطلب (${row.item.unit})',
+            border: const OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dCtx),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final v = double.tryParse(ctrl.text.trim());
+              Navigator.pop(dCtx, v);
+            },
+            child: const Text('تطبيق'),
+          ),
+        ],
+      ),
+    );
+    if (res != null && res > 0 && mounted) {
+      setState(() {
+        row.requiredQty = res;
+        row.selected = true;
+      });
+    }
+  }
+
+  Future<void> _exportAsImage() async {
+    final picked = _selectedRows;
+    if (picked.isEmpty) {
+      showSnack(context, 'اختر صنفاً واحداً على الأقل لتصدير القائمة', error: true);
+      return;
+    }
+    setState(() => _busyImage = true);
+    try {
+      final st = await ref.read(repoProvider).settings();
+      final orgName =
+          (st['businessName'] ?? st['org.name'] ?? 'المتجر').trim();
+      final bytes = await _renderShortagesImage(
+        orgName: orgName,
+        rows: picked,
+        date: DateTime.now(),
+      );
+      final dir = await getTemporaryDirectory();
+      final stamp = DateTime.now().millisecondsSinceEpoch;
+      final file = File('${dir.path}/shortages_$stamp.png');
+      await file.writeAsBytes(bytes, flush: true);
+
+      // حفظ نسخة إضافية في مجلد مستندات التطبيق للرجوع إليها
+      try {
+        final docDir = await getApplicationDocumentsDirectory();
+        final savedCopy = File('${docDir.path}/shortages_$stamp.png');
+        await savedCopy.writeAsBytes(bytes, flush: true);
+      } catch (_) {}
+
+      await Share.shareXFiles(
+        [XFile(file.path, mimeType: 'image/png')],
+        subject: 'قائمة النواقص — $orgName',
+        text: 'قائمة نواقص المخزون ($orgName) - ${Fmt.date(DateTime.now())}',
+      );
+      if (mounted) {
+        showSnack(context, '✅ تم تجهيز وحفظ صورة قائمة النواقص بنجاح');
+      }
+    } catch (e) {
+      if (mounted) {
+        showSnack(context, 'تعذر حفظ صورة النواقص: $e', error: true);
+      }
+    } finally {
+      if (mounted) setState(() => _busyImage = false);
+    }
+  }
+
+  Future<void> _exportAsPdf() async {
+    final picked = _selectedRows;
+    if (picked.isEmpty) {
+      showSnack(context, 'اختر صنفاً واحداً على الأقل لتصدير ملف PDF', error: true);
+      return;
+    }
+    setState(() => _busyPdf = true);
+    try {
+      final st = await ref.read(repoProvider).settings();
+      final orgName =
+          (st['businessName'] ?? st['org.name'] ?? 'المتجر').trim();
+      final pdfBytes = await _buildShortagesPdf(
+        orgName: orgName,
+        rows: picked,
+        date: DateTime.now(),
+      );
+      final stamp = DateTime.now().millisecondsSinceEpoch;
+      final filename = 'shortages_$stamp.pdf';
+
+      // حفظ نسخة محلية في مستندات التطبيق
+      try {
+        final docDir = await getApplicationDocumentsDirectory();
+        final savedPdf = File('${docDir.path}/$filename');
+        await savedPdf.writeAsBytes(pdfBytes, flush: true);
+      } catch (_) {}
+
+      await Printing.sharePdf(
+        bytes: pdfBytes,
+        filename: filename,
+      );
+      if (mounted) {
+        showSnack(context, '✅ تم إنشاء ملف PDF لقائمة النواقص بنجاح');
+      }
+    } catch (e) {
+      if (mounted) {
+        showSnack(context, 'تعذر إنشاء ملف PDF: $e', error: true);
+      }
+    } finally {
+      if (mounted) setState(() => _busyPdf = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final itemsAsync = ref.watch(itemsProvider);
+    final allItems = itemsAsync.valueOrNull ?? const <Item>[];
+    _initRows(allItems);
+
+    final existingIds = _rows.map((r) => r.item.id).toSet();
+    final extraCandidates = _searchAddQuery.trim().isEmpty
+        ? const <Item>[]
+        : allItems
+            .where((it) =>
+                !it.isDeleted &&
+                !existingIds.contains(it.id) &&
+                it.name
+                    .toLowerCase()
+                    .contains(_searchAddQuery.trim().toLowerCase()))
+            .take(8)
+            .toList();
+
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 16,
+        right: 16,
+        top: 4,
+        bottom: MediaQuery.viewInsetsOf(context).bottom + 16,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // رأس النافذة
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFD97706).withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.assignment_late_outlined,
+                  color: Color(0xFFD97706),
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'قائمة النواقص وطلب البضاعة',
+                      style: TextStyle(
+                        fontSize: 16.5,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    Text(
+                      'حدد الأصناف والكميات المطلوبة لحفظها كصورة أو ملف PDF',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: AppColors.text2Of(context),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                onPressed: () => Navigator.pop(context),
+                icon: const Icon(Icons.close_rounded),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+
+          // حقل بحث سريع لإضافة أي صنف إضافي للقائمة
+          TextField(
+            decoration: InputDecoration(
+              isDense: true,
+              hintText: 'ابحث لإضافة صنف آخر إلى قائمة النواقص...',
+              prefixIcon: const Icon(Icons.add_shopping_cart_rounded, size: 19),
+              suffixIcon: _searchAddQuery.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.clear, size: 18),
+                      onPressed: () => setState(() => _searchAddQuery = ''),
+                    ),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            onChanged: (v) => setState(() => _searchAddQuery = v),
+          ),
+          if (extraCandidates.isNotEmpty)
+            Container(
+              margin: const EdgeInsets.only(top: 6),
+              constraints: const BoxConstraints(maxHeight: 140),
+              decoration: BoxDecoration(
+                color: AppColors.surfaceOf(context),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.borderOf(context)),
+              ),
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: extraCandidates.length,
+                itemBuilder: (_, i) {
+                  final it = extraCandidates[i];
+                  return ListTile(
+                    dense: true,
+                    title: Text(
+                      it.name,
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    subtitle: Text(
+                      'المتوفر: ${Fmt.qty(it.quantity)} ${it.unit} • حد التنبيه: ${Fmt.qty(it.minQuantity)}',
+                      style: const TextStyle(fontSize: 11.5),
+                    ),
+                    trailing: FilledButton.tonalIcon(
+                      onPressed: () {
+                        setState(() {
+                          _rows.insert(
+                            0,
+                            _ShortageDraftRow(
+                              item: it,
+                              selected: true,
+                              requiredQty:
+                                  it.minQuantity > 0 ? it.minQuantity : 5,
+                            ),
+                          );
+                          _searchAddQuery = '';
+                        });
+                      },
+                      icon: const Icon(Icons.add, size: 16),
+                      label: const Text('إضافة'),
+                    ),
+                  );
+                },
+              ),
+            ),
+
+          const SizedBox(height: 8),
+          // شريط تحديد الكل / الإحصائية
+          Row(
+            children: [
+              Text(
+                'الأصناف المحددة: ${_selectedRows.length} من ${_rows.length}',
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const Spacer(),
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
+                onPressed: () {
+                  final allSelected = _rows.every((r) => r.selected);
+                  setState(() {
+                    for (final r in _rows) {
+                      r.selected = !allSelected;
+                    }
+                  });
+                },
+                icon: Icon(
+                  _rows.every((r) => r.selected)
+                      ? Icons.deselect_outlined
+                      : Icons.select_all_rounded,
+                  size: 17,
+                ),
+                label: Text(
+                  _rows.every((r) => r.selected) ? 'إلغاء تحديد الكل' : 'تحديد الكل',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
+            ],
+          ),
+
+          // قائمة الأصناف الناقصة
+          Expanded(
+            child: _rows.isEmpty
+                ? const EmptyState(
+                    icon: Icons.inventory_rounded,
+                    title: 'لا توجد أصناف تحت حد التنبيه',
+                    message:
+                        'يمكنك البحث في الحقل أعلاه لإضافة أي صنف ترغب بطلبه إلى القائمة.',
+                  )
+                : ListView.separated(
+                    itemCount: _rows.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 6),
+                    itemBuilder: (context, index) {
+                      final r = _rows[index];
+                      final it = r.item;
+                      final isOut = it.quantity <= 0;
+                      final statusColor = isOut
+                          ? AppColors.dangerOf(context)
+                          : const Color(0xFFD97706);
+                      final statusLabel = isOut ? 'نفدت الكمية' : 'تحت حد التنبيه';
+
+                      return Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: r.selected
+                              ? AppColors.surfaceOf(context)
+                              : AppColors.surfaceOf(context)
+                                  .withValues(alpha: 0.5),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: r.selected
+                                ? statusColor.withValues(alpha: 0.45)
+                                : AppColors.borderOf(context),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Checkbox(
+                              value: r.selected,
+                              visualDensity: VisualDensity.compact,
+                              onChanged: (v) =>
+                                  setState(() => r.selected = v ?? false),
+                            ),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          it.name,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.w800,
+                                            fontSize: 13.5,
+                                          ),
+                                        ),
+                                      ),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 6, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: statusColor.withValues(
+                                              alpha: 0.12),
+                                          borderRadius:
+                                              BorderRadius.circular(6),
+                                        ),
+                                        child: Text(
+                                          statusLabel,
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w800,
+                                            color: statusColor,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    'المتوفر: ${Fmt.qty(it.quantity)} ${it.unit}  •  حد التنبيه: ${Fmt.qty(it.minQuantity)} ${it.unit}',
+                                    style: TextStyle(
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.w600,
+                                      color: AppColors.text2Of(context),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            // التحكم بالكمية المطلوبة للطلب
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                Text(
+                                  'الكمية المطلوبة',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    color: AppColors.text3Of(context),
+                                  ),
+                                ),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      visualDensity: VisualDensity.compact,
+                                      iconSize: 18,
+                                      icon: const Icon(
+                                          Icons.remove_circle_outline),
+                                      onPressed: () {
+                                        if (r.requiredQty > 1) {
+                                          setState(() => r.requiredQty -= 1);
+                                        }
+                                      },
+                                    ),
+                                    InkWell(
+                                      borderRadius: BorderRadius.circular(6),
+                                      onTap: () => _promptEditRequiredQty(r),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 8, vertical: 3),
+                                        decoration: BoxDecoration(
+                                          color: AppColors.primaryOf(context)
+                                              .withValues(alpha: 0.10),
+                                          borderRadius:
+                                              BorderRadius.circular(6),
+                                        ),
+                                        child: Text(
+                                          Fmt.qty(r.requiredQty),
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.w900,
+                                            fontSize: 13,
+                                            color: AppColors.primaryOf(context),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    IconButton(
+                                      visualDensity: VisualDensity.compact,
+                                      iconSize: 18,
+                                      icon:
+                                          const Icon(Icons.add_circle_outline),
+                                      onPressed: () =>
+                                          setState(() => r.requiredQty += 1),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+          ),
+
+          const SizedBox(height: 12),
+          // أزرار الحفظ والمشاركة (كصورة PNG أو كملف PDF)
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    backgroundColor: const Color(0xFF0F3E78),
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: (_busyImage || _busyPdf) ? null : _exportAsImage,
+                  icon: _busyImage
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.image_outlined, size: 20),
+                  label: const Text(
+                    'حفظ كصورة (PNG)',
+                    style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13.5),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    backgroundColor: const Color(0xFFB91C1C),
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: (_busyImage || _busyPdf) ? null : _exportAsPdf,
+                  icon: _busyPdf
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.picture_as_pdf_outlined, size: 20),
+                  label: const Text(
+                    'حفظ كملف PDF',
+                    style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13.5),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// يولّد ملف PDF عربي متكامل لقائمة النواقص.
+Future<Uint8List> _buildShortagesPdf({
+  required String orgName,
+  required List<_ShortageDraftRow> rows,
+  required DateTime date,
+}) async {
+  final theme = await PdfFonts.theme();
+  final doc = pw.Document(theme: theme);
+  final dateStr = Fmt.dateTime(date);
+
+  doc.addPage(
+    pw.MultiPage(
+      pageFormat: PdfPageFormat.a4,
+      margin: const pw.EdgeInsets.all(28),
+      textDirection: pw.TextDirection.rtl,
+      header: (_) => PdfFonts.rtl(
+        child: pw.Container(
+          margin: const pw.EdgeInsets.only(bottom: 14),
+          padding: const pw.EdgeInsets.all(14),
+          decoration: const pw.BoxDecoration(
+            color: PdfColor.fromInt(0xFF0F3E78),
+            borderRadius: pw.BorderRadius.all(pw.Radius.circular(8)),
+          ),
+          child: pw.Row(
+            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+            children: [
+              pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text(
+                    orgName.isEmpty ? 'قائمة نواقص المخزون' : orgName,
+                    style: pw.TextStyle(
+                      color: PdfColors.white,
+                      fontSize: 16,
+                      fontWeight: pw.FontWeight.bold,
+                    ),
+                  ),
+                  pw.SizedBox(height: 3),
+                  pw.Text(
+                    'قائمة النواقص وطلب البضاعة (الأصناف تحت حد التنبيه)',
+                    style: const pw.TextStyle(
+                      color: PdfColors.white,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
+              pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.end,
+                children: [
+                  pw.Text(
+                    'التاريخ: $dateStr',
+                    style: const pw.TextStyle(
+                      color: PdfColors.white,
+                      fontSize: 10,
+                    ),
+                  ),
+                  pw.SizedBox(height: 3),
+                  pw.Text(
+                    'إجمالي الأصناف: ${rows.length}',
+                    style: pw.TextStyle(
+                      color: PdfColors.amber200,
+                      fontSize: 11,
+                      fontWeight: pw.FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+      build: (_) => [
+        PdfFonts.rtl(
+          child: pw.Table(
+            border: pw.TableBorder.all(
+              color: const PdfColor.fromInt(0xFFCBD5E1),
+              width: 0.7,
+            ),
+            columnWidths: const {
+              0: pw.FlexColumnWidth(1.2), // الحالة
+              1: pw.FlexColumnWidth(1.1), // الوحدة
+              2: pw.FlexColumnWidth(1.3), // الكمية المطلوبة
+              3: pw.FlexColumnWidth(1.2), // حد التنبيه
+              4: pw.FlexColumnWidth(1.2), // المتوفر
+              5: pw.FlexColumnWidth(3.2), // اسم الصنف
+              6: pw.FixedColumnWidth(28), // م
+            },
+            children: [
+              pw.TableRow(
+                decoration: const pw.BoxDecoration(
+                  color: PdfColor.fromInt(0xFFF1F5F9),
+                ),
+                children: [
+                  _pdfCell('الحالة', bold: true),
+                  _pdfCell('الوحدة', bold: true),
+                  _pdfCell('المطلوب طلبه', bold: true),
+                  _pdfCell('حد التنبيه', bold: true),
+                  _pdfCell('المتوفر', bold: true),
+                  _pdfCell('اسم الصنف', bold: true, alignRight: true),
+                  _pdfCell('م', bold: true),
+                ],
+              ),
+              for (var i = 0; i < rows.length; i++)
+                pw.TableRow(
+                  decoration: pw.BoxDecoration(
+                    color: i.isEven
+                        ? PdfColors.white
+                        : const PdfColor.fromInt(0xFFF8FAFC),
+                  ),
+                  children: [
+                    _pdfCell(
+                      rows[i].item.quantity <= 0 ? 'نفد' : 'تحت الحد',
+                      color: rows[i].item.quantity <= 0
+                          ? const PdfColor.fromInt(0xFFB91C1C)
+                          : const PdfColor.fromInt(0xFFB45309),
+                      bold: true,
+                    ),
+                    _pdfCell(rows[i].item.unit),
+                    _pdfCell(
+                      Fmt.qty(rows[i].requiredQty),
+                      bold: true,
+                      color: const PdfColor.fromInt(0xFF0F3E78),
+                    ),
+                    _pdfCell(Fmt.qty(rows[i].item.minQuantity)),
+                    _pdfCell(Fmt.qty(rows[i].item.quantity)),
+                    _pdfCell(rows[i].item.name, bold: true, alignRight: true),
+                    _pdfCell('${i + 1}'),
+                  ],
+                ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+
+  return doc.save();
+}
+
+pw.Widget _pdfCell(
+  String text, {
+  bool bold = false,
+  bool alignRight = false,
+  PdfColor? color,
+}) =>
+    pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+      child: pw.Text(
+        text,
+        textAlign: alignRight ? pw.TextAlign.right : pw.TextAlign.center,
+        textDirection: pw.TextDirection.rtl,
+        style: pw.TextStyle(
+          fontSize: 10,
+          fontWeight: bold ? pw.FontWeight.bold : pw.FontWeight.normal,
+          color: color ?? const PdfColor.fromInt(0xFF0F172A),
+        ),
+      ),
+    );
+
+/// يرسم صورة عالية الدقة (PNG) لقائمة النواقص باللغة العربية.
+Future<Uint8List> _renderShortagesImage({
+  required String orgName,
+  required List<_ShortageDraftRow> rows,
+  required DateTime date,
+}) async {
+  const double width = 860;
+  const double headerHeight = 118;
+  const double tableHeaderHeight = 46;
+  const double rowHeight = 46;
+  const double footerHeight = 52;
+  const double pad = 24;
+
+  final double totalHeight = headerHeight +
+      tableHeaderHeight +
+      (rows.length * rowHeight) +
+      footerHeight +
+      (pad * 2);
+
+  final recorder = ui.PictureRecorder();
+  final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, width, totalHeight));
+
+  // خلفية بيضاء كاملة
+  canvas.drawRect(
+    Rect.fromLTWH(0, 0, width, totalHeight),
+    Paint()..color = const Color(0xFFF8FAFC),
+  );
+
+  // ترويسة كحلية
+  final headerRect = RRect.fromRectAndRadius(
+    const Rect.fromLTWH(pad, pad, width - pad * 2, headerHeight - 12),
+    const Radius.circular(14),
+  );
+  canvas.drawRRect(
+    headerRect,
+    Paint()..color = const Color(0xFF0F3E78),
+  );
+
+  _drawCanvasText(
+    canvas,
+    text: orgName.isEmpty ? 'قائمة نواقص المخزون' : orgName,
+    x: pad + 20,
+    y: pad + 18,
+    maxWidth: width - pad * 2 - 40,
+    fontSize: 22,
+    fontWeight: FontWeight.w900,
+    color: Colors.white,
+    align: TextAlign.right,
+  );
+  _drawCanvasText(
+    canvas,
+    text:
+        'قائمة النواقص وطلب البضاعة (${rows.length} صنف)  •  ${Fmt.dateTime(date)}',
+    x: pad + 20,
+    y: pad + 56,
+    maxWidth: width - pad * 2 - 40,
+    fontSize: 14.5,
+    fontWeight: FontWeight.w700,
+    color: const Color(0xFFFDE68A),
+    align: TextAlign.right,
+  );
+
+  double y = pad + headerHeight;
+
+  // ترويسة الجدول
+  const tableWidth = width - pad * 2;
+  canvas.drawRRect(
+    RRect.fromRectAndCorners(
+      Rect.fromLTWH(pad, y, tableWidth, tableHeaderHeight),
+      topLeft: const Radius.circular(10),
+      topRight: const Radius.circular(10),
+    ),
+    Paint()..color = const Color(0xFFE2E8F0),
+  );
+
+  // أعمدة الجدول من اليمين إلى اليسار:
+  // م (50) | اسم الصنف (310) | المتوفر (110) | حد التنبيه (110) | المطلوب (130) | الوحدة (102)
+  final cols = <({String title, double w})>[
+    (title: 'م', w: 50),
+    (title: 'اسم الصنف', w: 310),
+    (title: 'المتوفر', w: 110),
+    (title: 'حد التنبيه', w: 110),
+    (title: 'الكمية المطلوبة', w: 130),
+    (title: 'الوحدة', w: 102),
+  ];
+
+  double colRight = width - pad;
+  for (final col in cols) {
+    final colLeft = colRight - col.w;
+    _drawCanvasText(
+      canvas,
+      text: col.title,
+      x: colLeft + 6,
+      y: y + 12,
+      maxWidth: col.w - 12,
+      fontSize: 13.5,
+      fontWeight: FontWeight.w900,
+      color: const Color(0xFF0F172A),
+      align: col.title == 'اسم الصنف' ? TextAlign.right : TextAlign.center,
+    );
+    colRight = colLeft;
+  }
+
+  y += tableHeaderHeight;
+
+  for (var i = 0; i < rows.length; i++) {
+    final r = rows[i];
+    final rowBg = i.isEven ? Colors.white : const Color(0xFFF1F5F9);
+    canvas.drawRect(
+      Rect.fromLTWH(pad, y, tableWidth, rowHeight),
+      Paint()..color = rowBg,
+    );
+    canvas.drawLine(
+      Offset(pad, y + rowHeight),
+      Offset(width - pad, y + rowHeight),
+      Paint()
+        ..color = const Color(0xFFCBD5E1)
+        ..strokeWidth = 1,
+    );
+
+    final values = <String>[
+      '${i + 1}',
+      r.item.name,
+      Fmt.qty(r.item.quantity),
+      Fmt.qty(r.item.minQuantity),
+      Fmt.qty(r.requiredQty),
+      r.item.unit,
+    ];
+
+    double cRight = width - pad;
+    for (var c = 0; c < cols.length; c++) {
+      final w = cols[c].w;
+      final cLeft = cRight - w;
+      final isName = c == 1;
+      final isReq = c == 4;
+      final isAvail = c == 2;
+      Color txtColor = const Color(0xFF1E293B);
+      if (isReq) txtColor = const Color(0xFF0F3E78);
+      if (isAvail && r.item.quantity <= 0) txtColor = const Color(0xFFB91C1C);
+
+      _drawCanvasText(
+        canvas,
+        text: values[c],
+        x: cLeft + 6,
+        y: y + 12,
+        maxWidth: w - 12,
+        fontSize: 13.5,
+        fontWeight: (isName || isReq) ? FontWeight.w800 : FontWeight.w600,
+        color: txtColor,
+        align: isName ? TextAlign.right : TextAlign.center,
+      );
+      cRight = cLeft;
+    }
+
+    y += rowHeight;
+  }
+
+  // تذييل الصورة
+  _drawCanvasText(
+    canvas,
+    text: 'تم استخراج قائمة النواقص آلياً — إجمالي الأصناف المطلوبة: ${rows.length}',
+    x: pad,
+    y: y + 14,
+    maxWidth: tableWidth,
+    fontSize: 12.5,
+    fontWeight: FontWeight.w700,
+    color: const Color(0xFF64748B),
+    align: TextAlign.center,
+  );
+
+  final picture = recorder.endRecording();
+  final img = await picture.toImage(width.toInt(), totalHeight.ceil());
+  final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+  return byteData!.buffer.asUint8List();
+}
+
+void _drawCanvasText(
+  Canvas canvas, {
+  required String text,
+  required double x,
+  required double y,
+  required double maxWidth,
+  required double fontSize,
+  required FontWeight fontWeight,
+  required Color color,
+  TextAlign align = TextAlign.right,
+}) {
+  final tp = TextPainter(
+    text: TextSpan(
+      text: text,
+      style: TextStyle(
+        fontSize: fontSize,
+        fontWeight: fontWeight,
+        color: color,
+        fontFamily: 'Cairo',
+      ),
+    ),
+    textDirection: TextDirection.rtl,
+    textAlign: align,
+    maxLines: 1,
+    ellipsis: '…',
+  )..layout(minWidth: maxWidth, maxWidth: maxWidth);
+  tp.paint(canvas, Offset(x, y));
+}
+

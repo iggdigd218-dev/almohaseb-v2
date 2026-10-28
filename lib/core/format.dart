@@ -19,6 +19,12 @@ class Fmt {
 
   static String moneyFor(double v, CurrencyDef c) => money(v, c.decimal);
 
+  /// تنسيق الكميات (بدون كسور إن كانت عدداً صحيحاً، أو بمنزلتين عشريتين).
+  static String qty(double v) =>
+      v == v.roundToDouble() ? money(v, 0) : money(v, 2);
+
+  static String num(double v, [int decimals = 0]) => money(v, decimals);
+
   // ══════ (سلامة الحساب المالي) تقريب ومقارنة بتسامح ══════
 
   /// تسامح المقارنة بين مبلغين: يمنع قبولاً أو رفضاً خاطئاً ناتجاً عن

@@ -7,6 +7,12 @@ import '../core/theme.dart';
 import '../data/providers.dart';
 import 'widgets.dart';
 import 'home_shell.dart' show AppScreen;
+import 'inventory_screen.dart'
+    show
+        inventoryShortagesModeProvider,
+        isShortageItem,
+        openShortagesListSheet;
+
 
 /// لوحة التحكم الرئيسية — تصميم مبسّط:
 ///  - بطاقة ملخّص الحساب أعلى الشاشة مع سحب أفقي بين العملات.
@@ -137,7 +143,7 @@ class DashboardScreen extends ConsumerWidget {
             },
           ),
           const SizedBox(height: 18),
-          const _Alerts(),
+          _Alerts(onOpen: onOpen),
           const SizedBox(height: 8),
           _Recent(onOpen: onOpen),
         ],
@@ -530,56 +536,201 @@ class _FeatureTile extends StatelessWidget {
 // ===========================================================================
 
 class _Alerts extends ConsumerWidget {
-  const _Alerts();
+  final void Function(AppScreen)? onOpen;
+  const _Alerts({this.onOpen});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final alerts = ref.watch(alertsProvider).valueOrNull ?? [];
-    if (alerts.isEmpty) return const SizedBox.shrink();
+    final allItems = ref.watch(itemsProvider).valueOrNull ?? [];
+    final shortages = allItems.where(isShortageItem).toList();
     final curs =
         ref.watch(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const SectionTitle('تنبيهات'),
+        // قسم النواقص (الأصناف التي وصلت تحت حد التنبيه أو نفدت)
+        SectionTitle(
+          'قسم النواقص (${shortages.length})',
+          actionLabel: 'قائمة النواقص (صورة / PDF)',
+          onAction: () => openShortagesListSheet(context, ref),
+        ),
         Card(
-          child: Column(
-            children: alerts.map((a) {
-              final c = curs.firstWhere(
-                (x) => x.code == a.account.currency,
-                orElse: () => kDefaultCurrencies.first,
-              );
-              return ListTile(
-                leading: Icon(
-                  Icons.warning_amber_rounded,
-                  color: AppColors.accentOf(context),
-                ),
-                title: Text(
-                  a.account.name,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
+          child: shortages.isEmpty
+              ? ListTile(
+                  leading: Icon(
+                    Icons.check_circle_outline_rounded,
+                    color: AppColors.greenOf(context),
                   ),
+                  title: const Text(
+                    'جميع الأصناف فوق حد التنبيه',
+                    style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800),
+                  ),
+                  subtitle: const Text(
+                    'اضغط لفتح قسم النواقص أو إنشاء قائمة طلب بضاعة (صورة / PDF)',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () {
+                    ref.read(inventoryShortagesModeProvider.notifier).state =
+                        true;
+                    onOpen?.call(AppScreen.inventory);
+                  },
+                )
+              : Column(
+                  children: [
+                    for (var i = 0; i < shortages.take(5).length; i++) ...[
+                      if (i > 0) const Divider(height: 1, indent: 52),
+                      Builder(
+                        builder: (context) {
+                          final it = shortages[i];
+                          final isOut = it.quantity <= 0;
+                          final badgeColor = isOut
+                              ? AppColors.dangerOf(context)
+                              : const Color(0xFFD97706);
+                          return ListTile(
+                            dense: true,
+                            leading: Container(
+                              width: 38,
+                              height: 38,
+                              decoration: BoxDecoration(
+                                color: badgeColor.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Icon(
+                                isOut
+                                    ? Icons.production_quantity_limits_rounded
+                                    : Icons.warning_amber_rounded,
+                                color: badgeColor,
+                                size: 20,
+                              ),
+                            ),
+                            title: Text(
+                              it.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 14.5,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            subtitle: Text(
+                              'المتوفر: ${Fmt.qty(it.quantity)} ${it.unit}  •  حد التنبيه: ${Fmt.qty(it.minQuantity)} ${it.unit}',
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            trailing: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                color: badgeColor.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                isOut ? 'نفد' : 'تحت الحد',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w900,
+                                  color: badgeColor,
+                                ),
+                              ),
+                            ),
+                            onTap: () {
+                              ref
+                                  .read(inventoryShortagesModeProvider.notifier)
+                                  .state = true;
+                              onOpen?.call(AppScreen.inventory);
+                            },
+                          );
+                        },
+                      ),
+                    ],
+                    const Divider(height: 1),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: () {
+                                ref
+                                    .read(
+                                      inventoryShortagesModeProvider.notifier,
+                                    )
+                                    .state = true;
+                                onOpen?.call(AppScreen.inventory);
+                              },
+                              icon: const Icon(
+                                Icons.inventory_2_outlined,
+                                size: 17,
+                              ),
+                              label: Text('عرض كل النواقص (${shortages.length})'),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: FilledButton.tonalIcon(
+                              onPressed: () =>
+                                  openShortagesListSheet(context, ref),
+                              icon: const Icon(
+                                Icons.picture_as_pdf_outlined,
+                                size: 17,
+                              ),
+                              label: const Text('حفظ كصورة / PDF'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-                subtitle: Text(
-                  'تجاوز الحد الائتماني '
-                  '(${Fmt.money(a.account.creditLimit ?? 0, c.decimal)} ${c.symbol})',
-                  style: const TextStyle(fontSize: 13.5),
-                ),
-                trailing: Text(
-                  '${Fmt.money(a.balance, c.decimal)} ${c.symbol}',
-                  style: TextStyle(
-                    fontSize: 14.5,
-                    fontWeight: FontWeight.w800,
+        ),
+        const SizedBox(height: 12),
+        if (alerts.isNotEmpty) ...[
+          const SectionTitle('تنبيهات الديون'),
+          Card(
+            child: Column(
+              children: alerts.map((a) {
+                final c = curs.firstWhere(
+                  (x) => x.code == a.account.currency,
+                  orElse: () => kDefaultCurrencies.first,
+                );
+                return ListTile(
+                  leading: Icon(
+                    Icons.warning_amber_rounded,
                     color: AppColors.accentOf(context),
                   ),
-                ),
-              );
-            }).toList(),
+                  title: Text(
+                    a.account.name,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  subtitle: Text(
+                    'تجاوز الحد الائتماني '
+                    '(${Fmt.money(a.account.creditLimit ?? 0, c.decimal)} ${c.symbol})',
+                    style: const TextStyle(fontSize: 13.5),
+                  ),
+                  trailing: Text(
+                    '${Fmt.money(a.balance, c.decimal)} ${c.symbol}',
+                    style: TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.accentOf(context),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
           ),
-        ),
-        const SizedBox(height: 10),
+          const SizedBox(height: 10),
+        ],
       ],
     );
   }
