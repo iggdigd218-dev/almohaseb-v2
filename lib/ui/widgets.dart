@@ -402,6 +402,7 @@ void showSnack(
   bool error = false,
   bool silent = false,
 }) {
+  if (!context.mounted) return;
   // رسائل الخطأ لم تعد شريطاً أحمر صغيراً أسفل الشاشة يختفي خلف النوافذ:
   // تظهر الآن نافذة منبثقة بارزة وسط الشاشة توضح للمستخدم سبب الخطأ.
   if (error) {
@@ -432,8 +433,10 @@ void showSnack(
       Sfx.click();
     }
   }
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  if (messenger == null) return;
   final displayMessage = error ? friendlyErrorText(message) : message;
-  ScaffoldMessenger.of(context)
+  messenger
     ..clearSnackBars()
     ..showSnackBar(
       SnackBar(

@@ -1002,12 +1002,15 @@ class MainActivity : FlutterFragmentActivity() {
         } else null
 
         val jid = if (digits.length >= 6) "$digits@s.whatsapp.net" else ""
+        val sharedClip = if (uri != null) {
+            ClipData.newUri(contentResolver, "voucher", uri)
+        } else null
 
         val baseIntent = Intent(Intent.ACTION_SEND).apply {
             if (uri != null) {
-                type = "image/*"
+                type = "image/png"
                 putExtra(Intent.EXTRA_STREAM, uri)
-                clipData = ClipData.newUri(contentResolver, "voucher", uri)
+                clipData = sharedClip
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             } else {
                 type = "text/plain"
@@ -1019,7 +1022,25 @@ class MainActivity : FlutterFragmentActivity() {
                 putExtra("jid", jid)
                 putExtra("address", digits)
             }
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+        if (uri != null) {
+            try {
+                val resInfoList = packageManager.queryIntentActivities(
+                    baseIntent,
+                    PackageManager.MATCH_DEFAULT_ONLY,
+                )
+                for (resolveInfo in resInfoList) {
+                    val pkgName = resolveInfo.activityInfo?.packageName ?: continue
+                    try {
+                        grantUriPermission(
+                            pkgName,
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                        )
+                    } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
         }
 
         val initialIntents = mutableListOf<Intent>()
@@ -1030,7 +1051,18 @@ class MainActivity : FlutterFragmentActivity() {
                     try {
                         grantUriPermission(waPkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     } catch (_: Exception) {}
-                    initialIntents.add(imageIntent(waPkg, uri, text, jid, includeJid = true))
+                    initialIntents.add(
+                        Intent(Intent.ACTION_SEND).apply {
+                            setPackage(waPkg)
+                            type = "image/png"
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            putExtra(Intent.EXTRA_TEXT, text)
+                            putExtra(Intent.EXTRA_TITLE, "سند العملية")
+                            putExtra("jid", jid)
+                            clipData = sharedClip
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                    )
                 } else {
                     initialIntents.add(
                         Intent(
@@ -1038,7 +1070,6 @@ class MainActivity : FlutterFragmentActivity() {
                             Uri.parse("https://api.whatsapp.com/send?phone=$digits&text=${Uri.encode(text)}"),
                         ).apply {
                             setPackage(waPkg)
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         }
                     )
                 }
@@ -1053,6 +1084,7 @@ class MainActivity : FlutterFragmentActivity() {
                     putExtra(Intent.EXTRA_TEXT, text)
                     if (uri != null) {
                         putExtra(Intent.EXTRA_STREAM, uri)
+                        clipData = sharedClip
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         if (!smsPkg.isNullOrEmpty()) {
                             try {
@@ -1060,7 +1092,6 @@ class MainActivity : FlutterFragmentActivity() {
                             } catch (_: Exception) {}
                         }
                     }
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 initialIntents.add(smsIntent)
             } catch (_: Exception) {}
@@ -1070,11 +1101,22 @@ class MainActivity : FlutterFragmentActivity() {
             if (initialIntents.isNotEmpty()) {
                 putExtra(Intent.EXTRA_INITIAL_INTENTS, initialIntents.toTypedArray())
             }
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (sharedClip != null) {
+                clipData = sharedClip
+            }
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
-        return if (launch(chooser)) "ok" else "error"
+        if (launch(chooser)) return "ok"
+
+        val fallbackChooser = Intent.createChooser(baseIntent, "مشاركة إشعار وسند العملية").apply {
+            if (sharedClip != null) {
+                clipData = sharedClip
+            }
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return if (launch(fallbackChooser)) "ok" else "error"
     }
 
     private fun launch(intent: Intent): Boolean = try {

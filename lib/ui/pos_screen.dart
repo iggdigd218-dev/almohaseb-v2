@@ -3401,16 +3401,39 @@ class _PosScreenState extends ConsumerState<PosScreen>
         final sym = cur.symbol;
         if (sheetCtx != null && sheetCtx.mounted) Navigator.pop(sheetCtx);
         Sfx.opCreated(); // صوت الدفع + اهتزاز طويل (1.5 ث) عند إنشاء العملية.
-        _showSuccessDialog(
-          txId,
-          refNum,
-          lines,
-          totalAmount: totAmt,
-          paidAmount: isPartialSale ? paidAmt : null,
-          remainingAmount: isPartialSale ? remAmt : null,
-          currencySymbol: sym,
-        );
         _clearCart();
+
+        if (isRealDesktop) {
+          // في نسخة الويندوز: إرسال أمر الطباعة في الخلفية فوراً دون إرباك الموظف بنوافذ إضافية.
+          showSnack(
+            context,
+            'تم حفظ الفاتورة #$refNum وإرسال أمر الطباعة في الخلفية ✅',
+            silent: true,
+          );
+          unawaited(_printThermalInvoiceInBackground(txId, selectedAcc, lines));
+        } else if (TxShare.isAutoShareConfigured(selectedAcc)) {
+          final savedTx = await repo.transactionById(txId);
+          if (savedTx != null && mounted) {
+            unawaited(
+              TxShare.sendNow(
+                context,
+                ref,
+                tx: savedTx,
+                account: selectedAcc,
+              ),
+            );
+          }
+        } else {
+          _showSuccessDialog(
+            txId,
+            refNum,
+            lines,
+            totalAmount: totAmt,
+            paidAmount: isPartialSale ? paidAmt : null,
+            remainingAmount: isPartialSale ? remAmt : null,
+            currencySymbol: sym,
+          );
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -3428,6 +3451,78 @@ class _PosScreenState extends ConsumerState<PosScreen>
     }
   }
 
+  Future<void> _printThermalInvoiceInBackground(
+    int txId,
+    Account? account,
+    List<InvoiceLine> lines,
+  ) async {
+    try {
+      final repo = ref.read(repoProvider);
+      final tx = await repo.transactionById(txId);
+      if (tx == null) return;
+      final acc = account ??
+          (tx.accountId == null ? null : await repo.account(tx.accountId!));
+      final stamp = await featureNeedsStamp(ref, Feature.reportsExport);
+      final st = await repo.settings();
+      final orgName = (st['businessName'] ?? 'المتجر').trim();
+      final orgPhone = (st['phone'] ?? '').trim();
+      final orgAddress =
+          (st['address'] ?? st['businessAddress'] ?? st['orgAddress'] ?? '')
+              .trim();
+      var sellerOrDevice = (st['user.name'] ??
+              st['currentUserName'] ??
+              st['cashierName'] ??
+              st['ownerName'] ??
+              st['devicePrefix'] ??
+              '')
+          .trim();
+      if (sellerOrDevice.isEmpty) {
+        sellerOrDevice = 'الجهاز الرئيسي';
+      }
+      final footer = (st['voucherFooter'] ?? 'شكراً لزيارتكم!').trim();
+      final logoPath = (st['logo'] ??
+              st['logoPath'] ??
+              st['account.photoPath'] ??
+              '')
+          .trim();
+      final logoBase64 =
+          (st['org.icon.b64'] ?? st['logoBase64'] ?? '').trim();
+
+      final bytes = await buildThermalInvoicePdf(
+        tx: tx,
+        account: acc,
+        lines: lines,
+        orgName: orgName,
+        orgPhone: orgPhone,
+        footer: footer,
+        orgAddress: orgAddress,
+        sellerOrDevice: sellerOrDevice,
+        logoPath: logoPath,
+        logoBase64: logoBase64,
+        stamp: stamp,
+      );
+
+      try {
+        final printers = await Printing.listPrinters();
+        final defaultPrinter = printers.where((p) => p.isDefault).firstOrNull ??
+            printers.firstOrNull;
+        if (defaultPrinter != null) {
+          final printed = await Printing.directPrintPdf(
+            printer: defaultPrinter,
+            onLayout: (_) async => bytes,
+            name: 'invoice-${tx.reference}.pdf',
+          );
+          if (printed) return;
+        }
+      } catch (_) {}
+
+      await Printing.layoutPdf(
+        onLayout: (_) async => bytes,
+        name: 'invoice-${tx.reference}.pdf',
+      );
+    } catch (_) {}
+  }
+
   void _showSuccessDialog(
     int txId,
     String refNum,
@@ -3441,114 +3536,151 @@ class _PosScreenState extends ConsumerState<PosScreen>
       context: context,
       barrierDismissible: false,
       builder: (ctx) {
-        return AlertDialog(
-          title: const Row(
-            children: [
-              Icon(Icons.check_circle, color: AppColors.green),
-              SizedBox(width: 8),
-              Text('تمت العملية بنجاح ✅'),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('رقم الفاتورة: $refNum'),
-              Text('عدد الأصناف: ${lines.length}'),
-              if (totalAmount != null) ...[
-                const SizedBox(height: 6),
-                Text(
-                  'إجمالي الفاتورة: ${Fmt.money(totalAmount)} $currencySymbol',
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
+        bool sharing = false;
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) => AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.check_circle, color: AppColors.green),
+                SizedBox(width: 8),
+                Text('تمت العملية بنجاح ✅'),
               ],
-              if (paidAmount != null && remainingAmount != null) ...[
-                const SizedBox(height: 6),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Colors.orange.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: Colors.orange.withValues(alpha: 0.4),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('رقم الفاتورة: $refNum'),
+                Text('عدد الأصناف: ${lines.length}'),
+                if (totalAmount != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'إجمالي الفاتورة: ${Fmt.money(totalAmount)} $currencySymbol',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ],
+                if (paidAmount != null && remainingAmount != null) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: Colors.orange.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '✅ المبلغ المدفوع: ${Fmt.money(paidAmount)} $currencySymbol',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
+                            color: AppColors.green,
+                            fontSize: 13,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '🔴 المبلغ المتبقي (آجل): ${Fmt.money(remainingAmount)} $currencySymbol',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
+                            color: AppColors.red,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '✅ المبلغ المدفوع: ${Fmt.money(paidAmount)} $currencySymbol',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          color: AppColors.green,
-                          fontSize: 13,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        '🔴 المبلغ المتبقي (آجل): ${Fmt.money(remainingAmount)} $currencySymbol',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          color: AppColors.red,
-                          fontSize: 13,
-                        ),
-                      ),
-                    ],
-                  ),
+                ],
+                const SizedBox(height: 12),
+                const Text(
+                  'يمكنك طباعة الإيصال الحراري أو مشاركة الفاتورة وصورة السند عالية الدقة عبر نافذة مشاركة النظام:',
                 ),
               ],
-              const SizedBox(height: 12),
-              const Text(
-                'يمكنك طباعة الإيصال الحراري أو مشاركة الفاتورة عبر واتساب مباشرة:',
+            ),
+            actions: [
+              OutlinedButton.icon(
+                icon: const Icon(Icons.print_outlined),
+                label: const Text('طباعة إيصال حراري (80mm)'),
+                onPressed: sharing
+                    ? null
+                    : () async {
+                        final repo = ref.read(repoProvider);
+                        final tx = await repo.transactionById(txId);
+                        if (tx == null) return;
+                        final acc = tx.accountId == null
+                            ? null
+                            : await repo.account(tx.accountId!);
+                        final stamp =
+                            await featureNeedsStamp(ref, Feature.reportsExport);
+                        if (context.mounted) {
+                          await _printThermalInvoice(
+                            tx,
+                            acc,
+                            lines,
+                            stamp: stamp,
+                          );
+                        }
+                      },
+              ),
+              FilledButton.icon(
+                icon: sharing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.share_outlined),
+                label: Text(sharing ? 'جارٍ التجهيز…' : 'مشاركة'),
+                onPressed: sharing
+                    ? null
+                    : () async {
+                        setDialogState(() => sharing = true);
+                        try {
+                          final repo = ref.read(repoProvider);
+                          final tx = await repo.transactionById(txId);
+                          if (!mounted || tx == null) return;
+                          final acc = tx.accountId == null
+                              ? null
+                              : await repo.account(tx.accountId!);
+                          if (!mounted) return;
+                          if (TxShare.isAutoShareConfigured(acc)) {
+                            await TxShare.sendNow(
+                              context,
+                              ref,
+                              tx: tx,
+                              account: acc,
+                            );
+                          } else {
+                            await TxShare.shareViaSystemSheet(
+                              context,
+                              ref,
+                              tx: tx,
+                              account: acc,
+                            );
+                          }
+                          if (ctx.mounted) {
+                            Navigator.pop(ctx);
+                          }
+                        } finally {
+                          if (ctx.mounted) {
+                            setDialogState(() => sharing = false);
+                          }
+                        }
+                      },
+              ),
+              TextButton(
+                onPressed: sharing ? null : () => Navigator.pop(ctx),
+                child: const Text('فاتورة جديدة'),
               ),
             ],
           ),
-          actions: [
-            OutlinedButton.icon(
-              icon: const Icon(Icons.print_outlined),
-              label: const Text('طباعة إيصال حراري (80mm)'),
-              onPressed: () async {
-                final repo = ref.read(repoProvider);
-                final tx = await repo.transactionById(txId);
-                if (tx == null) return;
-                final acc = tx.accountId == null
-                    ? null
-                    : await repo.account(tx.accountId!);
-                final stamp = await featureNeedsStamp(
-                    ref, Feature.reportsExport);
-                if (context.mounted) {
-                  await _printThermalInvoice(tx, acc, lines, stamp: stamp);
-                }
-              },
-            ),
-            FilledButton.icon(
-              icon: const Icon(Icons.send_outlined),
-              label: const Text('مشاركة / واتساب'),
-              onPressed: () async {
-                final repo = ref.read(repoProvider);
-                final tx = await repo.transactionById(txId);
-                if (!mounted || tx == null) return;
-                final acc = tx.accountId == null
-                    ? null
-                    : await repo.account(tx.accountId!);
-                if (!mounted) return;
-                if (acc == null || acc.phone.isEmpty) {
-                  showSnack(
-                    context,
-                    'لا يوجد رقم هاتف مسجل للعميل',
-                    error: true,
-                  );
-                  return;
-                }
-                await TxShare.sendNow(context, ref, tx: tx, account: acc);
-              },
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('فاتورة جديدة'),
-            ),
-          ],
         );
       },
     );
@@ -3920,11 +4052,40 @@ class _PosHistoryTabState extends ConsumerState<_PosHistoryTab> {
                                 icon: const Icon(
                                     Icons.visibility_outlined, size: 16),
                                 label: const Text(
-                                  'تفاصيل الفاتورة',
+                                  'التفاصيل',
                                   style: TextStyle(fontSize: 12),
                                 ),
                               ),
-                              const SizedBox(width: 8),
+                              const SizedBox(width: 4),
+                              TextButton.icon(
+                                style: TextButton.styleFrom(
+                                  visualDensity: VisualDensity.compact,
+                                ),
+                                onPressed: () async {
+                                  if (TxShare.isAutoShareConfigured(account)) {
+                                    await TxShare.sendNow(
+                                      context,
+                                      ref,
+                                      tx: tx,
+                                      account: account,
+                                    );
+                                  } else {
+                                    await TxShare.shareViaSystemSheet(
+                                      context,
+                                      ref,
+                                      tx: tx,
+                                      account: account,
+                                    );
+                                  }
+                                },
+                                icon:
+                                    const Icon(Icons.share_outlined, size: 16),
+                                label: const Text(
+                                  'مشاركة',
+                                  style: TextStyle(fontSize: 12),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
                               FilledButton.tonalIcon(
                                 style: FilledButton.styleFrom(
                                   visualDensity: VisualDensity.compact,

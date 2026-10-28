@@ -273,6 +273,27 @@ class TxShare {
     return lines.join('\n');
   }
 
+  static Repo _repoOf(BuildContext context, WidgetRef ref) {
+    try {
+      return ref.read(repoProvider);
+    } catch (_) {
+      return ProviderScope.containerOf(context, listen: false)
+          .read(repoProvider);
+    }
+  }
+
+  static void _safeBump(BuildContext context, WidgetRef ref) {
+    try {
+      bump(ref);
+    } catch (_) {
+      if (!context.mounted) return;
+      try {
+        final container = ProviderScope.containerOf(context, listen: false);
+        container.read(dbTickProvider.notifier).state++;
+      } catch (_) {}
+    }
+  }
+
   /// هل تم ضبط إعداد مسبق للمشاركة التلقائية لهذا الحساب؟
   static bool isAutoShareConfigured(Account? a) {
     if (a == null) return false;
@@ -292,7 +313,7 @@ class TxShare {
     required Tx tx,
     Account? account,
   }) async {
-    final repo = ref.read(repoProvider);
+    final repo = _repoOf(context, ref);
     final acc = account ??
         (tx.accountId == null ? null : await repo.account(tx.accountId!));
     final phone = _phoneOf(acc, 'whatsapp');
@@ -313,7 +334,9 @@ class TxShare {
       return TxShareOutcome.failed;
     }
 
-    bump(ref);
+    if (context.mounted) {
+      _safeBump(context, ref);
+    }
 
     if (Platform.isAndroid) {
       final ok = await WhatsApp.systemShare(
@@ -342,7 +365,7 @@ class TxShare {
     bool silentIfNoPhone = false,
     String? forceChannel,
   }) async {
-    final repo = ref.read(repoProvider);
+    final repo = _repoOf(context, ref);
     final acc = account ??
         (tx.accountId == null ? null : await repo.account(tx.accountId!));
 
@@ -430,8 +453,8 @@ class TxShare {
         }
       } catch (_) {}
       final ok = await SmsSender.send(phone: phone, body: text);
-      bump(ref);
       if (context.mounted) {
+        _safeBump(context, ref);
         showSnack(
           context,
           ok
@@ -502,7 +525,9 @@ class TxShare {
       return TxShareOutcome.failed;
     }
 
-    bump(ref);
+    if (context.mounted) {
+      _safeBump(context, ref);
+    }
     if (res == WaResult.imageFailed || res == WaResult.error) {
       final shared = await _shareImageWithText(path, text);
       if (context.mounted) {
@@ -525,7 +550,7 @@ class TxShare {
   static Future<bool> _shareImageWithText(String path, String text) async {
     try {
       await Share.shareXFiles(
-        [XFile(path)],
+        [XFile(path, mimeType: 'image/png')],
         text: text,
         subject: 'سند العملية — إدارة البيانات',
       );
@@ -552,7 +577,7 @@ Future<void> showTxSuccessDialog(
   Account? account,
 }) async {
   if (!context.mounted) return;
-  final repo = ref.read(repoProvider);
+  final repo = TxShare._repoOf(context, ref);
   final acc = account ??
       (tx.accountId == null ? null : await repo.account(tx.accountId!));
   final currencies = await repo.currencies();
@@ -562,71 +587,132 @@ Future<void> showTxSuccessDialog(
   );
   if (!context.mounted) return;
 
-  final refNum = tx.reference.trim().isNotEmpty
-      ? tx.reference.trim()
-      : (tx.id != null ? '${tx.id}' : '');
-
   await showDialog<void>(
     context: context,
     barrierDismissible: true,
-    builder: (ctx) {
-      return AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.check_circle, color: AppColors.green),
-            SizedBox(width: 8),
-            Expanded(child: Text('تمت العملية بنجاح ✅')),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('نوع العملية: ${tx.type.icon} ${tx.type.label}'),
-            if (refNum.isNotEmpty) Text('رقم المرجع / السند: #$refNum'),
-            if (acc != null) Text('الحساب / العميل: ${acc.name}'),
-            const SizedBox(height: 6),
-            Text(
-              'المبلغ: ${Fmt.money(tx.amount, cur.decimal)} ${cur.symbol}',
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'يمكنك مشاركة إشعار العملية مع صورة السند عالية الدقة عبر نافذة مشاركة النظام (واتساب، الرسائل النصية، وغيرها):',
-              style: TextStyle(fontSize: 13),
-            ),
-          ],
-        ),
-        actions: [
-          OutlinedButton.icon(
-            icon: const Icon(Icons.receipt_long_outlined),
-            label: const Text('معاينة السند'),
-            onPressed: () {
-              Navigator.pop(ctx);
-              showReceiptPreview(context, ref, tx: tx, account: acc);
-            },
+    builder: (_) => _TxSuccessDialog(
+      tx: tx,
+      account: acc,
+      currency: cur,
+    ),
+  );
+}
+
+class _TxSuccessDialog extends ConsumerStatefulWidget {
+  final Tx tx;
+  final Account? account;
+  final CurrencyDef currency;
+
+  const _TxSuccessDialog({
+    required this.tx,
+    required this.account,
+    required this.currency,
+  });
+
+  @override
+  ConsumerState<_TxSuccessDialog> createState() => _TxSuccessDialogState();
+}
+
+class _TxSuccessDialogState extends ConsumerState<_TxSuccessDialog> {
+  bool _sharing = false;
+
+  Future<void> _onSharePressed() async {
+    if (_sharing) return;
+    setState(() => _sharing = true);
+    try {
+      await TxShare.shareViaSystemSheet(
+        context,
+        ref,
+        tx: widget.tx,
+        account: widget.account,
+      );
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _sharing = false);
+      }
+    }
+  }
+
+  Future<void> _onPreviewPressed() async {
+    if (_sharing) return;
+    final rootCtx = Navigator.of(context, rootNavigator: true).context;
+    Navigator.of(context).pop();
+    if (rootCtx.mounted) {
+      await showReceiptPreview(
+        rootCtx,
+        ref,
+        tx: widget.tx,
+        account: widget.account,
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tx = widget.tx;
+    final acc = widget.account;
+    final cur = widget.currency;
+    final refNum = tx.reference.trim().isNotEmpty
+        ? tx.reference.trim()
+        : (tx.id != null ? '${tx.id}' : '');
+
+    return AlertDialog(
+      title: const Row(
+        children: [
+          Icon(Icons.check_circle, color: AppColors.green),
+          SizedBox(width: 8),
+          Expanded(child: Text('تمت العملية بنجاح ✅')),
+        ],
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('نوع العملية: ${tx.type.icon} ${tx.type.label}'),
+          if (refNum.isNotEmpty) Text('رقم المرجع / السند: #$refNum'),
+          if (acc != null) Text('الحساب / العميل: ${acc.name}'),
+          const SizedBox(height: 6),
+          Text(
+            'المبلغ: ${Fmt.money(tx.amount, cur.decimal)} ${cur.symbol}',
+            style: const TextStyle(fontWeight: FontWeight.bold),
           ),
-          FilledButton.icon(
-            icon: const Icon(Icons.share_outlined),
-            label: const Text('مشاركة'),
-            onPressed: () async {
-              Navigator.pop(ctx);
-              await TxShare.shareViaSystemSheet(
-                context,
-                ref,
-                tx: tx,
-                account: acc,
-              );
-            },
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('إغلاق'),
+          const SizedBox(height: 12),
+          const Text(
+            'يمكنك مشاركة إشعار العملية مع صورة السند عالية الدقة عبر نافذة مشاركة النظام (واتساب، الرسائل النصية، وغيرها):',
+            style: TextStyle(fontSize: 13),
           ),
         ],
-      );
-    },
-  );
+      ),
+      actions: [
+        OutlinedButton.icon(
+          icon: const Icon(Icons.receipt_long_outlined),
+          label: const Text('معاينة السند'),
+          onPressed: _sharing ? null : _onPreviewPressed,
+        ),
+        FilledButton.icon(
+          icon: _sharing
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+              : const Icon(Icons.share_outlined),
+          label: Text(_sharing ? 'جارٍ التجهيز…' : 'مشاركة'),
+          onPressed: _sharing ? null : _onSharePressed,
+        ),
+        TextButton(
+          onPressed: _sharing ? null : () => Navigator.of(context).pop(),
+          child: const Text('إغلاق'),
+        ),
+      ],
+    );
+  }
 }
 
 /// معاينة صورة الإيصال مع أزرار الإرسال وإعادة التوليد.
@@ -636,7 +722,8 @@ Future<void> showReceiptPreview(
   required Tx tx,
   Account? account,
 }) async {
-  final repo = ref.read(repoProvider);
+  if (!context.mounted) return;
+  final repo = TxShare._repoOf(context, ref);
   final acc = account ??
       (tx.accountId == null ? null : await repo.account(tx.accountId!));
   var path = MediaPaths.toAbsolute(tx.image);
@@ -666,93 +753,97 @@ Future<void> showReceiptPreview(
   await showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
-    builder: (_) => DraggableScrollableSheet(
-      initialChildSize: .85,
-      expand: false,
-      builder: (ctx, controller) => Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 8, 6),
-            child: Row(
-              children: [
-                Icon(Icons.image_outlined, color: AppColors.primaryOf(ctx)),
-                const SizedBox(width: 8),
-                Text(
-                  'إيصال العملية',
-                  style: Theme.of(ctx).textTheme.titleMedium,
-                ),
-                const Spacer(),
-                IconButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  icon: const Icon(Icons.close),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: SingleChildScrollView(
-              controller: controller,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: Image.file(File(path)),
-              ),
-            ),
-          ),
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(14),
+    builder: (_) => Consumer(
+      builder: (sheetCtx, sheetRef, _) => DraggableScrollableSheet(
+        initialChildSize: .85,
+        expand: false,
+        builder: (ctx, controller) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 8, 6),
               child: Row(
                 children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () async {
-                        Navigator.pop(ctx);
-                        try {
-                          await TxShare.generate(
-                            repo: repo,
-                            tx: tx,
-                            account: acc,
-                          );
-                          bump(ref);
-                          if (context.mounted) {
-                            showSnack(context, 'أُعيد توليد الصورة');
-                          }
-                        } catch (e) {
-                          if (context.mounted) {
-                            showSnack(
-                              context,
-                              'تعذّرت إعادة توليد الصورة: $e',
-                              error: true,
-                            );
-                          }
-                        }
-                      },
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('إعادة التوليد'),
-                    ),
+                  Icon(Icons.image_outlined, color: AppColors.primaryOf(ctx)),
+                  const SizedBox(width: 8),
+                  Text(
+                    'إيصال العملية',
+                    style: Theme.of(ctx).textTheme.titleMedium,
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed: () {
-                        Navigator.pop(ctx);
-                        TxShare.shareViaSystemSheet(
-                          context,
-                          ref,
-                          tx: tx.copyWith(image: path),
-                          account: acc,
-                        );
-                      },
-                      icon: const Icon(Icons.share_outlined),
-                      label: const Text('مشاركة السند'),
-                    ),
+                  const Spacer(),
+                  IconButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    icon: const Icon(Icons.close),
                   ),
                 ],
               ),
             ),
-          ),
-        ],
+            Expanded(
+              child: SingleChildScrollView(
+                controller: controller,
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: Image.file(File(path)),
+                ),
+              ),
+            ),
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          Navigator.pop(ctx);
+                          try {
+                            await TxShare.generate(
+                              repo: repo,
+                              tx: tx,
+                              account: acc,
+                            );
+                            if (context.mounted) {
+                              TxShare._safeBump(context, sheetRef);
+                              showSnack(context, 'أُعيد توليد الصورة');
+                            }
+                          } catch (e) {
+                            if (context.mounted) {
+                              showSnack(
+                                context,
+                                'تعذّرت إعادة توليد الصورة: $e',
+                                error: true,
+                              );
+                            }
+                          }
+                        },
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('إعادة التوليد'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: () async {
+                          await TxShare.shareViaSystemSheet(
+                            sheetCtx,
+                            sheetRef,
+                            tx: tx.copyWith(image: path),
+                            account: acc,
+                          );
+                          if (ctx.mounted) {
+                            Navigator.pop(ctx);
+                          }
+                        },
+                        icon: const Icon(Icons.share_outlined),
+                        label: const Text('مشاركة السند'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     ),
   );

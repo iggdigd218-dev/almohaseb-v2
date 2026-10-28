@@ -421,6 +421,76 @@ class _State extends ConsumerState<AccountFormScreen> {
                 prefixIcon: Icon(Icons.phone_android),
               ),
             ),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Theme.of(context)
+                    .colorScheme
+                    .surfaceContainerHighest
+                    .withValues(alpha: 0.35),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: AppColors.borderOf(context).withValues(alpha: 0.6),
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.share_outlined,
+                        size: 15,
+                        color: AppColors.primaryOf(context),
+                      ),
+                      const SizedBox(width: 6),
+                      const Expanded(
+                        child: Text(
+                          'إعداد مشاركة العمليات تلقائياً:',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 4,
+                    children: [
+                      for (final opt in const <(String, String)>[
+                        ('none', '🚫 عدم المشاركة'),
+                        ('auto_whatsapp', '💬 واتساب'),
+                        ('auto_w4b', '💼 واتساب أعمال'),
+                        ('auto_sms', '✉️ رسائل SMS'),
+                        ('auto_system', '📤 خيارات النظام'),
+                      ])
+                        ChoiceChip(
+                          label: Text(
+                            opt.$2,
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                          visualDensity: VisualDensity.compact,
+                          materialTapTargetSize:
+                              MaterialTapTargetSize.shrinkWrap,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 4,
+                            vertical: 0,
+                          ),
+                          selected: _notifyChannel == opt.$1,
+                          showCheckmark: false,
+                          onSelected: (_) =>
+                              setState(() => _notifyChannel = opt.$1),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
             const SizedBox(height: 13),
             TextFormField(
               controller: _address,
