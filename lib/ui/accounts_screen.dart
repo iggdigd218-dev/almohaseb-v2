@@ -32,106 +32,125 @@ class AccountsScreen extends ConsumerWidget {
         ref.watch(accountTxCountsProvider).valueOrNull ?? const {};
     final summary = ref.watch(summaryProvider).valueOrNull;
 
-    return Column(
+    return Stack(
       children: [
-        // شريط الفلترة المتقدم والبحث
-        _EnhancedFilterBar(
-          filter: filter,
-          currencies: curs,
-          balanceFilter: balanceFilter,
-          summary: summary,
-        ),
-        Expanded(
-          child: list.when(
-            skipLoadingOnReload: true,
-            skipLoadingOnRefresh: true,
-            loading: () => const Center(
-              child: Padding(
-                padding: EdgeInsets.all(24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    CircularProgressIndicator(),
-                    SizedBox(height: 12),
-                    Text('جارٍ تحميل الحسابات…'),
-                  ],
-                ),
-              ),
+        Column(
+          children: [
+            // شريط الفلترة المتقدم والبحث + زر إضافة حساب جديد
+            _EnhancedFilterBar(
+              filter: filter,
+              currencies: curs,
+              balanceFilter: balanceFilter,
+              summary: summary,
             ),
-            error: (e, _) => Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    EmptyState(
-                      icon: Icons.error_outline,
-                      title: 'تعذّر تحميل الحسابات',
-                      message:
-                          '$e'.length > 200 ? '${'$e'.substring(0, 200)}…' : '$e',
+            Expanded(
+              child: list.when(
+                skipLoadingOnReload: true,
+                skipLoadingOnRefresh: true,
+                loading: () => const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(),
+                        SizedBox(height: 12),
+                        Text('جارٍ تحميل الحسابات…'),
+                      ],
                     ),
-                    const SizedBox(height: 12),
-                    FilledButton.icon(
-                      onPressed: () => bump(ref),
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('إعادة المحاولة'),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            data: (rawItems) {
-              // تطبيق فلتر الرصيد (الكل، عليكم، لكم، مسدد)
-              final items = rawItems.where((it) {
-                switch (balanceFilter) {
-                  case _BalanceFilter.all:
-                    return true;
-                  case _BalanceFilter.debt:
-                    return it.balance < -Fmt.moneyEpsilon;
-                  case _BalanceFilter.credit:
-                    return it.balance > Fmt.moneyEpsilon;
-                  case _BalanceFilter.settled:
-                    return it.balance.abs() <= Fmt.moneyEpsilon;
-                }
-              }).toList();
-
-              if (items.isEmpty) {
-                return EmptyState(
-                  icon: Icons.people_outline,
-                  title: filter.query.isEmpty &&
-                          filter.kind == null &&
-                          balanceFilter == _BalanceFilter.all
-                      ? 'لا توجد حسابات بعد'
-                      : 'لا نتائج مطابقة',
-                  message: filter.query.isEmpty &&
-                          filter.kind == null &&
-                          balanceFilter == _BalanceFilter.all
-                      ? 'أضف أول حساب لعميل أو مورد'
-                      : 'جرّب تغيير كلمة البحث أو الفلاتر',
-                  action: filter.query.isEmpty
-                      ? FilledButton.icon(
-                          onPressed: () => openAccountForm(context, ref),
-                          icon: const Icon(Icons.add),
-                          label: const Text('إضافة حساب'),
-                        )
-                      : null,
-                );
-              }
-              return RefreshIndicator(
-                onRefresh: () async => bump(ref),
-                child: ListView.separated(
-                  padding: const EdgeInsets.fromLTRB(14, 4, 14, 90),
-                  itemCount: items.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 8),
-                  itemBuilder: (_, i) => _AccountCard(
-                    item: items[i],
-                    currencies: curs,
-                    hidden: hidden,
-                    txCount: txCounts[items[i].account.id] ?? 0,
                   ),
                 ),
-              );
+                error: (e, _) => Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        EmptyState(
+                          icon: Icons.error_outline,
+                          title: 'تعذّر تحميل الحسابات',
+                          message: '$e'.length > 200
+                              ? '${'$e'.substring(0, 200)}…'
+                              : '$e',
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton.icon(
+                          onPressed: () => bump(ref),
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('إعادة المحاولة'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                data: (rawItems) {
+                  // تطبيق فلتر الرصيد (الكل، عليكم، لكم، مسدد)
+                  final items = rawItems.where((it) {
+                    switch (balanceFilter) {
+                      case _BalanceFilter.all:
+                        return true;
+                      case _BalanceFilter.debt:
+                        return it.balance < -Fmt.moneyEpsilon;
+                      case _BalanceFilter.credit:
+                        return it.balance > Fmt.moneyEpsilon;
+                      case _BalanceFilter.settled:
+                        return it.balance.abs() <= Fmt.moneyEpsilon;
+                    }
+                  }).toList();
+
+                  if (items.isEmpty) {
+                    return EmptyState(
+                      icon: Icons.people_outline,
+                      title: filter.query.isEmpty &&
+                              filter.kind == null &&
+                              balanceFilter == _BalanceFilter.all
+                          ? 'لا توجد حسابات بعد'
+                          : 'لا نتائج مطابقة',
+                      message: filter.query.isEmpty &&
+                              filter.kind == null &&
+                              balanceFilter == _BalanceFilter.all
+                          ? 'أضف أول حساب لعميل أو مورد'
+                          : 'جرّب تغيير كلمة البحث أو الفلاتر',
+                      action: FilledButton.icon(
+                        onPressed: () => openAccountForm(context, ref),
+                        icon: const Icon(Icons.person_add_alt_1_rounded),
+                        label: const Text('إضافة حساب جديد'),
+                      ),
+                    );
+                  }
+                  return RefreshIndicator(
+                    onRefresh: () async => bump(ref),
+                    child: ListView.separated(
+                      padding: const EdgeInsets.fromLTRB(14, 4, 14, 90),
+                      itemCount: items.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (_, i) => _AccountCard(
+                        item: items[i],
+                        currencies: curs,
+                        hidden: hidden,
+                        txCount: txCounts[items[i].account.id] ?? 0,
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+        PositionedDirectional(
+          bottom: 16,
+          end: 16,
+          child: FloatingActionButton.extended(
+            heroTag: 'accounts_add_fab',
+            onPressed: () {
+              Sfx.tap();
+              openAccountForm(context, ref);
             },
+            icon: const Icon(Icons.person_add_alt_1_rounded),
+            label: const Text(
+              'حساب جديد',
+              style: TextStyle(fontWeight: FontWeight.w800),
+            ),
           ),
         ),
       ],
@@ -196,35 +215,61 @@ class _EnhancedFilterBarState extends ConsumerState<_EnhancedFilterBar> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // حقل البحث
-          TextField(
-            decoration: InputDecoration(
-              hintText: 'بحث بالاسم أو الهاتف أو الملاحظات…',
-              hintStyle: const TextStyle(fontSize: 13),
-              prefixIcon: const Icon(Icons.search, size: 20),
-              suffixIcon: filter.query.isEmpty
-                  ? null
-                  : IconButton(
-                      icon: const Icon(Icons.close, size: 18),
-                      onPressed: () {
-                        _searchCtrl.clear();
-                        n.state = filter.copyWith(query: '');
-                      },
+          // حقل البحث + زر إضافة حساب جديد
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  decoration: InputDecoration(
+                    hintText: 'بحث بالاسم أو الهاتف أو الملاحظات…',
+                    hintStyle: const TextStyle(fontSize: 13),
+                    prefixIcon: const Icon(Icons.search, size: 20),
+                    suffixIcon: filter.query.isEmpty
+                        ? null
+                        : IconButton(
+                            icon: const Icon(Icons.close, size: 18),
+                            onPressed: () {
+                              _searchCtrl.clear();
+                              n.state = filter.copyWith(query: '');
+                            },
+                          ),
+                    isDense: true,
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                    filled: true,
+                    fillColor: isDark
+                        ? const Color(0xFF1E293B)
+                        : const Color(0xFFF1F5F9),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
                     ),
-              isDense: true,
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-              filled: true,
-              fillColor:
-                  isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide.none,
+                  ),
+                  style: const TextStyle(fontSize: 13.5),
+                  controller: _searchCtrl,
+                  onChanged: (v) => n.state = filter.copyWith(query: v),
+                ),
               ),
-            ),
-            style: const TextStyle(fontSize: 13.5),
-            controller: _searchCtrl,
-            onChanged: (v) => n.state = filter.copyWith(query: v),
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onPressed: () {
+                  Sfx.tap();
+                  openAccountForm(context, ref);
+                },
+                icon: const Icon(Icons.person_add_alt_1_rounded, size: 18),
+                label: const Text(
+                  'حساب جديد',
+                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800),
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 7),
           // فلاتر العملات وفلاتر الأرصدة

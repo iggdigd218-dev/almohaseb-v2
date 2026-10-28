@@ -106,7 +106,12 @@ class _State extends ConsumerState<AccountFormScreen> {
     _kind = a?.kind ?? AccountKind.customer;
     _currency = a?.currency ?? 'YER';
     _archived = a?.archived ?? false;
-    _notifyChannel = a?.notifyChannel ?? 'whatsapp';
+    final rawNotify = (a?.notifyChannel ?? 'none').trim();
+    _notifyChannel = switch (rawNotify) {
+      'auto_whatsapp' || 'auto_w4b' || 'auto_sms' || 'auto_system' => rawNotify,
+      'sms' => 'auto_sms',
+      _ => 'none',
+    };
     _initialSnapshot = _formSnapshot();
   }
 

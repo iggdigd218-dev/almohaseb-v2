@@ -118,7 +118,6 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
   int? _sectionId; // القسم المختار (null = الكل، -1 = «عام/بدون قسم»)
   int? _rootId; // الفئة الرئيسية المختارة (null = الكل)
   int? _subId; // الفئة الفرعية المختارة (null = كل ما تحت الرئيسية)
-  int _shortageSubFilter = 0; // 0 = كل النواقص، 1 = تحت حد التنبيه، 2 = نافدة تماماً
   StreamSubscription<int>? _syncBusSub;
 
   @override
@@ -213,15 +212,9 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
   List<Item> _visibleItems(List<ItemCategory> roots, List<Item> items) {
     final ids = _selectedIds(roots);
     final q = ref.read(itemQueryProvider).trim().toLowerCase();
-    final onlyShortages = ref.read(inventoryShortagesModeProvider);
     final out = items.where((it) {
       // استثناء صريح للأصناف المحذوفة
       if (it.isDeleted) return false;
-      if (onlyShortages) {
-        if (!isShortageItem(it)) return false;
-        if (_shortageSubFilter == 1 && !it.low) return false;
-        if (_shortageSubFilter == 2 && !it.out) return false;
-      }
       if (ids != null) {
         if (_sectionId == kGeneralSectionId && _rootId == null) {
           final isUncategorized = it.categoryId == null || it.categoryId == 0;
@@ -241,9 +234,7 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
           it.category.toLowerCase().contains(q) ||
           it.notes.toLowerCase().contains(q);
     }).toList()
-      ..sort((a, b) => onlyShortages
-          ? _compareItems(a, b, _SortKey.outFirst)
-          : _compareItems(a, b, _sort));
+      ..sort((a, b) => _compareItems(a, b, _sort));
     return out;
   }
 
@@ -292,10 +283,18 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
     final categoriesAsync = ref.watch(itemCategoryTreeProvider);
     final itemsAsync = ref.watch(itemsProvider);
     final sectionsAsync = ref.watch(sectionsProvider);
-    final onlyShortages = ref.watch(inventoryShortagesModeProvider);
+    final openShortagesRequest = ref.watch(inventoryShortagesModeProvider);
     final sections = sectionsAsync.valueOrNull ?? const <Section>[];
     final allItems = itemsAsync.valueOrNull ?? const <Item>[];
     final shortagesCount = allItems.where(isShortageItem).length;
+
+    if (openShortagesRequest) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ref.read(inventoryShortagesModeProvider.notifier).state = false;
+        openShortagesListSheet(context, ref);
+      });
+    }
 
     return Stack(
       children: [
@@ -304,28 +303,11 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
             _InventoryToolbar(
               mode: _mode,
               sort: _sort,
+              shortagesCount: shortagesCount,
               onModeChanged: _setMode,
               onSortChanged: (k) => setState(() => _sort = k),
               onAddCategory: () => openItemCategoryForm(context, ref),
-            ),
-            // شريط قسم النواقص البارز للتنقل السريع وإنشاء قائمة النواقص (صورة / PDF)
-            _ShortagesSwitchBar(
-              onlyShortages: onlyShortages,
-              totalCount: allItems.where((i) => !i.isDeleted).length,
-              shortagesCount: shortagesCount,
-              subFilter: _shortageSubFilter,
-              lowAlertCount: allItems
-                  .where((i) => !i.isDeleted && !i.archived && i.low)
-                  .length,
-              outOfStockCount: allItems
-                  .where((i) => !i.isDeleted && !i.archived && i.out)
-                  .length,
-              onToggleShortages: (val) {
-                ref.read(inventoryShortagesModeProvider.notifier).state = val;
-                setState(() {});
-              },
-              onSubFilterChanged: (f) => setState(() => _shortageSubFilter = f),
-              onExportList: () => openShortagesListSheet(context, ref),
+              onOpenShortages: () => openShortagesListSheet(context, ref),
             ),
             categoriesAsync.when(
               skipLoadingOnReload: true,
@@ -413,44 +395,22 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
       );
     }
     final visible = _visibleItems(roots, items);
-    final onlyShortages = ref.watch(inventoryShortagesModeProvider);
     if (visible.isEmpty) {
       return EmptyState(
-        icon: onlyShortages
-            ? Icons.check_circle_outline_rounded
-            : Icons.search_off,
-        title: onlyShortages
-            ? 'لا توجد نواقص في المخزون حالياً'
-            : 'لا توجد نتائج',
-        message: onlyShortages
-            ? 'جميع الأصناف متوفرة بكميات أعلى من حد التنبيه المحدد. يمكنك أيضاً إنشاء قائمة طلب مخصصة.'
-            : 'جرّب كلمة بحث أخرى أو بدّل الفئة.',
-        action: Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          alignment: WrapAlignment.center,
-          children: [
-            if (onlyShortages)
-              FilledButton.icon(
-                onPressed: () => openShortagesListSheet(context, ref),
-                icon: const Icon(Icons.playlist_add_check_rounded, size: 18),
-                label: const Text('إنشاء قائمة نواقص مخصصة'),
-              ),
-            FilledButton.tonalIcon(
-              onPressed: () {
-                ref.read(itemQueryProvider.notifier).state = '';
-                ref.read(inventoryShortagesModeProvider.notifier).state = false;
-                setState(() {
-                  _rootId = null;
-                  _subId = null;
-                  _sectionId = null;
-                  _shortageSubFilter = 0;
-                });
-              },
-              icon: const Icon(Icons.filter_alt_off_outlined, size: 18),
-              label: Text(onlyShortages ? 'عرض كل الأصناف' : 'مسح الفلاتر'),
-            ),
-          ],
+        icon: Icons.search_off,
+        title: 'لا توجد نتائج',
+        message: 'جرّب كلمة بحث أخرى أو بدّل الفئة.',
+        action: FilledButton.tonalIcon(
+          onPressed: () {
+            ref.read(itemQueryProvider.notifier).state = '';
+            setState(() {
+              _rootId = null;
+              _subId = null;
+              _sectionId = null;
+            });
+          },
+          icon: const Icon(Icons.filter_alt_off_outlined, size: 18),
+          label: const Text('مسح الفلاتر'),
         ),
       );
     }
@@ -515,20 +475,24 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
   }
 }
 
-/// شريط الأدوات: بحث + باركود + فرز + تبديل نمط العرض.
+/// شريط الأدوات: بحث + باركود + أيقونة قائمة النواقص + فرز + تبديل نمط العرض.
 class _InventoryToolbar extends ConsumerWidget {
   final String mode;
   final _SortKey sort;
+  final int shortagesCount;
   final ValueChanged<String> onModeChanged;
   final ValueChanged<_SortKey> onSortChanged;
   final VoidCallback onAddCategory;
+  final VoidCallback onOpenShortages;
 
   const _InventoryToolbar({
     required this.mode,
     required this.sort,
+    required this.shortagesCount,
     required this.onModeChanged,
     required this.onSortChanged,
     required this.onAddCategory,
+    required this.onOpenShortages,
   });
 
   Future<void> _scan(BuildContext context, WidgetRef ref) async {
@@ -547,7 +511,7 @@ class _InventoryToolbar extends ConsumerWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // (2026-09-24) ترويسة زرقاء أنيقة: بحث بيضاوي أبيض + ماسح باركود.
+        // ترويسة زرقاء أنيقة: بحث بيضاوي أبيض + أيقونة قائمة النواقص + ماسح باركود.
         Container(
           decoration: BoxDecoration(
             gradient: LinearGradient(
@@ -615,6 +579,64 @@ class _InventoryToolbar extends ConsumerWidget {
                     ),
                   ),
                   const SizedBox(width: 8),
+                  // أيقونة النواقص المنفصلة مع شارة العدد — تفتح قائمة النواقص المرتبة
+                  SizedBox(
+                    width: 46,
+                    height: 46,
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        Positioned.fill(
+                          child: Material(
+                            color: shortagesCount > 0
+                                ? const Color(0xFFF59E0B).withValues(alpha: 0.28)
+                                : Colors.white.withValues(alpha: .18),
+                            shape: const CircleBorder(),
+                            clipBehavior: Clip.antiAlias,
+                            child: IconButton(
+                              tooltip: 'قائمة النواقص ($shortagesCount)',
+                              onPressed: onOpenShortages,
+                              icon: const Icon(
+                                Icons.assignment_late_outlined,
+                                color: Colors.white,
+                                size: 21,
+                              ),
+                            ),
+                          ),
+                        ),
+                        if (shortagesCount > 0)
+                          PositionedDirectional(
+                            top: -2,
+                            start: -2,
+                            child: IgnorePointer(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 5.5,
+                                  vertical: 1.5,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFEF4444),
+                                  borderRadius: BorderRadius.circular(99),
+                                  border: Border.all(
+                                    color: Colors.white,
+                                    width: 1.5,
+                                  ),
+                                ),
+                                child: Text(
+                                  '$shortagesCount',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
                   SizedBox(
                     width: 46,
                     height: 46,
@@ -635,7 +657,7 @@ class _InventoryToolbar extends ConsumerWidget {
             ),
           ),
         ),
-        // صفّ الفرز ونمط العرض يبقى على الخلفية الثلجية (قراءة أسهل).
+        // صفّ الفرز وأيقونة قائمة النواقص ونمط العرض يبقى على الخلفية الثلجية.
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
           child: LayoutBuilder(
@@ -647,7 +669,53 @@ class _InventoryToolbar extends ConsumerWidget {
                     child: _SortButton(
                         sort: sort, wide: wide, onChanged: onSortChanged),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message: 'فتح قائمة النواقص المرتبة ($shortagesCount)',
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(11),
+                      onTap: onOpenShortages,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 7),
+                        decoration: BoxDecoration(
+                          color: shortagesCount > 0
+                              ? const Color(0xFFD97706).withValues(alpha: 0.12)
+                              : Colors.transparent,
+                          border: Border.all(
+                            color: shortagesCount > 0
+                                ? const Color(0xFFD97706).withValues(alpha: 0.45)
+                                : AppColors.borderOf(context),
+                          ),
+                          borderRadius: BorderRadius.circular(11),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.assignment_late_outlined,
+                              size: 17,
+                              color: shortagesCount > 0
+                                  ? const Color(0xFFD97706)
+                                  : AppColors.text2Of(context),
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              'النواقص ($shortagesCount)',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w800,
+                                color: shortagesCount > 0
+                                    ? const Color(0xFFD97706)
+                                    : AppColors.text2Of(context),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
                   _ViewModeToggle(
                       mode: mode, wide: wide, onChanged: onModeChanged),
                 ],
@@ -3027,260 +3095,7 @@ class _Thumb extends StatelessWidget {
       );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// قسم النواقص (الأصناف تحت حد التنبيه والنافدة) + تصدير كصورة PNG أو ملف PDF
-// ═══════════════════════════════════════════════════════════════════════════
-
-class _ShortagesSwitchBar extends StatelessWidget {
-  final bool onlyShortages;
-  final int totalCount;
-  final int shortagesCount;
-  final int subFilter;
-  final int lowAlertCount;
-  final int outOfStockCount;
-  final ValueChanged<bool> onToggleShortages;
-  final ValueChanged<int> onSubFilterChanged;
-  final VoidCallback onExportList;
-
-  const _ShortagesSwitchBar({
-    required this.onlyShortages,
-    required this.totalCount,
-    required this.shortagesCount,
-    required this.subFilter,
-    required this.lowAlertCount,
-    required this.outOfStockCount,
-    required this.onToggleShortages,
-    required this.onSubFilterChanged,
-    required this.onExportList,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final dangerColor = AppColors.dangerOf(context);
-    const warnColor = Color(0xFFD97706);
-    final primaryColor = AppColors.primaryOf(context);
-
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 2),
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: onlyShortages
-            ? warnColor.withValues(alpha: 0.08)
-            : AppColors.surfaceOf(context),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: onlyShortages
-              ? warnColor.withValues(alpha: 0.45)
-              : AppColors.borderOf(context),
-          width: onlyShortages ? 1.4 : 1.0,
-        ),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              // تبويب كل الأصناف
-              Expanded(
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(10),
-                  onTap: () => onToggleShortages(false),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 160),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: !onlyShortages
-                          ? primaryColor
-                          : Colors.transparent,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.inventory_2_outlined,
-                          size: 17,
-                          color: !onlyShortages
-                              ? Colors.white
-                              : AppColors.text2Of(context),
-                        ),
-                        const SizedBox(width: 6),
-                        Flexible(
-                          child: Text(
-                            'كل الأصناف ($totalCount)',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w800,
-                              color: !onlyShortages
-                                  ? Colors.white
-                                  : AppColors.textOf(context),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 6),
-              // تبويب قسم النواقص
-              Expanded(
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(10),
-                  onTap: () => onToggleShortages(true),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 160),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: onlyShortages
-                          ? dangerColor
-                          : (shortagesCount > 0
-                              ? dangerColor.withValues(alpha: 0.10)
-                              : Colors.transparent),
-                      borderRadius: BorderRadius.circular(10),
-                      border: shortagesCount > 0 && !onlyShortages
-                          ? Border.all(
-                              color: dangerColor.withValues(alpha: 0.35),
-                            )
-                          : null,
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.warning_amber_rounded,
-                          size: 18,
-                          color: onlyShortages
-                              ? Colors.white
-                              : (shortagesCount > 0
-                                  ? dangerColor
-                                  : AppColors.text2Of(context)),
-                        ),
-                        const SizedBox(width: 5),
-                        Flexible(
-                          child: Text(
-                            'قسم النواقص ($shortagesCount)',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w900,
-                              color: onlyShortages
-                                  ? Colors.white
-                                  : (shortagesCount > 0
-                                      ? dangerColor
-                                      : AppColors.textOf(context)),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 6),
-              // زر إنشاء قائمة النواقص (صورة / PDF)
-              Tooltip(
-                message: 'إنشاء قائمة النواقص وحفظها كصورة أو PDF',
-                child: FilledButton.tonalIcon(
-                  style: FilledButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    backgroundColor: warnColor.withValues(alpha: 0.16),
-                    foregroundColor: warnColor,
-                  ),
-                  onPressed: onExportList,
-                  icon: const Icon(Icons.fact_check_outlined, size: 17),
-                  label: const Text(
-                    'قائمة النواقص',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          if (onlyShortages) ...[
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                _subChip(
-                  context,
-                  index: 0,
-                  label: 'كل النواقص ($shortagesCount)',
-                  activeColor: dangerColor,
-                ),
-                const SizedBox(width: 6),
-                _subChip(
-                  context,
-                  index: 1,
-                  label: 'تحت حد التنبيه ($lowAlertCount)',
-                  activeColor: warnColor,
-                ),
-                const SizedBox(width: 6),
-                _subChip(
-                  context,
-                  index: 2,
-                  label: 'نافدة ($outOfStockCount)',
-                  activeColor: dangerColor,
-                ),
-              ],
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _subChip(
-    BuildContext context, {
-    required int index,
-    required String label,
-    required Color activeColor,
-  }) {
-    final selected = subFilter == index;
-    return Expanded(
-      child: InkWell(
-        borderRadius: BorderRadius.circular(8),
-        onTap: () => onSubFilterChanged(index),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 6),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: selected
-                ? activeColor.withValues(alpha: 0.16)
-                : AppColors.surfaceOf(context),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: selected
-                  ? activeColor
-                  : AppColors.borderOf(context),
-            ),
-          ),
-          child: Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: selected ? FontWeight.w900 : FontWeight.w600,
-              color: selected ? activeColor : AppColors.text2Of(context),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// يفتح نافذة إنشاء وتصدير قائمة النواقص كصورة PNG أو ملف PDF.
+/// يفتح نافذة قائمة النواقص المنفصلة والمرتبة مع إمكانية حفظها كصورة PNG أو ملف PDF.
 Future<void> openShortagesListSheet(
   BuildContext context,
   WidgetRef ref,
@@ -3324,14 +3139,28 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
   bool _busyImage = false;
   bool _busyPdf = false;
   String _searchAddQuery = '';
+  int _filterTab = 0; // 0 = الكل، 1 = نافدة (0)، 2 = تحت حد التنبيه
+
+  void _sortRows() {
+    _rows.sort((a, b) {
+      final ao = a.item.quantity <= 0 ? 0 : 1;
+      final bo = b.item.quantity <= 0 ? 0 : 1;
+      final c = ao.compareTo(bo);
+      if (c != 0) return c;
+      final q = a.item.quantity.compareTo(b.item.quantity);
+      if (q != 0) return q;
+      return a.item.name
+          .trim()
+          .toLowerCase()
+          .compareTo(b.item.name.trim().toLowerCase());
+    });
+  }
 
   void _initRows(List<Item> allItems) {
     if (_initialized) return;
     _initialized = true;
-    final shortages = allItems.where(isShortageItem).toList()
-      ..sort((a, b) => _compareItems(a, b, _SortKey.outFirst));
+    final shortages = allItems.where(isShortageItem).toList();
     for (final it in shortages) {
-      // الكمية المقترحة للطلب: الفرق للوصول إلى حد التنبيه (أو حد التنبيه نفسه إن كان > 0، وإلا 10)
       double suggested = 1;
       if (it.minQuantity > 0) {
         final diff = it.minQuantity - it.quantity;
@@ -3347,6 +3176,15 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
         ),
       );
     }
+    _sortRows();
+  }
+
+  List<_ShortageDraftRow> get _filteredRows {
+    return _rows.where((r) {
+      if (_filterTab == 1) return r.item.quantity <= 0;
+      if (_filterTab == 2) return r.item.quantity > 0;
+      return true;
+    }).toList();
   }
 
   List<_ShortageDraftRow> get _selectedRows =>
@@ -3397,7 +3235,8 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
   Future<void> _exportAsImage() async {
     final picked = _selectedRows;
     if (picked.isEmpty) {
-      showSnack(context, 'اختر صنفاً واحداً على الأقل لتصدير القائمة', error: true);
+      showSnack(context, 'اختر صنفاً واحداً على الأقل لتصدير القائمة',
+          error: true);
       return;
     }
     setState(() => _busyImage = true);
@@ -3415,7 +3254,6 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
       final file = File('${dir.path}/shortages_$stamp.png');
       await file.writeAsBytes(bytes, flush: true);
 
-      // حفظ نسخة إضافية في مجلد مستندات التطبيق للرجوع إليها
       try {
         final docDir = await getApplicationDocumentsDirectory();
         final savedCopy = File('${docDir.path}/shortages_$stamp.png');
@@ -3442,7 +3280,8 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
   Future<void> _exportAsPdf() async {
     final picked = _selectedRows;
     if (picked.isEmpty) {
-      showSnack(context, 'اختر صنفاً واحداً على الأقل لتصدير ملف PDF', error: true);
+      showSnack(context, 'اختر صنفاً واحداً على الأقل لتصدير ملف PDF',
+          error: true);
       return;
     }
     setState(() => _busyPdf = true);
@@ -3458,7 +3297,6 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
       final stamp = DateTime.now().millisecondsSinceEpoch;
       final filename = 'shortages_$stamp.pdf';
 
-      // حفظ نسخة محلية في مستندات التطبيق
       try {
         final docDir = await getApplicationDocumentsDirectory();
         final savedPdf = File('${docDir.path}/$filename');
@@ -3481,11 +3319,53 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
     }
   }
 
+  Widget _buildFilterChip({
+    required int index,
+    required String label,
+    required Color activeColor,
+  }) {
+    final selected = _filterTab == index;
+    return Expanded(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: () => setState(() => _filterTab = index),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 6),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: selected
+                ? activeColor.withValues(alpha: 0.14)
+                : AppColors.surfaceOf(context),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: selected ? activeColor : AppColors.borderOf(context),
+              width: selected ? 1.4 : 1.0,
+            ),
+          ),
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 11.5,
+              fontWeight: selected ? FontWeight.w900 : FontWeight.w700,
+              color: selected ? activeColor : AppColors.text2Of(context),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final itemsAsync = ref.watch(itemsProvider);
     final allItems = itemsAsync.valueOrNull ?? const <Item>[];
     _initRows(allItems);
+
+    final outCount = _rows.where((r) => r.item.quantity <= 0).length;
+    final lowCount = _rows.where((r) => r.item.quantity > 0).length;
+    final visibleRows = _filteredRows;
 
     final existingIds = _rows.map((r) => r.item.id).toSet();
     final extraCandidates = _searchAddQuery.trim().isEmpty
@@ -3531,16 +3411,16 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'قائمة النواقص وطلب البضاعة',
+                      'قائمة النواقص المرتبة وطلب البضاعة',
                       style: TextStyle(
-                        fontSize: 16.5,
+                        fontSize: 16,
                         fontWeight: FontWeight.w900,
                       ),
                     ),
                     Text(
-                      'حدد الأصناف والكميات المطلوبة لحفظها كصورة أو ملف PDF',
+                      'مرتبة تلقائياً (النافدة أولاً ثم الأقل كمية) — حفظ كصورة أو PDF',
                       style: TextStyle(
-                        fontSize: 12,
+                        fontSize: 11.5,
                         color: AppColors.text2Of(context),
                       ),
                     ),
@@ -3553,7 +3433,31 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
               ),
             ],
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
+
+          // تبويبات الفلترة السريعة داخل قائمة النواقص
+          Row(
+            children: [
+              _buildFilterChip(
+                index: 0,
+                label: 'الكل (${_rows.length})',
+                activeColor: AppColors.primaryOf(context),
+              ),
+              const SizedBox(width: 6),
+              _buildFilterChip(
+                index: 1,
+                label: 'نافدة ($outCount)',
+                activeColor: AppColors.dangerOf(context),
+              ),
+              const SizedBox(width: 6),
+              _buildFilterChip(
+                index: 2,
+                label: 'تحت الحد ($lowCount)',
+                activeColor: const Color(0xFFD97706),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
 
           // حقل بحث سريع لإضافة أي صنف إضافي للقائمة
           TextField(
@@ -3600,8 +3504,7 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
                     trailing: FilledButton.tonalIcon(
                       onPressed: () {
                         setState(() {
-                          _rows.insert(
-                            0,
+                          _rows.add(
                             _ShortageDraftRow(
                               item: it,
                               selected: true,
@@ -3609,6 +3512,7 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
                                   it.minQuantity > 0 ? it.minQuantity : 5,
                             ),
                           );
+                          _sortRows();
                           _searchAddQuery = '';
                         });
                       },
@@ -3620,7 +3524,7 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
               ),
             ),
 
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           // شريط تحديد الكل / الإحصائية
           Row(
             children: [
@@ -3651,37 +3555,40 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
                   size: 17,
                 ),
                 label: Text(
-                  _rows.every((r) => r.selected) ? 'إلغاء تحديد الكل' : 'تحديد الكل',
+                  _rows.every((r) => r.selected)
+                      ? 'إلغاء تحديد الكل'
+                      : 'تحديد الكل',
                   style: const TextStyle(fontSize: 12),
                 ),
               ),
             ],
           ),
 
-          // قائمة الأصناف الناقصة
+          // قائمة الأصناف الناقصة المرتبة والمرقمة
           Expanded(
-            child: _rows.isEmpty
+            child: visibleRows.isEmpty
                 ? const EmptyState(
                     icon: Icons.inventory_rounded,
-                    title: 'لا توجد أصناف تحت حد التنبيه',
+                    title: 'لا توجد أصناف ضمن هذا التصنيف',
                     message:
                         'يمكنك البحث في الحقل أعلاه لإضافة أي صنف ترغب بطلبه إلى القائمة.',
                   )
                 : ListView.separated(
-                    itemCount: _rows.length,
+                    itemCount: visibleRows.length,
                     separatorBuilder: (_, __) => const SizedBox(height: 6),
                     itemBuilder: (context, index) {
-                      final r = _rows[index];
+                      final r = visibleRows[index];
                       final it = r.item;
                       final isOut = it.quantity <= 0;
                       final statusColor = isOut
                           ? AppColors.dangerOf(context)
                           : const Color(0xFFD97706);
-                      final statusLabel = isOut ? 'نفدت الكمية' : 'تحت حد التنبيه';
+                      final statusLabel =
+                          isOut ? 'نفدت الكمية' : 'تحت حد التنبيه';
 
                       return Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 8),
+                            horizontal: 8, vertical: 8),
                         decoration: BoxDecoration(
                           color: r.selected
                               ? AppColors.surfaceOf(context)
@@ -3696,6 +3603,24 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
                         ),
                         child: Row(
                           children: [
+                            // رقم تسلسلي مرتب (#1, #2, ...)
+                            Container(
+                              width: 26,
+                              height: 26,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: statusColor.withValues(alpha: 0.14),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                '${index + 1}',
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w900,
+                                  color: statusColor,
+                                ),
+                              ),
+                            ),
                             Checkbox(
                               value: r.selected,
                               visualDensity: VisualDensity.compact,
@@ -3843,7 +3768,8 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
                       : const Icon(Icons.image_outlined, size: 20),
                   label: const Text(
                     'حفظ كصورة (PNG)',
-                    style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13.5),
+                    style: TextStyle(
+                        fontWeight: FontWeight.w900, fontSize: 13.5),
                   ),
                 ),
               ),
@@ -3868,7 +3794,8 @@ class _ShortagesListSheetState extends ConsumerState<_ShortagesListSheet> {
                       : const Icon(Icons.picture_as_pdf_outlined, size: 20),
                   label: const Text(
                     'حفظ كملف PDF',
-                    style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13.5),
+                    style: TextStyle(
+                        fontWeight: FontWeight.w900, fontSize: 13.5),
                   ),
                 ),
               ),

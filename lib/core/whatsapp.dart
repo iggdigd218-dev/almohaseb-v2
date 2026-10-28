@@ -68,6 +68,29 @@ class WhatsApp {
     return ok ? WaResult.ok : WaResult.error;
   }
 
+  /// يفتح نافذة مشاركة النظام الرسمية (System Share Chooser) مع صورة السند
+  /// عالية الدقة ونص الإشعار، ومع تجهيز الدخول المباشر لمحادثة العميل في واتساب
+  /// أو الرسائل النصية إن وُجد رقم هاتف، ودون حجب المشاركة عند عدم وجود رقم.
+  static Future<bool> systemShare({
+    required String phone,
+    required String text,
+    String? imagePath,
+  }) async {
+    final digits = phone.trim().isEmpty ? '' : Fmt.waNumber(phone);
+    try {
+      final r = await _ch.invokeMethod<String>('systemShare', {
+        'phone': digits,
+        'text': text,
+        'path': imagePath,
+      });
+      return r == 'ok';
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
   static String messageFor(WaResult r) => switch (r) {
         WaResult.ok => 'تم فتح واتساب ✅',
         WaResult.noWhatsApp => 'واتساب غير مثبّت على الجهاز',

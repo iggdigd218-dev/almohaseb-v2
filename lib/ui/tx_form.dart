@@ -302,18 +302,29 @@ class _TxFormState extends ConsumerState<TxForm> {
       } catch (_) {
         // The save is committed; failure of a follow-up read is not a save failure.
       }
+      final targetAcc = _account;
+      final autoShare =
+          !_isTransfer && keepId == null && TxShare.isAutoShareConfigured(targetAcc);
       var share = TxShareOutcome.skipped;
-      if (!_isTransfer && _account != null && mounted) {
+      if (autoShare && targetAcc != null && mounted) {
         try {
           share = await TxShare.sendNow(context, ref,
-                  tx: saved, account: _account!, silentIfNoPhone: true)
+                  tx: saved, account: targetAcc, silentIfNoPhone: false)
               .timeout(const Duration(seconds: 15));
         } catch (_) {
           share = TxShareOutcome.failed;
         }
+      } else if (!_isTransfer) {
+        // نجهّز صورة السند عالية الدقة في الخلفية دون إرسال تلقائي عبر واتساب.
+        unawaited(
+          TxShare.generate(repo: repo, tx: saved, account: targetAcc)
+              .then<void>((_) {}, onError: (Object _, StackTrace __) {}),
+        );
       }
       if (!mounted) return;
       bump(ref);
+      final rootNavContext =
+          Navigator.of(context, rootNavigator: true).context;
       final message = StringBuffer(keepId != null
           ? 'تم تعديل العملية وتحديث الرصيد ✅'
           : 'تم حفظ العملية وتحديث الرصيد ✅');
@@ -329,6 +340,16 @@ class _TxFormState extends ConsumerState<TxForm> {
       // إنشاء عملية جديدة: اهتزاز طويل (1.5 ث) + صوت مميز؛ التعديل: نجاح عادي.
       if (widget.existing == null || widget.isCopy) {
         Sfx.opCreated();
+        if (!autoShare && !Sfx.muted && rootNavContext.mounted) {
+          unawaited(
+            showTxSuccessDialog(
+              rootNavContext,
+              ref,
+              tx: saved,
+              account: targetAcc,
+            ),
+          );
+        }
       } else {
         Sfx.success();
       }

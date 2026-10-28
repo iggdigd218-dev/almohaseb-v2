@@ -273,37 +273,97 @@ class TxShare {
     return lines.join('\n');
   }
 
-  /// المسار الكامل: توليد + حفظ + فتح واتساب على رقم العميل.
+  /// هل تم ضبط إعداد مسبق للمشاركة التلقائية لهذا الحساب؟
+  static bool isAutoShareConfigured(Account? a) {
+    if (a == null) return false;
+    final ch = a.notifyChannel.trim();
+    return ch == 'auto_whatsapp' ||
+        ch == 'auto_w4b' ||
+        ch == 'auto_sms' ||
+        ch == 'auto_system';
+  }
+
+  /// يفتح نافذة المشاركة الرسمية للنظام (System Share Sheet) محمّلة بصورة
+  /// السند عالية الدقة ونص الإشعار، مع دعم الدخول المباشر لمحادثة العميل في
+  /// واتساب أو الرسائل النصية إن وُجد رقم، ودون حجب المشاركة عند غياب الرقم.
+  static Future<TxShareOutcome> shareViaSystemSheet(
+    BuildContext context,
+    WidgetRef ref, {
+    required Tx tx,
+    Account? account,
+  }) async {
+    final repo = ref.read(repoProvider);
+    final acc = account ??
+        (tx.accountId == null ? null : await repo.account(tx.accountId!));
+    final phone = _phoneOf(acc, 'whatsapp');
+
+    if (context.mounted) {
+      showSnack(context, 'جارٍ تجهيز صورة السند عالية الدقة للمشاركة…');
+    }
+
+    late final String text;
+    late final String path;
+    try {
+      text = await caption(repo: repo, tx: tx, account: acc);
+      path = await generate(repo: repo, tx: tx, account: acc);
+    } catch (e) {
+      if (context.mounted) {
+        showSnack(context, 'تعذّر تجهيز بيانات المشاركة: $e', error: true);
+      }
+      return TxShareOutcome.failed;
+    }
+
+    bump(ref);
+
+    if (Platform.isAndroid) {
+      final ok = await WhatsApp.systemShare(
+        phone: phone,
+        text: text,
+        imagePath: path,
+      );
+      if (ok) return TxShareOutcome.opened;
+    }
+
+    final shared = await _shareImageWithText(path, text);
+    if (context.mounted && !shared) {
+      showSnack(context, 'تعذّر فتح نافذة مشاركة النظام', error: true);
+    }
+    return shared ? TxShareOutcome.opened : TxShareOutcome.failed;
+  }
+
+  /// المسار الكامل: توليد + حفظ + فتح قناة المشاركة المحددة للحساب.
   ///
-  /// يعمل نفسه للعملية الجديدة ولإعادة الإرسال لعملية قديمة.
+  /// يعمل للعملية الجديدة (وفق الإعداد المسبق للحساب) ولإعادة الإرسال.
   static Future<TxShareOutcome> sendNow(
     BuildContext context,
     WidgetRef ref, {
     required Tx tx,
     Account? account,
     bool silentIfNoPhone = false,
+    String? forceChannel,
   }) async {
     final repo = ref.read(repoProvider);
     final acc = account ??
         (tx.accountId == null ? null : await repo.account(tx.accountId!));
 
-    // نحدد القناة من بيانات الحساب نفسه (لكل عميل تفضيله).
-    final channel = (acc?.notifyChannel ?? 'whatsapp').trim();
-    final phone = _phoneOf(acc, channel);
+    // نحدد القناة من بيانات الحساب نفسه (أو القناة الممررة صراحة).
+    final rawChannel = (forceChannel ?? acc?.notifyChannel ?? 'whatsapp').trim();
 
-    if (channel == 'none') {
-      return TxShareOutcome.skipped; // المستخدم فضّل عدم الإرسال.
+    if (rawChannel == 'none') {
+      return TxShareOutcome.skipped; // المستخدم فضّل عدم الإرسال التلقائي.
     }
 
+    if (rawChannel == 'system' || rawChannel == 'auto_system') {
+      return shareViaSystemSheet(context, ref, tx: tx, account: acc);
+    }
+
+    final isSms = rawChannel == 'sms' || rawChannel == 'auto_sms';
+    final phone = _phoneOf(acc, isSms ? 'sms' : 'whatsapp');
+
     if (phone.isEmpty) {
-      if (!silentIfNoPhone && context.mounted) {
-        showSnack(
-          context,
-          channel == 'sms'
-              ? 'لا يوجد رقم هاتف لهذا الحساب لإرسال رسالة نصية'
-              : 'لا يوجد رقم واتساب لهذا الحساب',
-          error: true,
-        );
+      if (!silentIfNoPhone) {
+        // إذا كان العميل لا يتضمن رقماً فهذا لا يمنع إظهار خيارات المشاركة من النظام.
+        return shareViaSystemSheet(context, ref, tx: tx, account: acc);
       }
       return TxShareOutcome.skipped;
     }
@@ -311,7 +371,7 @@ class TxShare {
     if (context.mounted) {
       showSnack(
         context,
-        channel == 'sms'
+        isSms
             ? 'جارٍ تجهيز الرسالة وفتح تطبيق الرسائل…'
             : 'جارٍ تجهيز الإيصال وفتح واتساب…',
       );
@@ -350,9 +410,7 @@ class TxShare {
     }
 
     // === فرع الرسائل النصية ===
-    if (channel == 'sms') {
-      // SMS لا يدعم إرفاق صور عبر النية العادية، لذا نولّد السند في الخلفية
-      // للتخزين، لكن نفتح تطبيق الرسائل بالنص فقط.
+    if (isSms) {
       try {
         if (needsFreshReceipt ||
             tx.image.isEmpty ||
@@ -375,7 +433,7 @@ class TxShare {
         showSnack(
           context,
           ok
-              ? 'تم فتح تطبيق الرسائل النصية — يمكنك إرفاق صورة السند يدوياً إن أردت.'
+              ? 'تم فتح تطبيق الرسائل النصية لمحادثة العميل ✅'
               : 'تعذّر فتح تطبيق الرسائل النصية',
           error: !ok,
         );
@@ -417,13 +475,17 @@ class TxShare {
 
     late final WaResult res;
     try {
-      // نختار حزمة واتساب المناسبة حسب ما هو مثبّت — لا نعتمد على إعداد عام.
       final installed = await WhatsApp.installed();
       String? pkg;
-      if (installed.contains('com.whatsapp.w4b')) {
+      if (rawChannel == 'auto_w4b' && installed.contains('com.whatsapp.w4b')) {
+        pkg = 'com.whatsapp.w4b';
+      } else if (rawChannel == 'auto_whatsapp' &&
+          installed.contains('com.whatsapp')) {
+        pkg = 'com.whatsapp';
+      } else if (installed.contains('com.whatsapp.w4b')) {
         pkg = 'com.whatsapp.w4b';
       } else if (installed.contains('com.whatsapp')) {
-        pkg = null; // العادي هو الافتراضي.
+        pkg = null;
       }
       res = await WhatsApp.send(
         phone: phone,
@@ -458,7 +520,6 @@ class TxShare {
   }
 
   /// مشاركة احتياطية تحفظ الصورة والنص معًا عبر نافذة مشاركة أندرويد.
-  /// تُستخدم فقط إذا رفض إصدار واتساب الإرسال المباشر.
   static Future<bool> _shareImageWithText(String path, String text) async {
     try {
       await Share.shareXFiles(
@@ -478,6 +539,92 @@ class TxShare {
     final w = a.whatsapp.trim();
     return w.isNotEmpty ? w : a.phone.trim();
   }
+}
+
+/// نافذة تأكيد نجاح إنشاء العملية (بنمط نافذة نجاح فاتورة المبيعات) مع زر
+/// المشاركة عبر نافذة النظام الرسمية وزر معاينة السند.
+Future<void> showTxSuccessDialog(
+  BuildContext context,
+  WidgetRef ref, {
+  required Tx tx,
+  Account? account,
+}) async {
+  if (!context.mounted) return;
+  final repo = ref.read(repoProvider);
+  final acc = account ??
+      (tx.accountId == null ? null : await repo.account(tx.accountId!));
+  final currencies = await repo.currencies();
+  final cur = currencies.firstWhere(
+    (c) => c.code == tx.currency,
+    orElse: () => kDefaultCurrencies.first,
+  );
+  if (!context.mounted) return;
+
+  final refNum = tx.reference.trim().isNotEmpty
+      ? tx.reference.trim()
+      : (tx.id != null ? '${tx.id}' : '');
+
+  await showDialog<void>(
+    context: context,
+    barrierDismissible: true,
+    builder: (ctx) {
+      return AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.check_circle, color: AppColors.green),
+            SizedBox(width: 8),
+            Expanded(child: Text('تمت العملية بنجاح ✅')),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('نوع العملية: ${tx.type.icon} ${tx.type.label}'),
+            if (refNum.isNotEmpty) Text('رقم المرجع / السند: #$refNum'),
+            if (acc != null) Text('الحساب / العميل: ${acc.name}'),
+            const SizedBox(height: 6),
+            Text(
+              'المبلغ: ${Fmt.money(tx.amount, cur.decimal)} ${cur.symbol}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'يمكنك مشاركة إشعار العملية مع صورة السند عالية الدقة عبر نافذة مشاركة النظام (واتساب، الرسائل النصية، وغيرها):',
+              style: TextStyle(fontSize: 13),
+            ),
+          ],
+        ),
+        actions: [
+          OutlinedButton.icon(
+            icon: const Icon(Icons.receipt_long_outlined),
+            label: const Text('معاينة السند'),
+            onPressed: () {
+              Navigator.pop(ctx);
+              showReceiptPreview(context, ref, tx: tx, account: acc);
+            },
+          ),
+          FilledButton.icon(
+            icon: const Icon(Icons.share_outlined),
+            label: const Text('مشاركة'),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await TxShare.shareViaSystemSheet(
+                context,
+                ref,
+                tx: tx,
+                account: acc,
+              );
+            },
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('إغلاق'),
+          ),
+        ],
+      );
+    },
+  );
 }
 
 /// معاينة صورة الإيصال مع أزرار الإرسال وإعادة التوليد.
@@ -588,15 +735,15 @@ Future<void> showReceiptPreview(
                     child: FilledButton.icon(
                       onPressed: () {
                         Navigator.pop(ctx);
-                        TxShare.sendNow(
+                        TxShare.shareViaSystemSheet(
                           context,
                           ref,
                           tx: tx.copyWith(image: path),
                           account: acc,
                         );
                       },
-                      icon: const Icon(Icons.send),
-                      label: const Text('إرسال واتساب'),
+                      icon: const Icon(Icons.share_outlined),
+                      label: const Text('مشاركة السند'),
                     ),
                   ),
                 ],

@@ -370,6 +370,12 @@ class MainActivity : FlutterFragmentActivity() {
                         val pkg = call.argument<String>("package")
                         result.success(send(phone, text, path, pkg))
                     }
+                    "systemShare" -> {
+                        val phone = call.argument<String>("phone") ?: ""
+                        val text = call.argument<String>("text") ?: ""
+                        val path = call.argument<String>("path")
+                        result.success(systemShare(phone, text, path))
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -973,6 +979,102 @@ class MainActivity : FlutterFragmentActivity() {
         if (launch(viaLink)) return "ok"
 
         return "error:تعذّر فتح المحادثة"
+    }
+
+    /**
+     * يفتح نافذة المشاركة الرسمية للنظام (Android System Chooser) مرفقاً بها
+     * صورة السند عالية الدقة ونص الإشعار، مع تضمين نوايا مخصصة لواتساب وتطبيق
+     * الرسائل النصية للدخول التلقائي إلى محادثة العميل إن وُجد رقم هاتف، ودون
+     * منع نافذة المشاركة إذا لم يكن للعميل رقم.
+     */
+    private fun systemShare(phone: String, text: String, path: String?): String {
+        val digits = phone.filter { it.isDigit() }
+        val file = path?.let { File(it) }
+            ?.takeIf { it.exists() && it.length() > 0L }
+            ?.let { src -> copyToShared(src) }
+
+        val uri: Uri? = if (file != null) {
+            try {
+                FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            } catch (_: Exception) {
+                null
+            }
+        } else null
+
+        val jid = if (digits.length >= 6) "$digits@s.whatsapp.net" else ""
+
+        val baseIntent = Intent(Intent.ACTION_SEND).apply {
+            if (uri != null) {
+                type = "image/*"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newUri(contentResolver, "voucher", uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } else {
+                type = "text/plain"
+            }
+            putExtra(Intent.EXTRA_TEXT, text)
+            putExtra("sms_body", text)
+            putExtra(Intent.EXTRA_TITLE, "سند العملية")
+            if (digits.length >= 6) {
+                putExtra("jid", jid)
+                putExtra("address", digits)
+            }
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+        val initialIntents = mutableListOf<Intent>()
+        if (digits.length >= 6) {
+            // نوايا مباشرة لواتساب وواتساب الأعمال للدخول التلقائي إلى شاشة الدردشة مع الصورة والنص
+            for (waPkg in installedPackages()) {
+                if (uri != null) {
+                    try {
+                        grantUriPermission(waPkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    } catch (_: Exception) {}
+                    initialIntents.add(imageIntent(waPkg, uri, text, jid, includeJid = true))
+                } else {
+                    initialIntents.add(
+                        Intent(
+                            Intent.ACTION_VIEW,
+                            Uri.parse("https://api.whatsapp.com/send?phone=$digits&text=${Uri.encode(text)}"),
+                        ).apply {
+                            setPackage(waPkg)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                    )
+                }
+            }
+
+            // نية مباشرة لتطبيق الرسائل النصية للدخول التلقائي لمحادثة رقم العميل
+            try {
+                val smsPkg = android.provider.Telephony.Sms.getDefaultSmsPackage(this)
+                val smsIntent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$digits")).apply {
+                    if (!smsPkg.isNullOrEmpty()) setPackage(smsPkg)
+                    putExtra("sms_body", text)
+                    putExtra(Intent.EXTRA_TEXT, text)
+                    if (uri != null) {
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        if (!smsPkg.isNullOrEmpty()) {
+                            try {
+                                grantUriPermission(smsPkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            } catch (_: Exception) {}
+                        }
+                    }
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                initialIntents.add(smsIntent)
+            } catch (_: Exception) {}
+        }
+
+        val chooser = Intent.createChooser(baseIntent, "مشاركة إشعار وسند العملية").apply {
+            if (initialIntents.isNotEmpty()) {
+                putExtra(Intent.EXTRA_INITIAL_INTENTS, initialIntents.toTypedArray())
+            }
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        return if (launch(chooser)) "ok" else "error"
     }
 
     private fun launch(intent: Intent): Boolean = try {
