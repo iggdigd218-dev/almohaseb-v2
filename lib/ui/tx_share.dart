@@ -289,7 +289,7 @@ class TxShare {
       if (!context.mounted) return;
       try {
         final container = ProviderScope.containerOf(context, listen: false);
-        container.read(dbTickProvider.notifier).state++;
+        container.read(refreshProvider.notifier).state++;
       } catch (_) {}
     }
   }
