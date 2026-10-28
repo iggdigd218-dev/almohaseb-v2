@@ -3470,6 +3470,14 @@ class _PosScreenState extends ConsumerState<PosScreen>
                     ? null
                     : await repo.account(tx.accountId!);
                 if (!mounted) return;
+                if (acc == null || acc.phone.isEmpty) {
+                  showSnack(
+                    context,
+                    'لا يوجد رقم هاتف مسجل للعميل',
+                    error: true,
+                  );
+                  return;
+                }
                 await TxShare.sendNow(context, ref, tx: tx, account: acc);
               },
             ),

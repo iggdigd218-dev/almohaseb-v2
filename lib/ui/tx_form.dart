@@ -306,13 +306,9 @@ class _TxFormState extends ConsumerState<TxForm> {
       var share = TxShareOutcome.skipped;
       if (!_isTransfer && _account != null && mounted) {
         try {
-          share = await TxShare.sendNow(
-            context,
-            ref,
-            tx: saved,
-            account: _account!,
-            silentIfNoPhone: true,
-          );
+          share = await TxShare.sendNow(context, ref,
+                  tx: saved, account: _account!, silentIfNoPhone: true)
+              .timeout(const Duration(seconds: 15));
         } catch (_) {
           share = TxShareOutcome.failed;
         }

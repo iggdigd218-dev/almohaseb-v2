@@ -273,8 +273,9 @@ class TxShare {
     return lines.join('\n');
   }
 
-  /// المسار الكامل: عرض خيارات المشاركة (واتساب العادي، واتساب الأعمال،
-  /// الرسائل النصية SMS، أو مشاركة صورة السند) والدخول المباشر لمحادثة العميل.
+  /// المسار الكامل: توليد + حفظ + فتح واتساب على رقم العميل.
+  ///
+  /// يعمل نفسه للعملية الجديدة ولإعادة الإرسال لعملية قديمة.
   static Future<TxShareOutcome> sendNow(
     BuildContext context,
     WidgetRef ref, {
@@ -286,48 +287,57 @@ class TxShare {
     final acc = account ??
         (tx.accountId == null ? null : await repo.account(tx.accountId!));
 
+    // نحدد القناة من بيانات الحساب نفسه (لكل عميل تفضيله).
     final channel = (acc?.notifyChannel ?? 'whatsapp').trim();
-    final initialPhone = _phoneOf(acc, channel);
+    final phone = _phoneOf(acc, channel);
 
-    if (channel == 'none' && silentIfNoPhone) {
+    if (channel == 'none') {
+      return TxShareOutcome.skipped; // المستخدم فضّل عدم الإرسال.
+    }
+
+    if (phone.isEmpty) {
+      if (!silentIfNoPhone && context.mounted) {
+        showSnack(
+          context,
+          channel == 'sms'
+              ? 'لا يوجد رقم هاتف لهذا الحساب لإرسال رسالة نصية'
+              : 'لا يوجد رقم واتساب لهذا الحساب',
+          error: true,
+        );
+      }
       return TxShareOutcome.skipped;
     }
 
-    if (initialPhone.isEmpty && silentIfNoPhone) {
-      return TxShareOutcome.skipped;
-    }
-
-    if (!context.mounted) return TxShareOutcome.skipped;
-
-    // نولّد صورة السند في الخلفية دائماً لحفظها مع العملية دون إعاقة فتح المحادثة.
-    unawaited(
-      generate(repo: repo, tx: tx, account: acc)
-          .timeout(const Duration(seconds: 6))
-          .then<void>((_) {}, onError: (Object e, StackTrace st) {
-        debugPrint('Background receipt generation failed: $e');
-      }),
-    );
-
-    final choice = await _showShareOptionsSheet(
-      context,
-      accountName: acc?.name ?? 'عميل نقدي',
-      initialPhone: initialPhone,
-      preferredChannel: channel,
-    );
-
-    if (choice == null || !context.mounted) {
-      return TxShareOutcome.skipped;
-    }
-
-    final phone = choice.phone.trim();
-    if (phone.isEmpty && choice.mode != _ShareMode.imageShare) {
+    if (context.mounted) {
       showSnack(
         context,
-        'يرجى إدخال رقم هاتف العميل لإرسال الإشعار',
-        error: true,
+        channel == 'sms'
+            ? 'جارٍ تجهيز الرسالة وفتح تطبيق الرسائل…'
+            : 'جارٍ تجهيز الإيصال وفتح واتساب…',
       );
-      return TxShareOutcome.skipped;
     }
+
+    late final List<InvoiceLine> itemLines;
+    late final Map<String, String> currentSettings;
+    try {
+      itemLines = tx.id == null
+          ? const <InvoiceLine>[]
+          : await repo.transactionItems(tx.id!);
+      currentSettings = await repo.settings();
+    } catch (e) {
+      if (context.mounted) {
+        showSnack(context, 'تعذّر تحميل بيانات السند: $e', error: true);
+      }
+      return TxShareOutcome.failed;
+    }
+    final hasLogo =
+        (currentSettings['org.icon.b64'] ?? '').trim().isNotEmpty ||
+            (currentSettings['logoBase64'] ?? '').trim().isNotEmpty ||
+            (currentSettings['logo'] ?? '').trim().isNotEmpty ||
+            (currentSettings['logoPath'] ?? '').trim().isNotEmpty ||
+            (currentSettings['account.photoPath'] ?? '').trim().isNotEmpty;
+    final needsFreshReceipt =
+        tx.type == OpType.debit || itemLines.isNotEmpty || hasLogo;
 
     late final String text;
     try {
@@ -339,15 +349,33 @@ class TxShare {
       return TxShareOutcome.failed;
     }
 
-    // 1) الرسائل النصية SMS المباشرة
-    if (choice.mode == _ShareMode.sms) {
+    // === فرع الرسائل النصية ===
+    if (channel == 'sms') {
+      // SMS لا يدعم إرفاق صور عبر النية العادية، لذا نولّد السند في الخلفية
+      // للتخزين، لكن نفتح تطبيق الرسائل بالنص فقط.
+      try {
+        if (needsFreshReceipt ||
+            tx.image.isEmpty ||
+            !MediaPaths.exists(tx.image)) {
+          unawaited(
+            generate(
+              repo: repo,
+              tx: tx,
+              account: acc,
+            ).timeout(const Duration(seconds: 5)).then<void>((_) {},
+                onError: (Object e, StackTrace st) {
+              debugPrint('Receipt generation failed: $e');
+            }),
+          );
+        }
+      } catch (_) {}
       final ok = await SmsSender.send(phone: phone, body: text);
       bump(ref);
       if (context.mounted) {
         showSnack(
           context,
           ok
-              ? 'تم فتح محادثة الرسائل النصية للعميل بنجاح'
+              ? 'تم فتح تطبيق الرسائل النصية — يمكنك إرفاق صورة السند يدوياً إن أردت.'
               : 'تعذّر فتح تطبيق الرسائل النصية',
           error: !ok,
         );
@@ -355,244 +383,82 @@ class TxShare {
       return ok ? TxShareOutcome.opened : TxShareOutcome.failed;
     }
 
-    // 2) واتساب العادي أو واتساب الأعمال — دخول مباشر لمحادثة العميل
-    if (choice.mode == _ShareMode.whatsappDirect ||
-        choice.mode == _ShareMode.whatsappBusinessDirect) {
-      final targetPkg = choice.mode == _ShareMode.whatsappBusinessDirect
-          ? 'com.whatsapp.w4b'
-          : 'com.whatsapp';
-      try {
-        final res = await WhatsApp.send(
-          phone: phone,
-          text: text,
-          imagePath: null, // بدون مسار صورة للدخول المباشر لمحادثة العميل فوراً
-          package: targetPkg,
-        );
-        bump(ref);
-        if (context.mounted && res != WaResult.ok) {
-          showSnack(context, WhatsApp.messageFor(res), error: true);
-        }
-        return res == WaResult.ok
-            ? TxShareOutcome.opened
-            : TxShareOutcome.failed;
-      } catch (e) {
-        if (context.mounted) {
-          showSnack(context, 'تعذّر فتح محادثة واتساب: $e', error: true);
-        }
-        return TxShareOutcome.failed;
-      }
-    }
-
-    // 3) إرفاق ومشاركة صورة السند مع النص
+    // === فرع واتساب ===
     String path;
     try {
-      path = await generate(repo: repo, tx: tx, account: acc);
-    } catch (e) {
+      if (needsFreshReceipt) {
+        path = await generate(repo: repo, tx: tx, account: acc);
+      } else if (tx.image.isNotEmpty && MediaPaths.exists(tx.image)) {
+        path = MediaPaths.toAbsolute(tx.image);
+      } else {
+        path = await generate(repo: repo, tx: tx, account: acc);
+      }
+    } catch (_) {
       if (context.mounted) {
-        showSnack(context, 'تعذّر تجهيز صورة السند: $e', error: true);
+        showSnack(
+          context,
+          'تعذّر تجهيز صورة السند، لم يتم إرسال إشعار نصي فقط.',
+          error: true,
+        );
       }
       return TxShareOutcome.failed;
     }
 
     if (path.isEmpty || !File(path).existsSync()) {
       if (context.mounted) {
-        showSnack(context, 'تعذّر العثور على صورة السند', error: true);
+        showSnack(
+          context,
+          'تعذّر العثور على صورة السند، لم يتم إرسال النص وحده.',
+          error: true,
+        );
       }
       return TxShareOutcome.failed;
     }
 
-    final shared = await _shareImageWithText(path, text);
-    bump(ref);
-    if (context.mounted) {
-      showSnack(
-        context,
-        shared
-            ? 'تم فتح نافذة مشاركة السند بالصورة والنص'
-            : 'تعذّر مشاركة صورة السند',
-        error: !shared,
+    late final WaResult res;
+    try {
+      // نختار حزمة واتساب المناسبة حسب ما هو مثبّت — لا نعتمد على إعداد عام.
+      final installed = await WhatsApp.installed();
+      String? pkg;
+      if (installed.contains('com.whatsapp.w4b')) {
+        pkg = 'com.whatsapp.w4b';
+      } else if (installed.contains('com.whatsapp')) {
+        pkg = null; // العادي هو الافتراضي.
+      }
+      res = await WhatsApp.send(
+        phone: phone,
+        text: text,
+        imagePath: path,
+        package: pkg,
       );
+    } catch (e) {
+      if (context.mounted) {
+        showSnack(context, 'تعذّر إرسال السند بالصورة والنص: $e', error: true);
+      }
+      return TxShareOutcome.failed;
     }
-    return shared ? TxShareOutcome.opened : TxShareOutcome.failed;
-  }
 
-  static Future<_ShareChoice?> _showShareOptionsSheet(
-    BuildContext context, {
-    required String accountName,
-    required String initialPhone,
-    required String preferredChannel,
-  }) async {
-    final phoneCtrl = TextEditingController(text: initialPhone);
-    return showModalBottomSheet<_ShareChoice>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) {
-        final isDark = Theme.of(ctx).brightness == Brightness.dark;
-        return Directionality(
-          textDirection: TextDirection.rtl,
-          child: Padding(
-            padding: EdgeInsets.only(
-              bottom: MediaQuery.of(ctx).viewInsets.bottom,
-            ),
-            child: Container(
-              decoration: BoxDecoration(
-                color: isDark ? const Color(0xFF1E2430) : Colors.white,
-                borderRadius: const BorderRadius.vertical(
-                  top: Radius.circular(22),
-                ),
-              ),
-              padding: const EdgeInsets.fromLTRB(18, 12, 18, 20),
-              child: SafeArea(
-                top: false,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Center(
-                      child: Container(
-                        width: 40,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: Colors.grey.withValues(alpha: 0.35),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Container(
-                          width: 38,
-                          height: 38,
-                          decoration: BoxDecoration(
-                            color:
-                                const Color(0xFF1E88E5).withValues(alpha: 0.14),
-                            borderRadius: BorderRadius.circular(11),
-                          ),
-                          child: const Icon(
-                            Icons.send_rounded,
-                            color: Color(0xFF1E88E5),
-                            size: 20,
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'إرسال إشعار العملية للعميل',
-                                style: TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                              Text(
-                                'العميل: $accountName — اختر وسيلة الإرسال للدخول المباشر للمحادثة',
-                                style: TextStyle(
-                                  fontSize: 11.5,
-                                  color: isDark
-                                      ? Colors.white70
-                                      : const Color(0xFF64748B),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        IconButton(
-                          onPressed: () => Navigator.pop(ctx),
-                          icon: const Icon(Icons.close, size: 20),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: phoneCtrl,
-                      keyboardType: TextInputType.phone,
-                      textDirection: TextDirection.ltr,
-                      decoration: InputDecoration(
-                        labelText: 'رقم هاتف / واتساب العميل',
-                        hintText: 'مثال: 777123456',
-                        prefixIcon: const Icon(Icons.phone_outlined, size: 19),
-                        isDense: true,
-                        filled: true,
-                        fillColor: isDark
-                            ? Colors.white.withValues(alpha: 0.05)
-                            : const Color(0xFFF8FAFC),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    _ShareOptionTile(
-                      icon: Icons.chat_rounded,
-                      iconColor: const Color(0xFF16A34A),
-                      title: 'واتساب (WhatsApp)',
-                      subtitle: 'فتح محادثة العميل مباشرة مع تفاصيل الفاتورة/السند',
-                      highlighted: preferredChannel != 'sms',
-                      onTap: () => Navigator.pop(
-                        ctx,
-                        _ShareChoice(
-                          mode: _ShareMode.whatsappDirect,
-                          phone: phoneCtrl.text,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    _ShareOptionTile(
-                      icon: Icons.storefront_rounded,
-                      iconColor: const Color(0xFF00897B),
-                      title: 'واتساب الأعمال (WhatsApp Business)',
-                      subtitle: 'الدخول المباشر لمحادثة العميل عبر واتساب الأعمال',
-                      onTap: () => Navigator.pop(
-                        ctx,
-                        _ShareChoice(
-                          mode: _ShareMode.whatsappBusinessDirect,
-                          phone: phoneCtrl.text,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    _ShareOptionTile(
-                      icon: Icons.sms_outlined,
-                      iconColor: const Color(0xFF1E88E5),
-                      title: 'الرسائل النصية (SMS)',
-                      subtitle: 'إرسال تفاصيل العملية برسالة نصية مباشرة لرقم العميل',
-                      highlighted: preferredChannel == 'sms',
-                      onTap: () => Navigator.pop(
-                        ctx,
-                        _ShareChoice(
-                          mode: _ShareMode.sms,
-                          phone: phoneCtrl.text,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    _ShareOptionTile(
-                      icon: Icons.image_outlined,
-                      iconColor: const Color(0xFF7C3AED),
-                      title: 'مشاركة صورة السند مع النص',
-                      subtitle: 'إرفاق صورة السند الرسمي عبر نافذة المشاركة',
-                      onTap: () => Navigator.pop(
-                        ctx,
-                        _ShareChoice(
-                          mode: _ShareMode.imageShare,
-                          phone: phoneCtrl.text,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
+    bump(ref);
+    if (res == WaResult.imageFailed || res == WaResult.error) {
+      final shared = await _shareImageWithText(path, text);
+      if (context.mounted) {
+        showSnack(
+          context,
+          shared
+              ? 'تم فتح مشاركة السند بالصورة والنص.'
+              : WhatsApp.messageFor(res),
+          error: !shared,
         );
-      },
-    );
+      }
+      return shared ? TxShareOutcome.opened : TxShareOutcome.failed;
+    } else if (context.mounted && res != WaResult.ok) {
+      showSnack(context, WhatsApp.messageFor(res), error: true);
+    }
+    return res == WaResult.ok ? TxShareOutcome.opened : TxShareOutcome.failed;
   }
 
   /// مشاركة احتياطية تحفظ الصورة والنص معًا عبر نافذة مشاركة أندرويد.
+  /// تُستخدم فقط إذا رفض إصدار واتساب الإرسال المباشر.
   static Future<bool> _shareImageWithText(String path, String text) async {
     try {
       await Share.shareXFiles(
@@ -611,107 +477,6 @@ class TxShare {
     if (channel == 'sms') return a.phone.trim();
     final w = a.whatsapp.trim();
     return w.isNotEmpty ? w : a.phone.trim();
-  }
-}
-
-enum _ShareMode {
-  whatsappDirect,
-  whatsappBusinessDirect,
-  sms,
-  imageShare,
-}
-
-class _ShareChoice {
-  final _ShareMode mode;
-  final String phone;
-  const _ShareChoice({required this.mode, required this.phone});
-}
-
-class _ShareOptionTile extends StatelessWidget {
-  final IconData icon;
-  final Color iconColor;
-  final String title;
-  final String subtitle;
-  final bool highlighted;
-  final VoidCallback onTap;
-
-  const _ShareOptionTile({
-    required this.icon,
-    required this.iconColor,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-    this.highlighted = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    return Material(
-      color: isDark ? const Color(0xFF262D3D) : Colors.white,
-      borderRadius: BorderRadius.circular(14),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(14),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: highlighted
-                  ? iconColor.withValues(alpha: 0.65)
-                  : (isDark
-                      ? Colors.white.withValues(alpha: 0.08)
-                      : const Color(0xFFE2E8F0)),
-              width: highlighted ? 1.4 : 1.0,
-            ),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: iconColor.withValues(alpha: 0.14),
-                  borderRadius: BorderRadius.circular(11),
-                ),
-                child: Icon(icon, color: iconColor, size: 21),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: isDark
-                            ? Colors.white60
-                            : const Color(0xFF64748B),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Icon(
-                Icons.arrow_forward_ios_rounded,
-                size: 14,
-                color: isDark ? Colors.white38 : const Color(0xFF94A3B8),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 }
 
