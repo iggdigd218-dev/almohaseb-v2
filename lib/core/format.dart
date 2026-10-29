@@ -47,11 +47,44 @@ class Fmt {
   /// هل المبلغان متساويان حسابيّاً (بتسامح)؟
   static bool sameMoney(double a, double b) => (a - b).abs() <= moneyEpsilon;
 
+  /// هل المبلغ صفري حسابيّاً (بتسامح)؟
+  static bool isZeroMoney(double v) => v.abs() <= moneyEpsilon;
+
   /// هل `a` أكبر من `b` بفارق يُعتدّ به (بتسامح)؟
   static bool moneyGt(double a, double b) => (a - b) > moneyEpsilon;
 
   /// هل `a` أصغر من `b` بفارق يُعتدّ به (بتسامح)؟
   static bool moneyLt(double a, double b) => (b - a) > moneyEpsilon;
+
+  /// استخراج بادئة الجهاز من حرف إنجليزي كبير واحد (A-Z) بدلاً من سلسلة طويلة.
+  static String singleLetterDevicePrefix(
+    String rawDeviceId, {
+    String? configuredPrefix,
+  }) {
+    final cfg = (configuredPrefix ?? '').trim().toUpperCase();
+    if (cfg.isNotEmpty) {
+      final m = RegExp(r'[A-Z]').firstMatch(cfg);
+      if (m != null) return m.group(0)!;
+    }
+    var clean = rawDeviceId.trim().toUpperCase();
+    if (clean.startsWith('DEVICE-')) {
+      clean = clean.substring('DEVICE-'.length).trim();
+    } else if (clean.startsWith('DEV-')) {
+      clean = clean.substring('DEV-'.length).trim();
+    }
+    final letterMatch = RegExp(r'[A-Z]').firstMatch(clean);
+    if (letterMatch != null) {
+      return letterMatch.group(0)!;
+    }
+    if (clean.isNotEmpty) {
+      var hash = 0;
+      for (final unit in clean.codeUnits) {
+        hash = (hash * 31 + unit) & 0x7fffffff;
+      }
+      return String.fromCharCode(65 + (hash % 26));
+    }
+    return 'A';
+  }
 
   /// مبلغ مع رمز العملة.
   static String withSymbol(double v, CurrencyDef c) =>

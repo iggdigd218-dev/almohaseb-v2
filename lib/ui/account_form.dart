@@ -493,12 +493,6 @@ class _State extends ConsumerState<AccountFormScreen> {
             ),
             const SizedBox(height: 13),
             TextFormField(
-              controller: _address,
-              scrollPadding: const EdgeInsets.only(bottom: 140),
-              decoration: const InputDecoration(labelText: 'العنوان'),
-            ),
-            const SizedBox(height: 13),
-            TextFormField(
               controller: _limit,
               scrollPadding: const EdgeInsets.only(bottom: 140),
               decoration: const InputDecoration(
@@ -510,22 +504,6 @@ class _State extends ConsumerState<AccountFormScreen> {
               ),
             ),
             AmountWords(controller: _limit, decimals: 2),
-            const SizedBox(height: 13),
-            TextFormField(
-              controller: _tags,
-              scrollPadding: const EdgeInsets.only(bottom: 140),
-              decoration: const InputDecoration(
-                labelText: 'علامات',
-                hintText: 'افصل بينها بفاصلة',
-              ),
-            ),
-            const SizedBox(height: 13),
-            TextFormField(
-              controller: _notes,
-              scrollPadding: const EdgeInsets.only(bottom: 140),
-              decoration: const InputDecoration(labelText: 'ملاحظات'),
-              maxLines: 3,
-            ),
             const SizedBox(height: 20),
             FilledButton.icon(
               onPressed: _saving ? null : _save,

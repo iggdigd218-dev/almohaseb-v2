@@ -412,6 +412,7 @@ class UpdateInstaller {
     // 3) متابعة التقدم مع التحويل التلقائي الذكي إلى محرك HTTP المتوازي
     // إذا بقي DownloadManager عالقاً عند 0 بايت لأكثر من 15 ثانية (30 دورة فحص).
     var stuckCount = 0;
+    var pausedTicks = 0;
     var zeroByteTicks = 0;
     var lastBytes = 0;
     var lastSampleTime = DateTime.now();
@@ -446,6 +447,7 @@ class UpdateInstaller {
       if (elapsedMs >= 800) {
         final delta = bytes - lastBytes;
         if (delta > 0) {
+          pausedTicks = 0;
           final instantBps = (delta * 1000.0) / elapsedMs;
           currentSpeedBps = currentSpeedBps <= 0
               ? instantBps
@@ -483,6 +485,17 @@ class UpdateInstaller {
           return;
         case 'paused':
           stuckCount = 0;
+          if (++pausedTicks >= 600) {
+            // تجاوز حد التوقف المؤقت (5 دقائق) — الانتقال لمحرك التنزيل البديل
+            await _cancelDownload(id);
+            await _saveDownload(null, null);
+            yield* _fallbackHttpDownload(
+              url,
+              expectedSha256: targetSha256,
+              fallbackUrl: fallbackUrl,
+            );
+            return;
+          }
           yield InstallProgress(
             InstallPhase.downloading,
             progress: (total > 0) ? bytes / total : 0.0,
@@ -509,6 +522,7 @@ class UpdateInstaller {
           break;
         default: // running / pending
           stuckCount = 0;
+          pausedTicks = 0;
           yield InstallProgress(
             InstallPhase.downloading,
             progress: (total > 0) ? bytes / total : 0.0,

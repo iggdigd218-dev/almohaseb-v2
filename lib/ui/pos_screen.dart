@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:printing/printing.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/accounting.dart';
 import '../core/desktop.dart';
@@ -1899,6 +1900,10 @@ class _PosScreenState extends ConsumerState<PosScreen>
                         ShellNav.go(ShellNav.inventory);
                       case 'sections_gate':
                         setState(() => _atSectionsGate = !_atSectionsGate);
+                      case 'user_guide':
+                        _showPosUserGuideSheet();
+                      case 'tech_support':
+                        _showTechSupportSheet();
                     }
                   },
                   itemBuilder: (ctx) => [
@@ -1974,6 +1979,25 @@ class _PosScreenState extends ConsumerState<PosScreen>
                         title: Text('تصفح شبكة الأقسام'),
                       ),
                     ),
+                    const PopupMenuDivider(),
+                    const PopupMenuItem<String>(
+                      value: 'user_guide',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.help_outline_rounded),
+                        title: Text('التعليمات'),
+                      ),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'tech_support',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.support_agent_rounded),
+                        title: Text('الدعم الفني'),
+                      ),
+                    ),
                   ],
                 ),
                 _headerIconButton(
@@ -1983,6 +2007,203 @@ class _PosScreenState extends ConsumerState<PosScreen>
                 ),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showPosUserGuideSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(borderRadius: AppRadius.sheetTop),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.fromLTRB(18, 14, 18, 24),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.menu_book_rounded,
+                    color: AppColors.primaryOf(ctx),
+                  ),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'التعليمات ودليل الاستخدام السريع',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(ctx),
+                  ),
+                ],
+              ),
+              const Divider(height: 16),
+              _guideItem(
+                ctx,
+                icon: Icons.point_of_sale_rounded,
+                title: 'البيع السريع ونقطة البيع (POS)',
+                body:
+                    'اضغط على الصنف لإضافته فوراً إلى السلة، أو استخدم ماسح الباركود والبحث الفوري. يمكنك تعليق الفاتورة الحالية وبدء فاتورة جديدة لخدمة أكثر من عميل في نفس الوقت.',
+              ),
+              _guideItem(
+                ctx,
+                icon: Icons.account_balance_wallet_outlined,
+                title: 'إدارة الديون والبيع الآجل والجزئي',
+                body:
+                    'عند إتمام الفاتورة يمكنك اختيار (نقداً، آجل، أو جزئي) مع تحديد حساب العميل ليتم قيد المبلغ المتبقي في كشف حسابه وإصدار سند إشعار مصور عالي الدقة.',
+              ),
+              _guideItem(
+                ctx,
+                icon: Icons.cloud_done_rounded,
+                title: 'العمل دون إنترنت والمزامنة السحابية',
+                body:
+                    'يعمل التطبيق بكفاءة كاملة دون اتصال بالإنترنت (Offline-First)، وبمجرد توفر الاتصال تتم مزامنة الفواتير والمخزون والحسابات تلقائياً بين جميع أجهزتك المرتبطة.',
+              ),
+              _guideItem(
+                ctx,
+                icon: Icons.assignment_return_outlined,
+                title: 'المرتجعات وقائمة النواقص',
+                body:
+                    'من القائمة العلوية (⋮) يمكنك البحث برقم الفاتورة لتنفيذ مرتجع مبيعات يعيد الكمية للمخزون تلقائياً، أو استعراض وتصدير قائمة النواقص كصورة أو ملف PDF.',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _guideItem(
+    BuildContext context, {
+    required IconData icon,
+    required String title,
+    required String body,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: AppColors.primaryOf(context).withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(icon, size: 20, color: AppColors.primaryOf(context)),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 13.5,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  body,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    height: 1.55,
+                    color: AppColors.text2Of(context),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showTechSupportSheet() {
+    const supportPhone = '+967774190040';
+    const supportWa = '967774190040';
+    showModalBottomSheet<void>(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: AppRadius.sheetTop),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 14, 18, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.support_agent_rounded,
+                    color: AppColors.primaryOf(ctx),
+                  ),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'الدعم الفني وخدمة العملاء',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(ctx),
+                  ),
+                ],
+              ),
+              const Divider(height: 16),
+              Text(
+                'نسعد بخدمتكم والرد على استفساراتكم الفنية على الرقم: $supportPhone',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: AppColors.text2Of(ctx),
+                ),
+              ),
+              const SizedBox(height: 14),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF16A34A),
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size.fromHeight(46),
+                ),
+                onPressed: () async {
+                  Navigator.pop(ctx);
+                  final uri = Uri.parse('https://wa.me/$supportWa');
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                },
+                icon: const Icon(Icons.chat_bubble_outline_rounded),
+                label: const Text('مراسلة الدعم الفني عبر واتساب'),
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(46),
+                ),
+                onPressed: () async {
+                  Navigator.pop(ctx);
+                  final uri = Uri.parse('tel:$supportPhone');
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                },
+                icon: const Icon(Icons.call_outlined),
+                label: const Text('اتصال مباشر ($supportPhone)'),
+              ),
+            ],
           ),
         ),
       ),
@@ -2430,9 +2651,9 @@ class _PosScreenState extends ConsumerState<PosScreen>
                   final remainingNow =
                       (_netTotal - paidNow).clamp(0.0, double.infinity);
                   final partialInvalid = _payment == _PosPayment.partial &&
-                      (_netTotal <= 0.01 ||
-                          paidNow < 0.01 ||
-                          paidNow > (_netTotal - 0.01) ||
+                      (_netTotal <= Fmt.moneyEpsilon ||
+                          paidNow < Fmt.moneyEpsilon ||
+                          paidNow > (_netTotal - Fmt.moneyEpsilon) ||
                           paidNow >= _netTotal);
 
                   final heldCount = ref.watch(heldInvoicesProvider).length;
@@ -2813,11 +3034,11 @@ class _PosScreenState extends ConsumerState<PosScreen>
                           if (p < 0) {
                             return 'لا يُسمح بإدخال مبلغ مدفوع بالسالب';
                           }
-                          if (p < 0.01) {
+                          if (p < Fmt.moneyEpsilon) {
                             return 'المبلغ المدفوع يجب أن يكون 0.01 على الأقل (أو اختر آجل كامل)';
                           }
-                          if (p > (_netTotal - 0.01) || p >= _netTotal) {
-                            return 'المبلغ المدفوع يجب أن يكون أقل من الصافي (${Fmt.money((_netTotal - 0.01).clamp(0.01, double.infinity), 2)}) — أو اختر نقداً';
+                          if (p > (_netTotal - Fmt.moneyEpsilon) || p >= _netTotal) {
+                            return 'المبلغ المدفوع يجب أن يكون أقل من الصافي (${Fmt.money((_netTotal - Fmt.moneyEpsilon).clamp(Fmt.moneyEpsilon, double.infinity), 2)}) — أو اختر نقداً';
                           }
                           return null;
                         },
@@ -3216,7 +3437,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
           );
           return;
         }
-        if (paidRaw < 0.01) {
+        if (paidRaw < Fmt.moneyEpsilon) {
           Sfx.reject();
           if (!mounted) return;
           showSnack(
@@ -3227,7 +3448,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
           );
           return;
         }
-        if (paidRaw > (_netTotal - 0.01) || paidRaw >= _netTotal) {
+        if (paidRaw > (_netTotal - Fmt.moneyEpsilon) || paidRaw >= _netTotal) {
           Sfx.reject();
           if (!mounted) return;
           showSnack(

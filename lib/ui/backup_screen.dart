@@ -785,48 +785,6 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
           ),
         ),
         const SizedBox(height: 20),
-        const SectionTitle('استخدام البيانات على أكثر من هاتف'),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.phonelink, color: AppColors.primaryOf(context)),
-                    const SizedBox(width: 8),
-                    const Expanded(
-                      child: Text(
-                        'نقل الحساب بين الأجهزة',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 14.5,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'التطبيق يعمل بلا إنترنت وكل البيانات محفوظة داخل جهازك، '
-                  'ولا يوجد خادم يزامن الأجهزة لحظيًا. للعمل على هاتف ثانٍ:\n\n'
-                  '١) أنشئ نسخة احتياطية هنا.\n'
-                  '٢) أرسل الملف إلى الهاتف الآخر (واتساب أو درايف أو كابل).\n'
-                  '٣) في الهاتف الآخر: النسخ الاحتياطي ← استعادة، واختر الملف.\n\n'
-                  'ملاحظة مهمة: الاستعادة تستبدل بيانات الجهاز الثاني بالكامل '
-                  'مع حفظ لقطة أمان تلقائية للبيانات السابقة.',
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    height: 1.75,
-                    color: AppColors.text2Of(context),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 20),
         SectionTitle(
           'سلة المهملات',
           actionLabel: 'تفريغ',

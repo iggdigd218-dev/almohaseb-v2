@@ -805,16 +805,63 @@ extension ApplyRemoteOp on Repo {
                         0));
 
             if (table == 'items') {
-              if (op.opType == OpKind.update && row.containsKey('quantity')) {
-                final isFromStockMove = op.payload['__from_stock_move'] != null ||
+              final existingName =
+                  '${existing.first['name'] ?? ''}'.trim();
+              final isStubRow = existingName == 'صنف';
+              if (op.opType == OpKind.create && row.containsKey('quantity')) {
+                if (isStubRow) {
+                  // الصف المحلي مؤقت (Stub) أُنشئ عند وصول حركات مخزون سابقة:
+                  // نجمع رصيد الحركات المتراكم في الـ Stub مع الكمية التأسيسية للصنف.
+                  final stubDelta =
+                      (existing.first['quantity'] as num?)?.toDouble() ?? 0.0;
+                  final createQty =
+                      (row['quantity'] as num?)?.toDouble() ?? 0.0;
+                  row['quantity'] = createQty + stubDelta;
+                } else {
+                  // الصنف موجود مسبقاً (مثلاً من نسخة احتياطية/لقطة ثم أُعيد سحب سجل العمليات):
+                  // إذا كانت هناك حركات مخزون مسجلة محلياً لهذا الصنف، لا نسمح لعملية
+                  // التأسيس القديمة (create) بتصفير أثر المبيعات وإعادة الكمية للقيمة الابتدائية.
+                  final hasMoves = await txn.query(
+                    'stock_moves',
+                    columns: ['id'],
+                    where:
+                        "item_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
+                    whereArgs: [op.entityId],
+                    limit: 1,
+                  );
+                  if (hasMoves.isNotEmpty) {
+                    row.remove('quantity');
+                  }
+                }
+              } else if (op.opType == OpKind.update &&
+                  row.containsKey('quantity')) {
+                final moveRefId = op.payload['__from_stock_move'];
+                final isFromStockMove = moveRefId != null ||
                     op.payload['__from_stock_move_delete'] != null;
                 final isQtyUnchangedMetaEdit = op.payload['__qty_changed'] == 0;
                 final isLegacyStockCompanion =
                     !op.payload.containsKey('name') &&
                         op.payload.containsKey('quantity');
-                if (isFromStockMove || isQtyUnchangedMetaEdit) {
+                if (isQtyUnchangedMetaEdit && !isStubRow) {
                   row.remove('quantity');
-                } else if (isLegacyStockCompanion) {
+                } else if (isFromStockMove && !isStubRow) {
+                  // نحذف الكمية فقط إذا كانت حركة المخزون المرافقة قد طُبِّقت محلياً بالفعل
+                  // أو ستُطبَّق كفرق (Delta)، أما إن كانت مفقودة/مضغوطة فنعتمد كمية الصنف المحدثة.
+                  if (moveRefId != null) {
+                    final moveRows = await txn.query(
+                      'stock_moves',
+                      columns: ['id'],
+                      where: 'id = ?',
+                      whereArgs: [moveRefId],
+                      limit: 1,
+                    );
+                    if (moveRows.isNotEmpty) {
+                      row.remove('quantity');
+                    }
+                  } else {
+                    row.remove('quantity');
+                  }
+                } else if (isLegacyStockCompanion && !isStubRow) {
                   final hasMoves = await txn.query(
                     'stock_moves',
                     columns: ['id'],
@@ -1002,9 +1049,32 @@ extension ApplyRemoteOp on Repo {
           if (op.entityType == EntityKind.stockMove) {
             try {
               final itemId = insertRow['item_id'];
+              final moveId = insertRow['id'] ?? op.entityId;
               final moveQty = (insertRow['quantity'] as num?)?.toDouble() ?? 0.0;
               final kindStr = '${insertRow['kind'] ?? 'sale'}'.trim();
               if (itemId != null && moveQty != 0) {
+                // التحقق مما إذا كانت عملية تحديث الصنف المرافقة (__from_stock_move == moveId)
+                // قد طبّقت الكمية النهائية مسبقاً في نفس الدفعة لتجنب الخصم المزدوج.
+                var alreadyAppliedByItemOp = false;
+                try {
+                  final itemOps = await txn.query(
+                    'operations',
+                    columns: ['payload', 'version'],
+                    where: "entity_type = 'item' AND entity_id = ?",
+                    whereArgs: ['$itemId'],
+                    orderBy: 'version DESC, timestamp DESC',
+                    limit: 5,
+                  );
+                  for (final io in itemOps) {
+                    final rawP = '${io['payload'] ?? ''}';
+                    if (rawP.contains('"__from_stock_move":$moveId') ||
+                        rawP.contains('"__from_stock_move":"$moveId"')) {
+                      alreadyAppliedByItemOp = true;
+                      break;
+                    }
+                  }
+                } catch (_) {}
+
                 final itRows = await txn.query(
                   'items',
                   columns: ['quantity'],
@@ -1012,17 +1082,18 @@ extension ApplyRemoteOp on Repo {
                   whereArgs: [itemId],
                   limit: 1,
                 );
-                if (itRows.isNotEmpty) {
+                if (itRows.isNotEmpty && !alreadyAppliedByItemOp) {
                   final curQty =
                       (itRows.first['quantity'] as num?)?.toDouble() ?? 0.0;
                   final double newQty;
                   if (kindStr == 'adjust') {
                     newQty = moveQty;
                   } else {
-                    final sign =
-                        (kindStr == 'purchase' || kindStr == 'returnIn')
-                            ? 1.0
-                            : -1.0;
+                    final sign = (kindStr == 'purchase' ||
+                            kindStr == 'return' ||
+                            kindStr == 'returnIn')
+                        ? 1.0
+                        : -1.0;
                     newQty = curQty + sign * moveQty;
                   }
                   await txn.update(
@@ -1667,4 +1738,150 @@ extension ApplyRemoteOp on Repo {
         EntityKind.section => 'sections',
         EntityKind.unknown => '__unknown__',
       };
+
+  /// مصالحة ومطابقة كميات المخزون بعد الجلب الكامل أو الاستعادة بعد إعادة التثبيت:
+  /// تتحقق من تطابق كمية كل صنف مع صافي حركات المخزون (`stock_moves`) وسطور الفواتير
+  /// (`transaction_items`: المبيعات ناقص المرتجعات) لضمان عدم بقاء أي صنف عالقاً
+  /// على كميته الابتدائية بعد إعادة التثبيت.
+  static Future<int> reconcileInventoryQuantities(DatabaseExecutor db) async {
+    var fixed = 0;
+    try {
+      final itemRows = await db.query(
+        'items',
+        columns: ['id', 'quantity', 'updated_at'],
+        where:
+            "(is_deleted = 0 OR is_deleted IS NULL) AND (deleted_at IS NULL OR deleted_at = '')",
+      );
+      if (itemRows.isEmpty) return 0;
+
+      final now = DateTime.now().toIso8601String();
+      for (final itemRow in itemRows) {
+        final itemId = itemRow['id'];
+        if (itemId == null) continue;
+        final currentQty = (itemRow['quantity'] as num?)?.toDouble() ?? 0.0;
+
+        // 1. فحص سجل عمليات الصنف لمعرفة الكمية الابتدائية عند الإنشاء (إن وُجدت) وآخر كمية مسجلة
+        double? initialCreateQty;
+        double? latestOpQty;
+        try {
+          final itemOps = await db.query(
+            'operations',
+            columns: ['op_type', 'payload', 'version'],
+            where: "entity_type = 'item' AND entity_id = ?",
+            whereArgs: ['$itemId'],
+            orderBy: 'version ASC, timestamp ASC',
+          );
+          for (final opRow in itemOps) {
+            final opType = '${opRow['op_type'] ?? ''}';
+            final rawPayload = '${opRow['payload'] ?? ''}';
+            if (rawPayload.isEmpty) continue;
+            final decoded = jsonDecode(rawPayload);
+            if (decoded is Map && decoded['quantity'] != null) {
+              final q = (decoded['quantity'] as num?)?.toDouble();
+              if (q != null) {
+                if (opType == 'create' && initialCreateQty == null) {
+                  initialCreateQty = q;
+                }
+                latestOpQty = q;
+              }
+            }
+          }
+        } catch (_) {}
+
+        // 2. فحص حركات المخزون الفعلية للصنف
+        final moves = await db.query(
+          'stock_moves',
+          columns: ['kind', 'quantity'],
+          where:
+              "item_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
+          whereArgs: [itemId],
+          orderBy: 'date ASC, created_at ASC, id ASC',
+        );
+
+        // 3. حساب صافي المبيعات ناقص المرتجعات من سطور الفواتير (transaction_items)
+        double netSoldFromTx = 0.0;
+        var hasTxLines = false;
+        try {
+          final txLines = await db.rawQuery('''
+            SELECT ti.quantity AS qty, t.type AS tx_type,
+                   COALESCE(t.original_tx_id, '') AS orig_id,
+                   COALESCE(t.notes, '') AS notes
+            FROM transaction_items ti
+            JOIN transactions t ON t.id = ti.tx_id
+            WHERE ti.item_id = ?
+              AND (t.deleted_at IS NULL OR t.deleted_at = '')
+          ''', [itemId]);
+          for (final tl in txLines) {
+            final q = (tl['qty'] as num?)?.toDouble() ?? 0.0;
+            if (q <= 0) continue;
+            hasTxLines = true;
+            final origId = '${tl['orig_id'] ?? ''}'.trim();
+            final notes = '${tl['notes'] ?? ''}';
+            final txType = '${tl['tx_type'] ?? ''}'.trim();
+            final isReturn = origId.isNotEmpty ||
+                notes.contains('[ORIG_TX:') ||
+                notes.contains('مرتجع من الفاتورة');
+            if (isReturn) {
+              netSoldFromTx -= q;
+            } else if (txType == 'revenue' ||
+                txType == 'debit' ||
+                txType == 'inflow') {
+              netSoldFromTx += q;
+            }
+          }
+        } catch (_) {}
+
+        double? reconciledQty;
+        if (moves.isNotEmpty) {
+          var hasAdjust = false;
+          var running = initialCreateQty ?? 0.0;
+          for (final m in moves) {
+            final k = '${m['kind'] ?? 'sale'}'.trim();
+            final mq = (m['quantity'] as num?)?.toDouble() ?? 0.0;
+            if (k == 'adjust') {
+              running = mq;
+              hasAdjust = true;
+            } else if (k == 'purchase' || k == 'return' || k == 'returnIn') {
+              running += mq;
+            } else {
+              running -= mq;
+            }
+          }
+          if (initialCreateQty != null || hasAdjust) {
+            if ((currentQty - running).abs() > 0.0001) {
+              reconciledQty = running;
+            }
+          } else if (latestOpQty != null &&
+              (currentQty - latestOpQty).abs() > 0.0001) {
+            reconciledQty = latestOpQty;
+          }
+        } else if (hasTxLines && netSoldFromTx.abs() > 0.0001) {
+          // لا توجد حركات stock_moves مسجلة رغم وجود فواتير مبيعات/مرتجعات لهذا الصنف
+          if (initialCreateQty != null &&
+              (currentQty - initialCreateQty).abs() <= 0.0001) {
+            reconciledQty = initialCreateQty - netSoldFromTx;
+          } else if (latestOpQty != null &&
+              (currentQty - latestOpQty).abs() > 0.0001) {
+            reconciledQty = latestOpQty;
+          }
+        } else if (initialCreateQty == null &&
+            latestOpQty != null &&
+            (currentQty - latestOpQty).abs() > 0.0001) {
+          reconciledQty = latestOpQty;
+        }
+
+        if (reconciledQty != null &&
+            (currentQty - reconciledQty).abs() > 0.0001) {
+          await db.update(
+            'items',
+            {'quantity': reconciledQty, 'updated_at': now},
+            where: 'id = ?',
+            whereArgs: [itemId],
+          );
+          fixed++;
+        }
+      }
+    } catch (_) {}
+    return fixed;
+  }
 }

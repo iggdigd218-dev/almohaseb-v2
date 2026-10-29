@@ -786,6 +786,12 @@ class CloudFirebaseTransport implements SyncTransport {
       await saveLastSyncedCursor(maxTsMs);
     }
 
+    if (applied > 0 || forceFullSync || resetCursor || lastCursorMs == 0) {
+      try {
+        await Applier.reconcileInventoryQuantities(db);
+      } catch (_) {}
+    }
+
     await repo.setSetting('lastCloudSync', DateTime.now().toLocal().toString());
     return applied;
   }

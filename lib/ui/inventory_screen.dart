@@ -441,10 +441,102 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
                   badge: _badgeOf(visible[i], roots, sections),
                 ),
           );
+    final isOwner = ref.watch(isWorkspaceOwnerProvider).valueOrNull ?? true;
+    final workspaceMode =
+        ref.watch(workspaceModeProvider).valueOrNull ?? 'standalone';
+    final currentUser = ref.watch(currentUserProvider);
+    final canSeeValuation =
+        (workspaceMode == 'standalone' || isOwner) &&
+        (currentUser == null ||
+            currentUser.role == UserRole.admin ||
+            currentUser.role == UserRole.agent);
+
+    var totalCostValue = 0.0;
+    var totalSellingValue = 0.0;
+    if (canSeeValuation) {
+      for (final it in items) {
+        if (it.quantity > 0) {
+          totalCostValue += it.quantity * it.buyPrice;
+          totalSellingValue += it.quantity * it.sellPrice;
+        }
+      }
+    }
+
     return RefreshIndicator(
       onRefresh: () async => bump(ref),
       child: Column(
         children: [
+          if (canSeeValuation)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 8, 14, 2),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                decoration: BoxDecoration(
+                  color: AppColors.surfaceOf(context),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: AppColors.borderOf(context)),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'إجمالي تكلفة المخزون (رأس المال)',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: AppColors.text3Of(context),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            Fmt.money(totalCostValue, 0),
+                            style: const TextStyle(
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.w900,
+                              color: AppColors.info,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Container(
+                      width: 1,
+                      height: 30,
+                      color: AppColors.borderOf(context),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'قيمة المخزون بسعر البيع',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: AppColors.text3Of(context),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            Fmt.money(totalSellingValue, 0),
+                            style: const TextStyle(
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.w900,
+                              color: AppColors.teal,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 6, 16, 2),
             child: Row(
@@ -476,7 +568,7 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
 }
 
 /// شريط الأدوات: بحث + باركود + أيقونة قائمة النواقص + فرز + تبديل نمط العرض.
-class _InventoryToolbar extends ConsumerWidget {
+class _InventoryToolbar extends ConsumerStatefulWidget {
   final String mode;
   final _SortKey sort;
   final int shortagesCount;
@@ -495,7 +587,26 @@ class _InventoryToolbar extends ConsumerWidget {
     required this.onOpenShortages,
   });
 
-  Future<void> _scan(BuildContext context, WidgetRef ref) async {
+  @override
+  ConsumerState<_InventoryToolbar> createState() => _InventoryToolbarState();
+}
+
+class _InventoryToolbarState extends ConsumerState<_InventoryToolbar> {
+  late final TextEditingController _searchCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _searchCtrl = TextEditingController(text: ref.read(itemQueryProvider));
+  }
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _scan(BuildContext context) async {
     try {
       final code = await scanBarcode(context);
       if (code == null || code.isEmpty || !context.mounted) return;
@@ -505,8 +616,20 @@ class _InventoryToolbar extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final q = ref.watch(itemQueryProvider);
+    if (_searchCtrl.text != q) {
+      _searchCtrl.value = TextEditingValue(
+        text: q,
+        selection: TextSelection.collapsed(offset: q.length),
+      );
+    }
+    final shortagesCount = widget.shortagesCount;
+    final onOpenShortages = widget.onOpenShortages;
+    final sort = widget.sort;
+    final onSortChanged = widget.onSortChanged;
+    final mode = widget.mode;
+    final onModeChanged = widget.onModeChanged;
     final dark = Theme.of(context).brightness == Brightness.dark;
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -542,8 +665,7 @@ class _InventoryToolbar extends ConsumerWidget {
                     child: SizedBox(
                       height: 46,
                       child: TextField(
-                        controller: TextEditingController(text: q)
-                          ..selection = TextSelection.collapsed(offset: q.length),
+                        controller: _searchCtrl,
                         style: const TextStyle(
                             fontSize: 14.5, color: Color(0xFF12223A)),
                         textAlignVertical: TextAlignVertical.center,
@@ -646,7 +768,7 @@ class _InventoryToolbar extends ConsumerWidget {
                       clipBehavior: Clip.antiAlias,
                       child: IconButton(
                         tooltip: 'مسح الباركود',
-                        onPressed: () => _scan(context, ref),
+                        onPressed: () => _scan(context),
                         icon: const Icon(Icons.qr_code_scanner_rounded,
                             color: Colors.white, size: 21),
                       ),
@@ -1634,20 +1756,38 @@ class _ItemTile extends ConsumerWidget {
                       ],
                     ),
                     const SizedBox(height: 7),
-                    Row(
-                      children: [
-                        _Price(
-                          label: 'شراء',
-                          value: Fmt.money(item.buyPrice, 0),
-                          color: AppColors.info,
-                        ),
-                        const SizedBox(width: 14),
-                        _Price(
-                          label: 'بيع',
-                          value: Fmt.money(item.sellPrice, 0),
-                          color: AppColors.teal,
-                        ),
-                      ],
+                    Builder(
+                      builder: (context) {
+                        final isOwner =
+                            ref.watch(isWorkspaceOwnerProvider).valueOrNull ??
+                                true;
+                        final workspaceMode =
+                            ref.watch(workspaceModeProvider).valueOrNull ??
+                                'standalone';
+                        final currentUser = ref.watch(currentUserProvider);
+                        final canSeeCost =
+                            (workspaceMode == 'standalone' || isOwner) &&
+                            (currentUser == null ||
+                                currentUser.role == UserRole.admin ||
+                                currentUser.role == UserRole.agent);
+                        return Row(
+                          children: [
+                            if (canSeeCost) ...[
+                              _Price(
+                                label: 'شراء',
+                                value: Fmt.money(item.buyPrice, 0),
+                                color: AppColors.info,
+                              ),
+                              const SizedBox(width: 14),
+                            ],
+                            _Price(
+                              label: 'بيع',
+                              value: Fmt.money(item.sellPrice, 0),
+                              color: AppColors.teal,
+                            ),
+                          ],
+                        );
+                      },
                     ),
                   ],
                 ),
@@ -3000,6 +3140,7 @@ class _ItemThumb extends StatelessWidget {
     return Image.file(
       File(MediaPaths.toAbsolute(image)),
       fit: BoxFit.cover,
+      filterQuality: FilterQuality.medium,
       errorBuilder: (_, __, ___) => placeholder,
     );
   }
@@ -3033,6 +3174,7 @@ class _Thumb extends StatelessWidget {
             ? Image.file(
                 file,
                 fit: BoxFit.cover,
+                filterQuality: FilterQuality.medium,
                 errorBuilder: (_, __, ___) => _fallback(context),
               )
             : _fallback(context),

@@ -2012,8 +2012,9 @@ class Repo {
     final txRows = await db.query(
       'transactions',
       columns: ['id'],
-      where: "(deleted_at IS NULL OR deleted_at = '') AND notes LIKE ?",
-      whereArgs: ['%$marker%'],
+      where:
+          "(deleted_at IS NULL OR deleted_at = '') AND (original_tx_id = ? OR notes LIKE ?)",
+      whereArgs: ['$originalTxId', '%$marker%'],
     );
     final result = <String, double>{};
     for (final r in txRows) {
@@ -2154,7 +2155,7 @@ class Repo {
       ];
       final retTx = Tx(
         type: returnOpType,
-        accountId: isCashRefund ? originalTx.accountId : originalTx.accountId,
+        accountId: isCashRefund ? null : originalTx.accountId,
         amount: returnAmount,
         currency: originalTx.currency,
         date: nowDt,
@@ -2169,6 +2170,7 @@ class Repo {
 
       final retMap = retTx.toMap();
       retMap['workspace_id'] = requireWorkspaceId;
+      retMap['original_tx_id'] = '${originalTx.id}';
       retMap['id'] = newGlobalId();
       retMap['updated_at'] = nowIso;
       returnTxId = await txn.insert('transactions', retMap);
@@ -2956,15 +2958,21 @@ class Repo {
             wm.isEmpty ? null : wm.first['value'] as String?);
         if (mode.inGroup) {
           final devRows = await db.query('settings',
-              columns: ['value'],
-              where: 'key = ?',
-              whereArgs: ['sync.deviceId'],
-              limit: 1);
-          final devId =
-              devRows.isEmpty ? '' : '${devRows.first['value'] ?? ''}';
-          final code = devId.replaceFirst('DEVICE-', '');
-          if (code.length >= 4) {
-            final prefix = code.substring(0, 4);
+              columns: ['key', 'value'],
+              where: "key IN ('sync.deviceId', 'devicePrefix')");
+          var devId = '';
+          var cfgPrefix = '';
+          for (final r in devRows) {
+            final k = '${r['key'] ?? ''}';
+            final v = '${r['value'] ?? ''}';
+            if (k == 'sync.deviceId') devId = v;
+            if (k == 'devicePrefix') cfgPrefix = v;
+          }
+          if (devId.trim().isNotEmpty || cfgPrefix.trim().isNotEmpty) {
+            final prefix = Fmt.singleLetterDevicePrefix(
+              devId,
+              configuredPrefix: cfgPrefix,
+            );
             return '$prefix-${'$nextNum'.padLeft(5, '0')}';
           }
         }
@@ -7320,16 +7328,27 @@ class Repo {
         opType: OpKind.create,
         payload: m.toMap()..['id'] = id,
       );
+      final updatedItemRows = await txn.query(
+        'items',
+        where: 'id = ?',
+        whereArgs: [m.itemId],
+        limit: 1,
+      );
+      final itemPayload = updatedItemRows.isNotEmpty
+          ? Map<String, Object?>.from(updatedItemRows.first)
+          : <String, Object?>{
+              ...it.toMap(),
+              'id': m.itemId,
+            };
+      itemPayload['id'] = m.itemId;
+      itemPayload['quantity'] = resultingQty;
+      itemPayload['updated_at'] = now;
+      itemPayload['__from_stock_move'] = id;
       await rec.record(
         entityType: EntityKind.item,
         entityId: '${m.itemId}',
         opType: OpKind.update,
-        payload: {
-          'id': m.itemId,
-          'quantity': resultingQty,
-          'updated_at': now,
-          '__from_stock_move': id,
-        },
+        payload: itemPayload,
       );
       await logActivityTx(
         txn,
@@ -7413,16 +7432,27 @@ class Repo {
           where: 'id = ?',
           whereArgs: [m.itemId],
         );
+        final updatedItemRows = await txn.query(
+          'items',
+          where: 'id = ?',
+          whereArgs: [m.itemId],
+          limit: 1,
+        );
+        final itemPayload = updatedItemRows.isNotEmpty
+            ? Map<String, Object?>.from(updatedItemRows.first)
+            : <String, Object?>{
+                ...itRow.first,
+                'id': m.itemId,
+              };
+        itemPayload['id'] = m.itemId;
+        itemPayload['quantity'] = newQty;
+        itemPayload['updated_at'] = now;
+        itemPayload['__from_stock_move_delete'] = id;
         await rec.record(
           entityType: EntityKind.item,
           entityId: '${m.itemId}',
           opType: OpKind.update,
-          payload: {
-            'id': m.itemId,
-            'quantity': newQty,
-            'updated_at': now,
-            '__from_stock_move_delete': id,
-          },
+          payload: itemPayload,
         );
       }
     });

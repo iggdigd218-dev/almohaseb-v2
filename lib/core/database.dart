@@ -23,7 +23,7 @@ class AppDatabase {
   static Future<Database>? _opening;
   static String _activeWorkspaceId = defaultWorkspaceIdConst;
   static bool _isTestOverride = false;
-  static const int _version = 28;
+  static const int _version = 29;
 
   /// مفتاح التخزين الدائم للمنشأة النشطة في SharedPreferences
   static const String kPrefActiveWorkspaceId = 'nexora_active_workspace_id';
@@ -597,6 +597,7 @@ class AppDatabase {
         sync_state   TEXT NOT NULL DEFAULT 'synced',
         created_by_user_id INTEGER,
         cashier_name TEXT DEFAULT '',
+        original_tx_id TEXT,
         date         TEXT NOT NULL,
         deleted_at   TEXT DEFAULT '',
         deleted_by   INTEGER,
@@ -619,6 +620,12 @@ class AppDatabase {
         'CREATE INDEX IF NOT EXISTS idx_tx_del ON transactions(deleted_at)');
     // قواعد قديمة أنشأت الجدول قبل v20 بدون عمود التجزئة — أضفه (idempotent).
     await _addColumn(db, 'transactions', 'attachment_hash', "TEXT DEFAULT ''");
+    await _addColumn(db, 'transactions', 'original_tx_id', 'TEXT');
+    await _tryCreateIndex(
+      db,
+      'idx_tx_original_tx_id',
+      'CREATE INDEX IF NOT EXISTS idx_tx_original_tx_id ON transactions(original_tx_id)',
+    );
 
     // ---------- السندات ----------
     await db.execute('''
@@ -887,6 +894,10 @@ class AppDatabase {
       // (R3) ترحيل الأرصدة القديمة: ترقية فواتير البيع الآجل أو الجزئي المسجلة
       // تاريخياً بنوع revenue ولديها account_id إلى نوع debit.
       await migrateToV27(db);
+    } catch (_) {}
+    try {
+      // (M3 - v29) عمود original_tx_id المفهرس لربط مرتجعات المبيعات بالفاتورة الأصلية.
+      await migrateToV29(db);
     } catch (_) {}
     try {
       // (2026-09-26) أعمدة حالة الحذف والنشاط للأصناف (is_deleted, is_active)
@@ -1822,6 +1833,10 @@ class AppDatabase {
     if (from < 28) {
       await migrateToV22(db);
     }
+    // ====== v29: عمود original_tx_id المفهرس على جدول transactions ======
+    if (from < 29) {
+      await migrateToV29(db);
+    }
     // ====== v17: ضمان المخطط الكامل عند كل فتح (إصلاح قواعد ويندوز الناقصة) ======
     // أي جدول ناقص من بناء سابق يُنشأ، والبذرة idempotent. هذا يغلق نهائيًا
     // خطأ "table workspaces already exists" و"تعذّر تحميل الفئات/الإعدادات".
@@ -2036,6 +2051,40 @@ class AppDatabase {
   /// العملاء بعد ضبط `opEffect`.
   static Future<void> migrateToV27(Database db) async {
     await migrateLegacyCreditRevenueToDebit(db);
+  }
+
+  /// Migration v28 → v29 (M3): إضافة عمود `original_tx_id` مفهرس في `transactions`
+  /// وتعبئته تلقائياً من السجلات القديمة التي تحتوي على `[ORIG_TX:<id>]` في `notes`.
+  static Future<void> migrateToV29(Database db) async {
+    await _addColumn(db, 'transactions', 'original_tx_id', 'TEXT');
+    await _tryCreateIndex(
+      db,
+      'idx_tx_original_tx_id',
+      'CREATE INDEX IF NOT EXISTS idx_tx_original_tx_id ON transactions(original_tx_id)',
+    );
+    try {
+      final rows = await db.query(
+        'transactions',
+        columns: ['id', 'notes'],
+        where:
+            "(original_tx_id IS NULL OR original_tx_id = '') AND notes LIKE '%[ORIG_TX:%'",
+      );
+      final rx = RegExp(r'\[ORIG_TX:([^\]]+)\]');
+      for (final r in rows) {
+        final id = r['id'];
+        final notes = '${r['notes'] ?? ''}';
+        final m = rx.firstMatch(notes);
+        final origId = m?.group(1)?.trim() ?? '';
+        if (id != null && origId.isNotEmpty) {
+          await db.update(
+            'transactions',
+            {'original_tx_id': origId},
+            where: 'id = ?',
+            whereArgs: [id],
+          );
+        }
+      }
+    } catch (_) {}
   }
 
   static Future<int> migrateLegacyCreditRevenueToDebit(Database db) async {

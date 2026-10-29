@@ -62,7 +62,7 @@ class BalanceText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final zero = value.abs() < 0.005;
+    final zero = Fmt.isZeroMoney(value);
     final color = zero
         ? Theme.of(context).hintColor
         : (value > 0 ? AppColors.green : AppColors.red);

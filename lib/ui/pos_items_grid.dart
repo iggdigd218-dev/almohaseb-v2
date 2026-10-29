@@ -60,6 +60,11 @@ class PosItemTile extends StatelessWidget {
 
   IconData get _resolvedIcon => fallbackIcon ?? Icons.inventory_2_outlined;
 
+  String _rawQtyCount(double q) {
+    if (q <= 0) return '0';
+    return q == q.roundToDouble() ? q.toInt().toString() : Fmt.money(q, 2);
+  }
+
   Widget _buildThumb(BuildContext context) {
     if (item.image.isEmpty) return _fallback(context);
     if (item.image.startsWith('http')) {
@@ -69,6 +74,7 @@ class PosItemTile extends StatelessWidget {
           child: Image.network(
             item.image,
             fit: BoxFit.cover,
+            filterQuality: FilterQuality.medium,
             errorBuilder: (_, __, ___) => _fallback(context),
           ),
         ),
@@ -81,6 +87,7 @@ class PosItemTile extends StatelessWidget {
           child: Image.file(
             File(MediaPaths.toAbsolute(item.image)),
             fit: BoxFit.cover,
+            filterQuality: FilterQuality.medium,
             errorBuilder: (_, __, ___) => _fallback(context),
           ),
         ),
@@ -96,7 +103,9 @@ class PosItemTile extends StatelessWidget {
     final isLow = !isOut &&
         (item.low || (item.minQuantity > 0 && item.quantity <= item.minQuantity));
 
-    final statusLabel = isOut ? 'نفد' : (isLow ? 'منخفض' : 'متوفر');
+    final rawCount = _rawQtyCount(item.quantity);
+    final statusLabel =
+        isOut ? 'نفد 0' : (isLow ? 'منخفض $rawCount' : 'متوفر $rawCount');
     final statusBg = isOut
         ? const Color(0xFFFFE4E6)
         : (isLow ? const Color(0xFFFEF3C7) : const Color(0xFFE6F7F2));
@@ -135,15 +144,15 @@ class PosItemTile extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // 1) منطقة الصورة أو الأيقونة الملونة تملأ النصف العلوي بالكامل.
+                    // 1) منطقة الصورة أو الأيقونة الملونة ممتدة رأسياً بعد دمج الكمية في الشارة السفلية.
                     Expanded(
-                      flex: 6,
+                      flex: 7,
                       child: _buildThumb(context),
                     ),
                     const SizedBox(height: 4),
                     // 2) اسم الصنف يظهر على سطرين لتمكين قراءة الاسم كاملاً والتفريق بين الأصناف.
                     ConstrainedBox(
-                      constraints: const BoxConstraints(minHeight: 25),
+                      constraints: const BoxConstraints(minHeight: 26),
                       child: Center(
                         child: Text(
                           item.name,
@@ -159,20 +168,8 @@ class PosItemTile extends StatelessWidget {
                         ),
                       ),
                     ),
-                    const SizedBox(height: 1),
-                    Text(
-                      '${Fmt.money(item.quantity)} ${item.unit}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 9.0,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.text3Of(context),
-                      ),
-                    ),
                     const SizedBox(height: 3),
-                    // 3) الصف السفلي: شارة التوفر يميناً + السعر بخط عريض يساراً.
+                    // 3) الصف السفلي: شارة التوفر مع العدد كرقم مجرد يميناً + السعر بخط عريض يساراً.
                     SizedBox(
                       height: 18,
                       child: Row(

@@ -283,7 +283,7 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
               pw.Divider(thickness: 0.6),
               if (sellerOrDevice.trim().isNotEmpty) ...[
                 pw.Text(
-                  'الموظف / الجهاز: ${sellerOrDevice.trim()}',
+                  'المستخدم: ${sellerOrDevice.trim()}',
                   style: pw.TextStyle(
                     fontSize: 9,
                     font: fonts.bold,

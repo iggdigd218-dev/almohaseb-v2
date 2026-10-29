@@ -85,7 +85,10 @@ class TxShare {
         : await repo.transactionItems(tx.id!);
 
     final rawRef = tx.reference.trim();
-    final devicePrefix = (st['devicePrefix'] ?? '').trim();
+    final devicePrefix = Fmt.singleLetterDevicePrefix(
+      st['sync.deviceId'] ?? '',
+      configuredPrefix: st['devicePrefix'],
+    );
     final String refCode;
     if (rawRef.isNotEmpty) {
       refCode = rawRef;
@@ -232,7 +235,7 @@ class TxShare {
     if (account != null && account.id != null) {
       try {
         final bal = await repo.balanceOf(account);
-        if (bal.abs() > 0.001) {
+        if (!Fmt.isZeroMoney(bal)) {
           final statusLabel = bal > 0 ? 'عليه' : 'له';
           lines.add(
             '📊 الرصيد الحالي للعميل: ${Fmt.money(bal.abs(), cur.decimal)} ${cur.symbol} ($statusLabel)',
@@ -259,13 +262,17 @@ class TxShare {
         }
       } catch (_) {}
     }
-    if (sellerOrDevice.isEmpty) {
+    if (sellerOrDevice.isNotEmpty &&
+        devicePrefix.isNotEmpty &&
+        !sellerOrDevice.contains('($devicePrefix)')) {
+      sellerOrDevice = '$sellerOrDevice ($devicePrefix)';
+    } else if (sellerOrDevice.isEmpty) {
       sellerOrDevice =
-          devicePrefix.isNotEmpty ? devicePrefix : 'الجهاز الرئيسي';
+          devicePrefix.isNotEmpty ? 'المدير ($devicePrefix)' : 'المدير';
     }
 
     lines.add('━━━━━━━━━━━━━');
-    lines.add('👨‍💼 الموظف / الجهاز: $sellerOrDevice');
+    lines.add('👨‍💼 المستخدم: $sellerOrDevice');
     final orgPhone = (st['phone'] ?? '').trim();
     if (orgPhone.isNotEmpty) lines.add('📞 للتواصل: $orgPhone');
     final footer = (st['voucherFooter'] ?? '').trim();

@@ -54,7 +54,13 @@ class _SectionTile extends StatelessWidget {
                       color: AppColors.surfaceOf(context),
                       borderRadius: BorderRadius.circular(12),
                     ),
-                    child: Icon(icon, color: tone.foreground, size: 20),
+                    child: Icon(
+                      icon,
+                      color: Theme.of(context).brightness == Brightness.dark
+                          ? Colors.white
+                          : Colors.black87,
+                      size: 20,
+                    ),
                   ),
                   const Spacer(),
                   if (count != null)
@@ -483,15 +489,20 @@ class _HorizontalSectionTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
     const activeBlue = Color(0xFF1E88E5);
+    final pastelBg = Color.lerp(tone.background, Colors.white, 0.22)!;
     final bg = active
         ? (dark
             ? activeBlue.withValues(alpha: 0.22)
-            : const Color(0xFFEAF3FF))
-        : (dark ? AppColors.surfaceOf(context) : Colors.white);
+            : Color.lerp(tone.background, const Color(0xFFEAF3FF), 0.45)!)
+        : (dark
+            ? tone.foreground.withValues(alpha: 0.14)
+            : pastelBg);
     final borderColor = active
         ? activeBlue
-        : AppColors.borderOf(context);
-    final iconColor = active ? activeBlue : tone.foreground;
+        : (dark
+            ? AppColors.borderOf(context)
+            : tone.foreground.withValues(alpha: 0.22));
+    final glyphColor = dark ? Colors.white : Colors.black87;
 
     return Padding(
       padding: const EdgeInsetsDirectional.only(end: 8),
@@ -518,10 +529,12 @@ class _HorizontalSectionTile extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.all(5),
                   decoration: BoxDecoration(
-                    color: iconColor.withValues(alpha: 0.14),
+                    color: dark
+                        ? Colors.white.withValues(alpha: 0.12)
+                        : Colors.white.withValues(alpha: 0.72),
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: Icon(icon, size: 19, color: iconColor),
+                  child: Icon(icon, size: 19, color: glyphColor),
                 ),
                 const SizedBox(height: 3),
                 Text(
@@ -843,16 +856,21 @@ class _CatRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
     return ListTile(
       onTap: onTap,
       leading: Container(
         width: 38,
         height: 38,
         decoration: BoxDecoration(
-          color: tone.foreground.withValues(alpha: 0.13),
+          color: dark ? tone.foreground.withValues(alpha: 0.2) : tone.background,
           borderRadius: BorderRadius.circular(12),
         ),
-        child: Icon(icon, color: tone.foreground, size: 20),
+        child: Icon(
+          icon,
+          color: dark ? Colors.white : Colors.black87,
+          size: 20,
+        ),
       ),
       title: Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
       trailing: active
@@ -883,13 +901,20 @@ class _CatChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
     const activeBlue = Color(0xFF1E88E5);
+    final pastelBg = Color.lerp(tone.background, Colors.white, 0.22)!;
     final bg = active
         ? (dark
             ? activeBlue.withValues(alpha: 0.22)
-            : const Color(0xFFEAF4FF))
-        : (dark ? AppColors.surfaceOf(context) : Colors.white);
-    final borderColor = active ? activeBlue : AppColors.borderOf(context);
-    final iconColor = active ? activeBlue : tone.foreground;
+            : Color.lerp(tone.background, const Color(0xFFEAF4FF), 0.45)!)
+        : (dark
+            ? tone.foreground.withValues(alpha: 0.14)
+            : pastelBg);
+    final borderColor = active
+        ? activeBlue
+        : (dark
+            ? AppColors.borderOf(context)
+            : tone.foreground.withValues(alpha: 0.22));
+    final glyphColor = dark ? Colors.white : Colors.black87;
 
     return Padding(
       padding: const EdgeInsetsDirectional.only(end: 8),
@@ -916,10 +941,12 @@ class _CatChip extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.all(4.5),
                   decoration: BoxDecoration(
-                    color: iconColor.withValues(alpha: 0.14),
+                    color: dark
+                        ? Colors.white.withValues(alpha: 0.12)
+                        : Colors.white.withValues(alpha: 0.72),
                     borderRadius: BorderRadius.circular(9),
                   ),
-                  child: Icon(icon, size: 18, color: iconColor),
+                  child: Icon(icon, size: 18, color: glyphColor),
                 ),
                 const SizedBox(height: 2.5),
                 Text(

@@ -741,8 +741,11 @@ class _TxCard extends ConsumerWidget {
     return _Badge(label: label, color: color, icon: icon);
   }
 
-  /// شارة صغيرة بعدد الأجهزة التي استلمت العملية؛ ✅ عند وصولها للجميع.
+  /// شارة صغيرة بعدد الأجهزة التي استلمت العملية؛ ✅ فور اكتمال المزامنة السحابية.
   Widget _deliveryBadge(BuildContext context, WidgetRef ref) {
+    if (tx.syncState == 'synced') {
+      return const Icon(Icons.check_circle, size: 16, color: Colors.green);
+    }
     final badges = ref.watch(txDeliveryBadgesProvider).valueOrNull;
     final b = badges?['${tx.id}'];
     if (b == null || b.total <= 0) return const SizedBox.shrink();
@@ -771,7 +774,7 @@ class _TxCard extends ConsumerWidget {
       'synced' => (
           'تمت المزامنة',
           Colors.green.shade600,
-          Icons.cloud_done_outlined,
+          Icons.check_circle_rounded,
         ),
       'syncing' => ('جاري المزامنة', Colors.orange.shade700, Icons.sync),
       'failed' => ('فشلت المزامنة', Colors.red.shade600, Icons.error_outline),

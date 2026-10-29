@@ -262,7 +262,7 @@ class SyncQueueOps {
       );
     } on DatabaseException catch (_) {
       final where = StringBuffer(
-        "status IN ('pending', 'syncing') AND status = ? AND (next_try_at = '' OR next_try_at <= ?)",
+        "status = ? AND (next_try_at = '' OR next_try_at <= ?)",
       );
       final args = <Object?>[
         SyncStatus.pending.name,
@@ -296,7 +296,8 @@ class SyncQueueOps {
   }
 
   /// إعادة محاولة فورية من المستخدم: تُعيد كل الصفوف غير المكتملة
-  /// (بما فيها ذات الأخطار المؤقتة) لتُدفع الآن دون انتظار backoff.
+  /// (بما فيها ذات الأخطار المؤقتة أو صفوف `failed` الموروثة من إصدارات سابقة
+  /// قبل توحيد الجدولة عبر `pending` + `next_try_at`) لتُدفع الآن دون انتظار backoff.
   Future<void> retryFailed() async {
     await db.update(
       'sync_queue',
