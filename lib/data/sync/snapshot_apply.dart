@@ -6,6 +6,7 @@ import 'package:sqflite/sqflite.dart';
 import '../../core/database.dart';
 import '../../core/media_paths.dart';
 import '../../core/secret_store.dart';
+import 'apply_remote.dart';
 
 class SnapshotApply {
   static const Set<String> _deviceColumns = {
@@ -571,6 +572,11 @@ class SnapshotApply {
           await txn.delete('settings', where: 'key = ?', whereArgs: [k]);
         }
       }
+
+      // مصالحة ومطابقة كميات المخزون فوراً بعد تطبيق اللقطة بالكامل
+      try {
+        await ApplyRemoteOp.reconcileInventoryQuantities(txn);
+      } catch (_) {}
     });
   }
 

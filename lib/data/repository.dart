@@ -1937,6 +1937,60 @@ class Repo {
     return id;
   }
 
+  /// تنفيذ عملية بيع مع خصم المخزون والمزامنة الذرية
+  Future<int> processSale({
+    required Tx tx,
+    required List<InvoiceLine> items,
+    bool deductStock = true,
+    Tx? companionTx,
+  }) =>
+      saveTx(
+        tx,
+        items: items,
+        deductStock: deductStock,
+        companionTx: companionTx,
+      );
+
+  /// دفع الكميات الحالية الفعلية بعد المطابقة إلى السحابة لتحديث عقدة /items
+  /// وإبطال أي كميات ابتدائية قديمة في فايربيز.
+  Future<int> pushReconciledItemsToCloud() async {
+    final db = await _db;
+    return await db.transaction((txn) async {
+      final rec = SyncRecorder(
+        db: txn,
+        deviceId: requireDeviceId,
+        workspaceId: requireWorkspaceId,
+        userId: _currentUserId,
+      );
+      final itemRows = await txn.query(
+        'items',
+        where:
+            "(is_deleted = 0 OR is_deleted IS NULL) AND (deleted_at IS NULL OR deleted_at = '')",
+      );
+      final now = DateTime.now().toIso8601String();
+      for (final r in itemRows) {
+        final id = r['id'];
+        if (id == null) continue;
+        await txn.rawUpdate(
+          'UPDATE items SET version = version + 1, updated_at = ? WHERE id = ?',
+          [now, id],
+        );
+        final fresh = await txn.query('items',
+            where: 'id = ?', whereArgs: [id], limit: 1);
+        if (fresh.isNotEmpty) {
+          final payload = Map<String, Object?>.from(fresh.first);
+          await rec.record(
+            entityType: EntityKind.item,
+            entityId: '$id',
+            opType: OpKind.update,
+            payload: payload,
+          );
+        }
+      }
+      return itemRows.length;
+    });
+  }
+
   /// سطور الفاتورة بصيغة خرائط لإرفاقها في حمولة المزامنة.
   Future<List<Map<String, Object?>>> _lineMaps(
       DatabaseExecutor txn, int txId) async {
@@ -7316,11 +7370,9 @@ class Repo {
         );
       }
       final now = DateTime.now().toIso8601String();
-      await txn.update(
-        'items',
-        {'quantity': resultingQty, 'updated_at': now},
-        where: 'id = ?',
-        whereArgs: [m.itemId],
+      await txn.rawUpdate(
+        'UPDATE items SET quantity = ?, version = version + 1, updated_at = ? WHERE id = ?',
+        [resultingQty, now, m.itemId],
       );
       await rec.record(
         entityType: EntityKind.stockMove,
@@ -7426,11 +7478,9 @@ class Repo {
         final it = Item.fromMap(itRow.first);
         final now = DateTime.now().toIso8601String();
         final newQty = it.quantity - m.kind.qtySign * m.quantity;
-        await txn.update(
-          'items',
-          {'quantity': newQty, 'updated_at': now},
-          where: 'id = ?',
-          whereArgs: [m.itemId],
+        await txn.rawUpdate(
+          'UPDATE items SET quantity = ?, version = version + 1, updated_at = ? WHERE id = ?',
+          [newQty, now, m.itemId],
         );
         final updatedItemRows = await txn.query(
           'items',

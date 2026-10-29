@@ -910,6 +910,7 @@ class AppDatabase {
           'UPDATE operations SET is_synced = synced WHERE is_synced = 0 AND synced = 1',
         );
       } catch (_) {}
+      await ensureItemSyncColumns(db);
       await _tryCreateIndex(
         db,
         'idx_ops_is_synced',
@@ -1132,6 +1133,17 @@ class AppDatabase {
     await _alterAddColumn(db, 'sections', 'image_path', "TEXT DEFAULT ''");
   }
 
+  /// ترميم ذاتي لأعمدة مزامنة المخزون في `items` (`initial_quantity`, `version`).
+  static Future<void> ensureItemSyncColumns(Database db) async {
+    await _alterAddColumn(db, 'items', 'initial_quantity', 'REAL NOT NULL DEFAULT 0');
+    await _alterAddColumn(db, 'items', 'version', 'INTEGER NOT NULL DEFAULT 1');
+    try {
+      await db.execute(
+        'UPDATE items SET initial_quantity = quantity WHERE initial_quantity = 0 AND quantity != 0',
+      );
+    } catch (_) {}
+  }
+
   /// (2026-09-24) الهوية البصرية للأقسام والفئات: أيقونة من الكتالوج،
   /// لون باستيل للكرت، وصورة اختيارية. idempotent — آمن على كل القواعد.
   static Future<void> migrateToV25(Database db) async {
@@ -1305,6 +1317,8 @@ class AppDatabase {
         buy_price     REAL NOT NULL DEFAULT 0,
         sell_price    REAL NOT NULL DEFAULT 0,
         quantity      REAL NOT NULL DEFAULT 0,
+        initial_quantity REAL NOT NULL DEFAULT 0,
+        version       INTEGER NOT NULL DEFAULT 1,
         min_quantity  REAL NOT NULL DEFAULT 0,
         currency      TEXT NOT NULL DEFAULT 'YER',
         category      TEXT DEFAULT '',
