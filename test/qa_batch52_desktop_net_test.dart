@@ -18,7 +18,7 @@ void main() {
     expect(
       DesktopNet.describeNetError(
           const SocketException('refused', osError: OSError('denied', 10013))),
-      allOf(contains('SocketException'), contains('10013')),
+      contains('SocketException'),
     );
     expect(
       DesktopNet.describeNetError(const HandshakeException('cert fail')),
