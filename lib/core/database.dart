@@ -23,7 +23,7 @@ class AppDatabase {
   static Future<Database>? _opening;
   static String _activeWorkspaceId = defaultWorkspaceIdConst;
   static bool _isTestOverride = false;
-  static const int _version = 29;
+  static const int _version = 30;
 
   /// مفتاح التخزين الدائم للمنشأة النشطة في SharedPreferences
   static const String kPrefActiveWorkspaceId = 'nexora_active_workspace_id';
@@ -1343,6 +1343,7 @@ class AppDatabase {
         kind        TEXT NOT NULL,
         quantity    REAL NOT NULL DEFAULT 0,
         unit_price  REAL NOT NULL DEFAULT 0,
+        cost_price  REAL NOT NULL DEFAULT 0.0,
         account_id  INTEGER,
         notes       TEXT DEFAULT '',
         date        TEXT NOT NULL,
@@ -1363,6 +1364,7 @@ class AppDatabase {
         unit        TEXT NOT NULL DEFAULT 'حبة',
         quantity    REAL NOT NULL CHECK (quantity > 0),
         unit_price  REAL NOT NULL CHECK (unit_price >= 0),
+        cost_price  REAL NOT NULL DEFAULT 0.0,
         total       REAL NOT NULL CHECK (total >= 0),
         FOREIGN KEY (tx_id) REFERENCES transactions (id) ON DELETE CASCADE,
         FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE SET NULL
@@ -1851,6 +1853,10 @@ class AppDatabase {
     if (from < 29) {
       await migrateToV29(db);
     }
+    // ====== v30: تجميد لقطة التكلفة (cost_price) في stock_moves و transaction_items ======
+    if (from < 30) {
+      await migrateToV30(db);
+    }
     // ====== v17: ضمان المخطط الكامل عند كل فتح (إصلاح قواعد ويندوز الناقصة) ======
     // أي جدول ناقص من بناء سابق يُنشأ، والبذرة idempotent. هذا يغلق نهائيًا
     // خطأ "table workspaces already exists" و"تعذّر تحميل الفئات/الإعدادات".
@@ -2098,6 +2104,24 @@ class AppDatabase {
           );
         }
       }
+    } catch (_) {}
+  }
+
+  /// Migration v29 → v30: إضافة عمود cost_price لـ stock_moves و transaction_items وتعبئتها من items.buy_price
+  static Future<void> migrateToV30(Database db) async {
+    await _addColumn(db, 'stock_moves', 'cost_price', 'REAL DEFAULT 0.0');
+    await _addColumn(db, 'transaction_items', 'cost_price', 'REAL DEFAULT 0.0');
+    try {
+      await db.execute('''
+        UPDATE stock_moves 
+        SET cost_price = COALESCE((SELECT buy_price FROM items WHERE items.id = stock_moves.item_id), 0.0)
+        WHERE cost_price IS NULL OR cost_price = 0.0;
+      ''');
+      await db.execute('''
+        UPDATE transaction_items 
+        SET cost_price = COALESCE((SELECT buy_price FROM items WHERE items.id = transaction_items.item_id), 0.0)
+        WHERE cost_price IS NULL OR cost_price = 0.0;
+      ''');
     } catch (_) {}
   }
 

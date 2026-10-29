@@ -37,15 +37,15 @@ class ConflictResolver {
     final inServerMs = incoming.serverTimeMs;
     final locServerMs = localLatest?.serverTimeMs ?? 0;
 
-    if (inServerMs > 0 && locServerMs > 0) {
-      if (incoming.version != localVersion) {
-        if (inServerMs != locServerMs) {
-          return inServerMs > locServerMs;
-        }
-        return incoming.version > localVersion;
+    // ترجيح توقيت السيرفر الحتمي (إذا توفر السيرفر في أي من الطرفين، يُعتمد فوراً كمقياس رئيسي)
+    if (inServerMs > 0 || locServerMs > 0) {
+      final sIn = inServerMs > 0 ? inServerMs : (DateTime.tryParse(incoming.timestamp)?.millisecondsSinceEpoch ?? 0);
+      final sLoc = locServerMs > 0 ? locServerMs : (DateTime.tryParse(localLatest?.timestamp ?? '')?.millisecondsSinceEpoch ?? 0);
+      if (sIn != sLoc) {
+        return sIn > sLoc;
       }
-      if (inServerMs != locServerMs) {
-        return inServerMs > locServerMs;
+      if (incoming.version != localVersion) {
+        return incoming.version > localVersion;
       }
       final localDevId = localLatest?.deviceId ?? '';
       if (localDevId.isNotEmpty && localDevId == incoming.deviceId) {
