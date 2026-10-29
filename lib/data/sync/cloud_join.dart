@@ -676,29 +676,6 @@ class CloudJoin {
     }
   }
 
-  static Future<void> _patchJson(String url, Object body,
-      {Duration timeout = const Duration(seconds: 60)}) async {
-    try {
-      var token = await _ensureToken();
-      var uri = _authedUrl(url, token);
-      var res = await http
-          .patch(uri,
-              headers: {'Content-Type': 'application/json'},
-              body: jsonEncode(body))
-          .timeout(timeout);
-      if (res.statusCode == 401 || res.statusCode == 403) {
-        final fresh = await FirebaseAuthRest.forceRefreshToken();
-        if (fresh != null && fresh.isNotEmpty) {
-          await http
-              .patch(_authedUrl(url, fresh),
-                  headers: {'Content-Type': 'application/json'},
-                  body: jsonEncode(body))
-              .timeout(timeout);
-        }
-      }
-    } catch (_) {}
-  }
-
   static Future<void> _delete(String url) async {
     try {
       var token = await _ensureToken();
