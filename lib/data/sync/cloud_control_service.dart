@@ -251,33 +251,11 @@ class CloudControlService {
       final fcmToken = 'fcm_${devId.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '')}';
 
       if (!isRevokedOrEvicted) {
-        // فحص ما إذا كان المدير قد قام بتعديل اسم الجهاز سحابياً وتطبيقه محلياً
-        try {
-          final remoteDev = await _getJson(devUrl);
-          if (remoteDev is Map) {
-            final remoteName = '${remoteDev['name'] ?? remoteDev['deviceName'] ?? remoteDev['device_name'] ?? ''}'.trim();
-            if (remoteName.isNotEmpty && remoteName != 'جهاز') {
-              final currentDevName = (st['sync.deviceName'] ?? '').toString().trim();
-              if (remoteName != currentDevName) {
-                await repo.setSetting('sync.deviceName', remoteName);
-                final db = await repo.database;
-                final nowIso = DateTime.now().toIso8601String();
-                await db.update('devices', {'name': remoteName, 'updated_at': nowIso}, where: 'id = ?', whereArgs: [devId]);
-                final myUser = await repo.currentUser();
-                if (myUser != null && myUser.id != null) {
-                  await db.update('users', {'name': remoteName, 'updated_at': nowIso}, where: 'id = ?', whereArgs: [myUser.id]);
-                }
-              }
-            }
-          }
-        } catch (_) {}
-
         final devPayload = <String, dynamic>{
           'deviceId': devId,
           'device_id': devId,
           'model': platformName,
           'platform': platformName,
-          'status': 'online',
           'last_seen': {'.sv': 'timestamp'},
           'lastSeenAt': {'.sv': 'timestamp'},
           'last_seen_at': {'.sv': 'timestamp'},
@@ -291,6 +269,9 @@ class CloudControlService {
           devPayload['device_name'] = devName;
           devPayload['linkedAt'] = {'.sv': 'timestamp'};
           devPayload['linked_at'] = {'.sv': 'timestamp'};
+        } else if (devName.isNotEmpty && devName != 'جهاز') {
+          devPayload['deviceName'] = devName;
+          devPayload['device_name'] = devName;
         }
         if (storeName.isNotEmpty) {
           devPayload['storeName'] = storeName;

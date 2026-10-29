@@ -1140,18 +1140,8 @@ extension ApplyRemoteOp on Repo {
             }
           } catch (_) {}
         }
-        if (op.entityType == EntityKind.tx) {
-          final txType = '${row['type'] ?? ''}'.trim().toLowerCase();
-          final notes = '${row['notes'] ?? ''}';
-          final origTxId = '${row['original_tx_id'] ?? ''}'.trim();
-          final isReturn = origTxId.isNotEmpty ||
-              notes.contains('[ORIG_TX:') ||
-              notes.contains('مرتجع من الفاتورة');
-
-          // معالجة بنود الفاتورة دون تكرار خصم المخزون المحسوب بالفعل عبر stock_moves
-          if (lines != null) {
-            await _replaceInvoiceLines(txn, op, lines);
-          }
+        if (op.entityType == EntityKind.tx && lines != null) {
+          await _replaceInvoiceLines(txn, op, lines);
         }
         break;
       case OpKind.delete_:
@@ -1719,15 +1709,6 @@ extension ApplyRemoteOp on Repo {
       if (cols.contains('unit_price') && row['unit_price'] == null) {
         row['unit_price'] = 0.0;
       }
-      if (cols.contains('cost_price') && (row['cost_price'] == null || (row['cost_price'] as num) == 0)) {
-        final itmId = row['item_id'];
-        if (itmId != null) {
-          final itRows = await txn.query('items', columns: ['buy_price'], where: 'id = ?', whereArgs: [itmId], limit: 1);
-          if (itRows.isNotEmpty) {
-            row['cost_price'] = (itRows.first['buy_price'] as num?)?.toDouble() ?? 0.0;
-          }
-        }
-      }
       if (cols.contains('total') && row['total'] == null) {
         final q = (row['quantity'] as num?)?.toDouble() ?? 1.0;
         final p = (row['unit_price'] as num?)?.toDouble() ?? 0.0;
@@ -1758,8 +1739,10 @@ extension ApplyRemoteOp on Repo {
         EntityKind.unknown => '__unknown__',
       };
 
-  /// مصالحة ومطابقة كميات المخزون الموحدة بعد الجلب الكامل أو الاستعادة:
-  /// المعادلة الشاملة الموحدة: (الكمية الابتدائية - مبيعات الفواتير النشطة + مرتجعات الفواتير النشطة + المشتريات والتسويات المسجلة في stock_moves)
+  /// مصالحة ومطابقة كميات المخزون بعد الجلب الكامل أو الاستعادة بعد إعادة التثبيت:
+  /// تتحقق من تطابق كمية كل صنف مع صافي حركات المخزون (`stock_moves`) وسطور الفواتير
+  /// (`transaction_items`: المبيعات ناقص المرتجعات) لضمان عدم بقاء أي صنف عالقاً
+  /// على كميته الابتدائية بعد إعادة التثبيت.
   static Future<int> reconcileInventoryQuantities(DatabaseExecutor db) async {
     var fixed = 0;
     try {
@@ -1777,31 +1760,47 @@ extension ApplyRemoteOp on Repo {
         if (itemId == null) continue;
         final currentQty = (itemRow['quantity'] as num?)?.toDouble() ?? 0.0;
 
-        // 1. الكمية الابتدائية من عملية التأسيس (create) للصنف
-        double initialQty = 0.0;
+        // 1. فحص سجل عمليات الصنف لمعرفة الكمية الابتدائية عند الإنشاء (إن وُجدت) وآخر كمية مسجلة
+        double? initialCreateQty;
+        double? latestOpQty;
         try {
           final itemOps = await db.query(
             'operations',
-            columns: ['op_type', 'payload'],
-            where: "entity_type = 'item' AND entity_id = ? AND op_type = 'create'",
+            columns: ['op_type', 'payload', 'version'],
+            where: "entity_type = 'item' AND entity_id = ?",
             whereArgs: ['$itemId'],
             orderBy: 'version ASC, timestamp ASC',
-            limit: 1,
           );
-          if (itemOps.isNotEmpty) {
-            final raw = '${itemOps.first['payload'] ?? ''}';
-            if (raw.isNotEmpty) {
-              final dec = jsonDecode(raw);
-              if (dec is Map && dec['quantity'] != null) {
-                initialQty = (dec['quantity'] as num?)?.toDouble() ?? 0.0;
+          for (final opRow in itemOps) {
+            final opType = '${opRow['op_type'] ?? ''}';
+            final rawPayload = '${opRow['payload'] ?? ''}';
+            if (rawPayload.isEmpty) continue;
+            final decoded = jsonDecode(rawPayload);
+            if (decoded is Map && decoded['quantity'] != null) {
+              final q = (decoded['quantity'] as num?)?.toDouble();
+              if (q != null) {
+                if (opType == 'create' && initialCreateQty == null) {
+                  initialCreateQty = q;
+                }
+                latestOpQty = q;
               }
             }
           }
         } catch (_) {}
 
-        // 2. مبيعات الفواتير النشطة ومرتجعات الفواتير النشطة
-        double activeSales = 0.0;
-        double activeReturns = 0.0;
+        // 2. فحص حركات المخزون الفعلية للصنف
+        final moves = await db.query(
+          'stock_moves',
+          columns: ['kind', 'quantity'],
+          where:
+              "item_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
+          whereArgs: [itemId],
+          orderBy: 'date ASC, created_at ASC, id ASC',
+        );
+
+        // 3. حساب صافي المبيعات ناقص المرتجعات من سطور الفواتير (transaction_items)
+        double netSoldFromTx = 0.0;
+        var hasTxLines = false;
         try {
           final txLines = await db.rawQuery('''
             SELECT ti.quantity AS qty, t.type AS tx_type,
@@ -1811,74 +1810,71 @@ extension ApplyRemoteOp on Repo {
             JOIN transactions t ON t.id = ti.tx_id
             WHERE ti.item_id = ?
               AND (t.deleted_at IS NULL OR t.deleted_at = '')
-              AND t.status != 'cancelled'
           ''', [itemId]);
           for (final tl in txLines) {
             final q = (tl['qty'] as num?)?.toDouble() ?? 0.0;
             if (q <= 0) continue;
+            hasTxLines = true;
             final origId = '${tl['orig_id'] ?? ''}'.trim();
             final notes = '${tl['notes'] ?? ''}';
-            final txType = '${tl['tx_type'] ?? ''}'.trim().toLowerCase();
-            final isReturn = txType == 'sales_return' ||
-                origId.isNotEmpty ||
+            final txType = '${tl['tx_type'] ?? ''}'.trim();
+            final isReturn = origId.isNotEmpty ||
                 notes.contains('[ORIG_TX:') ||
                 notes.contains('مرتجع من الفاتورة');
             if (isReturn) {
-              activeReturns += q;
-            } else if (txType == 'sale' ||
-                txType == 'revenue' ||
+              netSoldFromTx -= q;
+            } else if (txType == 'revenue' ||
                 txType == 'debit' ||
                 txType == 'inflow') {
-              activeSales += q;
+              netSoldFromTx += q;
             }
           }
         } catch (_) {}
 
-        // 3. المشتريات والتسويات المسجلة في stock_moves
-        final moves = await db.query(
-          'stock_moves',
-          columns: ['kind', 'quantity', 'notes'],
-          where: "item_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
-          whereArgs: [itemId],
-          orderBy: 'date ASC, created_at ASC, id ASC',
-        );
-
-        double manualStockDelta = 0.0;
-        bool hasAdjust = false;
-        double latestAdjust = 0.0;
-
-        for (final m in moves) {
-          final k = '${m['kind'] ?? ''}'.trim();
-          final q = (m['quantity'] as num?)?.toDouble() ?? 0.0;
-          final n = '${m['notes'] ?? ''}';
-          final isAutoInvoiceMove = n.startsWith('مبيع فاتورة') || n.startsWith('مرتجع من الفاتورة') || n.contains('[ORIG_TX:');
-          if (isAutoInvoiceMove) {
-            // محسوب بالفعل من سطور الفواتير لتفادي الخصم المزدوج
-            continue;
+        double? reconciledQty;
+        if (moves.isNotEmpty) {
+          var hasAdjust = false;
+          var running = initialCreateQty ?? 0.0;
+          for (final m in moves) {
+            final k = '${m['kind'] ?? 'sale'}'.trim();
+            final mq = (m['quantity'] as num?)?.toDouble() ?? 0.0;
+            if (k == 'adjust') {
+              running = mq;
+              hasAdjust = true;
+            } else if (k == 'purchase' || k == 'return' || k == 'returnIn') {
+              running += mq;
+            } else {
+              running -= mq;
+            }
           }
-          if (k == 'adjust') {
-            hasAdjust = true;
-            latestAdjust = q;
-            manualStockDelta = 0.0;
-          } else if (k == 'purchase' || k == 'return' || k == 'returnIn') {
-            manualStockDelta += q;
-          } else if (k == 'sale' || k == 'outflow' || k == 'damage') {
-            manualStockDelta -= q;
+          if (initialCreateQty != null || hasAdjust) {
+            if ((currentQty - running).abs() > 0.0001) {
+              reconciledQty = running;
+            }
+          } else if (latestOpQty != null &&
+              (currentQty - latestOpQty).abs() > 0.0001) {
+            reconciledQty = latestOpQty;
           }
+        } else if (hasTxLines && netSoldFromTx.abs() > 0.0001) {
+          // لا توجد حركات stock_moves مسجلة رغم وجود فواتير مبيعات/مرتجعات لهذا الصنف
+          if (initialCreateQty != null &&
+              (currentQty - initialCreateQty).abs() <= 0.0001) {
+            reconciledQty = initialCreateQty - netSoldFromTx;
+          } else if (latestOpQty != null &&
+              (currentQty - latestOpQty).abs() > 0.0001) {
+            reconciledQty = latestOpQty;
+          }
+        } else if (initialCreateQty == null &&
+            latestOpQty != null &&
+            (currentQty - latestOpQty).abs() > 0.0001) {
+          reconciledQty = latestOpQty;
         }
 
-        // المعادلة الشاملة الموحدة:
-        final double targetQty;
-        if (hasAdjust) {
-          targetQty = latestAdjust + manualStockDelta;
-        } else {
-          targetQty = initialQty - activeSales + activeReturns + manualStockDelta;
-        }
-
-        if ((currentQty - targetQty).abs() > 0.0001) {
+        if (reconciledQty != null &&
+            (currentQty - reconciledQty).abs() > 0.0001) {
           await db.update(
             'items',
-            {'quantity': targetQty, 'updated_at': now},
+            {'quantity': reconciledQty, 'updated_at': now},
             where: 'id = ?',
             whereArgs: [itemId],
           );
