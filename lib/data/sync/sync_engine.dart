@@ -586,6 +586,9 @@ class SyncEngine {
                   backendUrl: url,
                   workspaceId: wsToCheck,
                   deviceId: ourId,
+                  // (PR-5) لا تُنفَّذ التصفية إلا بشاهد طرد أحدث من آخر
+                  // انضمام ناجح — الأثر الأقدم يُتجاهل ويُمسح ذاتياً.
+                  joinedAtMs: int.tryParse(st['sync.joinedAtMs'] ?? ''),
                 ));
         if (approved) {
           final oldWs = await repo.activeWorkspaceId();

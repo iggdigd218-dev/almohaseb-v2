@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sqflite/sqflite.dart' show ConflictAlgorithm;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/accounting.dart';
 import '../core/cloud_config.dart';
@@ -23,6 +24,7 @@ import '../data/providers.dart';
 import '../data/repository.dart';
 import '../data/sync/account_workspace.dart';
 import '../data/sync/cloud_join.dart';
+import '../data/sync/device_id.dart';
 import '../data/sync/firebase_auth_service.dart';
 import '../data/sync/google_auth_service.dart';
 import 'account_section.dart' show provisionCloudAfterSignIn;
@@ -133,7 +135,13 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             content: Text(widget.initialNotice!),
             actions: [
               FilledButton(
-                onPressed: () => Navigator.of(dctx).pop(),
+                // (PR-5) تطهير بقايا الطرد المحلية عند الإقرار بالتنبيه:
+                // يبدأ العضو محاولته التالية من حالة نظيفة تماماً.
+                onPressed: () async {
+                  final nav = Navigator.of(dctx);
+                  await _purgeLocalEjectionRemnants();
+                  nav.pop();
+                },
                 child: const Text('حسناً فهمت'),
               ),
             ],
@@ -148,6 +156,47 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     _emailCtrl.dispose();
     _passwordCtrl.dispose();
     super.dispose();
+  }
+
+  /// (PR-5) تطهير بقايا الطرد المحلية عند إقرار العضو بتنبيه إنهاء الارتباط
+  /// أو قبل أي محاولة انضمام جديدة: أعلام العزل في sync_meta، ووسوم جهازنا
+  /// في جدول الأجهزة، وسياق الانضمام المعلق، والمفاتيح العالقة في الذاكرة
+  /// (بما فيها ما قد تخلفه إصدارات سابقة على الأجهزة).
+  Future<void> _purgeLocalEjectionRemnants() async {
+    try {
+      final repo = ref.read(repoProvider);
+      final db = await repo.database;
+      await db.delete('sync_meta',
+          where: "key IN ('selfRevoked', 'demotedToAgentBy')");
+      await db.delete('settings', where: "key LIKE 'pendingJoin.%'");
+      try {
+        final ourId = await ensureDeviceId(repo);
+        await db.update(
+          'devices',
+          {
+            'revoked_at': '',
+            'expelled_at': '',
+            'is_paired': 1,
+            'updated_at': DateTime.now().toIso8601String(),
+          },
+          where: 'id = ?',
+          whereArgs: [ourId],
+        );
+      } catch (_) {}
+    } catch (_) {}
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      for (final k in const [
+        'ejected_flag',
+        'is_ejected',
+        'ejected',
+        'ejection_dialog_pending',
+        'last_ejection_reason',
+        'auth_token',
+      ]) {
+        await prefs.remove(k);
+      }
+    } catch (_) {}
   }
 
   Future<void> _loadSavedDeviceWorkspaces() async {

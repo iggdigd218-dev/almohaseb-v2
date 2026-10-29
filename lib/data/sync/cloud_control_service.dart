@@ -228,7 +228,37 @@ class CloudControlService {
       final revokedRec = await _getJson(
               '$base/workspaces/$encWs/revoked_devices/$encDev.json') ??
           await _getJson('$base/workspaces/$encWs/evictions/$encDev.json');
-      final isRevokedOrEvicted = revokedRec is Map && revokedRec.isNotEmpty;
+      var isRevokedOrEvicted = revokedRec is Map && revokedRec.isNotEmpty;
+      // (PR-5) المقارنة الزمنية في مستمع الطرد: لا يُنفَّذ الطرد إلا إذا كان
+      // طابع الشاهد أحدث من طابع آخر انضمام ناجح (sync.joinedAtMs)؛ الشاهد
+      // الأقدم أثرٌ منتهٍ يُتجاهل ويُمسح ذاتياً — لا طرد بأثرٍ سابقٍ على انضمام.
+      if (revokedRec is Map && revokedRec.isNotEmpty) {
+        final joinedMs = int.tryParse(st['sync.joinedAtMs'] ?? '') ?? 0;
+        var evictMs = 0;
+        final rawMs = revokedRec['evictedAtMs'] ??
+            revokedRec['ejected_at'] ??
+            revokedRec['timestamp'] ??
+            revokedRec['revokedAtMs'];
+        if (rawMs is int) {
+          evictMs = rawMs;
+        } else if (rawMs is num) {
+          evictMs = rawMs.toInt();
+        } else {
+          final dt = DateTime.tryParse(
+              '${revokedRec['evictedAt'] ?? revokedRec['ejectedAt'] ?? ''}'
+                  .trim());
+          if (dt != null) evictMs = dt.millisecondsSinceEpoch;
+        }
+        if (joinedMs > 0 && (evictMs == 0 || evictMs <= joinedMs)) {
+          isRevokedOrEvicted = false;
+          try {
+            await _deleteUrl(
+                '$base/workspaces/$encWs/revoked_devices/$encDev.json');
+            await _deleteUrl(
+                '$base/workspaces/$encWs/evictions/$encDev.json');
+          } catch (_) {}
+        }
+      }
 
       final devName =
           (st['sync.deviceName'] ?? st['account.name'] ?? 'جهاز').trim();

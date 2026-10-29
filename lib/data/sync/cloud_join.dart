@@ -1647,8 +1647,42 @@ class CloudJoin {
         where: "key IN ('selfRevoked', 'demotedToAgentBy')",
       );
     } catch (_) {}
+    // (PR-5) فك حظر الطرد عند الانضمام المعتمد: تُمسح كل شواهد الطرد والحظر
+    // السحابية — evictions و revoked_devices و ejected_devices — لا evictions
+    // وحدها؛ لأن نبض العضو يفحص revoked_devices أولاً، وبقاؤها يعيد وسمه
+    // مطروداً بعد نجاح الربط فيقع في حلقة الطرد اللانهائية.
+    final encOurId = Uri.encodeComponent(ourId);
+    for (final node in const [
+      'evictions',
+      'revoked_devices',
+      'ejected_devices',
+    ]) {
+      try {
+        await _delete('$root/$node/$encOurId.json');
+      } catch (_) {}
+    }
+    // (PR-5) طابع «آخر انضمام ناجح» — تقارن به شواهد الطرد في المستمع اللحظي
+    // وفي checkLeaveOrEvicted: أي شاهد أقدم منه أثر منتهٍ يُتجاهل ويُمسح ذاتياً.
     try {
-      await _delete('$root/evictions/${Uri.encodeComponent(ourId)}.json');
+      await repo.setSetting(
+          'sync.joinedAtMs', '${DateTime.now().millisecondsSinceEpoch}');
+    } catch (_) {}
+    // (PR-5) تحديث عقدة الجهاز السحابية بحالة نظيفة فور إتمام الربط
+    // (قراءة ثم دمج حتى لا تُمحى بقية حقول العقدة).
+    try {
+      final devNode = await _getJson('$root/devices/$encOurId.json');
+      final devBase = devNode == null
+          ? <String, Object?>{}
+          : Map<String, Object?>.from(devNode);
+      await _putJson('$root/devices/$encOurId.json', {
+        ...devBase,
+        'status': 'active',
+        'revoked': false,
+        'revoked_at': '',
+        'expelled_at': '',
+        'is_paired': true,
+        'last_seen': DateTime.now().millisecondsSinceEpoch,
+      });
     } catch (_) {}
     final own = await db.query('devices',
         where: 'id = ?', whereArgs: [ourId], limit: 1);
@@ -2778,6 +2812,7 @@ class CloudJoin {
     required String backendUrl,
     required String workspaceId,
     required String deviceId,
+    int? joinedAtMs,
   }) async {
     try {
       final root = _root(backendUrl, workspaceId);
@@ -2794,20 +2829,69 @@ class CloudJoin {
         return true;
       }
       // 2) فحص عقدة الطرد الصريحة (evictions):
-      // تبقى الشاهدة في السحابة ولا تُحذف إلا عند موافقة المدير على طلب انضمام جديد أو رفع الحظر
+      // تبقى الشاهدة في السحابة ولا تُحذف إلا عند موافقة المدير على طلب انضمام جديد أو رفع الحظر.
+      // (PR-5) المقارنة الزمنية: لا يُنفَّذ الطرد إلا إذا كان طابع الشاهد أحدث
+      // من طابع آخر انضمام ناجح — الشاهد الأقدم أثرٌ منتهٍ يُمسح ذاتياً.
+      final joinedMs = joinedAtMs ?? 0;
       final eviction = await _getJson('$root/evictions/$enc.json');
       if (eviction != null) {
-        return true;
+        var evictMs = 0;
+        final rawMs = eviction['evictedAtMs'] ??
+            eviction['ejected_at'] ??
+            eviction['timestamp'] ??
+            eviction['revokedAtMs'];
+        if (rawMs is int) {
+          evictMs = rawMs;
+        } else if (rawMs is num) {
+          evictMs = rawMs.toInt();
+        } else {
+          final dt = DateTime.tryParse(
+              '${eviction['evictedAt'] ?? eviction['ejectedAt'] ?? ''}'.trim());
+          if (dt != null) evictMs = dt.millisecondsSinceEpoch;
+        }
+        if (joinedMs > 0 && (evictMs == 0 || evictMs <= joinedMs)) {
+          // شاهد قديم سابق لانضمام معتمد — يُمسح ولا يَطرد.
+          try {
+            await _delete('$root/evictions/$enc.json');
+            await _delete('$root/revoked_devices/$enc.json');
+            await _delete('$root/ejected_devices/$enc.json');
+          } catch (_) {}
+        } else {
+          return true;
+        }
       }
       // 3) فحص عقدة السجل (roster): إذا تم وسمه صراحة كمطرود أو محظور أو فُك اقترانه
       final roster = await _getJson('$root/roster/$enc.json');
       if (roster != null) {
-        final expelled = '${roster['expelled_at'] ?? ''}'.trim().isNotEmpty ||
+        final expelledStr = '${roster['expelled_at'] ?? ''}'.trim();
+        final revokedStr = '${roster['revoked_at'] ?? ''}'.trim();
+        final expelled = expelledStr.isNotEmpty ||
             '${roster['status'] ?? ''}' == 'expelled';
-        final revoked = '${roster['revoked_at'] ?? ''}'.trim().isNotEmpty;
+        final revoked = revokedStr.isNotEmpty;
         final unpaired = (roster['is_paired'] as int? ?? 1) == 0;
         if (expelled || revoked || unpaired) {
-          return true;
+          // (PR-5) نفس المقارنة الزمنية على وسوم السجل: وسم أقدم من الانضمام
+          // المعتمد يُصحَّح سحابياً بدل طرده.
+          var rosterEvictMs = 0;
+          final dtStr = expelledStr.isNotEmpty ? expelledStr : revokedStr;
+          final dt = dtStr.isNotEmpty ? DateTime.tryParse(dtStr) : null;
+          if (dt != null) rosterEvictMs = dt.millisecondsSinceEpoch;
+          if (joinedMs > 0 &&
+              (rosterEvictMs == 0 || rosterEvictMs <= joinedMs)) {
+            try {
+              await _putJson('$root/roster/$enc.json', {
+                ...roster,
+                'status': 'active',
+                'revoked': false,
+                'revoked_at': '',
+                'expelled_at': '',
+                'is_paired': 1,
+                'last_seen': DateTime.now().millisecondsSinceEpoch,
+              });
+            } catch (_) {}
+          } else {
+            return true;
+          }
         }
       }
       // غياب السجل أو تأخره لا يعني أبداً الطرد — لا طرد بالظن أو بالغياب المؤقت
@@ -2924,9 +3008,18 @@ class CloudJoin {
     // موافقة المدير على طلب الانضمام الجديد تلغي فوراً أي شاهدة طرد سابقة في /evictions
     // وتحدّث سجل الجهاز محلياً وسحابياً قبل إعلان approved حتى لا يصطدم العضو بسجل طرد قديم.
     final root0 = _root(backendUrl, workspaceId);
-    try {
-      await _delete('$root0/evictions/${Uri.encodeComponent(deviceId)}.json');
-    } catch (_) {}
+    // (PR-5) إلغاء موثّق لكل شواهد الطرد/الحظر السحابية — لا evictions وحدها —
+    // حتى لا يصطدم العضو بسجل قديم عند أول نبض بعد الموافقة.
+    final encApproved = Uri.encodeComponent(deviceId);
+    for (final node in const [
+      'evictions',
+      'revoked_devices',
+      'ejected_devices',
+    ]) {
+      try {
+        await _delete('$root0/$node/$encApproved.json');
+      } catch (_) {}
+    }
 
     // 2) إعداد المستخدم والجهاز محلياً ورفع سجل نظيف إلى /roster قبل إشعار العضو بـ approved
     final db = await repo.database;
