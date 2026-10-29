@@ -1274,7 +1274,43 @@ class SyncEngine {
         );
       }
     } catch (_) {}
+    // (PR-6) دفع اسم جهازنا صراحةً إلى فهرس الأجهزة السحابي (وعقدة اشتراك
+    // المدير) بعد أي بثّ سجل — الاسم لم يعد يُحمل في النبض الدوري.
+    try {
+      final st = await repo.settings();
+      final url = effectiveBackendUrl(st['cloudBackendUrl']);
+      final ws = _cloudTransport?.workspaceId ?? await repo.activeWorkspaceId();
+      if (url.isNotEmpty && ws.isNotEmpty) {
+        final devId = await ensureDeviceId(repo);
+        final name =
+            (st['sync.deviceName'] ?? st['account.name'] ?? '').trim();
+        if (name.isNotEmpty) {
+          await CloudJoin.pushDeviceNameIndex(
+            backendUrl: url,
+            workspaceId: ws,
+            deviceId: devId,
+            name: name,
+            includeSubscription: await repo.isWorkspaceOwner(),
+          );
+        }
+      }
+    } catch (_) {}
     notifyNewOperation();
+  }
+
+  /// (PR-6) دفع اسم جهاز عضو (من المدير) إلى عقدته السحابية في فهرس
+  /// الأجهزة — ليستقبله المستمع اللحظي على جهاز العضو فوراً. يكمّل بثّ
+  /// السجل الرسمي (broadcastRosterChange) ولا يستبدله.
+  Future<void> pushMemberDeviceName(String deviceId, String name) async {
+    try {
+      final st = await repo.settings();
+      final url = effectiveBackendUrl(st['cloudBackendUrl']);
+      if (url.isEmpty) return;
+      final ws = _cloudTransport?.workspaceId ?? await repo.activeWorkspaceId();
+      if (ws.isEmpty) return;
+      await CloudJoin.pushDeviceNameIndex(
+          backendUrl: url, workspaceId: ws, deviceId: deviceId, name: name);
+    } catch (_) {}
   }
 
   /// جدولة push فورية (لا تنتظر دورة الـ Timer) — لتسريع Near-Real-Time.
