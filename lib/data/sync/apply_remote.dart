@@ -1939,27 +1939,6 @@ extension ApplyRemoteOp on Repo {
           fixed++;
         }
       }
-
-      // P1-1: كشف والتنبيه عن أي مخزون سالب بعد المصالحة
-      try {
-        final negativeItems = await db.query(
-          'items',
-          columns: ['id', 'name', 'quantity'],
-          where: "(is_deleted = 0 OR is_deleted IS NULL) AND quantity < -0.00001",
-        );
-        for (final neg in negativeItems) {
-          final name = '${neg['name'] ?? 'صنف'}';
-          final qty = (neg['quantity'] as num?)?.toDouble() ?? 0.0;
-          await db.insert('activity', {
-            'workspace_id': 'default',
-            'text': 'تنبيه عجز مخزون: الصنف «$name» أصبح رصيده سالباً ($qty) نتيجة عمليات متزامنة.',
-            'ref_type': 'item',
-            'ref_id': '${neg['id']}',
-            'user_name': 'النظام الآلي',
-            'created_at': DateTime.now().toIso8601String(),
-          });
-        }
-      } catch (_) {}
     } catch (_) {}
     return fixed;
   }

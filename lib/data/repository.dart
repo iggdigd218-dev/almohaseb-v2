@@ -1792,25 +1792,7 @@ class Repo {
             whereArgs: [id],
           );
           for (final line in items) {
-            double costP = line.costPrice;
-            if (costP <= 0 && line.itemId != null) {
-              final iRow = await txn.query('items', columns: ['buy_price'], where: 'id = ?', whereArgs: [line.itemId], limit: 1);
-              if (iRow.isNotEmpty) {
-                costP = (iRow.first['buy_price'] as num?)?.toDouble() ?? 0.0;
-              }
-            }
-            final lineWithCost = InvoiceLine(
-              id: line.id,
-              txId: line.txId,
-              itemId: line.itemId,
-              name: line.name,
-              unit: line.unit,
-              quantity: line.quantity,
-              unitPrice: line.unitPrice,
-              costPrice: costP,
-              total: line.total,
-            );
-            final lm = lineWithCost.toMap(transactionId: id);
+            final lm = line.toMap(transactionId: id);
             lm['workspace_id'] = requireWorkspaceId;
             lm['id'] = newGlobalId();
             await txn.insert('transaction_items', lm);
@@ -1864,25 +1846,7 @@ class Repo {
             whereArgs: [id],
           );
           for (final line in items) {
-            double costP = line.costPrice;
-            if (costP <= 0 && line.itemId != null) {
-              final iRow = await txn.query('items', columns: ['buy_price'], where: 'id = ?', whereArgs: [line.itemId], limit: 1);
-              if (iRow.isNotEmpty) {
-                costP = (iRow.first['buy_price'] as num?)?.toDouble() ?? 0.0;
-              }
-            }
-            final lineWithCost = InvoiceLine(
-              id: line.id,
-              txId: line.txId,
-              itemId: line.itemId,
-              name: line.name,
-              unit: line.unit,
-              quantity: line.quantity,
-              unitPrice: line.unitPrice,
-              costPrice: costP,
-              total: line.total,
-            );
-            final lm = lineWithCost.toMap(transactionId: id);
+            final lm = line.toMap(transactionId: id);
             lm['workspace_id'] = requireWorkspaceId;
             lm['id'] = newGlobalId();
             await txn.insert('transaction_items', lm);
@@ -3076,59 +3040,11 @@ class Repo {
   /// الرقم التسلسلي التالي لأي عملية مالية (رقمي بحت).
   Future<String> nextTxNumber() => nextSeq('counter_tx', table: 'transactions');
 
-  /// الرقم التسلسلي التالي للسند مع البادئة الحرفية حسب النوع وبادئة الجهاز ومنع التضارب.
+  /// الرقم التسلسلي التالي للسند مع البادئة الحرفية حسب النوع.
   Future<String> nextVoucherNumber(VoucherKind kind) async {
     final key = 'counter_voucher_${kind.code}';
-    final db = await _db;
-    var attempts = 0;
-    while (attempts < 100) {
-      final seq = await nextSeq(key);
-      var prefix = '';
-      try {
-        final wm = await db.query('settings',
-            columns: ['value'], where: "key = 'workspaceMode'", limit: 1);
-        final mode = WorkspaceMode.parse(
-            wm.isEmpty ? null : wm.first['value'] as String?);
-        if (mode.inGroup) {
-          final devRows = await db.query('settings',
-              columns: ['key', 'value'],
-              where: "key IN ('sync.deviceId', 'devicePrefix')");
-          var devId = '';
-          var cfgPrefix = '';
-          for (final r in devRows) {
-            final k = '${r['key'] ?? ''}';
-            final v = '${r['value'] ?? ''}';
-            if (k == 'sync.deviceId') devId = v;
-            if (k == 'devicePrefix') cfgPrefix = v;
-          }
-          if (devId.trim().isNotEmpty || cfgPrefix.trim().isNotEmpty) {
-            prefix = Fmt.singleLetterDevicePrefix(
-              devId,
-              configuredPrefix: cfgPrefix,
-            );
-          }
-        }
-      } catch (_) {}
-      final numStr = seq.padLeft(4, '0');
-      final candidate = prefix.isNotEmpty
-          ? '$prefix-${kind.prefix}$numStr'
-          : '${kind.prefix}$numStr';
-
-      // حارس الفرادة المحلي
-      final existing = await db.query(
-        'vouchers',
-        columns: ['id'],
-        where: 'number = ?',
-        whereArgs: [candidate],
-        limit: 1,
-      );
-      if (existing.isEmpty) {
-        return candidate;
-      }
-      attempts++;
-    }
-    final seqFallback = await nextSeq(key);
-    return '${kind.prefix}${seqFallback.padLeft(4, '0')}';
+    final seq = await nextSeq(key);
+    return '${kind.prefix}${seq.padLeft(4, '0')}';
   }
 
   Future<int> saveVoucher(Voucher v) async {
@@ -7428,17 +7344,13 @@ class Repo {
     SyncRecorder rec,
     StockMove m,
   ) async {
+    final id = await txn.insert('stock_moves', m.toMap()..['id'] = newGlobalId());
     final r = await txn.query(
       'items',
       where: 'id = ?',
       whereArgs: [m.itemId],
       limit: 1,
     );
-    final buyPrice = r.isNotEmpty ? ((r.first['buy_price'] ?? 0) as num).toDouble() : 0.0;
-    final effectiveCost = m.costPrice > 0 ? m.costPrice : buyPrice;
-    final moveMap = m.toMap();
-    moveMap['cost_price'] = effectiveCost;
-    final id = await txn.insert('stock_moves', moveMap..['id'] = newGlobalId());
     ({int itemId, String name, double qty, double minQty})? lowStock;
     if (r.isNotEmpty) {
       final it = Item.fromMap(r.first);
@@ -7596,7 +7508,7 @@ class Repo {
     });
   }
 
-  /// ملخّص المخزون: التكلفة والقيمة والربح المحقق والمتوقع (مع استبعاد الفواتير المحذوفة والملغاة وتوظيف التكلفة المجمدة).
+  /// ملخّص المخزون: التكلفة والقيمة والربح المحقق والمتوقع.
   Future<Map<String, double>> inventorySummary() async {
     final all = await items();
     var cost = 0.0, value = 0.0, expected = 0.0, low = 0.0;
@@ -7606,46 +7518,20 @@ class Repo {
       expected += i.expectedProfit;
       if (i.low || i.out) low++;
     }
-    // الربح المحقق فعليًا من فواتير البيع النشطة (غير المحذوفة وغير الملغاة) مقابل التكلفة المجمدة أو سعر الشراء.
+    // الربح المحقق فعليًا من حركات البيع مقابل سعر الشراء الحالي.
     final db = await _db;
-    final salesRows = await db.rawQuery('''
-      SELECT 
-        ti.quantity AS q,
-        ti.unit_price AS p,
-        COALESCE(ti.cost_price, i.buy_price, 0.0) AS b
-      FROM transaction_items ti
-      JOIN transactions t ON t.id = ti.tx_id
-      JOIN items i ON i.id = ti.item_id
-      WHERE t.type = 'sale'
-        AND (t.deleted_at IS NULL OR t.deleted_at = '')
-        AND t.status != 'cancelled'
-    ''');
-    final returnRows = await db.rawQuery('''
-      SELECT 
-        ti.quantity AS q,
-        ti.unit_price AS p,
-        COALESCE(ti.cost_price, i.buy_price, 0.0) AS b
-      FROM transaction_items ti
-      JOIN transactions t ON t.id = ti.tx_id
-      JOIN items i ON i.id = ti.item_id
-      WHERE t.type = 'sales_return'
-        AND (t.deleted_at IS NULL OR t.deleted_at = '')
-        AND t.status != 'cancelled'
-    ''');
+    final rows = await db.rawQuery(
+      "SELECT s.quantity AS q, s.unit_price AS p, i.buy_price AS b "
+      "FROM stock_moves s JOIN items i ON i.id = s.item_id "
+      "WHERE s.kind = 'sale'",
+    );
     var realised = 0.0, sales = 0.0;
-    for (final r in salesRows) {
+    for (final r in rows) {
       final q = ((r['q'] ?? 0) as num).toDouble();
       final p = ((r['p'] ?? 0) as num).toDouble();
       final b = ((r['b'] ?? 0) as num).toDouble();
       realised += (p - b) * q;
       sales += p * q;
-    }
-    for (final r in returnRows) {
-      final q = ((r['q'] ?? 0) as num).toDouble();
-      final p = ((r['p'] ?? 0) as num).toDouble();
-      final b = ((r['b'] ?? 0) as num).toDouble();
-      realised -= (p - b) * q;
-      sales -= p * q;
     }
     return {
       'items': all.length.toDouble(),
