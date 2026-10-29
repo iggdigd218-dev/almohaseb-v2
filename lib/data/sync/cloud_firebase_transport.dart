@@ -369,25 +369,6 @@ class CloudFirebaseTransport implements SyncTransport {
             .timeout(const Duration(seconds: 5));
       } catch (_) {}
     }
-
-    // تحديث عقدة الصنف المباشرة في السحابة /items/{id} لضمان مطابقة الرصيد ومنع إعادة التثبيت من جلب كميات أولية قديمة
-    if (op.entityType == EntityKind.item && op.opType != OpKind.delete_) {
-      try {
-        final itemUri = Uri.parse(
-            '$_root/items/${Uri.encodeComponent(op.entityId)}.json');
-        final targetItemUri =
-            auth == null ? itemUri : itemUri.replace(query: auth);
-        final itemBody = jsonEncode({
-          ...cloudPayload,
-          'id': op.entityId,
-          'server_time': kServerValueTimestamp,
-          'server_ts': kServerValueTimestamp,
-        });
-        await http
-            .put(targetItemUri, body: itemBody, headers: _authHeaders)
-            .timeout(const Duration(seconds: 5));
-      } catch (_) {}
-    }
   }
 
   // ==================== المصافحة النشطة للسجل (دفعة 53) ====================

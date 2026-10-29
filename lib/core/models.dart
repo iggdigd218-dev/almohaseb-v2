@@ -1075,8 +1075,6 @@ class Item {
   final double buyPrice;
   final double sellPrice;
   final double quantity;
-  final double initialQuantity;
-  final int version;
   final double minQuantity;
   final String currency;
   final String category;
@@ -1099,8 +1097,6 @@ class Item {
     this.buyPrice = 0,
     this.sellPrice = 0,
     this.quantity = 0,
-    this.initialQuantity = 0,
-    this.version = 1,
     this.minQuantity = 0,
     this.currency = 'YER',
     this.category = '',
@@ -1144,8 +1140,6 @@ class Item {
     double? buyPrice,
     double? sellPrice,
     double? quantity,
-    double? initialQuantity,
-    int? version,
     double? minQuantity,
     String? currency,
     String? category,
@@ -1166,8 +1160,6 @@ class Item {
         buyPrice: buyPrice ?? this.buyPrice,
         sellPrice: sellPrice ?? this.sellPrice,
         quantity: quantity ?? this.quantity,
-        initialQuantity: initialQuantity ?? this.initialQuantity,
-        version: version ?? this.version,
         minQuantity: minQuantity ?? this.minQuantity,
         currency: currency ?? this.currency,
         category: category ?? this.category,
@@ -1191,8 +1183,6 @@ class Item {
         'buy_price': buyPrice,
         'sell_price': sellPrice,
         'quantity': quantity,
-        'initial_quantity': initialQuantity > 0 ? initialQuantity : quantity,
-        'version': version,
         'min_quantity': minQuantity,
         'currency': currency,
         'category': category,
@@ -1205,8 +1195,6 @@ class Item {
         'updated_at': updatedAt.toIso8601String(),
       };
 
-  Map<String, Object?> toJson() => toMap();
-
   factory Item.fromMap(Map<String, Object?> m) => Item(
         id: m['id'] as int?,
         name: (m['name'] ?? '') as String,
@@ -1218,8 +1206,6 @@ class Item {
         buyPrice: ((m['buy_price'] ?? 0) as num).toDouble(),
         sellPrice: ((m['sell_price'] ?? 0) as num).toDouble(),
         quantity: ((m['quantity'] ?? 0) as num).toDouble(),
-        initialQuantity: ((m['initial_quantity'] ?? m['quantity'] ?? 0) as num).toDouble(),
-        version: (m['version'] as int?) ?? 1,
         minQuantity: ((m['min_quantity'] ?? 0) as num).toDouble(),
         currency: (m['currency'] ?? 'YER') as String,
         category: (m['category_name'] ?? m['category'] ?? '') as String,

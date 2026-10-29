@@ -1142,34 +1142,6 @@ extension ApplyRemoteOp on Repo {
         }
         if (op.entityType == EntityKind.tx && lines != null) {
           await _replaceInvoiceLines(txn, op, lines);
-          if (existing.isEmpty) {
-            final txType = '${cleanPayload['type'] ?? ''}'.trim().toLowerCase();
-            final notes = '${cleanPayload['notes'] ?? ''}';
-            final isReturn = txType == 'sales_return' ||
-                notes.contains('[ORIG_TX:') ||
-                notes.contains('مرتجع من الفاتورة');
-            final isSale = txType == 'sale' ||
-                txType == 'revenue' ||
-                txType == 'debit' ||
-                txType == 'inflow';
-            for (final line in lines) {
-              final itemId = line['item_id'];
-              final qty = (line['quantity'] as num?)?.toDouble() ?? 0.0;
-              if (itemId != null && qty > 0) {
-                if (isReturn) {
-                  await txn.rawUpdate(
-                    'UPDATE items SET quantity = quantity + ?, version = version + 1, updated_at = ? WHERE id = ?',
-                    [qty, now, itemId],
-                  );
-                } else if (isSale) {
-                  await txn.rawUpdate(
-                    'UPDATE items SET quantity = quantity - ?, version = version + 1, updated_at = ? WHERE id = ?',
-                    [qty, now, itemId],
-                  );
-                }
-              }
-            }
-          }
         }
         break;
       case OpKind.delete_:
@@ -1774,36 +1746,6 @@ extension ApplyRemoteOp on Repo {
   static Future<int> reconcileInventoryQuantities(DatabaseExecutor db) async {
     var fixed = 0;
     try {
-      try {
-        await db.execute('''
-          UPDATE items 
-          SET quantity = CASE 
-              WHEN (initial_quantity IS NOT NULL AND initial_quantity > 0) THEN initial_quantity 
-              ELSE quantity 
-            END 
-            - COALESCE((
-                SELECT SUM(ti.quantity) 
-                FROM transaction_items ti 
-                JOIN transactions t ON ti.tx_id = t.id 
-                WHERE ti.item_id = items.id 
-                  AND (t.type = 'sale' OR t.type = 'revenue' OR t.type = 'debit' OR t.type = 'inflow')
-                  AND (t.notes NOT LIKE '%[ORIG_TX:%' AND t.notes NOT LIKE '%مرتجع من الفاتورة%')
-                  AND (t.deleted_at IS NULL OR t.deleted_at = '')
-                  AND (t.status IS NULL OR t.status != 'cancelled')
-            ), 0) 
-            + COALESCE((
-                SELECT SUM(ti.quantity) 
-                FROM transaction_items ti 
-                JOIN transactions t ON ti.tx_id = t.id 
-                WHERE ti.item_id = items.id 
-                  AND (t.type = 'sales_return' OR t.notes LIKE '%[ORIG_TX:%' OR t.notes LIKE '%مرتجع من الفاتورة%')
-                  AND (t.deleted_at IS NULL OR t.deleted_at = '')
-                  AND (t.status IS NULL OR t.status != 'cancelled')
-            ), 0)
-          WHERE (is_deleted = 0 OR is_deleted IS NULL) AND (deleted_at IS NULL OR deleted_at = '');
-        ''');
-      } catch (_) {}
-
       final itemRows = await db.query(
         'items',
         columns: ['id', 'quantity', 'updated_at'],
