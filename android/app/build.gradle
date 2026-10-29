@@ -60,11 +60,14 @@ android {
 
     buildTypes {
         release {
-            if (keystorePropertiesFile.exists() && keystoreProperties['storeFile'] != null && file(keystoreProperties['storeFile']).exists()) {
-                signingConfig = signingConfigs.release
-            } else {
-                signingConfig = signingConfigs.debug
+            // توقيع ثابت إلزامي للإصدارات: إذا غاب المفتاح نُفشل البناء بدل
+            // التوقيع بمفتاح debug مؤقت (الذي يكسر التحديث فوق نسخة مثبّتة).
+            if (!keystorePropertiesFile.exists()) {
+                throw new GradleException(
+                    "توقيع release مفقود: أضف android/key.properties (أو سرّ ANDROID_KEYSTORE_BASE64 في CI). " +
+                    "التوقيع بمفتاح debug يمنع تثبيت التحديث فوق النسخة السابقة.")
             }
+            signingConfig = signingConfigs.release
             minifyEnabled = false
             shrinkResources = false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
