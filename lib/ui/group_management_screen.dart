@@ -338,7 +338,8 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
             final memberDevices = list
                 .where((d) =>
                     d['id'] != ownId &&
-                    ((d['is_owner'] ?? 0) as int) != 1)
+                    ((d['is_owner'] ?? 0) as int) != 1 &&
+                    '${d['expelled_at'] ?? ''}'.trim().isEmpty)
                 .toList();
 
             return RefreshIndicator(

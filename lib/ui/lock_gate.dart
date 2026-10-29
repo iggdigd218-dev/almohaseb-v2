@@ -118,22 +118,16 @@ class _LockGateState extends ConsumerState<LockGate>
                 ),
                 const SizedBox(height: 20),
                 FilledButton.icon(
-                  onPressed: () async {
-                    try {
-                      final repo = ref.read(repoProvider);
-                      await repo.resetToStandaloneAfterExpulsion();
-                    } catch (_) {}
-                    if (context.mounted) {
-                      Navigator.of(context).pushAndRemoveUntil(
-                        MaterialPageRoute(
-                          builder: (_) => const OnboardingScreen(
-                            initialNotice:
-                                'تم إلغاء الوصول / ارتباطك ملغى من قِبل المنشأة',
-                          ),
+                  onPressed: () {
+                    Navigator.of(context).pushAndRemoveUntil(
+                      MaterialPageRoute(
+                        builder: (_) => const OnboardingScreen(
+                          initialNotice:
+                              'تم إلغاء الوصول / ارتباطك ملغى من قِبل المنشأة',
                         ),
-                        (_) => false,
-                      );
-                    }
+                      ),
+                      (_) => false,
+                    );
                   },
                   icon: const Icon(Icons.exit_to_app),
                   label: const Text('العودة لشاشة البداية'),

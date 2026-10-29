@@ -133,19 +133,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             content: Text(widget.initialNotice!),
             actions: [
               FilledButton(
-                onPressed: () async {
-                  try {
-                    final prefs = await SharedPreferences.getInstance();
-                    await prefs.remove('ejection_dialog_pending');
-                    await prefs.remove('last_ejection_reason');
-                    await prefs.remove('ejected_flag');
-                    await prefs.remove('ejected');
-                    await prefs.remove('expelled_at');
-                    await prefs.remove('workspace_expelled');
-                    await prefs.remove('is_ejected');
-                  } catch (_) {}
-                  if (dctx.mounted) Navigator.of(dctx).pop();
-                },
+                onPressed: () => Navigator.of(dctx).pop(),
                 child: const Text('حسناً فهمت'),
               ),
             ],

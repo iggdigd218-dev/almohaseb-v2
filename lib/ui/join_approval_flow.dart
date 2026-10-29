@@ -9,8 +9,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'package:shared_preferences/shared_preferences.dart';
-
 import '../core/cloud_config.dart';
 import '../core/platform_info.dart';
 import '../core/sfx.dart';
@@ -236,17 +234,6 @@ class _JoinApprovalScreenState extends ConsumerState<JoinApprovalScreen> {
         backendUrl: url,
         targetWorkspaceId: ws,
       );
-      try {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.remove('is_ejected');
-        await prefs.remove('ejected_flag');
-        await prefs.remove('ejected');
-        await prefs.remove('ejection_dialog_pending');
-        await prefs.remove('last_ejection_reason');
-        await prefs.remove('expelled_at');
-        await prefs.remove('workspace_expelled');
-        await prefs.setInt('workspace_joined_at', DateTime.now().millisecondsSinceEpoch);
-      } catch (_) {}
       await CloudJoin.requestJoin(
         repo,
         backendUrl: url,
