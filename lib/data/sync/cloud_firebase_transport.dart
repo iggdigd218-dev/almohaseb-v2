@@ -788,7 +788,7 @@ class CloudFirebaseTransport implements SyncTransport {
 
     if (applied > 0 || forceFullSync || resetCursor || lastCursorMs == 0) {
       try {
-        await Applier.reconcileInventoryQuantities(db);
+        await ApplyRemoteOp.reconcileInventoryQuantities(db);
       } catch (_) {}
     }
 

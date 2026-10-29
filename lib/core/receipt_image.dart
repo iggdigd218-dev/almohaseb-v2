@@ -546,9 +546,9 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   // ===== 3) شبكة المنتصف (المبلغ والتفقيط يميناً + الرصيد بعد العملية يساراً) =====
   const gap = 20.0;
   const totalGridW = w - pad * 2;
-  final rightBoxW = totalGridW * 0.54 - gap / 2;
-  final leftBoxW = totalGridW * 0.46 - gap / 2;
-  final rightBoxX = w - pad - rightBoxW;
+  const rightBoxW = totalGridW * 0.54 - gap / 2;
+  const leftBoxW = totalGridW * 0.46 - gap / 2;
+  const rightBoxX = w - pad - rightBoxW;
   const leftBoxX = pad;
 
   final isGreenMode = d.isCashSale || !d.isDebit;
@@ -692,7 +692,7 @@ Future<String> buildReceiptImage(ReceiptData d) async {
       // رسم قيمة الرصيد وبجانبها يميناً شارة «عليه» / «له» كما في الصورة المرجعية
       const pillW = 68.0;
       const pillH = 36.0;
-      final centerGroupX = leftBoxX + leftBoxW / 2;
+      const centerGroupX = leftBoxX + leftBoxW / 2;
       final pillRect = RRect.fromRectAndRadius(
         Rect.fromLTWH(centerGroupX + 68, y + 92, pillW, pillH),
         const Radius.circular(12),
@@ -1059,7 +1059,7 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   final userTp = TextPainter(
     text: TextSpan(
       text: userLabel,
-      style: const TextStyle(
+      style: TextStyle(
         fontSize: 20,
         fontWeight: FontWeight.w800,
         fontFamily: uiFontFamily,

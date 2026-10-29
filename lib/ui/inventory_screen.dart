@@ -441,10 +441,10 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
                   badge: _badgeOf(visible[i], roots, sections),
                 ),
           );
-    final isOwner = ref.watch(isWorkspaceOwnerProvider).valueOrNull ?? true;
+    final isOwner = ref.watch(isOwnerProvider).valueOrNull ?? true;
     final workspaceMode =
         ref.watch(workspaceModeProvider).valueOrNull ?? 'standalone';
-    final currentUser = ref.watch(currentUserProvider);
+    final currentUser = ref.watch(currentUserProvider).valueOrNull;
     final canSeeValuation =
         (workspaceMode == 'standalone' || isOwner) &&
         (currentUser == null ||
@@ -1759,12 +1759,13 @@ class _ItemTile extends ConsumerWidget {
                     Builder(
                       builder: (context) {
                         final isOwner =
-                            ref.watch(isWorkspaceOwnerProvider).valueOrNull ??
+                            ref.watch(isOwnerProvider).valueOrNull ??
                                 true;
                         final workspaceMode =
                             ref.watch(workspaceModeProvider).valueOrNull ??
                                 'standalone';
-                        final currentUser = ref.watch(currentUserProvider);
+                        final currentUser =
+                            ref.watch(currentUserProvider).valueOrNull;
                         final canSeeCost =
                             (workspaceMode == 'standalone' || isOwner) &&
                             (currentUser == null ||

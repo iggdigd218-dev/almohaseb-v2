@@ -2018,7 +2018,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      shape: const RoundedRectangleBorder(borderRadius: AppRadius.sheetTop),
+      shape: RoundedRectangleBorder(borderRadius: AppRadius.sheetTop),
       builder: (ctx) => Padding(
         padding: const EdgeInsets.fromLTRB(18, 14, 18, 24),
         child: SingleChildScrollView(
@@ -2137,7 +2137,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
     const supportWa = '967774190040';
     showModalBottomSheet<void>(
       context: context,
-      shape: const RoundedRectangleBorder(borderRadius: AppRadius.sheetTop),
+      shape: RoundedRectangleBorder(borderRadius: AppRadius.sheetTop),
       builder: (ctx) => SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(18, 14, 18, 20),
