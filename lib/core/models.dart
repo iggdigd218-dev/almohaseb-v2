@@ -374,30 +374,6 @@ class InvoiceLine {
     double? total,
   }) : total = total ?? quantity * unitPrice;
 
-  InvoiceLine copyWith({
-    int? id,
-    int? txId,
-    int? itemId,
-    String? name,
-    String? unit,
-    double? quantity,
-    double? unitPrice,
-    double? costPrice,
-    double? total,
-  }) {
-    return InvoiceLine(
-      id: id ?? this.id,
-      txId: txId ?? this.txId,
-      itemId: itemId ?? this.itemId,
-      name: name ?? this.name,
-      unit: unit ?? this.unit,
-      quantity: quantity ?? this.quantity,
-      unitPrice: unitPrice ?? this.unitPrice,
-      costPrice: costPrice ?? this.costPrice,
-      total: total ?? this.total,
-    );
-  }
-
   Map<String, Object?> toMap({int? transactionId}) => {
         if (id != null) 'id': id,
         'tx_id': transactionId ?? txId,
@@ -1283,32 +1259,6 @@ class StockMove {
   double profitAgainst(double buyPrice) {
     final effectiveCost = costPrice > 0 ? costPrice : buyPrice;
     return kind == StockKind.sale ? (unitPrice - effectiveCost) * quantity : 0;
-  }
-
-  StockMove copyWith({
-    int? id,
-    int? itemId,
-    StockKind? kind,
-    double? quantity,
-    double? unitPrice,
-    double? costPrice,
-    int? accountId,
-    String? notes,
-    DateTime? date,
-    DateTime? createdAt,
-  }) {
-    return StockMove(
-      id: id ?? this.id,
-      itemId: itemId ?? this.itemId,
-      kind: kind ?? this.kind,
-      quantity: quantity ?? this.quantity,
-      unitPrice: unitPrice ?? this.unitPrice,
-      costPrice: costPrice ?? this.costPrice,
-      accountId: accountId ?? this.accountId,
-      notes: notes ?? this.notes,
-      date: date ?? this.date,
-      createdAt: createdAt ?? this.createdAt,
-    );
   }
 
   Map<String, Object?> toMap() => {

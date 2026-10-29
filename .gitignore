@@ -1,7 +1,6 @@
 .dart_tool/
 .packages
 build/
-inspect_build_logs.py
 .flutter-plugins
 .flutter-plugins-dependencies
 android/local.properties
