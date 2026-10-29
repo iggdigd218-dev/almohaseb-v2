@@ -259,6 +259,16 @@ class CloudFirebaseTransport implements SyncTransport {
       entityId: op.entityId,
       preserveChatAttachment: true,
     );
+    if (op.opType == OpKind.delete_) {
+      cloudPayload['tombstone'] = <String, Object?>{
+        'id': op.entityId,
+        'is_deleted': 1,
+        'deleted_at': op.deviceTime.isNotEmpty
+            ? op.deviceTime
+            : DateTime.now().toIso8601String(),
+        'entity_type': op.entityType.name,
+      };
+    }
     final localSanitizedPayload = sanitizeOperationPayload(
       op.payload,
       entityType: op.entityType,
@@ -789,6 +799,25 @@ class CloudFirebaseTransport implements SyncTransport {
     if (applied > 0 || forceFullSync || resetCursor || lastCursorMs == 0) {
       try {
         await ApplyRemoteOp.reconcileInventoryQuantities(db);
+        try {
+          final negItems = await db.query(
+            'items',
+            columns: ['id', 'name', 'quantity'],
+            where: "quantity < -0.0001 AND (is_deleted = 0 OR is_deleted IS NULL) AND (deleted_at IS NULL OR deleted_at = '')",
+            limit: 5,
+          );
+          for (final item in negItems) {
+            final name = '${item['name'] ?? ''}';
+            final qty = (item['quantity'] as num?)?.toDouble() ?? 0.0;
+            await repo.notify(
+              title: 'تنبيه مخزون سالب: $name',
+              body: 'رصيد الصنف أصبح سالباً ($qty) نتيجة عمليات متزامنة. يرجى مراجعة وتسوية المخزون.',
+              kind: 'warning',
+              entityType: 'item',
+              entityId: '${item['id']}',
+            );
+          }
+        } catch (_) {}
       } catch (_) {}
     }
 

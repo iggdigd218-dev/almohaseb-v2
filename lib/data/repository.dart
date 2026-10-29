@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:http/http.dart' as http;
 
 import '../core/accounting.dart';
 import '../core/app_version.dart';
@@ -1792,7 +1793,21 @@ class Repo {
             whereArgs: [id],
           );
           for (final line in items) {
-            final lm = line.toMap(transactionId: id);
+            var cost = line.costPrice;
+            if (cost <= 0 && line.itemId != null) {
+              final itmRows = await txn.query(
+                'items',
+                columns: ['buy_price'],
+                where: 'id = ?',
+                whereArgs: [line.itemId],
+                limit: 1,
+              );
+              if (itmRows.isNotEmpty) {
+                cost = ((itmRows.first['buy_price'] ?? 0) as num).toDouble();
+              }
+            }
+            final lineWithCost = line.copyWith(costPrice: cost);
+            final lm = lineWithCost.toMap(transactionId: id);
             lm['workspace_id'] = requireWorkspaceId;
             lm['id'] = newGlobalId();
             await txn.insert('transaction_items', lm);
@@ -1846,7 +1861,21 @@ class Repo {
             whereArgs: [id],
           );
           for (final line in items) {
-            final lm = line.toMap(transactionId: id);
+            var cost = line.costPrice;
+            if (cost <= 0 && line.itemId != null) {
+              final itmRows = await txn.query(
+                'items',
+                columns: ['buy_price'],
+                where: 'id = ?',
+                whereArgs: [line.itemId],
+                limit: 1,
+              );
+              if (itmRows.isNotEmpty) {
+                cost = ((itmRows.first['buy_price'] ?? 0) as num).toDouble();
+              }
+            }
+            final lineWithCost = line.copyWith(costPrice: cost);
+            final lm = lineWithCost.toMap(transactionId: id);
             lm['workspace_id'] = requireWorkspaceId;
             lm['id'] = newGlobalId();
             await txn.insert('transaction_items', lm);
@@ -1902,6 +1931,7 @@ class Repo {
                         quantity: line.quantity,
                         kind: StockKind.sale,
                         unitPrice: line.unitPrice,
+                        costPrice: line.costPrice,
                         date: t.date,
                         createdAt: nowDt,
                         notes: 'مبيع فاتورة #${savedRef.isEmpty ? id : savedRef}',
@@ -2986,11 +3016,57 @@ class Repo {
   /// الرقم التسلسلي التالي لأي عملية مالية (رقمي بحت).
   Future<String> nextTxNumber() => nextSeq('counter_tx', table: 'transactions');
 
-  /// الرقم التسلسلي التالي للسند مع البادئة الحرفية حسب النوع.
+  /// الرقم التسلسلي التالي للسند مع البادئة الحرفية وبادئة الجهاز لضمان عدم التكرار.
   Future<String> nextVoucherNumber(VoucherKind kind) async {
+    final db = await _db;
+    var devicePrefix = '';
+    try {
+      final wm = await db.query(
+        'sync_meta',
+        columns: ['value'],
+        where: 'key = ?',
+        whereArgs: ['workspaceMode'],
+        limit: 1,
+      );
+      final mode = WorkspaceMode.parse(
+          wm.isEmpty ? null : wm.first['value'] as String?);
+      if (mode.inGroup) {
+        final devRows = await db.query(
+          'settings',
+          columns: ['key', 'value'],
+          where: "key IN ('sync.deviceId', 'devicePrefix')",
+        );
+        var devId = '';
+        var cfgPrefix = '';
+        for (final r in devRows) {
+          final k = '${r['key'] ?? ''}';
+          final v = '${r['value'] ?? ''}';
+          if (k == 'sync.deviceId') devId = v;
+          if (k == 'devicePrefix') cfgPrefix = v;
+        }
+        devicePrefix = Fmt.singleLetterDevicePrefix(
+          devId.isNotEmpty ? devId : (_deviceId ?? ''),
+          configuredPrefix: cfgPrefix,
+        );
+      }
+    } catch (_) {}
+
     final key = 'counter_voucher_${kind.code}';
-    final seq = await nextSeq(key);
-    return '${kind.prefix}${seq.padLeft(4, '0')}';
+    final pfx = devicePrefix.isNotEmpty ? '$devicePrefix-${kind.prefix}' : kind.prefix;
+    while (true) {
+      final seq = await nextSeq(key);
+      final candidate = '$pfx${seq.padLeft(4, '0')}';
+      final existing = await db.query(
+        'vouchers',
+        columns: ['id'],
+        where: 'number = ?',
+        whereArgs: [candidate],
+        limit: 1,
+      );
+      if (existing.isEmpty) {
+        return candidate;
+      }
+    }
   }
 
   Future<int> saveVoucher(Voucher v) async {
@@ -4015,18 +4091,52 @@ class Repo {
         'updated_at': now,
       }, where: 'id = ?', whereArgs: [myUser.id]);
     }
+
+    try {
+      final stCloud = await settings();
+      final cUrl = effectiveBackendUrl(stCloud['cloudBackendUrl']);
+      final cWs = requireWorkspaceId;
+      if (cUrl.isNotEmpty && cWs.isNotEmpty && cWs != 'default') {
+        final client = http.Client();
+        final devUri = Uri.parse('$cUrl/workspaces/$cWs/devices/${Uri.encodeComponent(requireDeviceId)}.json');
+        await client.patch(devUri, body: jsonEncode({'name': n, 'updated_at': now})).timeout(const Duration(seconds: 4));
+        final rosterUri = Uri.parse('$cUrl/workspaces/$cWs/roster/${Uri.encodeComponent(requireDeviceId)}.json');
+        await client.patch(rosterUri, body: jsonEncode({'device_name': n})).timeout(const Duration(seconds: 4));
+      }
+    } catch (_) {}
   }
 
   /// تحديث اسم جهاز (ليتعرّف المدير عليه).
   Future<void> renameDevice(String deviceId, String name) async {
     await _ensureCan('manage_users');
     final db = await _db;
+    final now = DateTime.now().toIso8601String();
+    final cleanName = name.trim();
     await db.update(
       'devices',
-      {'name': name.trim(), 'updated_at': DateTime.now().toIso8601String()},
+      {'name': cleanName, 'updated_at': now},
       where: 'id = ?',
       whereArgs: [deviceId],
     );
+
+    final r = await db.query('devices', columns: ['user_id'], where: 'id = ?', whereArgs: [deviceId], limit: 1);
+    final uid = r.isNotEmpty ? (r.first['user_id'] as int?) : null;
+    if (uid != null) {
+      await db.update('users', {'name': cleanName, 'updated_at': now}, where: 'id = ?', whereArgs: [uid]);
+    }
+
+    try {
+      final stCloud = await settings();
+      final cUrl = effectiveBackendUrl(stCloud['cloudBackendUrl']);
+      final cWs = requireWorkspaceId;
+      if (cUrl.isNotEmpty && cWs.isNotEmpty && cWs != 'default') {
+        final client = http.Client();
+        final devUri = Uri.parse('$cUrl/workspaces/$cWs/devices/${Uri.encodeComponent(deviceId)}.json');
+        await client.patch(devUri, body: jsonEncode({'name': cleanName, 'updated_at': now})).timeout(const Duration(seconds: 4));
+        final rosterUri = Uri.parse('$cUrl/workspaces/$cWs/roster/${Uri.encodeComponent(deviceId)}.json');
+        await client.patch(rosterUri, body: jsonEncode({'device_name': cleanName})).timeout(const Duration(seconds: 4));
+      }
+    } catch (_) {}
   }
 
   /// إلغاء اقتران/حظر جهاز — يمنعه من المزامنة حتى يُعاد اقترانه.
@@ -7290,24 +7400,31 @@ class Repo {
     SyncRecorder rec,
     StockMove m,
   ) async {
-    final id = await txn.insert('stock_moves', m.toMap()..['id'] = newGlobalId());
     final r = await txn.query(
       'items',
       where: 'id = ?',
       whereArgs: [m.itemId],
       limit: 1,
     );
+    var moveWithCost = m;
+    if (r.isNotEmpty && moveWithCost.costPrice <= 0) {
+      final it = Item.fromMap(r.first);
+      if (it.buyPrice > 0) {
+        moveWithCost = moveWithCost.copyWith(costPrice: it.buyPrice);
+      }
+    }
+    final id = await txn.insert('stock_moves', moveWithCost.toMap()..['id'] = newGlobalId());
     ({int itemId, String name, double qty, double minQty})? lowStock;
     if (r.isNotEmpty) {
       final it = Item.fromMap(r.first);
-      final delta = m.kind == StockKind.adjust
-          ? m.quantity - it.quantity
-          : m.kind.qtySign * m.quantity;
+      final delta = moveWithCost.kind == StockKind.adjust
+          ? moveWithCost.quantity - it.quantity
+          : moveWithCost.kind.qtySign * moveWithCost.quantity;
       final allowNegative = await _allowNegativeStock(txn);
       final resultingQty = it.quantity + delta;
       if (!allowNegative && Fmt.moneyGt(0, resultingQty)) {
         throw StateError(
-          m.kind == StockKind.sale
+          moveWithCost.kind == StockKind.sale
               ? 'الكمية المطلوبة من «${it.name}» غير متوفرة. '
                   'المتاح: ${it.quantity.toStringAsFixed(0)} ${it.unit}.'
               : 'لا يمكن أن يصير رصيد «${it.name}» سالباً '
@@ -7320,13 +7437,13 @@ class Repo {
         'items',
         {'quantity': resultingQty, 'updated_at': now},
         where: 'id = ?',
-        whereArgs: [m.itemId],
+        whereArgs: [moveWithCost.itemId],
       );
       await rec.record(
         entityType: EntityKind.stockMove,
         entityId: '$id',
         opType: OpKind.create,
-        payload: m.toMap()..['id'] = id,
+        payload: moveWithCost.toMap()..['id'] = id,
       );
       final updatedItemRows = await txn.query(
         'items',
@@ -7468,20 +7585,43 @@ class Repo {
       expected += i.expectedProfit;
       if (i.low || i.out) low++;
     }
-    // الربح المحقق فعليًا من حركات البيع مقابل سعر الشراء الحالي.
+    // الربح المحقق فعليًا من الفواتير النشطة (مع استبعاد المحذوفة والملغاة وخصم المرتجعات) ومقارنتها بسعر التكلفة المجمد.
     final db = await _db;
-    final rows = await db.rawQuery(
-      "SELECT s.quantity AS q, s.unit_price AS p, i.buy_price AS b "
-      "FROM stock_moves s JOIN items i ON i.id = s.item_id "
-      "WHERE s.kind = 'sale'",
+    final salesRows = await db.rawQuery(
+      "SELECT ti.quantity AS q, ti.unit_price AS p, "
+      "COALESCE(NULLIF(ti.cost_price, 0), i.buy_price, 0.0) AS b "
+      "FROM transaction_items ti "
+      "JOIN transactions t ON t.id = ti.tx_id "
+      "LEFT JOIN items i ON i.id = ti.item_id "
+      "WHERE (t.deleted_at IS NULL OR t.deleted_at = '') "
+      "AND t.status != 'cancelled' "
+      "AND t.type IN ('revenue', 'debit', 'inflow')",
     );
     var realised = 0.0, sales = 0.0;
-    for (final r in rows) {
+    for (final r in salesRows) {
       final q = ((r['q'] ?? 0) as num).toDouble();
       final p = ((r['p'] ?? 0) as num).toDouble();
       final b = ((r['b'] ?? 0) as num).toDouble();
       realised += (p - b) * q;
       sales += p * q;
+    }
+    // طرح المرتجعات النشطة
+    final returnRows = await db.rawQuery(
+      "SELECT ti.quantity AS q, ti.unit_price AS p, "
+      "COALESCE(NULLIF(ti.cost_price, 0), i.buy_price, 0.0) AS b "
+      "FROM transaction_items ti "
+      "JOIN transactions t ON t.id = ti.tx_id "
+      "LEFT JOIN items i ON i.id = ti.item_id "
+      "WHERE (t.deleted_at IS NULL OR t.deleted_at = '') "
+      "AND t.status != 'cancelled' "
+      "AND (t.type IN ('expense', 'credit', 'outflow') AND (t.notes LIKE '%[ORIG_TX:%' OR t.description LIKE '%مرتجع%'))",
+    );
+    for (final r in returnRows) {
+      final q = ((r['q'] ?? 0) as num).toDouble();
+      final p = ((r['p'] ?? 0) as num).toDouble();
+      final b = ((r['b'] ?? 0) as num).toDouble();
+      realised -= (p - b) * q;
+      sales -= p * q;
     }
     return {
       'items': all.length.toDouble(),

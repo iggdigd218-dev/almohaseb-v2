@@ -19,6 +19,7 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../../core/database.dart';
@@ -1649,6 +1650,21 @@ class CloudJoin {
     } catch (_) {}
     try {
       await _delete('$root/evictions/${Uri.encodeComponent(ourId)}.json');
+      await _delete('$root/ejected_devices/${Uri.encodeComponent(ourId)}.json');
+      await _delete('$root/revoked_devices/${Uri.encodeComponent(ourId)}.json');
+      await _patchJson('$root/devices/${Uri.encodeComponent(ourId)}.json', {
+        'status': 'active',
+        'ejected_at': null,
+        'revoked_at': null,
+        'revoked': false,
+        'is_paired': 1,
+        'last_seen': {'.sv': 'timestamp'},
+      });
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('ejected_flag');
+      await prefs.remove('ejected');
+      await prefs.remove('expelled_at');
+      await prefs.remove('workspace_expelled');
     } catch (_) {}
     final own = await db.query('devices',
         where: 'id = ?', whereArgs: [ourId], limit: 1);

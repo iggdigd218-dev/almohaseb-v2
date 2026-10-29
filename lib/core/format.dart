@@ -31,6 +31,21 @@ class Fmt {
   /// أخطاء الفاصلة العائمة (0.1 + 0.2 = 0.30000000000000004).
   static const double moneyEpsilon = 0.0001;
 
+  /// (P3) تسامح مقارنة الكميات والمخزون المتبقي والمجزأ مستقل عن إبسيلون الأموال.
+  static const double qtyEpsilon = 0.00001;
+
+  /// هل الكميتان متساويتان بتسامح الكميات؟
+  static bool sameQty(double a, double b) => (a - b).abs() <= qtyEpsilon;
+
+  /// هل الكمية صفرية بتسامح الكميات؟
+  static bool isZeroQty(double v) => v.abs() <= qtyEpsilon;
+
+  /// هل الكمية `a` أكبر من `b` بتسامح الكميات؟
+  static bool qtyGt(double a, double b) => (a - b) > qtyEpsilon;
+
+  /// هل الكمية `a` أصغر من `b` بتسامح الكميات؟
+  static bool qtyLt(double a, double b) => (b - a) > qtyEpsilon;
+
   /// تقريب مبلغ إلى منازل عملته — يُطبَّق على كل ناتج حسابي **مجموع**
   /// (أرصدة تراكمية، مجاميع تقارير) قبل عرضه أو مقارنته، فيمنع أرصدة
   /// مثل 9.99999999999998 بدل 10.00.

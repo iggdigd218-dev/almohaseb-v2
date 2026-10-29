@@ -359,6 +359,7 @@ class InvoiceLine {
   final String unit;
   final double quantity;
   final double unitPrice;
+  final double costPrice;
   final double total;
 
   const InvoiceLine({
@@ -369,6 +370,7 @@ class InvoiceLine {
     this.unit = 'حبة',
     required this.quantity,
     required this.unitPrice,
+    this.costPrice = 0.0,
     double? total,
   }) : total = total ?? quantity * unitPrice;
 
@@ -380,12 +382,14 @@ class InvoiceLine {
         'unit': unit,
         'quantity': quantity,
         'unit_price': unitPrice,
+        'cost_price': costPrice,
         'total': total,
       };
 
   factory InvoiceLine.fromMap(Map<String, Object?> m) {
     final quantity = ((m['quantity'] ?? 0) as num).toDouble();
     final unitPrice = ((m['unit_price'] ?? 0) as num).toDouble();
+    final costPrice = ((m['cost_price'] ?? 0.0) as num).toDouble();
     return InvoiceLine(
       id: m['id'] as int?,
       txId: m['tx_id'] as int?,
@@ -394,6 +398,7 @@ class InvoiceLine {
       unit: (m['unit'] ?? 'حبة') as String,
       quantity: quantity,
       unitPrice: unitPrice,
+      costPrice: costPrice,
       total: ((m['total'] ?? quantity * unitPrice) as num).toDouble(),
     );
   }
@@ -1229,6 +1234,7 @@ class StockMove {
   final StockKind kind;
   final double quantity;
   final double unitPrice;
+  final double costPrice;
   final int? accountId;
   final String notes;
   final DateTime date;
@@ -1240,6 +1246,7 @@ class StockMove {
     required this.kind,
     required this.quantity,
     this.unitPrice = 0,
+    this.costPrice = 0.0,
     this.accountId,
     this.notes = '',
     required this.date,
@@ -1248,9 +1255,11 @@ class StockMove {
 
   double get total => quantity * unitPrice;
 
-  /// الربح المحقق: يُحسب للبيع فقط، مقابل سعر الشراء الممرّر.
-  double profitAgainst(double buyPrice) =>
-      kind == StockKind.sale ? (unitPrice - buyPrice) * quantity : 0;
+  /// الربح المحقق: يُحسب للبيع فقط، مقابل سعر الشراء المجمّد أو الممرّر.
+  double profitAgainst(double buyPrice) {
+    final effectiveCost = costPrice > 0 ? costPrice : buyPrice;
+    return kind == StockKind.sale ? (unitPrice - effectiveCost) * quantity : 0;
+  }
 
   Map<String, Object?> toMap() => {
         if (id != null) 'id': id,
@@ -1258,6 +1267,7 @@ class StockMove {
         'kind': kind.code,
         'quantity': quantity,
         'unit_price': unitPrice,
+        'cost_price': costPrice,
         'account_id': accountId,
         'notes': notes,
         'date': date.toIso8601String(),
@@ -1270,6 +1280,7 @@ class StockMove {
         kind: StockKind.fromCode((m['kind'] ?? 'purchase') as String),
         quantity: ((m['quantity'] ?? 0) as num).toDouble(),
         unitPrice: ((m['unit_price'] ?? 0) as num).toDouble(),
+        costPrice: ((m['cost_price'] ?? 0.0) as num).toDouble(),
         accountId: m['account_id'] as int?,
         notes: (m['notes'] ?? '') as String,
         date: DateTime.parse(m['date'] as String),

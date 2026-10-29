@@ -29,24 +29,28 @@ class ConflictResolver {
       return incoming.payload.isNotEmpty;
     }
 
-    // 3. الكيان موجود محلياً: الحسم الموحّد والحتمي (M4):
-    // الترتيب القياسي الموحّد لكسر التعادل في جميع الحالات:
-    // (أ) مقارنة رقم الإصدار (Version) إن اختلف وكان أحدهما متقدماً.
-    // (ب) مقارنة الطابع الزمني المرجعي (server_time إن توفر في الطرفين، وإلا الطابع المحلي).
-    // (ج) كسر التعادل الحتمي عبر مقارنة معرف الجهاز lexicographically (`deviceId.compareTo`).
+    // 3. الكيان موجود محلياً: الحسم الموحّد والحتمي (P2-2 / M4):
+    // (أ) ترجيح توقيت السيرفر الحتمي (Server Time Priority):
+    // عند فض النزاعات، يكون server_time هو المرجّح الأول الحصري في حال توفره لدى أيٍّ من الطرفين.
     final inServerMs = incoming.serverTimeMs;
     final locServerMs = localLatest?.serverTimeMs ?? 0;
 
-    if (inServerMs > 0 && locServerMs > 0) {
-      if (incoming.version != localVersion) {
+    if (inServerMs > 0 || locServerMs > 0) {
+      if (inServerMs > 0 && locServerMs > 0) {
         if (inServerMs != locServerMs) {
           return inServerMs > locServerMs;
         }
-        return incoming.version > localVersion;
+        if (incoming.version != localVersion) {
+          return incoming.version > localVersion;
+        }
+      } else if (inServerMs > 0 && locServerMs == 0) {
+        // الطرف الوارد يحمل توقيت سيرفر مؤكد بينما المحلي لم يؤكَّد بعد من السيرفر
+        return true;
+      } else {
+        // الطرف المحلي يحمل توقيت سيرفر مؤكد بينما الوارد لا يحمل توقيت سيرفر
+        return false;
       }
-      if (inServerMs != locServerMs) {
-        return inServerMs > locServerMs;
-      }
+
       final localDevId = localLatest?.deviceId ?? '';
       if (localDevId.isNotEmpty && localDevId == incoming.deviceId) {
         return true;
@@ -54,23 +58,15 @@ class ConflictResolver {
       return incoming.deviceId.compareTo(localDevId) <= 0;
     }
 
-    // مسار عدم اكتمال server_time في أحد الطرفين: نفس الترتيب القياسي الموحّد
+    // (ب) غياب توقيت السيرفر عن الطرفين تماماً: المقارنة بالنسخة ثم التوقيت المحلي (deviceTime كخيار أخير)
     if (incoming.version != localVersion) {
       return incoming.version > localVersion;
     }
 
-    final tIn = inServerMs > 0
-        ? inServerMs
-        : (DateTime.tryParse(incoming.timestamp)?.millisecondsSinceEpoch ??
-            (DateTime.tryParse(incoming.deviceTime)?.millisecondsSinceEpoch ??
-                0));
-    final tLocal = locServerMs > 0
-        ? locServerMs
-        : (DateTime.tryParse(localLatest?.timestamp ?? '')
-                ?.millisecondsSinceEpoch ??
-            (DateTime.tryParse(localLatest?.deviceTime ?? '')
-                    ?.millisecondsSinceEpoch ??
-                0));
+    final tIn = DateTime.tryParse(incoming.timestamp)?.millisecondsSinceEpoch ??
+        (DateTime.tryParse(incoming.deviceTime)?.millisecondsSinceEpoch ?? 0);
+    final tLocal = DateTime.tryParse(localLatest?.timestamp ?? '')?.millisecondsSinceEpoch ??
+        (DateTime.tryParse(localLatest?.deviceTime ?? '')?.millisecondsSinceEpoch ?? 0);
 
     if (tIn != tLocal) {
       return tIn > tLocal;
