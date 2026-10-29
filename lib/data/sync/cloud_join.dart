@@ -675,6 +675,64 @@ class CloudJoin {
     }
   }
 
+  /// (PR-6) ترقيع موثّق لعقدة سحابية — يحدّث المفاتيح المعطاة فقط دون مسح
+  /// بقية حقول العقدة (REST PATCH)، مع تجديد التوكن عند 401/403. فشل
+  /// الترقيع لا يرمي: الاستدعاءات كلها best-effort ومغلَّفة بـ try/catch.
+  static Future<void> _patchJson(String url, Map<String, dynamic> body,
+      {Duration timeout = const Duration(seconds: 20)}) async {
+    try {
+      var token = await _ensureToken();
+      var res = await http
+          .patch(_authedUrl(url, token),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode(body))
+          .timeout(timeout);
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        final fresh = await FirebaseAuthRest.forceRefreshToken();
+        if (fresh != null && fresh.isNotEmpty) {
+          res = await http
+              .patch(_authedUrl(url, fresh),
+                  headers: {'Content-Type': 'application/json'},
+                  body: jsonEncode(body))
+              .timeout(timeout);
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// (PR-6) الدفع الذري لاسم جهاز إلى فهرس الأجهزة السحابي (`/devices/{id}`)
+  /// — البديل عن حمل الاسم في النبض الدوري: يُستدعى عند إعادة التسمية فقط
+  /// (ذاتية من العضو أو من المدير). `includeSubscription` يحدّث اسم عقدة
+  /// اشتراك المدير (`subscription.json`) كذلك.
+  static Future<void> pushDeviceNameIndex({
+    required String backendUrl,
+    required String workspaceId,
+    required String deviceId,
+    required String name,
+    bool includeSubscription = false,
+  }) async {
+    final n = name.trim();
+    if (n.isEmpty) return;
+    final root = _root(backendUrl, workspaceId);
+    final enc = Uri.encodeComponent(deviceId);
+    try {
+      await _patchJson('$root/devices/$enc.json', {
+        'name': n,
+        'device_name': n,
+        'deviceName': n,
+      });
+    } catch (_) {}
+    if (includeSubscription) {
+      try {
+        await _patchJson('$root/subscription.json', {
+          'name': n,
+          'device_name': n,
+          'deviceName': n,
+        });
+      } catch (_) {}
+    }
+  }
+
   static Future<void> _delete(String url) async {
     try {
       var token = await _ensureToken();

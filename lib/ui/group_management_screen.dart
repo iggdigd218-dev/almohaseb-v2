@@ -627,6 +627,11 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
                             await repo.renameDevice(
                                 d['id'] as String, name.trim());
                             await engine.broadcastRosterChange();
+                            // (PR-6) دفع الاسم إلى عقدة جهاز العضو في فهرس
+                            // الأجهزة السحابي — ليستقبله المستمع اللحظي
+                            // على جهازه خلال دورة النبض (30 ثانية).
+                            await engine.pushMemberDeviceName(
+                                d['id'] as String, name.trim());
                             Sfx.success();
                             safeBump();
                             if (context.mounted) {

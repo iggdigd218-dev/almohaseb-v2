@@ -35,6 +35,9 @@ class CloudControlService {
   final ValueNotifier<List<CloudAlert>> cloudAlertsNotifier =
       ValueNotifier<List<CloudAlert>>([]);
   final ValueNotifier<int> unreadAlertCountNotifier = ValueNotifier<int>(0);
+  // (PR-6) اسم جهازنا الحي: يُحدَّث عند استقبال إعادة تسمية من المدير عبر
+  // المستمع اللحظي — تستمع له الواجهة لتحدّث الاسم دون إعادة تشغيل.
+  final ValueNotifier<String> deviceNameNotifier = ValueNotifier<String>('');
 
   static const String _kReadAlertIdsPref = 'read_cloud_alert_ids';
   Set<String>? _cachedReadAlertIds;
@@ -73,6 +76,67 @@ class CloudControlService {
   void stop() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
+  }
+
+  /// (PR-6) مزامنة اسم جهازنا من السحابة (المستمع اللحظي للعضو): يستمع لعقدة
+  /// السجل (roster — تكتبها إعادة تسمية المدير عبر بثّ السجل) وعقدة الجهاز
+  /// (devices — التعديل المباشر من تطبيق الإدارة)؛ الاسم الأحدث يُطبَّق محلياً
+  /// عبر renameSelfDevice (جدول devices + الإعدادات + users) ويُبَثّ للواجهة.
+  /// حمايتا سباق: اسم بعيد أقدم من صفنا المحلي (updated_at) يُتجاهل، وسجلٌّ
+  /// متعارض مع إعادة تسمية ذاتية لحظة الدفع يُقفل الفرع الثاني — آخر كاتب يفوز.
+  Future<void> _syncSelfNameFromCloud(Repo repo, String base, String encWs,
+      String encDev, String devId, String localName) async {
+    try {
+      final db = await repo.database;
+      var localUpd = '';
+      var localRowName = '';
+      try {
+        final rows = await db.query('devices',
+            columns: ['name', 'updated_at'],
+            where: 'id = ?',
+            whereArgs: [devId],
+            limit: 1);
+        if (rows.isNotEmpty) {
+          localUpd = '${rows.first['updated_at'] ?? ''}';
+          localRowName = '${rows.first['name'] ?? ''}'.trim();
+        }
+      } catch (_) {}
+      // 1) السجل (roster): القناة الرسمية — مقارنة updated_at (آخر كاتب يفوز)،
+      //    مع شفاء الحالة القديمة (الجدول محدَّث عبر السحابة والإعدادات متخلفة).
+      final rosterRec =
+          await _getJson('$base/workspaces/$encWs/roster/$encDev.json');
+      if (rosterRec != null) {
+        final rn =
+            '${rosterRec['name'] ?? rosterRec['deviceName'] ?? ''}'.trim();
+        if (rn.isNotEmpty && rn != localName) {
+          final remoteUpd = '${rosterRec['updated_at'] ?? ''}';
+          final tableAlreadyAgrees = rn == localRowName;
+          if (remoteUpd.compareTo(localUpd) > 0 || tableAlreadyAgrees) {
+            await repo.renameSelfDevice(rn);
+            deviceNameNotifier.value = rn;
+          }
+          return; // سجل متعارض مع تسمية ذاتية أحدث — لا يُلمس شيء آخر.
+        }
+      }
+      // 2) عقدة الجهاز (devices): تعديل مباشر لحقل name/device_name — يُطبق
+      //    فقط إذا كان السجل متقارباً مع الاسم المحلي (لا سباق تسمية ذاتية)
+      //    والاسم البعيد جديد على الجدول المحلي معاً.
+      if (rosterRec == null ||
+          '${rosterRec['name'] ?? rosterRec['deviceName'] ?? ''}'.trim() ==
+                  localName ||
+          '${rosterRec['name'] ?? rosterRec['deviceName'] ?? ''}'.trim()
+              .isEmpty) {
+        final devRec =
+            await _getJson('$base/workspaces/$encWs/devices/$encDev.json');
+        if (devRec != null) {
+          final dn = '${devRec['name'] ?? devRec['device_name'] ?? ''}'.trim();
+          if (dn.isNotEmpty && dn != localName && dn != localRowName) {
+            await repo.renameSelfDevice(dn);
+            deviceNameNotifier.value = dn;
+          }
+        }
+      }
+    } catch (_) {}
   }
 
   /// فحص شامل لمركز التحكم السحابي وتحديث حالة الأجهزة والتنبيهات.
@@ -280,6 +344,17 @@ class CloudControlService {
 
       final fcmToken = 'fcm_${devId.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '')}';
 
+      // (PR-6) المستمع اللحظي لاسم جهازنا: مقارنة اسم السجل السحابي (roster
+      // — القناة الرسمية لإعادة تسمية المدير) وعقدة الجهاز (devices) بالاسم
+      // المحلي؛ أي اختلاف أحدث يُطبَّق فوراً (devices + settings + users)
+      // ويُبَثّ للمزوّدات الحية — بلا إعادة تشغيل.
+      if (!isRevokedOrEvicted) {
+        try {
+          await _syncSelfNameFromCloud(
+              repo, base, encWs, encDev, devId, devName);
+        } catch (_) {}
+      }
+
       if (!isRevokedOrEvicted) {
         final devPayload = <String, dynamic>{
           'deviceId': devId,
@@ -289,27 +364,29 @@ class CloudControlService {
           'last_seen': {'.sv': 'timestamp'},
           'lastSeenAt': {'.sv': 'timestamp'},
           'last_seen_at': {'.sv': 'timestamp'},
+          'status': 'online',
           'installed_version': '$kAppVersion+$kAppBuild',
           'fcm_token': fcmToken,
           if (fpHash.isNotEmpty) 'fingerprint': fpHash,
           if (fpHash.isNotEmpty) 'hw_fingerprint': fpHash,
         };
+        // (PR-6) هوية أول تسجيل فقط: الاسم يُدفع مرة واحدة عند أول ربط —
+        // النبض الدوري لا يحمل أي اسم (جهاز/عميل) حتى لا يكتب فوق تعديل
+        // المدير بالاسم القديم المخزن في الذاكرة (ارتداد الاسم). التحديثات
+        // اللاحقة تتم حصراً عبر الدفع الذري عند إعادة التسمية.
         if (!alreadyRegisteredInWorkspace) {
           devPayload['deviceName'] = devName;
           devPayload['device_name'] = devName;
           devPayload['linkedAt'] = {'.sv': 'timestamp'};
           devPayload['linked_at'] = {'.sv': 'timestamp'};
-        } else if (devName.isNotEmpty && devName != 'جهاز') {
-          devPayload['deviceName'] = devName;
-          devPayload['device_name'] = devName;
+          if (clientName.isNotEmpty) {
+            devPayload['clientName'] = clientName;
+            devPayload['client_name'] = clientName;
+          }
         }
         if (storeName.isNotEmpty) {
           devPayload['storeName'] = storeName;
           devPayload['store_name'] = storeName;
-        }
-        if (clientName.isNotEmpty) {
-          devPayload['clientName'] = clientName;
-          devPayload['client_name'] = clientName;
         }
         if (phone.isNotEmpty) {
           devPayload['phone'] = phone;
@@ -331,8 +408,6 @@ class CloudControlService {
           'installed_version': '$kAppVersion+$kAppBuild',
           'device_id': devId,
           'deviceId': devId,
-          'device_name': devName,
-          'deviceName': devName,
           if (memberEmail.isNotEmpty) 'email': memberEmail,
         };
         if (storeName.isNotEmpty) {

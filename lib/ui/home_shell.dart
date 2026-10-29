@@ -255,6 +255,24 @@ class _HomeShellState extends ConsumerState<HomeShell>
     // 🌐 مركز التحكم السحابي والتنبيهات المباشرة والإدارة عن بعد
     CloudControlService.instance
         .startPeriodicHeartbeat(ref.read(repoProvider));
+    // (PR-6) استماع لحظي: إعادة تسمية جهازنا من المدير (أو تطبيق الإدارة)
+    // تُطبَّق فوراً على الواجهة الحية — مزوّدات الهوية/الإعدادات — دون
+    // إعادة تشغيل التطبيق.
+    CloudControlService.instance.deviceNameNotifier
+        .addListener(_onRemoteDeviceRename);
+  }
+
+  /// (PR-6) وصل إعادة تسمية المدير بالواجهة الحية: المستمع اللحظي في
+  /// cloud_control_service طبّق الاسم محلياً (devices + settings + users)
+  /// ورفع هذا الإشعار — نحدّث المزوّدات الحية هنا.
+  void _onRemoteDeviceRename() {
+    if (!mounted) return;
+    try {
+      ref.invalidate(settingsProvider);
+      ref.invalidate(currentUserProvider);
+      ref.invalidate(deviceRoleProvider);
+      bump(ref);
+    } catch (_) {}
   }
 
   /// (متطلب 5) سلوك الإقلاع وتوجيه البداية حسب المنصة والدور
@@ -1037,6 +1055,8 @@ class _HomeShellState extends ConsumerState<HomeShell>
     ChatHooks.onChatMessage = null;
     ChatHooks.onMemberNotice = null;
     ShellNav.request.removeListener(_onShellNavRequest);
+    CloudControlService.instance.deviceNameNotifier
+        .removeListener(_onRemoteDeviceRename);
     CloudControlService.instance.stop();
     super.dispose();
   }
