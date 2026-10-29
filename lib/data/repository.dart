@@ -22,6 +22,9 @@ import 'sync/device_id.dart';
 import 'sync/device_registry.dart';
 import 'sync/google_auth_service.dart';
 import 'sync/operation.dart';
+// (PR-2) استيراد دائري مقصود ومسموح في Dart: امتداد ApplyRemoteOp يوسّع
+// Repo من الطرف الآخر، ونحتاج هنا مصالحة المخزون الثابتة فيه.
+import 'sync/apply_remote.dart';
 import 'sync/recorder.dart';
 import 'sync/snapshot_apply.dart';
 import 'sync/sync_diagnostics.dart';
@@ -2072,6 +2075,11 @@ class Repo {
 
     late final int returnTxId;
 
+    // (PR-2) نحدد معرف سند المرتجع مسبقاً لتوسيم حركات الإرجاع به —
+    // حتى يستطيع حذف المرتجع عكس حركاته حصراً (دون غيره من مرتجعات
+    // نفس الفاتورة)، ويبقى الاسترجاع من المهملات متعادلاً معه.
+    final plannedRetId = newGlobalId();
+
     await db.transaction((txn) async {
       final rec = SyncRecorder(
         db: txn,
@@ -2126,7 +2134,7 @@ class Repo {
               unitPrice: line.unitPrice,
               date: nowDt,
               createdAt: nowDt,
-              notes: 'مرتجع مبيعات الفاتورة #$origRef',
+              notes: 'مرتجع مبيعات الفاتورة #$origRef [#ret:$plannedRetId]',
             ),
           );
         }
@@ -2171,7 +2179,7 @@ class Repo {
       final retMap = retTx.toMap();
       retMap['workspace_id'] = requireWorkspaceId;
       retMap['original_tx_id'] = '${originalTx.id}';
-      retMap['id'] = newGlobalId();
+      retMap['id'] = plannedRetId; // (PR-2) نفس المعرف الموسوم في حركات الإرجاع
       retMap['updated_at'] = nowIso;
       returnTxId = await txn.insert('transactions', retMap);
 
@@ -2300,6 +2308,30 @@ class Repo {
                     'عكس حركة مخزون لحذف فاتورة #${refLabel.isEmpty ? id : refLabel}',
               ),
             );
+          }
+        }
+      }
+
+      // (PR-2) حذف مرتجع مبيعات: عكس حركات الإرجاع التي أنشأها هذا السند
+      // تحديداً (موسومة [#ret:<id>]) فيُحسم أثرها من الرصيد ويُرفع التصحيح
+      // للسحابة. المرتجعات القديمة غير الموسومة لا تُمس إطلاقاً (توافق خلفي:
+      // لم تكن تُغيّر الرصيد أصلاً فلا يصح خصمها عند حذفها).
+      if (!isSaleType && itemRows.isNotEmpty) {
+        final origIdField = '${rows.first['original_tx_id'] ?? ''}'.trim();
+        if (origIdField.isNotEmpty) {
+          for (final row in itemRows) {
+            final line = InvoiceLine.fromMap(row);
+            if (line.itemId == null || line.quantity <= 0) continue;
+            final tagged = await txn.query(
+              'stock_moves',
+              where:
+                  "item_id = ? AND kind = 'return' AND (deleted_at IS NULL OR deleted_at = '') AND notes LIKE ?",
+              whereArgs: [line.itemId!, '%[#ret:$id]%'],
+              limit: 1,
+            );
+            if (tagged.isNotEmpty) {
+              await _deleteStockMoveRowInTxn(txn, rec, tagged.first);
+            }
           }
         }
       }
@@ -5627,6 +5659,29 @@ class Repo {
                 );
               }
             }
+          } else if (restoredLines.isNotEmpty &&
+              '${tx['original_tx_id'] ?? ''}'.trim().isNotEmpty) {
+            // (PR-2) استرجاع مرتجع محذوف: إعادة إرجاع كمياته للمخزون بنفس
+            // الوسم [#ret:<id>] فيبقى قابلاً للحذف/الاسترجاع مرات أخرى،
+            // ويتعادل مع حركة العكس التي أحدثها الحذف سابقاً.
+            final nowDt = DateTime.now();
+            for (final line in restoredLines) {
+              if (line.itemId != null && line.quantity > 0) {
+                await _applyStockMoveInTxn(
+                  txn,
+                  rec,
+                  StockMove(
+                    itemId: line.itemId!,
+                    quantity: line.quantity,
+                    kind: StockKind.ret,
+                    unitPrice: line.unitPrice,
+                    date: nowDt,
+                    createdAt: nowDt,
+                    notes: 'مرتجع مبيعات (استرجاع من المهملات) [#ret:$txId]',
+                  ),
+                );
+              }
+            }
           }
 
           await rec.record(
@@ -7394,6 +7449,65 @@ class Repo {
     return id;
   }
 
+  /// (PR-2) حذف صف حركة مخزون داخل معاملة نشطة مع عكس أثره على رصيد الصنف
+  /// ورفع التصحيح للسحابة (رفيق __from_stock_move_delete) — نفس منطق
+  /// [deleteStockMove] لكن بدون فتح معاملة أو فحص صلاحية، لإعادة الاستخدام
+  /// من مسارات حذف/استرجاع المرتجعات داخل معاملاتها الأصل.
+  Future<void> _deleteStockMoveRowInTxn(
+    Transaction txn,
+    SyncRecorder rec,
+    Map<String, Object?> moveRow,
+  ) async {
+    final id = moveRow['id'];
+    final m = StockMove.fromMap(moveRow);
+    final itRow = await txn.query(
+      'items',
+      where: 'id = ?',
+      whereArgs: [m.itemId],
+      limit: 1,
+    );
+    await txn.delete('stock_moves', where: 'id = ?', whereArgs: [id]);
+    await rec.record(
+      entityType: EntityKind.stockMove,
+      entityId: '$id',
+      opType: OpKind.delete_,
+      payload: {...moveRow, 'id': id},
+    );
+    if (itRow.isNotEmpty && m.kind != StockKind.adjust) {
+      final it = Item.fromMap(itRow.first);
+      final now = DateTime.now().toIso8601String();
+      final newQty = it.quantity - m.kind.qtySign * m.quantity;
+      await txn.update(
+        'items',
+        {'quantity': newQty, 'updated_at': now},
+        where: 'id = ?',
+        whereArgs: [m.itemId],
+      );
+      final updatedItemRows = await txn.query(
+        'items',
+        where: 'id = ?',
+        whereArgs: [m.itemId],
+        limit: 1,
+      );
+      final itemPayload = updatedItemRows.isNotEmpty
+          ? Map<String, Object?>.from(updatedItemRows.first)
+          : <String, Object?>{
+              ...itRow.first,
+              'id': m.itemId,
+            };
+      itemPayload['id'] = m.itemId;
+      itemPayload['quantity'] = newQty;
+      itemPayload['updated_at'] = now;
+      itemPayload['__from_stock_move_delete'] = id;
+      await rec.record(
+        entityType: EntityKind.item,
+        entityId: '${m.itemId}',
+        opType: OpKind.update,
+        payload: itemPayload,
+      );
+    }
+  }
+
   Future<void> deleteStockMove(int id) async {
     await _ensureCan('delete_tx');
     final db = await _db;
@@ -7404,58 +7518,55 @@ class Repo {
         whereArgs: [id],
       );
       if (r.isEmpty) return;
-      final m = StockMove.fromMap(r.first);
-      final itRow = await txn.query(
-        'items',
-        where: 'id = ?',
-        whereArgs: [m.itemId],
-        limit: 1,
-      );
-      await txn.delete('stock_moves', where: 'id = ?', whereArgs: [id]);
       final rec = await newRecorder(txn);
-      await rec.record(
-        entityType: EntityKind.stockMove,
-        entityId: '$id',
-        opType: OpKind.delete_,
-        payload: {
-          ...r.first,
-          'id': id,
-        },
+      await _deleteStockMoveRowInTxn(txn, rec, r.first);
+    });
+  }
+
+  /// (PR-2 — صيانة يدوية) إعادة مطابقة أرصدة المخزون من السجل التاريخي:
+  /// الكمية الافتتاحية عند إنشاء الصنف + حركات المخزون (شراء/تسوية) ± صافي
+  /// المبيعات والمرتجعات من سطور الفواتير غير المحذوفة وغير الملغاة.
+  /// يصحّح الأرصدة المحلية ويعيد عدد الأصناف المصحّحة، وعند [pushToCloud]
+  /// يرفع كل رصيد مصحّح إلى السحابة (عملية update للصنف بـ version+1)
+  /// فتتلقّاه بقية الأجهزة — بما فيها المثبّتة مسبقاً — لتصحيح التباعد الحالي.
+  Future<int> reconcileInventory({bool pushToCloud = true}) async {
+    await _ensureCan('manage_backup');
+    final db = await _db;
+    final changes = <Map<String, Object?>>[];
+    var fixed = 0;
+    await db.transaction((txn) async {
+      fixed = await ApplyRemoteOp.reconcileInventoryQuantities(
+        txn,
+        onChanged: (itemId, prevQty, newQty) =>
+            changes.add({'id': itemId, 'prev': prevQty, 'new': newQty}),
       );
-      if (itRow.isNotEmpty && m.kind != StockKind.adjust) {
-        final it = Item.fromMap(itRow.first);
-        final now = DateTime.now().toIso8601String();
-        final newQty = it.quantity - m.kind.qtySign * m.quantity;
-        await txn.update(
-          'items',
-          {'quantity': newQty, 'updated_at': now},
-          where: 'id = ?',
-          whereArgs: [m.itemId],
-        );
-        final updatedItemRows = await txn.query(
-          'items',
-          where: 'id = ?',
-          whereArgs: [m.itemId],
-          limit: 1,
-        );
-        final itemPayload = updatedItemRows.isNotEmpty
-            ? Map<String, Object?>.from(updatedItemRows.first)
-            : <String, Object?>{
-                ...itRow.first,
-                'id': m.itemId,
-              };
-        itemPayload['id'] = m.itemId;
-        itemPayload['quantity'] = newQty;
-        itemPayload['updated_at'] = now;
-        itemPayload['__from_stock_move_delete'] = id;
-        await rec.record(
-          entityType: EntityKind.item,
-          entityId: '${m.itemId}',
-          opType: OpKind.update,
-          payload: itemPayload,
-        );
+      if (pushToCloud && changes.isNotEmpty) {
+        final rec = await newRecorder(txn);
+        for (final c in changes) {
+          final row = await txn.query(
+            'items',
+            where: 'id = ?',
+            whereArgs: [c['id']],
+            limit: 1,
+          );
+          if (row.isEmpty) continue;
+          final payload = Map<String, Object?>.from(row.first);
+          payload['id'] = c['id'];
+          payload['quantity'] = c['new'];
+          // (PR-2) الكمية هي جوهر التصحيح: تُطبَّق كما هي على كل جهاز،
+          // والوسم التشخيصي يميز عمليات الصيانة في سجل العمليات.
+          payload['__qty_changed'] = 1;
+          payload['__reconciled'] = true;
+          await rec.record(
+            entityType: EntityKind.item,
+            entityId: '${c['id']}',
+            opType: OpKind.update,
+            payload: payload,
+          );
+        }
       }
     });
+    return fixed;
   }
 
   /// ملخّص المخزون: التكلفة والقيمة والربح المحقق والمتوقع.

@@ -1265,6 +1265,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                               ),
                             ],
                           ],
+                          // (PR-2) صيانة المخزون — للمالك/المدير أو الوضع
+                          // المستقل: إعادة مطابقة الأرصدة من السجل التاريخي
+                          // ودفع التصحيحات للسحابة فوراً.
+                          if (canEditOrg) ...[
+                            const SizedBox(height: 18),
+                            const _Collapsible(
+                              title: 'صيانة المخزون',
+                              icon: Icons.fact_check_outlined,
+                              color: Color(0xFF0284C7),
+                              children: [_InventoryMaintenanceCard()],
+                            ),
+                          ],
                           const UpdateSection(),
                           const SizedBox(height: 18),
                           Card(
@@ -2469,6 +2481,74 @@ class _LeavePendingDialogState extends State<_LeavePendingDialog> {
           child: const Text('إلغاء الطلب'),
         ),
       ],
+    );
+  }
+}
+
+/// (PR-2) بطاقة «إعادة مطابقة المخزون» — صيانة يدوية للمالك/المدير:
+/// تعيد احتساب رصيد كل صنف من الكمية الافتتاحية وسجل حركات المخزون
+/// وصافي مبيعات ومرتجعات الفواتير، ثم ترفع الأرصدة المصحّحة إلى السحابة
+/// فوراً — فتتطابق عليها بقية الأجهزة (بما فيها المثبّتة مسبقاً).
+class _InventoryMaintenanceCard extends ConsumerWidget {
+  const _InventoryMaintenanceCard();
+
+  Future<void> _run(BuildContext context, WidgetRef ref) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('إعادة مطابقة المخزون'),
+        content: const Text(
+          'سيُعاد احتساب رصيد كل صنف من الكمية الافتتاحية عند إنشائه وسجل '
+          'حركات المخزون وصافي مبيعات ومرتجعات الفواتير غير المحذوفة.\n\n'
+          'الأرصدة المصحّحة تُرفع إلى السحابة فوراً لتتطابق عليها كل الأجهزة. '
+          'الإجراء آمن ومتوافق: الأصناف السليمة لا تتغير.',
+          textAlign: TextAlign.start,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('مطابقة الآن'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final repo = ref.read(repoProvider);
+    try {
+      final fixed = await repo.reconcileInventory(pushToCloud: true);
+      if (!context.mounted) return;
+      showSnack(
+        context,
+        fixed > 0
+            ? 'تمت المطابقة: صُحّح $fixed صنفاً ورُفعت الأرصدة إلى السحابة'
+            : 'المخزون مطابق بالفعل — لا حاجة لأي تصحيح',
+      );
+    } catch (e) {
+      if (!context.mounted) return;
+      showSnack(context, 'تعذّرت المطابقة: $e', error: true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Card(
+      child: ListTile(
+        leading: const Icon(Icons.fact_check_outlined,
+            color: Color(0xFF0284C7)),
+        title: const Text('إعادة مطابقة المخزون'),
+        subtitle: const Text(
+          'تصحيح الأرصدة من السجل التاريخي (الافتتاحية + الحركات ± صافي '
+          'الفواتير) ورفعها للسحابة — يعالج تصفير المخزون بعد إعادة '
+          'التثبيت والتباعد القديم بين الأجهزة.',
+          style: TextStyle(fontSize: 11.5, height: 1.5),
+        ),
+        trailing: const Icon(Icons.chevron_left),
+        onTap: () => _run(context, ref),
+      ),
     );
   }
 }

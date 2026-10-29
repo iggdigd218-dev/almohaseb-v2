@@ -1739,11 +1739,26 @@ extension ApplyRemoteOp on Repo {
         EntityKind.unknown => '__unknown__',
       };
 
-  /// مصالحة ومطابقة كميات المخزون بعد الجلب الكامل أو الاستعادة بعد إعادة التثبيت:
-  /// تتحقق من تطابق كمية كل صنف مع صافي حركات المخزون (`stock_moves`) وسطور الفواتير
-  /// (`transaction_items`: المبيعات ناقص المرتجعات) لضمان عدم بقاء أي صنف عالقاً
-  /// على كميته الابتدائية بعد إعادة التثبيت.
-  static Future<int> reconcileInventoryQuantities(DatabaseExecutor db) async {
+  /// (PR-2) مصالحة ومطابقة كميات المخزون بعد الجلب الكامل أو الاستعادة بعد
+  /// إعادة التثبيت: يعيد احتساب رصيد كل صنف من سجله التاريخي الكامل —
+  /// الكمية الافتتاحية عند الإنشاء، وحركات المخزون (شراء/تسوية/إرجاع)،
+  /// وصافي المبيعات ناقص المرتجعات من سطور الفواتير غير المحذوفة وغير
+  /// الملغاة — لضمان ألا يبقى صنف عالقاً على كميته الابتدائية القديمة
+  /// لأن مبيعاتٍ سابقة لم تحدّث حقل الكمية في السحابة.
+  ///
+  /// المنطق (مقاوم للازدواج):
+  /// - مع حركات مخزون: الرصيد = طيّ الحركات من الافتتاحية (التسوية قيمة
+  ///   مطلقة)، مطروحاً منه ما نقص من سطور فواتير لم تغطّها حركات
+  ///   (بيانات قديمة) ومضافاً إليه ما زاد من مرتجعات كذلك.
+  /// - بلا حركات إطلاقاً: صيغة المالك الحرفية — الافتتاحية − المبيعات
+  ///   + المرتجعات. وهي آمنة دوماً لأن أي تعديل كمي شرعي (بيع/شراء/
+  ///   تسوية/تعديل يدوي) يترك حركة، فغياب الحركات يعني أن الكمية لم
+  ///   تتغير يداً منذ الإنشاء.
+  /// - [onChanged] يُستدعى لكل صنف يُصحَّح (للرفع السحابي من الزر اليدوي).
+  static Future<int> reconcileInventoryQuantities(
+    DatabaseExecutor db, {
+    void Function(int itemId, double prevQty, double newQty)? onChanged,
+  }) async {
     var fixed = 0;
     try {
       final itemRows = await db.query(
@@ -1756,11 +1771,11 @@ extension ApplyRemoteOp on Repo {
 
       final now = DateTime.now().toIso8601String();
       for (final itemRow in itemRows) {
-        final itemId = itemRow['id'];
+        final itemId = itemRow['id'] as int?;
         if (itemId == null) continue;
         final currentQty = (itemRow['quantity'] as num?)?.toDouble() ?? 0.0;
 
-        // 1. فحص سجل عمليات الصنف لمعرفة الكمية الابتدائية عند الإنشاء (إن وُجدت) وآخر كمية مسجلة
+        // 1. سجل عمليات الصنف: الكمية الافتتاحية عند الإنشاء وآخر كمية مرفوعة
         double? initialCreateQty;
         double? latestOpQty;
         try {
@@ -1788,7 +1803,7 @@ extension ApplyRemoteOp on Repo {
           }
         } catch (_) {}
 
-        // 2. فحص حركات المخزون الفعلية للصنف
+        // 2. حركات المخزون الفعلية: طيّ زمني + مجموعا البيع والإرجاع للتغطية
         final moves = await db.query(
           'stock_moves',
           columns: ['kind', 'quantity'],
@@ -1797,10 +1812,29 @@ extension ApplyRemoteOp on Repo {
           whereArgs: [itemId],
           orderBy: 'date ASC, created_at ASC, id ASC',
         );
+        var hasAdjust = false;
+        var running = initialCreateQty ?? 0.0;
+        var moveSalesSum = 0.0;
+        var moveReturnsSum = 0.0;
+        for (final m in moves) {
+          final k = '${m['kind'] ?? 'sale'}'.trim();
+          final mq = (m['quantity'] as num?)?.toDouble() ?? 0.0;
+          if (k == 'adjust') {
+            running = mq;
+            hasAdjust = true;
+          } else if (k == 'purchase' || k == 'return' || k == 'returnIn') {
+            running += mq;
+            if (k == 'return' || k == 'returnIn') moveReturnsSum += mq;
+          } else {
+            running -= mq;
+            moveSalesSum += mq;
+          }
+        }
 
-        // 3. حساب صافي المبيعات ناقص المرتجعات من سطور الفواتير (transaction_items)
-        double netSoldFromTx = 0.0;
-        var hasTxLines = false;
+        // 3. صافي المبيعات والمرتجعات من سطور الفواتير (غير المحذوفة
+        //    وغير الملغاة) — مصدر الحقيقة للبيانات القديمة الخالية من الحركات
+        double txSold = 0.0;
+        double txReturned = 0.0;
         try {
           final txLines = await db.rawQuery('''
             SELECT ti.quantity AS qty, t.type AS tx_type,
@@ -1810,59 +1844,52 @@ extension ApplyRemoteOp on Repo {
             JOIN transactions t ON t.id = ti.tx_id
             WHERE ti.item_id = ?
               AND (t.deleted_at IS NULL OR t.deleted_at = '')
+              AND COALESCE(t.status, 'done') != 'cancelled'
           ''', [itemId]);
           for (final tl in txLines) {
             final q = (tl['qty'] as num?)?.toDouble() ?? 0.0;
             if (q <= 0) continue;
-            hasTxLines = true;
             final origId = '${tl['orig_id'] ?? ''}'.trim();
             final notes = '${tl['notes'] ?? ''}';
             final txType = '${tl['tx_type'] ?? ''}'.trim();
             final isReturn = origId.isNotEmpty ||
+                txType == 'sales_return' ||
                 notes.contains('[ORIG_TX:') ||
                 notes.contains('مرتجع من الفاتورة');
             if (isReturn) {
-              netSoldFromTx -= q;
+              txReturned += q;
             } else if (txType == 'revenue' ||
                 txType == 'debit' ||
                 txType == 'inflow') {
-              netSoldFromTx += q;
+              txSold += q;
             }
           }
         } catch (_) {}
 
+        // مبيعات/مرتجعات لم تغطها حركات (سجل قديم) — تُخصم/تُضاف مرة واحدة
+        final missingSold =
+            (txSold - moveSalesSum) > 0 ? (txSold - moveSalesSum) : 0.0;
+        final missingReturned =
+            (txReturned - moveReturnsSum) > 0 ? (txReturned - moveReturnsSum) : 0.0;
+
         double? reconciledQty;
         if (moves.isNotEmpty) {
-          var hasAdjust = false;
-          var running = initialCreateQty ?? 0.0;
-          for (final m in moves) {
-            final k = '${m['kind'] ?? 'sale'}'.trim();
-            final mq = (m['quantity'] as num?)?.toDouble() ?? 0.0;
-            if (k == 'adjust') {
-              running = mq;
-              hasAdjust = true;
-            } else if (k == 'purchase' || k == 'return' || k == 'returnIn') {
-              running += mq;
-            } else {
-              running -= mq;
-            }
-          }
           if (initialCreateQty != null || hasAdjust) {
-            if ((currentQty - running).abs() > 0.0001) {
-              reconciledQty = running;
+            final target = running - missingSold + missingReturned;
+            if ((currentQty - target).abs() > 0.0001) {
+              reconciledQty = target;
             }
           } else if (latestOpQty != null &&
               (currentQty - latestOpQty).abs() > 0.0001) {
             reconciledQty = latestOpQty;
           }
-        } else if (hasTxLines && netSoldFromTx.abs() > 0.0001) {
-          // لا توجد حركات stock_moves مسجلة رغم وجود فواتير مبيعات/مرتجعات لهذا الصنف
-          if (initialCreateQty != null &&
-              (currentQty - initialCreateQty).abs() <= 0.0001) {
-            reconciledQty = initialCreateQty - netSoldFromTx;
-          } else if (latestOpQty != null &&
-              (currentQty - latestOpQty).abs() > 0.0001) {
-            reconciledQty = latestOpQty;
+        } else if (initialCreateQty != null &&
+            (txSold + txReturned) > 0.0001) {
+          // لا حركات إطلاقاً رغم وجود فواتير: صيغة المالك الحرفية —
+          // الافتتاحية − المبيعات + المرتجعات (تشغيلها متكرر آمن).
+          final target = initialCreateQty - txSold + txReturned;
+          if ((currentQty - target).abs() > 0.0001) {
+            reconciledQty = target;
           }
         } else if (initialCreateQty == null &&
             latestOpQty != null &&
@@ -1878,6 +1905,7 @@ extension ApplyRemoteOp on Repo {
             where: 'id = ?',
             whereArgs: [itemId],
           );
+          onChanged?.call(itemId, currentQty, reconciledQty);
           fixed++;
         }
       }
