@@ -1,5 +1,5 @@
 {
-  "version": "3.97.43+310",
+  "version": "3.98.0+311",
   "minSupported": "3.13.0",
   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/latest",
@@ -14,12 +14,12 @@
     "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe"
   },
   "downloadsMirror": {
-    "android": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.43-310/nexora-arm64.apk",
+    "android": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.0-311/nexora-arm64.apk",
     "androidVariants": {
-      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.43-310/nexora-arm64.apk",
-      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.43-310/nexora-armv7.apk"
+      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.0-311/nexora-arm64.apk",
+      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.0-311/nexora-armv7.apk"
     },
-    "windows": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.97.43-310/NexoraSetup.exe"
+    "windows": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.0-311/NexoraSetup.exe"
   },
   "downloadsFallbackGithub": {
     "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-arm64.apk",
@@ -30,5 +30,5 @@
     "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe"
   },
   "publishedAt": "2026-10-29T07:45:00Z",
-  "notes": "• تصميم جديد لسندات الإشعار بالترويسة السماوية الجذابة وشعار المنشأة الدائري في المنتصف مع جدول أصناف ديناميكي الارتفاع لفواتير المبيعات.\n• إصلاح جذري لمزامنة كميات المخزون سحابياً ومطابقتها التلقائية عند إعادة التثبيت، وتحديث بطاقات نقطة البيع والأقسام."
+  "notes": "• ترقية المخطط v30 وتجميد كلفة الصنف في الفواتير وحركات المخزون.\n• نظام منع تصادم أرقام الفواتير والسندات المتزامنة بالأجهزة المتعددة.\n• تصحيح معادلة الأرباح المحققة وتطهير التسميات والترحيل وربط أجهزة المنشأة."
 }

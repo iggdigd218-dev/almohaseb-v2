@@ -23,7 +23,7 @@ class AppDatabase {
   static Future<Database>? _opening;
   static String _activeWorkspaceId = defaultWorkspaceIdConst;
   static bool _isTestOverride = false;
-  static const int _version = 29;
+  static const int _version = 30;
 
   /// مفتاح التخزين الدائم للمنشأة النشطة في SharedPreferences
   static const String kPrefActiveWorkspaceId = 'nexora_active_workspace_id';
@@ -900,6 +900,10 @@ class AppDatabase {
       await migrateToV29(db);
     } catch (_) {}
     try {
+      // (v30) تجميد كلفة الصنف في حركات المخزون وعناصر الفواتير.
+      await migrateToV30(db);
+    } catch (_) {}
+    try {
       // (2026-09-26) أعمدة حالة الحذف والنشاط للأصناف (is_deleted, is_active)
       await _addColumn(db, 'items', 'is_deleted', 'INTEGER NOT NULL DEFAULT 0');
       await _addColumn(db, 'items', 'is_active', 'INTEGER NOT NULL DEFAULT 1');
@@ -1132,6 +1136,12 @@ class AppDatabase {
     await _alterAddColumn(db, 'sections', 'image_path', "TEXT DEFAULT ''");
   }
 
+  /// (v30) إضافة عمود cost_price لجداول stock_moves و transaction_items
+  static Future<void> migrateToV30(Database db) async {
+    await _addColumn(db, 'stock_moves', 'cost_price', 'REAL DEFAULT 0.0');
+    await _addColumn(db, 'transaction_items', 'cost_price', 'REAL DEFAULT 0.0');
+  }
+
   /// (2026-09-24) الهوية البصرية للأقسام والفئات: أيقونة من الكتالوج،
   /// لون باستيل للكرت، وصورة اختيارية. idempotent — آمن على كل القواعد.
   static Future<void> migrateToV25(Database db) async {
@@ -1329,6 +1339,7 @@ class AppDatabase {
         kind        TEXT NOT NULL,
         quantity    REAL NOT NULL DEFAULT 0,
         unit_price  REAL NOT NULL DEFAULT 0,
+        cost_price  REAL DEFAULT 0.0,
         account_id  INTEGER,
         notes       TEXT DEFAULT '',
         date        TEXT NOT NULL,
@@ -1349,6 +1360,7 @@ class AppDatabase {
         unit        TEXT NOT NULL DEFAULT 'حبة',
         quantity    REAL NOT NULL CHECK (quantity > 0),
         unit_price  REAL NOT NULL CHECK (unit_price >= 0),
+        cost_price  REAL DEFAULT 0.0,
         total       REAL NOT NULL CHECK (total >= 0),
         FOREIGN KEY (tx_id) REFERENCES transactions (id) ON DELETE CASCADE,
         FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE SET NULL
