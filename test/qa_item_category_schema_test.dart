@@ -51,12 +51,12 @@ void main() {
     await AppDatabase.createSchema(db);
     await db.execute('DROP TABLE item_categories');
     await db.execute(_legacyItemCategories);
-    repo = Repo(databaseProvider: () async => db);
     if (heal) {
       // ما يحدث فعلياً عند كل فتح للتطبيق (onOpen).
       await AppDatabase.ensureFullSchema(db);
-      await repo.initSyncInfra();
     }
+    repo = Repo(databaseProvider: () async => db);
+    await repo.initSyncInfra();
   }
 
   Future<List<String>> columns() async {

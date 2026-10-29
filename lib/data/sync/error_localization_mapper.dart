@@ -77,10 +77,8 @@ class ErrorLocalizationMapper {
       sqlQuery: sqlQuery,
       sqlArgs: sqlArgs,
     );
-    // تدوين غير متزامن في الخلفية دون تعطيل واجهة المستخدم أو رمي استثناءات غير متوقعة
-    try {
-      localized.appendToLogFile().catchError((_) {});
-    } catch (_) {}
+    // تدوين غير متزامن في الخلفية دون تعطيل واجهة المستخدم
+    localized.appendToLogFile();
     return localized;
   }
 
