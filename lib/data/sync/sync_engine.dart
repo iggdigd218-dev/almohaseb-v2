@@ -1207,7 +1207,10 @@ class SyncEngine {
   /// إعادة السماح لجهاز محظور: يُزيل وسم الحظر/الطرد المحلي (`revoked_at` /
   /// `expelled_at`) ويعيده مقترناً (`is_paired = 1`)، كما يحذف شاهدة الإقصاء
   /// السحابية من `/evictions/{deviceId}` حتى يتمكن الجهاز من إعادة الربط
-  /// والمزامنة دون أن يُقصى مجدداً بسبب شاهدة سابقة.
+  /// إعادة السماح لجهاز محظور: يُزيل وسم الحظر/الطرد المحلي (`revoked_at` /
+  /// `expelled_at`) ويعيده مقترناً (`is_paired = 1`)، كما يحذف كافة شواهد الإقصاء
+  /// السحابية من `/evictions/{deviceId}` و `/ejected_devices/{deviceId}` حتى يتمكن الجهاز
+  /// من إعادة الربط والمزامنة دون أن يُقصى مجدداً بسبب شاهدة سابقة.
   Future<void> clearEvictionBroadcast(String targetDeviceId) async {
     try {
       final db = await _db;
@@ -1229,29 +1232,41 @@ class SyncEngine {
         final base = url.replaceAll(RegExp(r'/+$'), '');
         final encWs = Uri.encodeComponent(ws);
         final encDev = Uri.encodeComponent(targetDeviceId);
-        // (F-1d) حذف موثّق: evictions للكتابة مشروطة auth != null —
-        // الطلب العاري يفشل 401 فيبقى شاهد الطرد في السحابة إلى الأبد
-        // (يُقرأ صفرياً لكنه يمنع إعادة الربط الفوري بعد الطرد).
-        // تجديد توكن واحد عند 401/403 ثم فشل آمن — بلا إعادة محاولة.
-        final evUrl = '$base/workspaces/$encWs/evictions/$encDev.json';
+
         var evToken = FirebaseAuthRest.cachedIdToken;
         if (evToken == null || evToken.isEmpty) {
           try {
             evToken = await FirebaseAuthRest.cloudIdToken();
           } catch (_) {}
         }
-        if (evToken != null && evToken.isNotEmpty) {
-          var evRes = await http
-              .delete(_withAuthQuery(evUrl, evToken))
-              .timeout(const Duration(seconds: 10));
-          if (evRes.statusCode == 401 || evRes.statusCode == 403) {
-            final evFresh = await FirebaseAuthRest.forceRefreshToken();
-            if (evFresh != null && evFresh.isNotEmpty) {
-              await http
-                  .delete(_withAuthQuery(evUrl, evFresh))
-                  .timeout(const Duration(seconds: 10));
+
+        final paths = [
+          '$base/workspaces/$encWs/evictions/$encDev.json',
+          '$base/workspaces/$encWs/ejected_devices/$encDev.json',
+          '$base/workspaces/$encWs/revoked_devices/$encDev.json',
+          '$base/ejected_devices/$encDev.json',
+          '$base/evictions/$encDev.json',
+        ];
+
+        for (final p in paths) {
+          try {
+            if (evToken != null && evToken.isNotEmpty) {
+              var evRes = await http
+                  .delete(_withAuthQuery(p, evToken))
+                  .timeout(const Duration(seconds: 8));
+              if (evRes.statusCode == 401 || evRes.statusCode == 403) {
+                final evFresh = await FirebaseAuthRest.forceRefreshToken();
+                if (evFresh != null && evFresh.isNotEmpty) {
+                  evToken = evFresh;
+                  await http
+                      .delete(_withAuthQuery(p, evFresh))
+                      .timeout(const Duration(seconds: 8));
+                }
+              }
+            } else {
+              await http.delete(Uri.parse(p)).timeout(const Duration(seconds: 8));
             }
-          }
+          } catch (_) {}
         }
       }
     } catch (_) {}

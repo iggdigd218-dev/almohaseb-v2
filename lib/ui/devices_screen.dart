@@ -329,19 +329,17 @@ class DeviceCard extends StatelessWidget {
       add('rename', Icons.edit_outlined, Colors.blueGrey, 'إعادة التسمية',
           enabled: !inactive);
     }
-    if (!expelled) {
-      if (revoked) {
-        add('restore', Icons.verified_user_outlined, Colors.green,
-            'إعادة السماح (إلغاء الحظر)',
-            enabled: !isSelf);
-      } else {
-        add('revoke', Icons.block, Colors.orange, 'حظر الجهاز',
-            enabled: !isSelf);
-      }
+    if (expelled || revoked) {
+      add('restore', Icons.verified_user_outlined, Colors.green,
+          'إلغاء الحظر والسماح بالربط',
+          enabled: !isSelf);
+    } else {
+      add('revoke', Icons.block, Colors.orange, 'حظر الجهاز',
+          enabled: !isSelf);
     }
     // (دفعة 58 — متطلب 19) «ربط العضو عبر السحابة» يظهر للمالك أو الوكيل المخوّل
     // عندما يكون الجهاز موقوفاً/غير مرتبط — جهاز نشط مرتبط فعلاً لا يحتاج إعادة ربط.
-    if (!expelled && !isSelf && canManageMembers && onCloudLink != null && revoked) {
+    if (!isSelf && canManageMembers && onCloudLink != null && (expelled || revoked)) {
       add('cloudlink', Icons.cloud_sync_outlined, const Color(0xFF0EA5E9),
           'ربط العضو عبر السحابة');
     }
