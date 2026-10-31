@@ -614,12 +614,16 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     const fallback = Icon(Icons.person, color: Colors.white, size: 34);
+    // (PR-8) صورة شخصية حادة: كاش بكثافة البكسل الفيزيائية + جودة عالية.
+    final faceCacheWidth = crispCacheWidth(context, 72);
     final Widget face = photo.startsWith('http')
         ? Image.network(
             photo,
             width: 72,
             height: 72,
             fit: BoxFit.cover,
+            cacheWidth: faceCacheWidth,
+            filterQuality: FilterQuality.medium,
             errorBuilder: (_, __, ___) => fallback,
           )
         : (photo.isNotEmpty
@@ -628,6 +632,8 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
                 width: 72,
                 height: 72,
                 fit: BoxFit.cover,
+                cacheWidth: faceCacheWidth,
+                filterQuality: FilterQuality.medium,
                 errorBuilder: (_, __, ___) => fallback,
               )
             : fallback);

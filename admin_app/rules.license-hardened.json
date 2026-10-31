@@ -37,6 +37,20 @@
         ".read": "auth != null",
         ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || auth.uid === 'WXUwZHEtp6VsNPaFRuUAD0RPp0U2')"
       },
+      "plus": {
+        "version_manifest": {
+          ".read": true,
+          ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || auth.uid === 'WXUwZHEtp6VsNPaFRuUAD0RPp0U2')"
+        },
+        "force_update": {
+          ".read": "auth != null",
+          ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || auth.uid === 'WXUwZHEtp6VsNPaFRuUAD0RPp0U2')"
+        },
+        "version_policy": {
+          ".read": "auth != null",
+          ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || auth.uid === 'WXUwZHEtp6VsNPaFRuUAD0RPp0U2')"
+        }
+      },
       "broadcast_notifications": {
         ".read": "auth != null",
         ".write": "auth != null && (auth.token.admin === true || auth.uid === 'mTMmR6MDBMZH8nKEbvCntRemkq73' || auth.uid === 'WXUwZHEtp6VsNPaFRuUAD0RPp0U2')"

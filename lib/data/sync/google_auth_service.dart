@@ -154,6 +154,31 @@ class GoogleAuthService {
     return const GoogleAuthResult.ok(null);
   }
 
+  /// استعادة جلسة وتوكنات Google بصمت (signInSilently) وتحديث جدول google_auth والإعدادات.
+  /// يُستدعى عند فتح شاشة النسخ الاحتياطي (Google Drive Backup) لاستعادة توكنات Drive فوراً.
+  Future<GoogleUser?> signInSilently() async {
+    try {
+      final gs = _ensureSignIn();
+      if (gs == null) return await currentUserFromDb();
+      final a = gs.currentUser ??
+          await gs
+              .signInSilently(suppressErrors: true)
+              .timeout(const Duration(seconds: 6), onTimeout: () => null);
+      if (a != null) {
+        final cached = await currentUserFromDb();
+        final tokens = await _extractTokensWithRetry(a);
+        final u = _mapAccount(
+          a,
+          tokens.idToken ?? cached?.idToken,
+          accessToken: tokens.accessToken ?? cached?.accessToken,
+        );
+        await _persist(u);
+        return u;
+      }
+    } catch (_) {}
+    return await currentUserFromDb();
+  }
+
   /// استخراج `idToken` و `accessToken` من حساب Google مع إعادة المحاولة تلقائياً.
   Future<({String? idToken, String? accessToken})> _extractTokensWithRetry(
     GoogleSignInAccount a, {
@@ -343,6 +368,21 @@ class GoogleAuthService {
           'updated_at': DateTime.now().toIso8601String(),
         },
         conflictAlgorithm: ConflictAlgorithm.replace);
+    final cleanEmail = u.email.trim().toLowerCase();
+    if (cleanEmail.isNotEmpty) {
+      try {
+        await db.insert(
+          'settings',
+          {'key': 'account.email', 'value': cleanEmail},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        await db.insert(
+          'settings',
+          {'key': 'email', 'value': cleanEmail},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      } catch (_) {}
+    }
   }
 
   Future<void> _clear() async {

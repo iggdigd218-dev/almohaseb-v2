@@ -114,6 +114,7 @@ class DashboardScreen extends ConsumerWidget {
                     net: s.net,
                     owedToUs: s.owedToUs,
                     owedByUs: s.owedByUs,
+                    salesByCurrency: s.salesByCurrency,
                     hidden: hidden,
                   ),
                   const SizedBox(height: 18),
@@ -156,12 +157,14 @@ class _CurrencyCard extends StatefulWidget {
   final Map<String, double> net;
   final Map<String, double> owedToUs; // مستحق لنا (عليه)
   final Map<String, double> owedByUs; // مستحق علينا (له)
+  final Map<String, double> salesByCurrency; // إجمالي المبيعات لكل عملة
   final bool hidden;
   const _CurrencyCard({
     required this.currencies,
     required this.net,
     required this.owedToUs,
     required this.owedByUs,
+    this.salesByCurrency = const {},
     required this.hidden,
   });
 
@@ -210,7 +213,7 @@ class _CurrencyCardState extends State<_CurrencyCard> {
     return Column(
       children: [
         SizedBox(
-          height: 188,
+          height: 244,
           child: PageView.builder(
             controller: _controller,
             onPageChanged: (i) => setState(() => _page = i),
@@ -221,10 +224,11 @@ class _CurrencyCardState extends State<_CurrencyCard> {
               final netV = widget.net[c.code] ?? 0;
               final toUs = widget.owedToUs[c.code] ?? 0;
               final byUs = widget.owedByUs[c.code] ?? 0;
+              final salesV = widget.salesByCurrency[c.code] ?? 0;
               return Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 2),
                 child: Container(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
                       begin: Alignment.topRight,
@@ -279,7 +283,7 @@ class _CurrencyCardState extends State<_CurrencyCard> {
                                 ? '••••••'
                                 : Fmt.money(netV, c.decimal),
                             style: TextStyle(
-                              fontSize: 34,
+                              fontSize: 32,
                               fontWeight: FontWeight.w900,
                               color: AppColors.textOf(context),
                               letterSpacing: .5,
@@ -321,6 +325,15 @@ class _CurrencyCardState extends State<_CurrencyCard> {
                             ),
                           ),
                         ],
+                      ),
+                      const SizedBox(height: 8),
+                      _AmountPill(
+                        label: 'إجمالي المبيعات',
+                        arrow: Icons.trending_up_rounded,
+                        value: salesV,
+                        currency: c,
+                        hidden: widget.hidden,
+                        positive: true,
                       ),
                     ],
                   ),

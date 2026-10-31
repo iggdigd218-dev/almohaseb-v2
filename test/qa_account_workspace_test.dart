@@ -19,6 +19,7 @@ import 'package:nexora_app/core/database.dart';
 import 'package:nexora_app/data/repository.dart';
 import 'package:nexora_app/data/sync/account_workspace.dart';
 import 'package:nexora_app/data/sync/firebase_auth_service.dart';
+import 'package:nexora_app/data/sync/subscription_guard.dart';
 import 'package:nexora_app/data/sync/workspace_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -42,6 +43,7 @@ void main() {
     await AppDatabase.createSchema(db);
     repo = Repo(databaseProvider: () async => db);
     await repo.initSyncInfra();
+    await repo.bindWorkspaceId('WS-ACCTTEST');
   });
 
   tearDown(() async {
@@ -241,24 +243,23 @@ void main() {
     expect(store, isEmpty, reason: 'لا كتابات سحابية لجهاز العضو');
   });
 
-  test('ACCT-04 (استعادة 3.55) ensureWorkspace: معرّف عشوائي دائماً — '
-      'لا علاقة له بحساب Google', () async {
-    // جلسة محفوظة + قاعدة جديدة بلا صف workspaces.
+  test('ACCT-04 أول إقلاع خام يعيد default ولا يستدعي السحابة نهائياً، وتوليد WS- يتم عند الإنشاء فقط', () async {
+    debugDefaultBackendUrlOverride = null;
     final tmp2 = await Directory.systemTemp.createTemp('nexora_account2_');
     final db2 = await databaseFactory.openDatabase('${tmp2.path}/w.db',
         options: OpenDatabaseOptions(
             onConfigure: (d) => d.execute('PRAGMA foreign_keys = ON')));
     await AppDatabase.createSchema(db2);
-    await db2.insert('settings', {'key': 'account.uid', 'value': account.uid},
-        conflictAlgorithm: ConflictAlgorithm.replace);
-    await db2.delete('workspaces');
-    final ws = await ensureWorkspace(db2);
-    // (استعادة سلوك 3.55) هوية المساحة محلية وعشوائية — تسجيل الدخول لا
-    // يعيد تسميتها أبداً، فلا ينكسر الربط بتعذّر الشبكة أو الرمز.
-    expect(ws, startsWith('WS-'));
-    expect(ws.length, 11); // 'WS-' + 8 خانات
-    expect(ws, isNot('WS-${account.uid}'),
-        reason: 'معرف المساحة مستقل عن الحساب تماماً (سلوك 3.55)');
+    final repo2 = Repo(databaseProvider: () async => db2);
+    await repo2.initSyncInfra();
+    final ws = await ensureWorkspace(db2, repo: repo2);
+    expect(ws, 'default',
+        reason: 'أول إقلاع خام يعيد default دون توليد WS-* وهمي');
+    expect(await SubscriptionGuard.isWorkspaceCloudReady(repo2), isFalse,
+        reason: 'أول إقلاع خام غير جاهز سحابياً ولا يطلق أي نبض سحابي');
+    final generated = generateWorkspaceId();
+    expect(generated, startsWith('WS-'));
+    expect(generated.length, 11);
     await db2.close();
     await tmp2.delete(recursive: true);
   });

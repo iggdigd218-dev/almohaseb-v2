@@ -790,7 +790,11 @@ Future<void> showReceiptPreview(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(16),
-                  child: Image.file(File(path)),
+                  // (PR-8) جودة عالية للمعاينة — الدقة الكاملة تبقى للمشاركة.
+                  child: Image.file(
+                    File(path),
+                    filterQuality: FilterQuality.high,
+                  ),
                 ),
               ),
             ),

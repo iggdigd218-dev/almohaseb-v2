@@ -154,6 +154,9 @@ class _LockGateState extends ConsumerState<LockGate>
                   'assets/images/logo.png',
                   width: 112,
                   height: 112,
+                  // (PR-8) حدة Retina للشعار + كاش بكثافة البكسل.
+                  cacheWidth: crispCacheWidth(context, 112),
+                  filterQuality: FilterQuality.medium,
                 ),
               ),
               const SizedBox(height: 18),

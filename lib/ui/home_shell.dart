@@ -252,9 +252,15 @@ class _HomeShellState extends ConsumerState<HomeShell>
     });
     // يقظة المجموعة + أذونات النظام الحقيقية (إشعارات/بطارية).
     _ensureGroupKeepAlive();
-    // 🌐 مركز التحكم السحابي والتنبيهات المباشرة والإدارة عن بعد
-    CloudControlService.instance
-        .startPeriodicHeartbeat(ref.read(repoProvider));
+    // 🌐 مركز التحكم السحابي ومراقب الانضمام — يعملان فقط عند الجاهزية السحابية الفعلية
+    unawaited(() async {
+      final repo = ref.read(repoProvider);
+      if (await SubscriptionGuard.isWorkspaceCloudReady(repo)) {
+        if (!mounted) return;
+        CloudControlService.instance.startPeriodicHeartbeat(repo);
+        await _startGlobalJoinWatcher();
+      }
+    }());
     // (PR-6) استماع لحظي: إعادة تسمية جهازنا من المدير (أو تطبيق الإدارة)
     // تُطبَّق فوراً على الواجهة الحية — مزوّدات الهوية/الإعدادات — دون
     // إعادة تشغيل التطبيق.
@@ -830,7 +836,8 @@ class _HomeShellState extends ConsumerState<HomeShell>
   Future<void> _startGlobalJoinWatcher() async {
     try {
       final repo = ref.read(repoProvider);
-      if (!await repo.canManageGroup()) {
+      if (!await SubscriptionGuard.isWorkspaceCloudReady(repo) ||
+          !await repo.canManageGroup()) {
         _globalJoinWatcher?.stop();
         _globalJoinWatcher = null;
         _joinPollTimer?.cancel();
@@ -1741,6 +1748,9 @@ class _HomeShellState extends ConsumerState<HomeShell>
                         width: 28,
                         height: 28,
                         fit: BoxFit.cover,
+                        // (PR-8) حدة Retina للشعار المصغر.
+                        cacheWidth: crispCacheWidth(context, 28),
+                        filterQuality: FilterQuality.medium,
                         errorBuilder: (_, __, ___) => const Icon(
                           Icons.business_rounded,
                           size: 16,
@@ -2712,12 +2722,16 @@ class _Drawer extends ConsumerWidget {
                             color: Colors.white,
                             size: 30,
                           );
+                          // (PR-8) حدة Retina للصورة الشخصية بالدرج.
+                          final faceCacheWidth = crispCacheWidth(ctx, 54);
                           final Widget face = photo.startsWith('http')
                               ? Image.network(
                                   photo,
                                   width: 54,
                                   height: 54,
                                   fit: BoxFit.cover,
+                                  cacheWidth: faceCacheWidth,
+                                  filterQuality: FilterQuality.medium,
                                   errorBuilder: (_, __, ___) => fallback,
                                 )
                               : (photo.isNotEmpty
@@ -2726,6 +2740,8 @@ class _Drawer extends ConsumerWidget {
                                       width: 54,
                                       height: 54,
                                       fit: BoxFit.cover,
+                                      cacheWidth: faceCacheWidth,
+                                      filterQuality: FilterQuality.medium,
                                       errorBuilder: (_, __, ___) => fallback,
                                     )
                                   : fallback);

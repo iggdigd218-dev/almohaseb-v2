@@ -155,6 +155,8 @@ class _SplashScreenState extends State<SplashScreen>
                     child: Image.asset(
                       'assets/images/logo.png',
                       fit: BoxFit.contain,
+                      // (PR-8) جودة معالجة عالية للشعار — بلا غباش.
+                      filterQuality: FilterQuality.medium,
                     ),
                   ),
                 ),

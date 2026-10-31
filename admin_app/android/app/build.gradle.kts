@@ -41,6 +41,11 @@ android {
 
     signingConfigs {
         create("release") {
+            // (PR-7) توقيع صريح V1+V2+V3 — الافتراضي في AGP يوقّع V2 فقط،
+            // وبوابة verify في السير ترفض النشر بلا V3 (أجهزة أندرويد 13+).
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
             if (keystorePropertiesFile.exists()) {
                 keyAlias = keystoreProperties["keyAlias"] as String
                 keyPassword = keystoreProperties["keyPassword"] as String

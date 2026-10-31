@@ -87,7 +87,7 @@ Future<void> showCloudInviteDialog(BuildContext context, WidgetRef ref) async {
     invite = await CloudJoin.createInvite(repo).timeout(kCloudInviteTimeout);
   } on TimeoutException {
     error = 'انتهت مهلة إنشاء الدعوة '
-        '(${kCloudInviteTimeout.inSeconds ~/ 60} دقائق) — '
+        '(${kCloudInviteTimeout.inSeconds} ثانية) — '
         'تحقّق من شبكتك ثم أعد المحاولة.';
   } catch (e) {
     error = e is CloudJoinException ? e.message : '$e';

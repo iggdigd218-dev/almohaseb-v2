@@ -704,6 +704,9 @@ class _TxFormState extends ConsumerState<TxForm> {
               width: 34,
               height: 34,
               fit: BoxFit.cover,
+              // (PR-8) حدة Retina للمرفق المصغر.
+              cacheWidth: crispCacheWidth(context, 34),
+              filterQuality: FilterQuality.medium,
             ),
           ),
           IconButton(

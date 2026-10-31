@@ -13,7 +13,20 @@
           "package_name": "com.nexora.almohaseb"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "538829721157-dpj2s6jfs1uq0bc1ap6us4u1pftne8kc.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.nexora.almohaseb",
+            "certificate_hash": "aadd360de5d415839911e9997e7cdd23da1f1d0e"
+          }
+        },
+        {
+          "client_id": "538829721157-lg1hmb4pr8679vt707lifucojrk9q05f.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyAh6_kGvoPvse3Mt3Yy06dmDaCpTKHp0F4"
@@ -21,7 +34,41 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "538829721157-8hat44cb1ns4l5qkqgof6hgu1hk7vjj0.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:538829721157:android:1cc9658ff81317959add2c",
+        "android_client_info": {
+          "package_name": "com.nexora.almohaseb_plus"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "538829721157-lg1hmb4pr8679vt707lifucojrk9q05f.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAh6_kGvoPvse3Mt3Yy06dmDaCpTKHp0F4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "538829721157-8hat44cb1ns4l5qkqgof6hgu1hk7vjj0.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }

@@ -11,6 +11,7 @@ import 'package:nexora_app/core/models.dart';
 import 'package:nexora_app/core/cloud_config.dart';
 import 'package:nexora_app/data/sync/auto_backup.dart';
 import 'package:nexora_app/data/repository.dart';
+import 'package:nexora_app/data/sync/subscription_guard.dart';
 import 'package:nexora_app/data/sync/workspace_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -43,14 +44,14 @@ void main() {
     } catch (_) {}
   });
 
-  test('SILENT-01 أول تثبيت: مساحة فريدة WS- لا default', () async {
+  test('SILENT-01 أول تثبيت خام: يعيد default ولا يفعّل الجاهزية السحابية قبل إنشاء المنشأة', () async {
     final ws = repo.requireWorkspaceId;
-    expect(ws, isNot('default'));
-    expect(RegExp(r'^WS-[A-HJ-KM-NP-Z2-9]{8}$').hasMatch(ws), isTrue,
-        reason: 'المعرف يجب أن يكون WS-XXXXXXXX: $ws');
+    expect(ws, 'default');
+    expect(await SubscriptionGuard.isWorkspaceCloudReady(repo), isFalse);
   });
 
   test('SILENT-02 النسخة الصامتة تُرفع لمسار المساحة وتحدّث الطابع', () async {
+    await repo.bindWorkspaceId('WS-SILENT02');
     // (2026-09-22) النسخ السحابي عبر حساب جوجل فقط — بريد مربوط.
     await repo.setSetting('account.email', 'boss@nexora.test');
     await repo.saveAccount(Account(
@@ -86,6 +87,7 @@ void main() {
   });
 
   test('SILENT-03 بعد الطرد: مساحة جديدة معزولة تختلف عن القديمة', () async {
+    await repo.bindWorkspaceId('WS-SILENT03');
     final before = repo.requireWorkspaceId;
     await repo.resetToStandaloneAfterExpulsion();
     final after = repo.requireWorkspaceId;

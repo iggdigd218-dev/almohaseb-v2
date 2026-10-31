@@ -5,24 +5,29 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nexora_app/core/accounting.dart';
 import 'package:nexora_app/core/database.dart';
 import 'package:nexora_app/core/models.dart';
+import 'package:nexora_app/data/providers.dart';
 import 'package:nexora_app/data/sync/auto_backup.dart';
 import 'package:nexora_app/data/repository.dart';
 import 'package:nexora_app/data/sync/cloud_firebase_transport.dart';
+import 'package:nexora_app/data/sync/cloud_join.dart';
 import 'package:nexora_app/data/sync/conflict_resolver.dart';
 import 'package:nexora_app/data/sync/operation.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:nexora_app/data/sync/workspace_service.dart';
 
-/// سحابة وهمية موحّدة: عمليات تزايدية + نسخ كاملة برمز.
+/// سحابة وهمية موحّدة: عمليات تزايدية + نسخ كاملة برمز + روستر الأجهزة.
 class _FakeCloud {
   final Map<String, Map<String, Object?>> operations = {};
+  final Map<String, Map<String, Object?>> roster = {};
   Map<String, Object?>? codeRecord;
+  int _nextServerTime = 1760000100000;
 
   static http.Response _json(String body, int status) =>
       http.Response.bytes(utf8.encode(body), status, headers: {
@@ -40,13 +45,39 @@ class _FakeCloud {
           return _json(
               codeRecord == null ? 'null' : jsonEncode(codeRecord), 200);
         }
+        if (path.contains('/roster/')) {
+          final devId = Uri.decodeComponent(
+              path.split('/roster/').last.replaceAll('.json', ''));
+          if (req.method == 'PUT') {
+            final map = Map<String, Object?>.from(jsonDecode(req.body) as Map);
+            roster[devId] = map;
+            return _json(jsonEncode(map), 200);
+          }
+          if (req.method == 'PATCH') {
+            final patch =
+                Map<String, Object?>.from(jsonDecode(req.body) as Map);
+            final existing = roster[devId] ?? <String, Object?>{'id': devId};
+            existing.addAll(patch);
+            roster[devId] = existing;
+            return _json(jsonEncode(existing), 200);
+          }
+          final item = roster[devId];
+          return _json(item == null ? 'null' : jsonEncode(item), 200);
+        }
+        if (path.endsWith('/roster.json')) {
+          if (roster.isEmpty) return _json('null', 200);
+          return _json(jsonEncode(roster), 200);
+        }
         if (path.contains('/operations')) {
           if (req.method == 'PUT') {
             final opId = Uri.decodeComponent(
                 path.split('/operations/').last.replaceAll('.json', ''));
-            operations[opId] =
-                Map<String, Object?>.from(jsonDecode(req.body) as Map);
-            return _json(req.body, 200);
+            final map = Map<String, Object?>.from(jsonDecode(req.body) as Map);
+            final serverTs = ++_nextServerTime;
+            if (map['server_time'] is Map) map['server_time'] = serverTs;
+            if (map['server_ts'] is Map) map['server_ts'] = serverTs;
+            operations[opId] = map;
+            return _json(jsonEncode(map), 200);
           }
           if (operations.isEmpty) return _json('null', 200);
           return _json(jsonEncode(operations), 200);
@@ -154,6 +185,13 @@ void main() {
         where: 'account_id = ?', whereArgs: [accId]);
     expect(bTx, hasLength(1));
     expect(bTx.first['amount'], 750);
+    // التحقق الصارم: العملية الواردة من السحابة تُحفظ على هاتف العضو بحالة synced فوراً
+    // ولا تدخل طابور الرفع المحلي sync_queue.
+    expect(bTx.first['sync_state'], 'synced',
+        reason: 'العملية الواردة من السحابة يجب أن تحمل sync_state = synced لدى العضو');
+    final bQueue = await b.query('sync_queue');
+    expect(bQueue, isEmpty,
+        reason: 'العملية الواردة من السحابة لا يجوز إدراجها في طابور الرفع المحلي');
     // سحب ثانٍ idempotent.
     final again = await http.runWithClient(
         () => tB.pull(resolver: ConflictResolver()), cloud.client);
@@ -232,5 +270,173 @@ void main() {
     await repoA.transactions();
     await repoA.accounts();
     await repoA.users();
+  });
+
+  test(
+      'B58-E2E-04 Manager Sync Monitor: pull PATCHes last_synced_time in roster, '
+      'syncRoster updates local devices, and txDeliveryBadgesProvider tracks 1/3 -> 2/3 -> 3/3',
+      () async {
+    final cloud = _FakeCloud();
+    final mgrId = repoA.requireDeviceId;
+    final mem1Id = repoB.requireDeviceId;
+    const mem2Id = 'DEV-MEMBER-C';
+
+    // إعداد جهاز ب كعضو فعلي، وإضافة العضوين في جدول devices لدى المدير أ
+    await b.update('devices', {'is_owner': 0, 'is_paired': 1},
+        where: 'id = ?', whereArgs: [mem1Id]);
+    await b.insert(
+      'sync_meta',
+      {'key': 'workspaceMode', 'value': 'member'},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+
+    final initIso = now.toIso8601String();
+    cloud.roster[mgrId] = {
+      'id': mgrId,
+      'workspace_id': 'default',
+      'name': 'جهاز المدير',
+      'is_paired': 1,
+      'is_owner': 1,
+      'revoked_at': '',
+      'expelled_at': '',
+      'updated_at': initIso,
+    };
+    for (final entry in [
+      {'id': mem1Id, 'name': 'جهاز عضو 1'},
+      {'id': mem2Id, 'name': 'جهاز عضو 2'},
+    ]) {
+      await a.insert(
+        'devices',
+        {
+          'id': entry['id'],
+          'workspace_id': 'default',
+          'name': entry['name'],
+          'is_paired': 1,
+          'is_owner': 0,
+          'revoked_at': '',
+          'expelled_at': '',
+          'last_sync_at': '',
+          'created_at': initIso,
+          'updated_at': initIso,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      cloud.roster[entry['id']!] = {
+        'id': entry['id'],
+        'workspace_id': 'default',
+        'name': entry['name'],
+        'is_paired': 1,
+        'is_owner': 0,
+        'revoked_at': '',
+        'expelled_at': '',
+        'updated_at': initIso,
+      };
+    }
+
+    // المدير أ ينشئ عملية مالية ويرفعها للسحابة
+    final accId = await repoA.saveAccount(Account(
+      name: 'عميل تتبع الانتشار',
+      kind: AccountKind.customer,
+      notifyChannel: 'none',
+      createdAt: now,
+      updatedAt: now,
+    ));
+    final txId = await repoA.saveTx(Tx(
+      accountId: accId,
+      accountKind: AccountKind.customer,
+      type: OpType.revenue,
+      amount: 1200,
+      currency: 'YER',
+      sign: '+',
+      rate: 1,
+      description: 'فاتورة مراقب الانتشار',
+      status: 'done',
+      syncState: 'pending',
+      date: now,
+      createdAt: now,
+      updatedAt: now,
+    ));
+
+    final tA = transport(repoA, a);
+    final pending = await a.query('operations', where: 'synced = 0');
+    for (final row in pending) {
+      await http.runWithClient(
+          () => tA.push(SyncOperation.fromMap(row)), cloud.client);
+    }
+    await a.update('transactions', {'sync_state': 'synced'},
+        where: 'id = ?', whereArgs: [txId]);
+
+    // 1) قبل سحب أي عضو: العداد لدى المدير 1/3 (المدير فقط استلمها)
+    final containerA = ProviderContainer(overrides: [
+      repoProvider.overrideWithValue(repoA),
+    ]);
+    addTearDown(containerA.dispose);
+
+    var badgesA = await containerA.read(txDeliveryBadgesProvider.future);
+    expect(badgesA['$txId']?.delivered, 1);
+    expect(badgesA['$txId']?.total, 3);
+    expect(badgesA['$txId']?.all, isFalse);
+
+    // بينما على جهاز العضو ب: العزل التام يعيد خريطة فارغة بلا عدادات
+    final containerB = ProviderContainer(overrides: [
+      repoProvider.overrideWithValue(repoB),
+    ]);
+    addTearDown(containerB.dispose);
+    final badgesB = await containerB.read(txDeliveryBadgesProvider.future);
+    expect(badgesB, isEmpty,
+        reason: 'أجهزة الأعضاء معزولة تماماً عن عدادات ومراقب انتشار الأجهزة الأخرى');
+
+    // 2) العضو 1 يسحب العملية -> يحدث PATCH تلقائي لـ last_synced_time في الروستر السحابي
+    final tB = transport(repoB, b);
+    await http.runWithClient(
+        () => tB.pull(resolver: ConflictResolver()), cloud.client);
+    expect(cloud.roster[mem1Id]?['last_synced_time'], isNotNull,
+        reason: 'pull لدى العضو يجب أن يحدث last_synced_time في عقدته بالروستر');
+
+    // المدير يزامن الروستر -> يلتقط last_synced_time للعضو 1 -> العداد يصبح 2/3
+    await http.runWithClient(
+      () => CloudJoin.syncRoster(
+        repoA,
+        a,
+        backendUrl: url,
+        workspaceId: 'default',
+      ),
+      cloud.client,
+    );
+    containerA.invalidate(txDeliveryBadgesProvider);
+    badgesA = await containerA.read(txDeliveryBadgesProvider.future);
+    expect(badgesA['$txId']?.delivered, 2);
+    expect(badgesA['$txId']?.total, 3);
+    expect(badgesA['$txId']?.all, isFalse);
+
+    // 3) العضو 2 يحدث مؤشر مزامنته في الروستر -> العداد لدى المدير يصبح 3/3 مكتمل (all = true)
+    cloud.roster[mem2Id]!['last_synced_time'] =
+        cloud.roster[mem1Id]!['last_synced_time'];
+    await http.runWithClient(
+      () => CloudJoin.syncRoster(
+        repoA,
+        a,
+        backendUrl: url,
+        workspaceId: 'default',
+      ),
+      cloud.client,
+    );
+    containerA.invalidate(txDeliveryBadgesProvider);
+    badgesA = await containerA.read(txDeliveryBadgesProvider.future);
+    expect(badgesA['$txId']?.delivered, 3);
+    expect(badgesA['$txId']?.total, 3);
+    expect(badgesA['$txId']?.all, isTrue);
+  });
+
+  test('B58-E2E-05 pos checkout: account selection hidden in cash mode and clean customer labels', () {
+    final posSrc = File('lib/ui/pos_screen.dart').readAsStringSync();
+    expect(posSrc.contains('عميل نقدي (بدون حساب)'), isFalse,
+        reason: 'يجب إزالة عبارة عميل نقدي (بدون حساب) من نافذة الدفع');
+    expect(posSrc.contains("child: Text('بيع نقدي')"), isTrue,
+        reason: 'يجب اعتماد تسمية بيع نقدي في نافذة الدفع');
+    expect(posSrc.contains('بدون هاتف'), isFalse,
+        reason: 'يجب إزالة رقم الهاتف والأقواس من القائمة المنسدلة للعملاء');
+    expect(posSrc.contains('if (needsAccount) ...['), isTrue,
+        reason: 'يجب عدم إظهار خيارات اختيار حساب العميل إلا عند تحديد العملية آجل/جزئي');
   });
 }

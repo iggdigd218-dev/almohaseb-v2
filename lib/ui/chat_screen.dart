@@ -503,6 +503,8 @@ class _Bubble extends StatelessWidget {
                   child: Image.file(
                     File(message.payload),
                     fit: BoxFit.contain,
+                    // (PR-8) جودة معالجة عالية — بلا غباش.
+                    filterQuality: FilterQuality.medium,
                     errorBuilder: (_, __, ___) =>
                         const Text('تعذّر عرض الصورة'),
                   ),

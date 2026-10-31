@@ -377,10 +377,26 @@ ReportTable buildReport(
           Fmt.money(e.value[2]),
         ];
       }).toList();
+      var tSales = 0.0;
+      for (final t in d.txs) {
+        final isRet = t.description.trim().startsWith('مرتجع ') ||
+            t.category == 'مرتجع مبيعات' ||
+            t.notes.contains('[ORIG_TX:');
+        final isSale = !isRet &&
+            (t.type == OpType.revenue ||
+                (t.type == OpType.debit &&
+                    t.accountKind != AccountKind.supplier));
+        if (isSale) {
+          tSales += t.amount;
+        } else if (isRet) {
+          tSales = (tSales - t.amount).clamp(0.0, double.infinity);
+        }
+      }
       return ReportTable(
         headers: const ['العملة', 'مستحق لنا', 'مستحق علينا', 'الصافي'],
         rows: rows,
         summary: [
+          ('إجمالي المبيعات', Fmt.money(tSales)),
           ('إجمالي المستحق لنا', Fmt.money(tRec)),
           ('إجمالي المستحق علينا', Fmt.money(tPay)),
           ('صافي الرصيد', Fmt.money(tNet)),
@@ -517,8 +533,24 @@ ReportTable buildReport(
       );
 
     case ReportTab.pl:
-      var revenue = 0.0, expense = 0.0, receivable = 0.0, payable = 0.0;
+      var revenue = 0.0,
+          expense = 0.0,
+          receivable = 0.0,
+          payable = 0.0,
+          totalSales = 0.0;
       for (final t in d.txs) {
+        final isRet = t.description.trim().startsWith('مرتجع ') ||
+            t.category == 'مرتجع مبيعات' ||
+            t.notes.contains('[ORIG_TX:');
+        final isSale = !isRet &&
+            (t.type == OpType.revenue ||
+                (t.type == OpType.debit &&
+                    t.accountKind != AccountKind.supplier));
+        if (isSale) {
+          totalSales += t.amount;
+        } else if (isRet) {
+          totalSales = (totalSales - t.amount).clamp(0.0, double.infinity);
+        }
         switch (t.type) {
           case OpType.revenue || OpType.inflow:
             revenue += t.amount;
@@ -536,11 +568,13 @@ ReportTable buildReport(
       return ReportTable(
         headers: const ['البند', 'المبلغ'],
         rows: [
+          ['إجمالي المبيعات', Fmt.money(totalSales)],
           ['إجمالي الإيرادات', Fmt.money(revenue)],
           ['إجمالي المصروفات', Fmt.money(expense)],
           ['صافي الأرباح / الخسائر', Fmt.money(profit)],
         ],
         summary: [
+          ('إجمالي المبيعات', Fmt.money(totalSales)),
           ('الإيرادات', Fmt.money(revenue)),
           ('المصروفات', Fmt.money(expense)),
           ('صافي الربح/الخسارة', Fmt.money(profit)),

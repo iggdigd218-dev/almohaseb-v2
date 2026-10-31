@@ -341,9 +341,16 @@ class CloudFirebaseTransport implements SyncTransport {
         whereArgs: [op.id],
       );
     }
+    final resolvedSyncMs = int.tryParse(resolvedServerTime) ??
+        DateTime.now().millisecondsSinceEpoch;
+    final resolvedSyncIso =
+        DateTime.fromMillisecondsSinceEpoch(resolvedSyncMs).toIso8601String();
     await db.update(
       'devices',
-      {'last_sync_at': DateTime.now().toIso8601String()},
+      {
+        'last_sync_at': resolvedSyncIso,
+        'last_seen_at': resolvedSyncIso,
+      },
       where: 'id = ?',
       whereArgs: [op.deviceId],
     );
@@ -784,6 +791,65 @@ class CloudFirebaseTransport implements SyncTransport {
 
     if (maxTsMs > lastCursorMs) {
       await saveLastSyncedCursor(maxTsMs);
+    }
+
+    if (maxTsMs > lastCursorMs || applied > 0) {
+      final effectiveSyncMs = maxTsMs > 0
+          ? maxTsMs
+          : DateTime.now().millisecondsSinceEpoch;
+      final syncIso =
+          DateTime.fromMillisecondsSinceEpoch(effectiveSyncMs).toIso8601String();
+      try {
+        await db.update(
+          'devices',
+          {
+            'last_sync_at': syncIso,
+            'last_seen_at': syncIso,
+          },
+          where: 'id = ?',
+          whereArgs: [ourId],
+        );
+      } catch (_) {}
+      // تحديث خفيف (PATCH) لعقدة الجهاز في الروستر السحابي لتسجيل آخر مؤشر مزامنة
+      // دون استهلاك باندويث أو طلبات قراءة إضافية.
+      try {
+        final devRows = await db.query(
+          'devices',
+          columns: ['is_paired', 'is_owner', 'revoked_at', 'expelled_at'],
+          where: 'id = ?',
+          whereArgs: [ourId],
+          limit: 1,
+        );
+        final canPatchRoster = devRows.isNotEmpty &&
+            (((devRows.first['is_paired'] as int?) ?? 0) == 1 ||
+                ((devRows.first['is_owner'] as int?) ?? 0) == 1) &&
+            '${devRows.first['revoked_at'] ?? ''}'.trim().isEmpty &&
+            '${devRows.first['expelled_at'] ?? ''}'.trim().isEmpty;
+        if (canPatchRoster && ourId.trim().isNotEmpty) {
+          final tok = await _idToken();
+          final rosterUri = Uri.parse(
+            '$_root/roster/${Uri.encodeComponent(ourId)}.json',
+          );
+          final targetRosterUri = tok == null
+              ? rosterUri
+              : rosterUri.replace(
+                  query: 'auth=${Uri.encodeQueryComponent(tok)}',
+                );
+          await http
+              .patch(
+                targetRosterUri,
+                headers: _authHeaders,
+                body: jsonEncode({
+                  'last_synced_time': effectiveSyncMs,
+                  'last_sync_at': syncIso,
+                  'last_seen_at': syncIso,
+                  'last_seen': kServerValueTimestamp,
+                  'lastSeenAt': kServerValueTimestamp,
+                }),
+              )
+              .timeout(const Duration(seconds: 5));
+        }
+      } catch (_) {}
     }
 
     if (applied > 0 || forceFullSync || resetCursor || lastCursorMs == 0) {

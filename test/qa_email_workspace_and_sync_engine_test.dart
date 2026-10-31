@@ -43,6 +43,7 @@ void main() {
     await AppDatabase.createSchema(db);
     repo = Repo(databaseProvider: () async => db);
     await repo.initSyncInfra();
+    await repo.bindWorkspaceId('WS-EMAILTST');
   });
 
   tearDown(() async {
@@ -343,36 +344,39 @@ void main() {
     expect(tx.first['amount'], 1500.0);
   });
 
-  test('EMAIL-07 معالج فحص وتوجيه الحسابات (Workspace Resolver) يكتشف المالك أو عضو الروستر', () async {
+  test('EMAIL-07 معالج فحص وتوجيه الحسابات (Workspace Resolver) يفحص الفهارس السريعة بالتوازي ويميز حالات عدم الوجود والمهلة', () async {
+    final bossKey = AccountWorkspace.emailToKey('boss@company.com');
+    final empKey = AccountWorkspace.emailToKey('employee@company.com');
     final cloudDb = <String, dynamic>{
-      '/workspaces.json': {
-        'WS-OWNER-100': {
-          'meta': {
-            'id': 'WS-OWNER-100',
-            'owner_email': 'boss@company.com',
-            'storeName': 'شركة القمة',
-          },
-        },
+      '/workspaces/_registry/emails_index/$bossKey.json': {
+        'workspaceId': 'WS-OWNER-100',
+        'email': 'boss@company.com',
+        'storeName': 'شركة القمة',
+      },
+      '/workspaces/WS-OWNER-100/meta.json': {
+        'id': 'WS-OWNER-100',
+        'owner_email': 'boss@company.com',
+        'storeName': 'شركة القمة',
+      },
+      '/workspaces/_registry/user_workspaces/$empKey.json': {
         'WS-ROSTER-200': {
-          'meta': {
-            'id': 'WS-ROSTER-200',
-            'owner_email': 'other@company.com',
-            'storeName': 'فرع الروستر',
-          },
-          'roster': {
-            'DEV-EMP-1': {
-              'device_id': 'DEV-EMP-1',
-              'email': 'employee@company.com',
-              'role': 'member',
-              'role_code': 'accountant',
-            },
-          },
+          'workspaceId': 'WS-ROSTER-200',
+          'role': 'member',
+          'role_code': 'accountant',
+          'storeName': 'فرع الروستر',
         },
+      },
+      '/workspaces/WS-ROSTER-200/meta.json': {
+        'id': 'WS-ROSTER-200',
+        'owner_email': 'other@company.com',
+        'storeName': 'فرع الروستر',
       },
     };
 
     final mockClient = MockClient((req) async {
       final path = req.url.path;
+      // التأكد من عدم استدعاء تنزيل الشجرة الكاملة /workspaces.json أبداً
+      expect(path, isNot('/workspaces.json'));
       if (req.method == 'GET' && cloudDb.containsKey(path)) {
         return http.Response.bytes(
           utf8.encode(jsonEncode(cloudDb[path])),
@@ -389,6 +393,7 @@ void main() {
         email: 'BOSS@company.com',
       );
       expect(ownerRes.found, isTrue);
+      expect(ownerRes.status, CloudWorkspaceResolutionStatus.found);
       expect(ownerRes.workspaceId, 'WS-OWNER-100');
       expect(ownerRes.role, 'owner');
 
@@ -397,6 +402,7 @@ void main() {
         email: 'Employee@company.com',
       );
       expect(memberRes.found, isTrue);
+      expect(memberRes.status, CloudWorkspaceResolutionStatus.found);
       expect(memberRes.workspaceId, 'WS-ROSTER-200');
       expect(memberRes.role, 'member');
       expect(memberRes.memberRoleCode, 'accountant');
@@ -406,7 +412,21 @@ void main() {
         email: 'brandnew@company.com',
       );
       expect(newUserRes.found, isFalse);
+      expect(newUserRes.isNotFound, isTrue);
+      expect(newUserRes.status, CloudWorkspaceResolutionStatus.notFound);
     }, () => mockClient);
+
+    // اختبار حالة خطأ الشبكة (networkError)
+    final errorClient = MockClient((_) async => throw const SocketException('offline'));
+    await http.runWithClient(() async {
+      final errRes = await AccountWorkspace.resolveWorkspaceInCloud(
+        backendUrl: url,
+        email: 'boss@company.com',
+      );
+      expect(errRes.found, isFalse);
+      expect(errRes.isNetworkOrTimeoutError, isTrue);
+      expect(errRes.status, CloudWorkspaceResolutionStatus.networkError);
+    }, () => errorClient);
   });
 
   test('EMAIL-08 تصفير الجلسة الكامل (Complete Session Purge) يمسح SharedPreferences ويغلق SQLite', () async {

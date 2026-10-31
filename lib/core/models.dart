@@ -432,6 +432,16 @@ enum VoucherKind {
         (e) => e.code == c,
         orElse: () => VoucherKind.receipt,
       );
+
+  /// (PR-3+) صياغة رقم السند ببادئة الجهاز لمنع التصادم [Prefix]-[Type]-[Sequence]
+  String formatNumber({String? devicePrefix, required int sequence, int pad = 4}) {
+    final pfx = (devicePrefix ?? '').trim().toUpperCase();
+    final seqStr = sequence.toString().padLeft(pad, '0');
+    if (pfx.isNotEmpty) {
+      return '$pfx-$prefix-$seqStr';
+    }
+    return '$prefix$seqStr';
+  }
 }
 
 class Voucher {
