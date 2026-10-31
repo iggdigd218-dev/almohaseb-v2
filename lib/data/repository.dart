@@ -2988,25 +2988,47 @@ class Repo {
             limit: 1);
         final mode = WorkspaceMode.parse(
             wm.isEmpty ? null : wm.first['value'] as String?);
-        if (mode.inGroup) {
-          final devRows = await db.query('settings',
-              columns: ['key', 'value'],
-              where: "key IN ('sync.deviceId', 'devicePrefix')");
+        // (إصلاح طريق مسدود) هذا المسار يعمل داخل معاملة (nextSeq الخاصة
+        // بالتسلسل أو معاملة saveTransaction) — يُمنع هنا استدعاء
+        // settings()/resolveDevicePrefix() لأنها تفتح الاتصال الخام أثناء
+        // معاملة قيد التنفيذ فتعلّقها إلى الأبد في sqflite، وهو ما جمّد
+        // حفظ الفواتير في 3.98.7+321 وعلّق أجزاء اختبار PR #11 كلها.
+        // كل القراءات والكتابة عبر المنفّذ الممرر (db = txn) حصراً.
+        final cfgRows = await db.query('settings',
+            columns: ['value'],
+            where: 'key = ?',
+            whereArgs: ['devicePrefix'],
+            limit: 1);
+        var prefix = (cfgRows.isEmpty ? '' : '${cfgRows.first['value'] ?? ''}')
+            .trim()
+            .toUpperCase();
+        if (prefix.isEmpty && mode.inGroup) {
           var devId = '';
-          var cfgPrefix = '';
-          for (final r in devRows) {
-            final k = '${r['key'] ?? ''}';
-            final v = '${r['value'] ?? ''}';
-            if (k == 'sync.deviceId') devId = v;
-            if (k == 'devicePrefix') cfgPrefix = v;
+          final idRows = await db.query('settings',
+              columns: ['value'],
+              where: 'key = ?',
+              whereArgs: ['sync.deviceId'],
+              limit: 1);
+          if (idRows.isNotEmpty) {
+            devId = '${idRows.first['value'] ?? ''}'.trim();
           }
-          if (devId.trim().isNotEmpty || cfgPrefix.trim().isNotEmpty) {
-            final prefix = Fmt.singleLetterDevicePrefix(
-              devId,
-              configuredPrefix: cfgPrefix,
-            );
-            return '$prefix-${'$nextNum'.padLeft(5, '0')}';
+          devId = devId.isNotEmpty ? devId : (_deviceId ?? '');
+          var clean = devId.toUpperCase().replaceFirst(RegExp(r'^DEV-?'), '');
+          clean = clean.replaceAll(RegExp(r'[^A-Z0-9]'), '');
+          if (clean.length >= 2) {
+            prefix = clean.substring(0, 2);
+          } else if (clean.isNotEmpty) {
+            prefix = clean;
           }
+          if (prefix.isNotEmpty) {
+            await db.insert('settings',
+                {'key': 'devicePrefix', 'value': prefix},
+                conflictAlgorithm: ConflictAlgorithm.replace);
+          }
+        }
+        if (mode.inGroup || prefix.isNotEmpty) {
+          if (prefix.isEmpty) prefix = 'A';
+          return '$prefix-${'$nextNum'.padLeft(5, '0')}';
         }
       } catch (_) {
         // بيئة اختبار بلا sync_meta — رقم بحت.
@@ -3015,13 +3037,56 @@ class Repo {
     return '$nextNum';
   }
 
+  /// (PR-3+) استخراج أو اشتقاق بادئة الجهاز لترقيم السندات والفواتير لمنع التصادم.
+  /// إذا كانت مسجلة في الإعدادات نعتمدها، وإلا نشتقها من هوية الجهاز بعد تنظيف 'DEV-'.
+  Future<String> resolveDevicePrefix() async {
+    try {
+      final st = await settings();
+      final cfg = (st['devicePrefix'] ?? '').trim().toUpperCase();
+      if (cfg.isNotEmpty) {
+        return cfg;
+      }
+      final devId = (st['sync.deviceId'] ?? _deviceId ?? '').trim();
+      var clean = devId.toUpperCase().replaceFirst(RegExp(r'^DEV-?'), '');
+      clean = clean.replaceAll(RegExp(r'[^A-Z0-9]'), '');
+      if (clean.length >= 2) {
+        final p = clean.substring(0, 2);
+        await setSetting('devicePrefix', p);
+        return p;
+      } else if (clean.isNotEmpty) {
+        final p = clean;
+        await setSetting('devicePrefix', p);
+        return p;
+      }
+    } catch (_) {}
+    return 'A';
+  }
+
   /// الرقم التسلسلي التالي لأي عملية مالية (رقمي بحت).
   Future<String> nextTxNumber() => nextSeq('counter_tx', table: 'transactions');
 
-  /// الرقم التسلسلي التالي للسند مع البادئة الحرفية حسب النوع.
+  /// الرقم التسلسلي التالي للسند مع البادئة الحرفية حسب النوع وبادئة الجهاز.
+  /// بصيغة [Prefix]-[Type]-[Sequence] (مثال: A-ق-0001 أو B-ص-0012).
   Future<String> nextVoucherNumber(VoucherKind kind) async {
     final key = 'counter_voucher_${kind.code}';
     final seq = await nextSeq(key);
+    try {
+      final wm = await (await _db).query('sync_meta',
+          columns: ['value'],
+          where: 'key = ?',
+          whereArgs: ['workspaceMode'],
+          limit: 1);
+      final mode = WorkspaceMode.parse(
+          wm.isEmpty ? null : wm.first['value'] as String?);
+      final st = await settings();
+      final hasExplicitPrefix = (st['devicePrefix'] ?? '').trim().isNotEmpty;
+      if (mode.inGroup || hasExplicitPrefix) {
+        final prefix = await resolveDevicePrefix();
+        if (prefix.isNotEmpty) {
+          return '$prefix-${kind.prefix}-${seq.padLeft(4, '0')}';
+        }
+      }
+    } catch (_) {}
     return '${kind.prefix}${seq.padLeft(4, '0')}';
   }
 

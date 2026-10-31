@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
+import '../../core/database.dart';
 import '../../core/media_paths.dart';
 import '../../core/models.dart';
 import '../repository.dart';
@@ -465,7 +466,7 @@ Future<void> _healItemNameConflict(
 
   final dups = await txn.query(
     'items',
-    columns: ['id', 'deleted_at', 'name', 'is_deleted'],
+    columns: ['id', 'deleted_at', 'name', 'is_deleted', 'quantity', 'workspace_id'],
     where: 'name = ? COLLATE NOCASE AND id != ?',
     whereArgs: [cleanName, newEntityId],
   );
@@ -516,6 +517,34 @@ Future<void> _healItemNameConflict(
       continue;
     }
 
+    // (PR-3+) حماية رصيد الصنف الافتتاحي عند دمج التكرار غير المتصل.
+    // حساب «المغطى بحركات المكرر» يجب أن يسبق إعادة توجيه الحركات إلى الصنف
+    // المعتمد: بعدها لا تبقى أي حركة مرتبطة بمعرّف المكرر فيتحول الفحص إلى
+    // كود ميت ويُسجَّل شراء تسوية مزدوج يخالف صيغة المطابقة
+    // (initialCreateQty + طيّ الحركات) ويضخّم المخزون عند إعادة المطابقة.
+    final dupQty = ((d['quantity'] as num?) ?? 0).toDouble();
+    double recordedInMoves = 0.0;
+    if (dupQty > 0) {
+      try {
+        final moveRows = await txn.rawQuery(
+          "SELECT kind, SUM(quantity) as total FROM stock_moves "
+          "WHERE item_id = ? AND (deleted_at IS NULL OR deleted_at = '') "
+          "GROUP BY kind",
+          [dupId],
+        );
+        for (final r in moveRows) {
+          final k = r['kind']?.toString() ?? '';
+          final t = ((r['total'] as num?) ?? 0).toDouble();
+          if (k == 'purchase' || k == 'return' || k == 'returnIn') {
+            recordedInMoves += t;
+          } else if (k == 'sale') {
+            recordedInMoves -= t;
+          }
+        }
+      } catch (_) {}
+    }
+
+    var movesRepointed = false;
     try {
       await txn.update(
         'stock_moves',
@@ -524,6 +553,7 @@ Future<void> _healItemNameConflict(
         whereArgs: [dupId],
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
+      movesRepointed = true;
     } catch (_) {}
 
     try {
@@ -535,6 +565,43 @@ Future<void> _healItemNameConflict(
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
     } catch (_) {}
+
+    if (dupQty > 0) {
+      // فقط ما لم تغطه حركات المكرر (رصيد افتتاحي، أو فشل إعادة التوجيه)
+      // يحتاج شراء تسوية — أما الكمية فتُرحَّل كاملة في كل الحالات.
+      final covered =
+          movesRepointed && recordedInMoves > 0 ? recordedInMoves : 0.0;
+      final uncoveredQty = dupQty > covered ? dupQty - covered : 0.0;
+
+      final now = DateTime.now();
+      final nowIso = now.toIso8601String();
+      final dateStr = nowIso.split('T').first;
+      final wsId = (d['workspace_id']?.toString().isNotEmpty ?? false)
+          ? d['workspace_id']
+          : AppDatabase.activeWorkspaceId;
+
+      if (uncoveredQty > 0) {
+        try {
+          await txn.insert('stock_moves', {
+            'workspace_id': wsId,
+            'item_id': newEntityId,
+            'kind': StockKind.purchase.code,
+            'quantity': uncoveredQty,
+            'unit_price': 0,
+            'notes': 'تسوية تلقائية لدمج رصيد صنف مكرر ($cleanName)',
+            'date': dateStr,
+            'created_at': nowIso,
+          });
+        } catch (_) {}
+      }
+
+      try {
+        await txn.rawUpdate(
+          'UPDATE items SET quantity = quantity + ?, updated_at = ? WHERE id = ?',
+          [dupQty, nowIso, newEntityId],
+        );
+      } catch (_) {}
+    }
 
     try {
       await txn.delete('items', where: 'id = ?', whereArgs: [dupId]);
@@ -550,7 +617,57 @@ Future<void> _healItemNameConflict(
   }
 }
 
+/// (PR-3+) شفاء الأصناف العالقة بدون قسم تلقائياً:
+/// عند وصول قسم جديد أو فئة مرتبطة بقسم، يتم ربط أي أصناف ذات `section_id IS NULL`
+/// بالقسم المحدد في فئتها التابعة فوراً عبر استعلام محصّن بـ EXISTS.
+Future<int> _autoHealOrphanItems(
+  DatabaseExecutor db, {
+  int? sectionId,
+  int? categoryId,
+}) async {
+  try {
+    String sql = '''
+      UPDATE items 
+      SET section_id = (
+          SELECT ic.section_id 
+          FROM item_categories ic 
+          WHERE ic.id = items.category_id
+      ),
+      updated_at = ?
+      WHERE (items.section_id IS NULL OR items.section_id = 0)
+        AND items.category_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM item_categories ic 
+          WHERE ic.id = items.category_id 
+            AND ic.section_id IS NOT NULL 
+            AND ic.section_id > 0
+            AND (ic.deleted_at IS NULL OR ic.deleted_at = '')
+        )
+    ''';
+    final nowIso = DateTime.now().toIso8601String();
+    final params = <Object?>[nowIso];
+    if (categoryId != null) {
+      sql += ' AND items.category_id = ?';
+      params.add(categoryId);
+    } else if (sectionId != null) {
+      sql += ' AND items.category_id IN (SELECT id FROM item_categories WHERE section_id = ?)';
+      params.add(sectionId);
+    }
+    return await db.rawUpdate(sql, params);
+  } catch (_) {
+    return 0;
+  }
+}
+
+
 extension ApplyRemoteOp on Repo {
+  /// (PR-3+) تشغيل الشفاء الذاتي للأصناف العالقة بدون قسم برمجياً أو في الاختبارات
+  Future<int> autoHealOrphanItems({int? sectionId, int? categoryId}) async {
+    final db = await database;
+    return _autoHealOrphanItems(db,
+        sectionId: sectionId, categoryId: categoryId);
+  }
+
   /// Returns false for replay/ignored/conflicting operations. The caller owns
   /// the transaction, so entity data and the operation receipt commit together.
   Future<bool> applyRemoteOperation(
@@ -796,6 +913,11 @@ extension ApplyRemoteOp on Repo {
         await ensureForeignParents(txn, table, row, op);
         // (2026-09-24) قسم يتيح: يُفرغ section_id غير الموجود محلياً.
         await nullDanglingSection(txn, table, row);
+        // (PR-3+) شفاء تعارض اسم الصنف يؤجَّل إلى ما بعد كتابة الصنف الوارد
+        // (تحديثًا أو إدراجًا): قبلها لا وجود للصف فتضيع ترحيلات الكمية
+        // (تحديث يضرب 0 صفوف)، وتُرفض حركة التسوية بقيد FK في الإنتاج،
+        // كما أن الكتابة اللاحقة كانت تستبدل الكمية المُرحَّلة.
+        String? pendingItemNameHeal;
         if (existing.isNotEmpty) {
           if (row.isNotEmpty) {
             final opMs = op.serverTimeMs > 0
@@ -927,7 +1049,7 @@ extension ApplyRemoteOp on Repo {
               if (row.containsKey('name')) {
                 final itmName = row['name']?.toString().trim() ?? '';
                 if (itmName.isNotEmpty) {
-                  await _healItemNameConflict(txn, itmName, op.entityId);
+                  pendingItemNameHeal = itmName;
                 }
               }
               if (row.containsKey('sku')) {
@@ -951,6 +1073,11 @@ extension ApplyRemoteOp on Repo {
                     sqlQuery: sql, sqlArgs: sqlArgs),
               );
               rethrow;
+            }
+            if (pendingItemNameHeal != null) {
+              // (PR-3+) الآن الصنف الوارد موجود — الترحيل والتسوية يعملان فعلًا.
+              await _healItemNameConflict(
+                  txn, pendingItemNameHeal, op.entityId);
             }
           }
         } else {
@@ -1002,7 +1129,7 @@ extension ApplyRemoteOp on Repo {
             if (insertRow.containsKey('name')) {
               final itmName = insertRow['name']?.toString().trim() ?? '';
               if (itmName.isNotEmpty) {
-                await _healItemNameConflict(txn, itmName, op.entityId);
+                pendingItemNameHeal = itmName;
               }
             }
             if (insertRow.containsKey('sku')) {
@@ -1044,6 +1171,13 @@ extension ApplyRemoteOp on Repo {
                   sqlQuery: sql, sqlArgs: sqlArgs),
             );
             rethrow;
+          }
+          if (pendingItemNameHeal != null) {
+            // (PR-3+) بعد الإدراج: الصنف موجود فتُرحَّل الكمية وتُسجَّل
+            // التسوية بقيد FK سليم — وقبل ذلك كان التحديث يضرب 0 صفوف
+            // فُيبتلع بصمت (فقدان رصيد صامت في الإنتاج).
+            await _healItemNameConflict(
+                txn, pendingItemNameHeal, op.entityId);
           }
           // تطبيق فرق الكمية (Delta) عند إدراج حركة مخزون جديدة واردة من جهاز آخر
           if (op.entityType == EntityKind.stockMove) {
@@ -1142,6 +1276,13 @@ extension ApplyRemoteOp on Repo {
         }
         if (op.entityType == EntityKind.tx && lines != null) {
           await _replaceInvoiceLines(txn, op, lines);
+        }
+        if (op.entityType == EntityKind.section) {
+          final secId = int.tryParse(op.entityId);
+          await _autoHealOrphanItems(txn, sectionId: secId);
+        } else if (op.entityType == EntityKind.itemCategory) {
+          final catId = int.tryParse(op.entityId);
+          await _autoHealOrphanItems(txn, categoryId: catId);
         }
         break;
       case OpKind.delete_:
