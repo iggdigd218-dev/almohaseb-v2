@@ -521,6 +521,84 @@ class CloudJoin {
     try {
       await repo.setSetting('creatorDeviceId', deviceId);
     } catch (_) {}
+    try {
+      await reserveDevicePrefixInCloud(repo,
+          backendUrl: backendUrl, workspaceId: workspaceId, deviceId: deviceId);
+    } catch (_) {}
+  }
+
+  /// (PR-3+) حجز بادئة فريدة للجهاز في السحابة لمنع تصادم أرقام السندات والفواتير:
+  /// العقدة: /workspaces/{ws}/device_prefixes/{prefix} = deviceId
+  /// إذا كانت البادئة محجوزة لجهاز آخر يتم اختيار البادئة التالية تلقائياً (A, B, C... Z, A1, B1...).
+  static Future<String> reserveDevicePrefixInCloud(
+    Repo repo, {
+    required String backendUrl,
+    required String workspaceId,
+    required String deviceId,
+  }) async {
+    final cleanBase = backendUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    final ws = workspaceId.trim();
+    final devId = deviceId.trim();
+    if (cleanBase.isEmpty || ws.isEmpty || devId.isEmpty) {
+      return await repo.resolveDevicePrefix();
+    }
+
+    try {
+      // 1. تحديد البادئة المفضلة الحالية من الإعدادات أو من معرّف الجهاز
+      final currentPref = (await repo.getSetting('devicePrefix') ?? '').trim();
+      final preferred = currentPref.isNotEmpty
+          ? currentPref
+          : await repo.resolveDevicePrefix();
+
+      // 2. قراءة بادئات الأجهزة المحجوزة مسبقاً في المنشأة
+      final prefixesUrl = '$cleanBase/workspaces/$ws/device_prefixes.json';
+      final currentReservations = await _getJson(prefixesUrl) ?? {};
+
+      // 3. هل يملك هذا الجهاز بادئة محجوزة باسمه مسبقاً؟
+      for (final entry in currentReservations.entries) {
+        if ('${entry.value}'.trim() == devId) {
+          final existingPrefix = entry.key.trim().toUpperCase();
+          if (existingPrefix.isNotEmpty) {
+            await repo.setSetting('devicePrefix', existingPrefix);
+            return existingPrefix;
+          }
+        }
+      }
+
+      // 4. توليد قائمة بالبادئات المرشحة (Preferred, A..Z, A1..Z9)
+      final candidates = <String>[];
+      if (preferred.isNotEmpty && !candidates.contains(preferred.toUpperCase())) {
+        candidates.add(preferred.toUpperCase());
+      }
+      for (int i = 0; i < 26; i++) {
+        final letter = String.fromCharCode(65 + i);
+        if (!candidates.contains(letter)) candidates.add(letter);
+      }
+      for (int n = 1; n <= 9; n++) {
+        for (int i = 0; i < 26; i++) {
+          final code = '${String.fromCharCode(65 + i)}$n';
+          if (!candidates.contains(code)) candidates.add(code);
+        }
+      }
+
+      // 5. العثور على أول بادئة شاغرة وحجزها ذرياً
+      String chosenPrefix = preferred;
+      for (final cand in candidates) {
+        final holder = currentReservations[cand];
+        if (holder == null || '$holder'.trim().isEmpty || '$holder'.trim() == devId) {
+          chosenPrefix = cand;
+          break;
+        }
+      }
+
+      final singlePrefixUrl = '$cleanBase/workspaces/$ws/device_prefixes/${Uri.encodeComponent(chosenPrefix)}.json';
+      await _putJson(singlePrefixUrl, devId, timeout: const Duration(seconds: 15));
+      await repo.setSetting('devicePrefix', chosenPrefix);
+      return chosenPrefix;
+    } catch (_) {
+      // شبكة غير متصلة أو خطأ سحابي: الاعتماد على الاشتقاق المحلي الآمن
+      return await repo.resolveDevicePrefix();
+    }
   }
 
   /// عند انتقال الإدارة بالبريد لجهاز جديد: يتم خفض أي جهاز مدير سابق في السجل السحابي
@@ -1772,6 +1850,12 @@ class CloudJoin {
     try {
       await DeviceRegistry.upsertBinding(repo,
           backendUrl: url, force: true);
+    } catch (_) {}
+
+    // (PR-3+) حجز بادئة الجهاز في السحابة لمنع تصادم أرقام السندات والفواتير
+    try {
+      await reserveDevicePrefixInCloud(repo,
+          backendUrl: url, workspaceId: workspaceId, deviceId: ourId);
     } catch (_) {}
 
     // الدعوة تُستخدم مرة واحدة (حُذفت مبكراً؛ هذا حذف احتياطي idempotent).

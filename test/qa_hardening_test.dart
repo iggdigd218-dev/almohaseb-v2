@@ -133,8 +133,10 @@ void main() {
       await db.insert('sync_meta', {'key': 'workspaceMode', 'value': 'member'},
           conflictAlgorithm: ConflictAlgorithm.replace);
       final n = await repo.nextTxNumber();
-      expect(n, startsWith('Q-'),
-          reason: 'داخل مجموعة: بادئة حرف لاتيني واحد من رمز الجهاز تمنع تصادم الأرقام');
+      // (PR-3+) المواصفة الجديدة: بادئة من حرفين لاتينيين تُشتق من رمز الجهاز
+      // بعد تنظيف بادئة 'DEV-' — 'DEVICE-QAPREFIX' → 'ICE-QAPREFIX' → 'IC'.
+      expect(n, startsWith('IC-'),
+          reason: 'داخل مجموعة: بادئة حرفين من رمز الجهاز (بعد تنظيف DEV-) تمنع تصادم الأرقام');
       expect(n.split('-').last.length, 5);
       // متتابعة: الرقم التالي يزيد.
       final n2 = await repo.nextTxNumber();
