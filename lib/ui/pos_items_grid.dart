@@ -66,6 +66,10 @@ class PosItemTile extends StatelessWidget {
   }
 
   Widget _buildThumb(BuildContext context) {
+    // (PR-8) حدة Retina: نكاش الصورة بكثافة بكسل الشاشة الفيزيائية
+    // (منع البكسلة والتمدد) + جودة معالجة عالية داخل ClipRRect بقص
+    // متناسق — بلا أي غباش.
+    final thumbCacheWidth = crispCacheWidth(context, 160);
     if (item.image.isEmpty) return _fallback(context);
     if (item.image.startsWith('http')) {
       return ClipRRect(
@@ -74,6 +78,7 @@ class PosItemTile extends StatelessWidget {
           child: Image.network(
             item.image,
             fit: BoxFit.cover,
+            cacheWidth: thumbCacheWidth,
             filterQuality: FilterQuality.medium,
             errorBuilder: (_, __, ___) => _fallback(context),
           ),
@@ -87,6 +92,7 @@ class PosItemTile extends StatelessWidget {
           child: Image.file(
             File(MediaPaths.toAbsolute(item.image)),
             fit: BoxFit.cover,
+            cacheWidth: thumbCacheWidth,
             filterQuality: FilterQuality.medium,
             errorBuilder: (_, __, ___) => _fallback(context),
           ),
@@ -106,15 +112,18 @@ class PosItemTile extends StatelessWidget {
     final rawCount = _rawQtyCount(item.quantity);
     final statusLabel =
         isOut ? 'نفد 0' : (isLow ? 'منخفض $rawCount' : 'متوفر $rawCount');
+    // (PR-8) شارات نقية مشرقة: أخضر تفاحي نضر للمتوفر، أحمر لطيف صريح
+    // للنفاد، أصفر عنبري للمنخفض.
     final statusBg = isOut
-        ? const Color(0xFFFFE4E6)
-        : (isLow ? const Color(0xFFFEF3C7) : const Color(0xFFE6F7F2));
+        ? const Color(0xFFFEE2E2)
+        : (isLow ? const Color(0xFFFEF3C7) : const Color(0xFFDCFCE7));
     final statusFg = isOut
-        ? const Color(0xFFE11D48)
-        : (isLow ? const Color(0xFFD97706) : const Color(0xFF00897B));
+        ? const Color(0xFFDC2626)
+        : (isLow ? const Color(0xFFB45309) : const Color(0xFF16A34A));
 
     final scheme = Theme.of(context).colorScheme;
-    const actionBlue = Color(0xFF1E88E5);
+    // (PR-8) الأزرق الحيوي الصافي الموحد.
+    const actionBlue = Color(0xFF2563EB);
 
     return Opacity(
       opacity: enabled ? 1 : .58,
@@ -160,7 +169,9 @@ class PosItemTile extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                           textAlign: TextAlign.center,
                           style: TextStyle(
-                            fontWeight: FontWeight.w800,
+                            // (PR-8) اسم الصنف: فحم نقي (0F172A في الفاتح)
+                            // بوزن واضح حاد — ويتكيف تلقائياً في الداكن.
+                            fontWeight: FontWeight.w700,
                             fontSize: 10.5,
                             height: 1.15,
                             color: AppColors.textOf(context),
@@ -200,9 +211,10 @@ class PosItemTile extends StatelessWidget {
                                 style: TextStyle(
                                   fontWeight: FontWeight.w900,
                                   fontSize: 11.0,
+                                  // (PR-8) سعر زمردي نضر للصنف المتاح.
                                   color: isOut
                                       ? AppColors.dangerOf(context)
-                                      : const Color(0xFF00897B),
+                                      : const Color(0xFF059669),
                                 ),
                               ),
                             ),

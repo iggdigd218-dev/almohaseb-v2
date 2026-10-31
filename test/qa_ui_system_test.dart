@@ -152,8 +152,9 @@ void main() {
 
   // ============ الثيم ============
   test('THM-01 رموز التصميم: الألوان والزوايا والظلال', () {
-    expect(AppColors.primary, const Color(0xFF0284C7));
-    expect(AppColors.bg, const Color(0xFFF1F5F9));
+    // (PR-8) الطابع الحيوي فائق النقاء: Blue-600 وSlate-50.
+    expect(AppColors.primary, const Color(0xFF2563EB));
+    expect(AppColors.bg, const Color(0xFFF8FAFC));
     expect(AppColors.surface, const Color(0xFFFFFFFF));
     expect(AppColors.green, const Color(0xFF059669));
     expect(AppRadius.card, 16);

@@ -219,6 +219,7 @@ class SnapshotApply {
               if ('${map['created_at'] ?? ''}'.trim().isEmpty) map['created_at'] = nowIso;
               if ('${map['updated_at'] ?? ''}'.trim().isEmpty) map['updated_at'] = nowIso;
               if ('${map['date'] ?? ''}'.trim().isEmpty) map['date'] = nowIso;
+              map['sync_state'] = 'synced';
             }
             if (table == 'transaction_items') {
               if ('${map['created_at'] ?? ''}'.trim().isEmpty) map['created_at'] = nowIso;
@@ -294,6 +295,15 @@ class SnapshotApply {
             }
             if (cols.contains('workspace_id') && '${map['workspace_id'] ?? ''}'.trim().isEmpty) {
               map['workspace_id'] = wsId;
+            }
+            if (cols.contains('sync_state')) {
+              map['sync_state'] = 'synced';
+            }
+            if (cols.contains('sync_status')) {
+              map['sync_status'] = 'synced';
+            }
+            if (cols.contains('is_synced')) {
+              map['is_synced'] = 1;
             }
             map.removeWhere((k, _) => !cols.contains(k));
             await txn.insert(

@@ -149,9 +149,10 @@ void main() {
     expect(invite.token, isNotEmpty);
     expect(invite.backendUrl, url);
     expect(invite.cloudCode, 'QA123');
-    // اللقطة والدعوة موجودتان في السحابة.
+    // الدعوة موجودة في السحابة فوراً دون رفع اللقطة أثناء التوليد.
     expect(
-        cloud.store.keys.any((k) => k.contains('joinSnapshot')), isTrue);
+        cloud.store.keys.any((k) => k.contains('joinSnapshot')), isFalse,
+        reason: 'فصل الإشارات عن نقل البيانات: لا تُرفع اللقطة أثناء توليد الدعوة');
     expect(
         cloud.store.keys
             .any((k) => k.contains('/invites/${invite.token}')),
@@ -160,6 +161,30 @@ void main() {
     final parsed = CloudInviteInfo.parseQr(invite.qrContent);
     expect(parsed?['tok'], invite.token);
     expect(parsed?['url'], url);
+
+    // موافقة المدير ترفع joinSnapshot.json حصراً دون snapshot.json المزدوج.
+    final devBId = await ensureDeviceId(repoB);
+    await http.runWithClient(
+        () => CloudJoin.approveJoinRequest(
+              repoA,
+              backendUrl: invite.backendUrl,
+              deviceId: devBId,
+              deviceName: 'جهاز عضو',
+              roleCode: 'cashier',
+              workspaceId: invite.workspaceId,
+            ),
+        cloud.client);
+    expect(
+        cloud.store.keys.any((k) => k.contains('joinSnapshot')), isTrue,
+        reason: 'تُرفع joinSnapshot عند الموافقة');
+    expect(
+        cloud.store.keys.any((k) => k.endsWith('/snapshot.json')), isFalse,
+        reason: 'إلغاء الرفع المزدوج لـ snapshot.json');
+    final snapMeta = await a.query('sync_meta',
+        where: 'key = ?',
+        whereArgs: ['snapshotThroughTs:${invite.workspaceId}']);
+    expect(snapMeta, isNotEmpty,
+        reason: 'يجب حفظ snapshotThroughTs في sync_meta عند الموافقة لضغط العمليات');
 
     await http.runWithClient(
         () => CloudJoin.join(repoB,
@@ -408,8 +433,17 @@ void main() {
     final inv = await http.runWithClient(
         () => CloudJoin.createInvite(repoA), cloud.client);
 
-    // تطهير سابق كما يحدث قبل الانضمام + إكمال الانضمام المعتمد:
+    // اعتماد المدير للطلب (لرفع اللقطة المحدثة) ثم تطهير الجلسة السابقة وإكمال الانضمام:
     await http.runWithClient(() async {
+      final devBId = await ensureDeviceId(repoB);
+      await CloudJoin.approveJoinRequest(
+        repoA,
+        backendUrl: inv.backendUrl,
+        deviceId: devBId,
+        deviceName: 'عضو استيراد',
+        roleCode: 'cashier',
+        workspaceId: inv.workspaceId,
+      );
       await CloudJoin.purgeAndIsolateJoiningMember(
         repoB,
         backendUrl: inv.backendUrl,

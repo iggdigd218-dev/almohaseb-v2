@@ -89,6 +89,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     GoogleDriveBackupInfo? backup;
     String? cloudError;
     bool liveSync = false;
+    String? accountEmail;
     try {
       final repo = ref.read(repoProvider);
       final engine = _tryReadSyncEngine();
@@ -99,10 +100,40 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       if (mounted && _liveSyncActive != liveSync) {
         setState(() => _liveSyncActive = liveSync);
       }
+      final settingEmail = ((await repo.getSetting('account.email')) ??
+              (await repo.getSetting('email')) ??
+              '')
+          .trim();
+      final db = await repo.database;
+      final authService = GoogleAuthService(db);
+      var dbUser = await authService.currentUserFromDb();
+      // تفعيل signInSilently() تلقائياً عند فتح شاشة النسخ لاستعادة توكنات Google Drive فوراً
+      final silentUser = await authService.signInSilently();
+      dbUser = silentUser ?? dbUser;
+      final resolvedEmail = [
+        settingEmail,
+        dbUser?.email.trim() ?? '',
+      ].firstWhere((e) => e.isNotEmpty && e.contains('@'), orElse: () => '');
+      if (resolvedEmail.isNotEmpty) {
+        accountEmail = resolvedEmail;
+        if (settingEmail.isEmpty) {
+          await repo.setSetting('account.email', resolvedEmail);
+          await repo.setSetting('email', resolvedEmail);
+        }
+      }
     } catch (_) {}
     try {
       account = await _drive.restoreSession();
       if (account != null) {
+        if ((accountEmail == null || accountEmail.isEmpty) &&
+            account.email.trim().isNotEmpty) {
+          accountEmail = account.email.trim();
+          try {
+            final repo = ref.read(repoProvider);
+            await repo.setSetting('account.email', accountEmail);
+            await repo.setSetting('email', accountEmail);
+          } catch (_) {}
+        }
         try {
           backup = await _drive.latestBackup();
         } catch (e) {
@@ -111,15 +142,6 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       }
     } catch (e) {
       cloudError = '$e';
-    }
-    if (!mounted) return;
-    String? accountEmail;
-    try {
-      final db = await ref.read(repoProvider).database;
-      if (!mounted) return;
-      accountEmail = (await GoogleAuthService(db).currentUserFromDb())?.email;
-    } catch (_) {
-      accountEmail = null;
     }
     if (!mounted) return;
     setState(() {
@@ -322,6 +344,19 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
 
   Future<GoogleAccountInfo?> _ensureGoogleAccount() async {
     var account = _googleAccount ?? await _drive.restoreSession();
+    if (account == null) {
+      try {
+        final repo = ref.read(repoProvider);
+        final db = await repo.database;
+        await GoogleAuthService(db).signInSilently();
+        account = await _drive.restoreSession();
+      } catch (_) {}
+    }
+    if (account == null && (_accountEmail?.trim().isNotEmpty ?? false)) {
+      try {
+        account = await _drive.signIn();
+      } catch (_) {}
+    }
     if (account != null) {
       GoogleDriveBackupInfo? backup;
       String? cloudError;
@@ -333,6 +368,10 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       if (mounted) {
         setState(() {
           _googleAccount = account;
+          if ((_accountEmail == null || _accountEmail!.isEmpty) &&
+              account!.email.trim().isNotEmpty) {
+            _accountEmail = account.email.trim();
+          }
           _cloudBackup = backup;
           _cloudError = cloudError;
         });

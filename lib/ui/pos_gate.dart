@@ -56,9 +56,10 @@ class _SectionTile extends StatelessWidget {
                     ),
                     child: Icon(
                       icon,
+                      // (PR-8) أيقونة القسم بلونه الحي الخاص — لا أسود موحد.
                       color: Theme.of(context).brightness == Brightness.dark
                           ? Colors.white
-                          : Colors.black87,
+                          : tone.foreground,
                       size: 20,
                     ),
                   ),
@@ -380,10 +381,11 @@ class PosSectionsStrip extends StatelessWidget {
           padding: const EdgeInsetsDirectional.fromSTEB(12, 6, 12, 4),
           child: Row(
             children: [
+              // (PR-8) رأس حيوي صافٍ — بلا أي كحلي قاتم.
               const Icon(
                 Icons.folder_outlined,
                 size: 18,
-                color: Color(0xFF1E3A5F),
+                color: Color(0xFF2563EB),
               ),
               const SizedBox(width: 6),
               Text(
@@ -408,14 +410,14 @@ class PosSectionsStrip extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 11.5,
                           fontWeight: FontWeight.w700,
-                          color: Color(0xFF1E88E5),
+                          color: Color(0xFF2563EB),
                         ),
                       ),
                       SizedBox(width: 3),
                       Icon(
                         Icons.arrow_forward_rounded,
                         size: 13,
-                        color: Color(0xFF1E88E5),
+                        color: Color(0xFF2563EB),
                       ),
                     ],
                   ),
@@ -488,21 +490,22 @@ class _HorizontalSectionTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
-    const activeBlue = Color(0xFF1E88E5);
-    final pastelBg = Color.lerp(tone.background, Colors.white, 0.22)!;
+    // (PR-8) الطابع الحيوي: خلفية باستيل نقية للقسم بلونه الخاص — النشط
+    // يتعمق قليلاً بنفس اللون (لا غسلة زرقاء موحدة)، وأيقونة حية بلون
+    // القسم بدل الأسود الداكن الموحد.
     final bg = active
         ? (dark
-            ? activeBlue.withValues(alpha: 0.22)
-            : Color.lerp(tone.background, const Color(0xFFEAF3FF), 0.45)!)
+            ? tone.foreground.withValues(alpha: 0.22)
+            : Color.lerp(tone.background, tone.foreground, 0.10)!)
         : (dark
             ? tone.foreground.withValues(alpha: 0.14)
-            : pastelBg);
+            : tone.background);
     final borderColor = active
-        ? activeBlue
+        ? tone.foreground
         : (dark
             ? AppColors.borderOf(context)
-            : tone.foreground.withValues(alpha: 0.22));
-    final glyphColor = dark ? Colors.white : Colors.black87;
+            : tone.foreground.withValues(alpha: 0.28));
+    final glyphColor = dark ? Colors.white : tone.foreground;
 
     return Padding(
       padding: const EdgeInsetsDirectional.only(end: 8),
@@ -531,7 +534,7 @@ class _HorizontalSectionTile extends StatelessWidget {
                   decoration: BoxDecoration(
                     color: dark
                         ? Colors.white.withValues(alpha: 0.12)
-                        : Colors.white.withValues(alpha: 0.72),
+                        : Colors.white,
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Icon(icon, size: 19, color: glyphColor),
@@ -553,9 +556,7 @@ class _HorizontalSectionTile extends StatelessWidget {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                   decoration: BoxDecoration(
-                    color: active
-                        ? activeBlue.withValues(alpha: 0.14)
-                        : tone.foreground.withValues(alpha: 0.12),
+                    color: tone.foreground.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(999),
                   ),
                   child: Text(
@@ -565,7 +566,7 @@ class _HorizontalSectionTile extends StatelessWidget {
                     style: TextStyle(
                       fontSize: 9,
                       fontWeight: FontWeight.w700,
-                      color: active ? activeBlue : tone.foreground,
+                      color: tone.foreground,
                     ),
                   ),
                 ),
@@ -657,10 +658,11 @@ class PosCategoryStrip extends StatelessWidget {
           padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 12, 3),
           child: Row(
             children: [
+              // (PR-8) رأس حيوي صافٍ — بلا أي كحلي قاتم.
               const Icon(
                 Icons.grid_view_rounded,
                 size: 18,
-                color: Color(0xFF1E3A5F),
+                color: Color(0xFF2563EB),
               ),
               const SizedBox(width: 6),
               Text(
@@ -685,14 +687,14 @@ class PosCategoryStrip extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 11.5,
                           fontWeight: FontWeight.w700,
-                          color: Color(0xFF1E88E5),
+                          color: Color(0xFF2563EB),
                         ),
                       ),
                       SizedBox(width: 3),
                       Icon(
                         Icons.arrow_forward_rounded,
                         size: 13,
-                        color: Color(0xFF1E88E5),
+                        color: Color(0xFF2563EB),
                       ),
                     ],
                   ),
@@ -868,7 +870,8 @@ class _CatRow extends StatelessWidget {
         ),
         child: Icon(
           icon,
-          color: dark ? Colors.white : Colors.black87,
+          // (PR-8) أيقونات الفئات كحلية أنيقة موحدة.
+          color: dark ? Colors.white : const Color(0xFF1E3A8A),
           size: 20,
         ),
       ),
@@ -900,21 +903,22 @@ class _CatChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
-    const activeBlue = Color(0xFF1E88E5);
-    final pastelBg = Color.lerp(tone.background, Colors.white, 0.22)!;
-    final bg = active
-        ? (dark
-            ? activeBlue.withValues(alpha: 0.22)
-            : Color.lerp(tone.background, const Color(0xFFEAF4FF), 0.45)!)
-        : (dark
-            ? tone.foreground.withValues(alpha: 0.14)
-            : pastelBg);
+    // (PR-8) بطاقات الفئات: أبيض ناصع نقي تماماً بلا أي تلوين خلفي،
+    // بإطار ثلجي دقيق (E2E8F0) وأيقونات كحلية أنيقة موحدة — والنشط
+    // يتميز بحد كحلي أوضح.
+    const catNavy = Color(0xFF1E3A8A);
+    const catNavyActive = Color(0xFF1E40AF);
+    final bg = dark
+        ? (active
+            ? catNavyActive.withValues(alpha: 0.22)
+            : tone.foreground.withValues(alpha: 0.14))
+        : Colors.white;
     final borderColor = active
-        ? activeBlue
+        ? (dark ? AppColors.primaryOf(context) : catNavyActive)
         : (dark
             ? AppColors.borderOf(context)
-            : tone.foreground.withValues(alpha: 0.22));
-    final glyphColor = dark ? Colors.white : Colors.black87;
+            : const Color(0xFFE2E8F0));
+    final glyphColor = dark ? Colors.white : catNavy;
 
     return Padding(
       padding: const EdgeInsetsDirectional.only(end: 8),
@@ -943,7 +947,7 @@ class _CatChip extends StatelessWidget {
                   decoration: BoxDecoration(
                     color: dark
                         ? Colors.white.withValues(alpha: 0.12)
-                        : Colors.white.withValues(alpha: 0.72),
+                        : const Color(0xFFEFF6FF),
                     borderRadius: BorderRadius.circular(9),
                   ),
                   child: Icon(icon, size: 18, color: glyphColor),
@@ -966,7 +970,7 @@ class _CatChip extends StatelessWidget {
                       const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                   decoration: BoxDecoration(
                     color: active
-                        ? activeBlue.withValues(alpha: 0.14)
+                        ? catNavyActive.withValues(alpha: 0.10)
                         : AppColors.surface2Of(context),
                     borderRadius: BorderRadius.circular(999),
                   ),
@@ -977,7 +981,9 @@ class _CatChip extends StatelessWidget {
                     style: TextStyle(
                       fontSize: 9,
                       fontWeight: FontWeight.w700,
-                      color: active ? activeBlue : AppColors.text2Of(context),
+                      color: active
+                          ? (dark ? AppColors.primaryOf(context) : catNavyActive)
+                          : AppColors.text2Of(context),
                     ),
                   ),
                 ),

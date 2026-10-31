@@ -84,6 +84,7 @@ void main() {
     AppDatabase.overrideForTest(db);
     repo = Repo();
     await repo.initSyncInfra(); // (دفعة 57) هوية الجهاز إلزامية قبل الكتابة.
+    await repo.bindWorkspaceId('WS-QASYNC01');
     SyncRecorder.onOperationRecorded = null;
     accountId = await repo.saveAccount(_account());
     engine = SyncEngine(repo: repo, dbProvider: () async => db);

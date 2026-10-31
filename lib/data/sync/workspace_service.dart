@@ -150,70 +150,25 @@ Future<String> ensureWorkspace(Database db, {Repo? repo}) async {
     return rawPref;
   }
 
-  // 4. مساحة افتراضية إن وُجدت: في بيئة الاختبار نُبقيها، وفي الإنتاج نُرقّيها لمعرّف WS- فريد معزول
+  // 4. مساحة افتراضية إن وُجدت: نُبقيها على 'default' دون ترقية الجداول إلى WS-*
+  //    (يُحصَر توليد WS-* داخل دالة الإنشاء الفعلية عند ضغط «إنشاء المنشأة» صراحة).
   final defaultRows = await db.query(
     'workspaces',
     where: "id = 'default'",
     limit: 1,
   );
   if (defaultRows.isNotEmpty) {
-    if (debugForceLegacyWorkspaceId) {
-      return defaultWorkspaceId;
-    }
-    final newId = generateWorkspaceId();
-    final now = DateTime.now().toIso8601String();
-    final baseRow = defaultRows.first;
-    await db.insert(
-      'workspaces',
-      {
-        'id': newId,
-        'name': (baseRow['name'] as String?)?.isNotEmpty == true
-            ? baseRow['name']
-            : 'متجري',
-        'owner_google_id': baseRow['owner_google_id'] ?? '',
-        'owner_email': (accountEmail != null && accountEmail.isNotEmpty)
-            ? accountEmail
-            : (baseRow['owner_email'] ?? ''),
-        'owner_name': baseRow['owner_name'] ?? '',
-        'created_at': baseRow['created_at'] ?? now,
-        'updated_at': now,
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
-    for (final t in const [
-      'devices',
-      'users',
-      'accounts',
-      'transactions',
-      'vouchers',
-      'items',
-      'item_categories',
-      'sections',
-      'stock_moves',
-      'conversations',
-      'messages',
-      'notifications',
-      'operations',
-    ]) {
-      try {
-        await db.update(t, {'workspace_id': newId},
-            where:
-                "workspace_id = 'default' OR workspace_id IS NULL OR workspace_id = ''");
-      } catch (_) {}
-    }
-    await repo?.setSetting(_workspaceIdSetting, newId);
-    repo?.debugSetWorkspaceId(newId);
-    return newId;
+    await repo?.setSetting(_workspaceIdSetting, defaultWorkspaceId);
+    repo?.debugSetWorkspaceId(defaultWorkspaceId);
+    return defaultWorkspaceId;
   }
 
-  // 5. إنشاء مساحة المنشأة للمرة الأولى فقط عند أول تشغيل خام
+  // 5. إنشاء المساحة الافتراضية 'default' عند أول تشغيل خام للجهاز دون توليد WS-*
   final now = DateTime.now().toIso8601String();
-  final id =
-      debugForceLegacyWorkspaceId ? defaultWorkspaceId : generateWorkspaceId();
   await db.insert(
     'workspaces',
     {
-      'id': id,
+      'id': defaultWorkspaceId,
       'name': 'متجري',
       'owner_google_id': '',
       'owner_email': accountEmail ?? '',
@@ -223,8 +178,9 @@ Future<String> ensureWorkspace(Database db, {Repo? repo}) async {
     },
     conflictAlgorithm: ConflictAlgorithm.ignore,
   );
-  await repo?.setSetting(_workspaceIdSetting, id);
-  return id;
+  await repo?.setSetting(_workspaceIdSetting, defaultWorkspaceId);
+  repo?.debugSetWorkspaceId(defaultWorkspaceId);
+  return defaultWorkspaceId;
 }
 
 Future<String?> currentWorkspaceId(Repo repo) async {

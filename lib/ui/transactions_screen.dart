@@ -521,6 +521,7 @@ class _Totals extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final codes = {
+      ...page.salesByCurrency.keys,
       ...page.inflowByCurrency.keys,
       ...page.outflowByCurrency.keys,
     }.toList();
@@ -530,7 +531,18 @@ class _Totals extends StatelessWidget {
       padding: const EdgeInsets.only(top: 10, bottom: 2),
       child: Column(
         children: [
-          for (final code in codes)
+          for (final code in codes) ...[
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: StatCard(
+                title: 'إجمالي المبيعات ($code)',
+                value: hidden
+                    ? '••••'
+                    : Fmt.money(page.salesByCurrency[code] ?? 0),
+                icon: Icons.trending_up_rounded,
+                color: AppColors.primaryOf(context),
+              ),
+            ),
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Row(
@@ -559,6 +571,7 @@ class _Totals extends StatelessWidget {
                 ],
               ),
             ),
+          ],
           Row(
             children: [
               Text(
@@ -671,20 +684,49 @@ class _TxCard extends ConsumerWidget {
                             const <String, String>{};
                         final googleLinked =
                             ref.watch(googleLinkedProvider).value ?? false;
+                        final isOwner =
+                            ref.watch(isOwnerProvider).value ?? (mode == 'host');
                         final isLocalStandalone = mode == 'standalone' ||
                             ((st['account.type'] ?? '') == 'individual' &&
                                 (st['account.email'] ?? st['email'] ?? '')
                                     .trim()
                                     .isEmpty &&
                                 !googleLinked);
+                        final badges = isOwner
+                            ? ref.watch(txDeliveryBadgesProvider).valueOrNull
+                            : null;
+                        final b = badges?['${tx.id}'];
+                        final hasManagerTracker =
+                            isOwner && b != null && b.total > 1;
+                        // على جهاز المدير فقط: إذا رُفعت العملية للسحابة ولكن لم تستلمها
+                        // كافة أجهزة الروستر بعد، تبقى الشارة «بانتظار المزامنة» مع العداد الذكي.
+                        final effectiveSyncState = hasManagerTracker
+                            ? (tx.syncState == 'synced' && !b.all
+                                ? 'pending'
+                                : tx.syncState)
+                            : tx.syncState;
                         return Wrap(
                           spacing: 5,
                           runSpacing: 4,
                           children: [
                             _statusPill(context, tx.status),
                             if (!isLocalStandalone) ...[
-                              _syncPill(context, tx.syncState),
-                              _deliveryBadge(context, ref),
+                              if (hasManagerTracker)
+                                InkWell(
+                                  borderRadius: BorderRadius.circular(20),
+                                  onTap: () =>
+                                      _showDeliveryDetailsSheet(context, b),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      _syncPill(context, effectiveSyncState),
+                                      const SizedBox(width: 5),
+                                      _deliveryBadge(context, b),
+                                    ],
+                                  ),
+                                )
+                              else
+                                _syncPill(context, effectiveSyncState),
                             ],
                           ],
                         );
@@ -741,31 +783,201 @@ class _TxCard extends ConsumerWidget {
     return _Badge(label: label, color: color, icon: icon);
   }
 
-  /// شارة صغيرة بعدد الأجهزة التي استلمت العملية؛ ✅ فور اكتمال المزامنة السحابية.
-  Widget _deliveryBadge(BuildContext context, WidgetRef ref) {
-    if (tx.syncState == 'synced') {
-      return const Icon(Icons.check_circle, size: 16, color: Colors.green);
-    }
-    final badges = ref.watch(txDeliveryBadgesProvider).valueOrNull;
-    final b = badges?['${tx.id}'];
-    if (b == null || b.total <= 0) return const SizedBox.shrink();
-    if (b.all) {
-      return const Icon(Icons.check_circle, size: 16, color: Colors.green);
-    }
+  /// شارة ذكية لجهاز المدير فقط تعرض عداد انتشار العملية بين أجهزة المنشأة (`👥 delivered/total`).
+  Widget _deliveryBadge(BuildContext context, TxDeliveryBadge b) {
+    final badgeColor = b.all ? Colors.green.shade700 : Colors.amber.shade900;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
       decoration: BoxDecoration(
-        color: Colors.blue.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(9),
+        color: badgeColor.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: badgeColor.withValues(alpha: 0.35)),
       ),
       child: Text(
-        '${b.delivered}/${b.total}',
-        style: const TextStyle(
+        '👥 ${b.delivered}/${b.total}',
+        style: TextStyle(
           fontSize: 10.5,
           fontWeight: FontWeight.w800,
-          color: Colors.blue,
+          color: badgeColor,
         ),
       ),
+    );
+  }
+
+  Future<void> _showDeliveryDetailsSheet(
+    BuildContext context,
+    TxDeliveryBadge badge,
+  ) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: AppColors.text3Of(ctx).withValues(alpha: 0.35),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Icon(
+                      badge.all
+                          ? Icons.verified_rounded
+                          : Icons.cloud_sync_rounded,
+                      color: badge.all
+                          ? Colors.green.shade600
+                          : Colors.amber.shade800,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'حالة استلام العملية على أجهزة المنشأة',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          Text(
+                            'تم الاستلام في ${badge.delivered} من أصل ${badge.total} أجهزة مسجلة في الروستر',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: AppColors.text3Of(ctx),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: (badge.all
+                                ? Colors.green.shade600
+                                : Colors.amber.shade800)
+                            .withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Text(
+                        '👥 ${badge.delivered}/${badge.total}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                          color: badge.all
+                              ? Colors.green.shade700
+                              : Colors.amber.shade900,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const Divider(height: 20),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 360),
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: badge.peers.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (ctx, i) {
+                      final p = badge.peers[i];
+                      final parsedReceived =
+                          DateTime.tryParse(p.receivedAt.trim());
+                      final timeText = parsedReceived != null
+                          ? Fmt.clock(parsedReceived)
+                          : '';
+                      final statusLabel = p.delivered
+                          ? '✅ تم الاستلام${timeText.isNotEmpty ? ' $timeText' : ''}'
+                          : '⏳ بانتظار الاتصال';
+                      final statusColor = p.delivered
+                          ? Colors.green.shade700
+                          : Colors.amber.shade900;
+                      return ListTile(
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 2,
+                        ),
+                        leading: CircleAvatar(
+                          radius: 18,
+                          backgroundColor: (p.isOwner
+                                  ? AppColors.primaryOf(ctx)
+                                  : AppColors.infoOf(ctx))
+                              .withValues(alpha: 0.12),
+                          child: Icon(
+                            p.isOwner
+                                ? Icons.admin_panel_settings_rounded
+                                : Icons.smartphone_rounded,
+                            size: 18,
+                            color: p.isOwner
+                                ? AppColors.primaryOf(ctx)
+                                : AppColors.infoOf(ctx),
+                          ),
+                        ),
+                        title: Text(
+                          p.deviceName,
+                          style: const TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        subtitle: Text(
+                          [
+                            if (p.isOwner) 'جهاز المدير' else 'جهاز عضو',
+                            if (p.isCreator) 'منشئ العملية',
+                          ].join(' · '),
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: AppColors.text3Of(ctx),
+                          ),
+                        ),
+                        trailing: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: statusColor.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: statusColor.withValues(alpha: 0.3),
+                            ),
+                          ),
+                          child: Text(
+                            statusLabel,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                              color: statusColor,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 

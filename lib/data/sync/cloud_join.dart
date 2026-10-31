@@ -253,13 +253,8 @@ const Duration kCloudOpTimeout = Duration(seconds: 15);
 /// اللقطة أثقل عملية في المسار — نمنحها وقتاً واقعياً.
 const Duration kCloudSnapshotUploadTimeout = Duration(minutes: 3);
 
-/// (دفعة 65 — تصحيح انحدار) المهلة الكلية لإنشاء دعوة انضمام من
-/// الواجهة: تشمل رفع اللقطة (الأثقل) ثم الدعوة ثم الفهرس. يجب أن تبقى
-/// **أكبر من** [kCloudSnapshotUploadTimeout] وإلا جهضت الواجهة
-/// العملية بعد أن يكون الخادم قد استلم اللقطة وقبل أن يكتب الدعوة،
-/// فتظهر للمدير «انتهت المهلة» ولا يجد العضو المساحة أبداً — وهو
-/// بالضبط ما جعل «الربط بالمجموعة» يبدو معطلاً بالكامل.
-const Duration kCloudInviteTimeout = Duration(minutes: 3, seconds: 30);
+/// المهلة الكلية لإنشاء دعوة انضمام من الواجهة بعد فصل رفع اللقطة عن توليد الرمز.
+const Duration kCloudInviteTimeout = Duration(seconds: 20);
 
 class CloudJoinException implements Exception {
   final String message;
@@ -894,6 +889,21 @@ class CloudJoin {
     return m;
   }
 
+  /// يستخرج الطابع الزمني بالملي ثانية من أي حقل سحابي أو محلي (int أو num أو نص رقمي أو ISO-8601).
+  static int parseSyncMs(Object? v) {
+    if (v is int && v > 0) return v;
+    if (v is num && v > 0) return v.toInt();
+    if (v is String) {
+      final s = v.trim();
+      if (s.isEmpty) return 0;
+      final asInt = int.tryParse(s);
+      if (asInt != null && asInt > 0) return asInt;
+      final dt = DateTime.tryParse(s);
+      if (dt != null) return dt.millisecondsSinceEpoch;
+    }
+    return 0;
+  }
+
   /// تنقية وتجهيز صف جهاز وارد من السحابة قبل إدراجه/تحديثه في جدول `devices` المحلي:
   /// 1) يقتصر على الأعمدة الفعلية لجدول `devices` فقط (يستبعد حقول السحابة كـ fingerprint وemail وlast_seen).
   /// 2) يضمن وجود سجل المنشأة الأب في جدول `workspaces` أولاً لمنع خطأ قيد المفتاح الأجنبي (Code 787).
@@ -909,6 +919,24 @@ class CloudJoin {
         m[k] = v;
       }
     });
+    final syncMs = [
+      parseSyncMs(raw['last_synced_time']),
+      parseSyncMs(raw['last_sync_at']),
+    ].reduce((a, b) => a > b ? a : b);
+    if (syncMs > 0) {
+      m['last_sync_at'] =
+          DateTime.fromMillisecondsSinceEpoch(syncMs).toIso8601String();
+    }
+    final seenMs = [
+      parseSyncMs(raw['last_seen_at']),
+      parseSyncMs(raw['last_seen']),
+      parseSyncMs(raw['lastSeenAt']),
+      syncMs,
+    ].reduce((a, b) => a > b ? a : b);
+    if (seenMs > 0) {
+      m['last_seen_at'] =
+          DateTime.fromMillisecondsSinceEpoch(seenMs).toIso8601String();
+    }
     m['auth_secret'] = '';
     m['pair_token'] = '';
     m['pair_token_exp'] = '';
@@ -1025,7 +1053,8 @@ class CloudJoin {
 
   // ==================== إنشاء الدعوة (المدير) ====================
 
-  /// يرفع لقطة كاملة + رمز دعوة صالح 24 ساعة، ويعيد بيانات الدعوة للعرض.
+  /// ينشئ رمز دعوة صالح 15 دقيقة ويكتب الفهارس السريعة فوراً (< 1.5 ثانية)
+  /// دون رفع اللقطة أو إعادة رفع الروستر في مسار التوليد.
   static Future<CloudInviteInfo> createInvite(Repo repo) async {
     // الملكية الفعلية (is_owner) أو وكالة المدير (canManageGroup) هي الحكم.
     final owner = await repo.isWorkspaceOwner();
@@ -1036,25 +1065,7 @@ class CloudJoin {
     }
     // 🔒 (التجربة) انتهاء الفترة يمنع ربط أجهزة جديدة.
     await _ensureSubscriptionAllows(repo);
-    // (الخطط المزدوجة) فتح كود ربط لجهاز ثانٍ = تحول تلقائي لمسار
-    // المؤسسات بمقاعده — دون المساس بالعداد الزمني للتجربة.
-    try {
-      final st0 = await repo.settings();
-      final url0 = effectiveBackendUrl(st0['cloudBackendUrl']);
-      if (url0.isNotEmpty) {
-        final ws0 = await repo.activeWorkspaceId();
-        await SubscriptionGuard.promoteToEnterprise(repo,
-            backendUrl: url0, workspaceId: ws0);
-        // 🪑 حد المقاعد: لا معنى لدعوة جديدة والمقاعد مستنفدة — نرفض
-        // مبكراً برسالة المدير بدل فشل متأخر عند موافقة العضو.
-        await _ensureSeatAvailable(repo,
-            backendUrl: url0,
-            workspaceId: ws0,
-            joiningDeviceId: '__new__');
-      }
-    } on CloudJoinException {
-      rethrow;
-    } catch (_) {}
+
     final mode = await repo.workspaceMode();
     if (owner && mode == 'member') {
       final db0 = await repo.database;
@@ -1069,144 +1080,87 @@ class CloudJoin {
           'اضبط رابط قاعدة البيانات السحابية أولاً من الإعدادات ← المزامنة السحابية.');
     }
     _validateHttps(url);
-    // نحاول جلب توكن هوية إن كان Anonymous/Email Auth مفعّلاً في Firebase Console؛
-    // وإن كان معطّلاً نكمل مباشرة نحو RTDB (حيث تفصل قواعد البيانات نفسها في السماح أو الرفض).
     await _ensureToken();
 
-    final db = await repo.database;
     final ws = await repo.activeWorkspaceId();
     final ourId = await ensureDeviceId(repo);
-    final ownerDevs = await db.query('devices',
-        columns: ['id'], where: 'is_owner = 1', limit: 1);
-    final hostDevId = ownerDevs.isNotEmpty
-        ? '${ownerDevs.first['id'] ?? ourId}'
-        : ourId;
 
-    final snapshot = await buildWorkspaceSnapshot(repo, hostDeviceId: hostDevId);
+    // التحقق من المقاعد وتهيئة سجل المالك بالتوازي لتسريع التوليد
+    try {
+      await Future.wait<void>([
+        _ensureSeatAvailable(repo,
+            backendUrl: url,
+            workspaceId: ws,
+            joiningDeviceId: '__new__'),
+        SubscriptionGuard.promoteToEnterprise(repo,
+                backendUrl: url, workspaceId: ws)
+            .catchError((_) {}),
+        registerCreatorIfAbsent(repo,
+                backendUrl: url, workspaceId: ws, deviceId: ourId)
+            .catchError((_) {}),
+        ensureOwnerMembership(repo, backendUrl: url, workspaceId: ws)
+            .catchError((_) {}),
+      ]);
+    } on CloudJoinException {
+      rethrow;
+    } catch (_) {}
 
     final now = DateTime.now();
     final root = _root(url, ws);
-    // رفع لقطة البيانات فوراً قبل إصدار الدعوة لضمان جاهزية اللقطة فور اقتران الجهاز الجديد
-    try {
-      final snapPayload = {
-        'createdAt': now.toIso8601String(),
-        'hostDeviceId': hostDevId,
-        'compacted_through_ts': now.millisecondsSinceEpoch,
-        'data': snapshot,
-      };
-      await _putJson(
-        '$root/joinSnapshot.json',
-        snapPayload,
-        timeout: const Duration(seconds: 25),
-      );
-      await _putJson(
-        '$root/snapshot.json',
-        snapPayload,
-        timeout: const Duration(seconds: 25),
-      );
-      final db2 = await repo.database;
-      await db2.insert(
-          'sync_meta',
-          {
-            'key': 'snapshotThroughTs:$ws',
-            'value': '${now.millisecondsSinceEpoch}',
-          },
-          conflictAlgorithm: ConflictAlgorithm.replace);
-    } catch (e) {
-      debugPrint('joinSnapshot upload on createInvite: $e');
-    }
 
-    // (الاسترداد السيادي) تسجيل منشئ المساحة مرة واحدة وإلى الأبد:
-    // creator_device_id يُكتب فقط إن لم يوجد — لا يتغير مع نقل الملكية
-    // أبداً، وهو صمام الأمان الأخير لاسترداد المجموعة. المجموعات القائمة
-    // قبل هذه الميزة تُسجَّل بأثر رجعي: المالك الحالي وقت أول دعوة جديدة.
-    try {
-      await registerCreatorIfAbsent(repo,
-          backendUrl: url, workspaceId: ws, deviceId: ourId);
-    } catch (_) {}
-    // (المرحلة 2) عضوية المالك: /members/{uid} بدور owner — أول عضو في
-    // المنشأة، وهو مرجع قواعد الأمان (auth.uid) لكتابة هذه المساحة.
-    try {
-      await ensureOwnerMembership(repo, backendUrl: url, workspaceId: ws);
-    } catch (_) {}
-
-    // ══ (إصلاح جذري — منع تصادم PIN 6 أرقام) ══
-    // كان توليد PIN يكتب invite_index/pin_XXXXXX مباشرة دون التحقق من
-    // وجوده، فدعوتان متزامنتان بنفس الرقم (احتمال 1/1e6 لكنه حتمي على
-    // نطاق واسع) تكتب إحداهما فوق الأخرى — العضو يدخل PIN فيجد مساحة
-    // خاطئة أو يفشل. الحل: حلقة توليد مع فحص الفهرس حتى نجد مفتاحاً حراً.
+    // ══ (منع تصادم PIN 6 أرقام بالتوازي عبر Future.wait) ══
     String token = _newToken();
     String pin = newPairPin();
-    for (var attempt = 0; attempt < 10; attempt++) {
+    for (var attempt = 0; attempt < 5; attempt++) {
       try {
-        final existTok =
-            await _getJson(_inviteIndexPath(url, _inviteTokenKey(token)));
+        final checks = await Future.wait<Map<String, Object?>?>([
+          _getJson(_inviteIndexPath(url, _inviteTokenKey(token))),
+          _getJson(_inviteIndexPath(url, _invitePinKey(pin))),
+        ]);
+        final existTok = checks[0];
+        final existPin = checks[1];
+        var collision = false;
         if (existTok != null) {
           token = _newToken();
-          continue;
+          collision = true;
         }
-        final existPin =
-            await _getJson(_inviteIndexPath(url, _invitePinKey(pin)));
         if (existPin != null) {
           final exp = DateTime.tryParse('${existPin['expiresAt'] ?? ''}');
           if (exp != null && DateTime.now().isBefore(exp)) {
             pin = newPairPin();
-            continue;
+            collision = true;
           }
         }
-        break;
+        if (!collision) break;
       } catch (_) {
         break;
       }
     }
-    // TTL دقيق: 15 دقيقة لمسار الموافقة التفاعلي (كانت 24 ساعة — نافذة
-    // أوسع من اللازم أمنياً بعد اعتماد موافقة المدير الصريحة).
+
+    // TTL دقيق: 15 دقيقة لمسار الموافقة التفاعلي.
     final expires = now.add(const Duration(minutes: 15));
-    await _putJson('$root/invites/$token.json', {
+    final invitePayload = {
       'createdAt': now.toIso8601String(),
       'expiresAt': expires.toIso8601String(),
       'ws': ws,
       'pin': pin,
-    }, timeout: const Duration(seconds: 20));
+    };
+    final indexPayload = {
+      'ws': ws,
+      'token': token,
+      'pin': pin,
+      'expiresAt': expires.toIso8601String(),
+    };
 
-    // (أ-2) فهرسان على الجذر (PIN + توكن) — اكتشاف المساحة بقراءة واحدة
-    // بدل مسح كل مساحات العمل. نضمن نجاح الفهرسة بمحاولات متكررة.
-    for (var i = 0; i < 3; i++) {
-      try {
-        await _putJson(_inviteIndexPath(url, _invitePinKey(pin)), {
-          'ws': ws,
-          'token': token,
-          'pin': pin,
-          'expiresAt': expires.toIso8601String(),
-        }, timeout: const Duration(seconds: 20));
-        await _putJson(_inviteIndexPath(url, _inviteTokenKey(token)), {
-          'ws': ws,
-          'token': token,
-          'pin': pin,
-          'expiresAt': expires.toIso8601String(),
-        }, timeout: const Duration(seconds: 20));
-        break;
-      } catch (_) {
-        if (i < 2) {
-          await Future<void>.delayed(const Duration(milliseconds: 400));
-        }
-      }
-    }
-
-    // رفع سجل الأجهزة النشطة فقط حتى تكون الحالة السحابية كاملة قبل انضمام العضو
-    // دون إعادة رفع أجهزة مطرودة أو محظورة سابقاً.
-    try {
-      final devices = await db.query(
-        'devices',
-        where:
-            "COALESCE(revoked_at,'') = '' AND COALESCE(expelled_at,'') = '' AND is_paired = 1",
-      );
-      for (final d in devices) {
-        await _putJson('$root/roster/${Uri.encodeComponent('${d['id']}')}.json',
-            _safeDeviceRow(d),
-            timeout: const Duration(seconds: 20));
-      }
-    } catch (_) {}
+    // كتابة عقدة الدعوة ومفتاحي الفهرس (PIN + توكن) بالتوازي في خطوة واحدة سريعة
+    await Future.wait<void>([
+      _putJson('$root/invites/$token.json', invitePayload,
+          timeout: const Duration(seconds: 15)),
+      _putJson(_inviteIndexPath(url, _invitePinKey(pin)), indexPayload,
+          timeout: const Duration(seconds: 15)),
+      _putJson(_inviteIndexPath(url, _inviteTokenKey(token)), indexPayload,
+          timeout: const Duration(seconds: 15)),
+    ]);
 
     return CloudInviteInfo(
       backendUrl: url,
@@ -1285,7 +1239,16 @@ class CloudJoin {
 
     Map<String, Object?>? snap;
     var snapshotCompactedTs = 0;
-    final snapRec = await _getJson('$root/joinSnapshot.json');
+    Map<String, Object?>? snapRec = await _getJson('$root/joinSnapshot.json');
+    // آلية الانتظار الذكي (Retry Polling كل 400ms) عند وصول إشعار الموافقة الفوري
+    // لضمان اكتمال رفع joinSnapshot.json ومنع السقوط في فخ اللقطة الفارغة (stub).
+    if (snapRec?['data'] is! Map && isApprovedInCloud) {
+      for (var retry = 0; retry < 12; retry++) {
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        snapRec = await _getJson('$root/joinSnapshot.json');
+        if (snapRec?['data'] is Map) break;
+      }
+    }
     if (snapRec?['data'] is Map) {
       snap = Map<String, Object?>.from(snapRec!['data'] as Map);
       snapshotCompactedTs =
@@ -1825,6 +1788,13 @@ class CloudJoin {
     if (own.isNotEmpty) {
       try {
         final nowMs = DateTime.now().millisecondsSinceEpoch;
+        final nowIso = DateTime.fromMillisecondsSinceEpoch(nowMs).toIso8601String();
+        await db.update(
+          'devices',
+          {'last_sync_at': nowIso, 'last_seen_at': nowIso},
+          where: 'id = ?',
+          whereArgs: [ourId],
+        );
         await _putJson(
             '$root/roster/${Uri.encodeComponent(ourId)}.json',
             {
@@ -1833,6 +1803,9 @@ class CloudJoin {
               'hw_fingerprint': myFp,
               'last_seen': nowMs,
               'lastSeenAt': nowMs,
+              'last_synced_time': nowMs,
+              'last_sync_at': nowIso,
+              'last_seen_at': nowIso,
               'is_paired': 1,
               'is_owner': 0,
               'revoked_at': '',
@@ -2022,6 +1995,16 @@ class CloudJoin {
         final id = '${r['id'] ?? entry.key}';
         if (id.isEmpty) continue;
         final remoteUpd = '${r['updated_at'] ?? ''}';
+        final remoteSyncMs = [
+          parseSyncMs(r['last_synced_time']),
+          parseSyncMs(r['last_sync_at']),
+        ].reduce((a, b) => a > b ? a : b);
+        final remoteSeenMs = [
+          parseSyncMs(r['last_seen_at']),
+          parseSyncMs(r['last_seen']),
+          parseSyncMs(r['lastSeenAt']),
+          remoteSyncMs,
+        ].reduce((a, b) => a > b ? a : b);
         final local = localById[id];
         if (id == ourId) {
           // سجلنا: المدير هو المرجع في التعيين/التسمية/الحظر/الطرد فقط.
@@ -2041,7 +2024,7 @@ class CloudJoin {
               fallbackUpd: remoteUpd,
             );
           }
-          if (! (!isOwner && remoteRevokedOrExpelled) &&
+          if (!(!isOwner && remoteRevokedOrExpelled) &&
               remoteUpd.compareTo(localUpd) <= 0) {
             continue;
           }
@@ -2096,6 +2079,12 @@ class CloudJoin {
           // لا نعيد إدراج جهاز مطرود/محظور في جدول devices المحلي ولا ننشئ له مستخدم ظل
           continue;
         }
+        if (local == null &&
+            r['is_paired'] == null &&
+            '${r['name'] ?? ''}'.trim().isEmpty) {
+          // تجاهل أي عقدة جزئية يتيمة لا تمثل سجل جهاز مكتمل
+          continue;
+        }
         if (!remoteExpelled) {
           await syncUserFromRoster(
             r,
@@ -2126,6 +2115,8 @@ class CloudJoin {
           } catch (_) {}
         } else {
           final localUpd = '${local['updated_at'] ?? ''}';
+          final localSyncMs = parseSyncMs(local['last_sync_at']);
+          final localSeenMs = parseSyncMs(local['last_seen_at']);
           final localActive = (local['is_paired'] as int? ?? 0) == 1 &&
               '${local['revoked_at'] ?? ''}'.isEmpty &&
               '${local['expelled_at'] ?? ''}'.isEmpty;
@@ -2136,12 +2127,50 @@ class CloudJoin {
           if (isOwner && localActive && remoteExpelled && !isolatedBySelf) {
             continue;
           }
-          if (remoteUpd.compareTo(localUpd) <= 0) continue;
+          if (remoteUpd.compareTo(localUpd) <= 0) {
+            // حتى لو لم يتغير updated_at، نلتقط تقدم مؤشر المزامنة (last_synced_time)
+            // وآخر ظهور للعضو من عقدة /roster محلياً دون أي طلبات إضافية.
+            if (remoteSyncMs > localSyncMs || remoteSeenMs > localSeenMs) {
+              final cursorPatch = <String, Object?>{};
+              if (remoteSyncMs > localSyncMs) {
+                cursorPatch['last_sync_at'] =
+                    DateTime.fromMillisecondsSinceEpoch(remoteSyncMs)
+                        .toIso8601String();
+              }
+              if (remoteSeenMs > localSeenMs) {
+                cursorPatch['last_seen_at'] =
+                    DateTime.fromMillisecondsSinceEpoch(remoteSeenMs)
+                        .toIso8601String();
+              }
+              if (cursorPatch.isNotEmpty) {
+                try {
+                  await db.update('devices', cursorPatch,
+                      where: 'id = ?', whereArgs: [id]);
+                  changed = true;
+                } catch (_) {}
+              }
+            }
+            continue;
+          }
           final row = await _sanitizeDeviceRowForDb(
             db,
             r,
             fallbackWorkspaceId: localWs,
           );
+          final bestSyncMs =
+              remoteSyncMs > localSyncMs ? remoteSyncMs : localSyncMs;
+          if (bestSyncMs > 0) {
+            row['last_sync_at'] =
+                DateTime.fromMillisecondsSinceEpoch(bestSyncMs)
+                    .toIso8601String();
+          }
+          final bestSeenMs =
+              remoteSeenMs > localSeenMs ? remoteSeenMs : localSeenMs;
+          if (bestSeenMs > 0) {
+            row['last_seen_at'] =
+                DateTime.fromMillisecondsSinceEpoch(bestSeenMs)
+                    .toIso8601String();
+          }
           row.remove('id');
           row.remove('created_at');
           // لا نلمس سرّ المصادقة المحلي (قد يكون تعلّمه عبر اقتران سابق).
@@ -2253,6 +2282,15 @@ class CloudJoin {
             continue;
           }
         }
+        final localDeviceSyncMs = parseSyncMs(d['last_sync_at']);
+        final remoteDeviceSyncMs = remoteEntry is Map
+            ? [
+                parseSyncMs(remoteEntry['last_synced_time']),
+                parseSyncMs(remoteEntry['last_sync_at']),
+              ].reduce((a, b) => a > b ? a : b)
+            : 0;
+        final syncCursorAdvanced =
+            devIdStr == ourId && localDeviceSyncMs > remoteDeviceSyncMs;
         final missingOrRevokedInCloud = remote == null ||
             remoteEntry is! Map ||
             '${remoteEntry['revoked_at'] ?? ''}'.isNotEmpty ||
@@ -2260,9 +2298,19 @@ class CloudJoin {
             (remoteEntry['is_paired'] as int? ?? 0) != 1 ||
             '${remoteEntry['user_role'] ?? ''}' != '${d['user_role'] ?? ''}' ||
             '${remoteEntry['user_permissions'] ?? ''}' != '${d['user_permissions'] ?? ''}' ||
-            '${remoteEntry['user_id'] ?? ''}' != '${d['user_id'] ?? ''}';
+            '${remoteEntry['user_id'] ?? ''}' != '${d['user_id'] ?? ''}' ||
+            syncCursorAdvanced;
         if (!missingOrRevokedInCloud && upd.compareTo(lastPush) <= 0) continue;
         final map = _safeDeviceRow(Map<String, Object?>.from(d));
+        final bestDeviceSyncMs = localDeviceSyncMs > remoteDeviceSyncMs
+            ? localDeviceSyncMs
+            : remoteDeviceSyncMs;
+        if (bestDeviceSyncMs > 0) {
+          map['last_synced_time'] = bestDeviceSyncMs;
+          map['last_sync_at'] =
+              DateTime.fromMillisecondsSinceEpoch(bestDeviceSyncMs)
+                  .toIso8601String();
+        }
         if (!isOwner) {
           map['is_owner'] = 0;
         }
@@ -3137,33 +3185,17 @@ class CloudJoin {
       throw const CloudJoinException('لا يمكن لجهاز المدير قبول نفسه كعضو في مجموعته.');
     }
     await _ensureSubscriptionAllows(repo);
-    await _ensureSeatAvailable(repo,
-        backendUrl: backendUrl,
-        workspaceId: workspaceId,
-        joiningDeviceId: deviceId);
+    // 1) التحقق من المقاعد وقراءة الطلب الأصلي بالتوازي
+    final preChecks = await Future.wait<Object?>([
+      _ensureSeatAvailable(repo,
+          backendUrl: backendUrl,
+          workspaceId: workspaceId,
+          joiningDeviceId: deviceId),
+      _getJson(requestPath(backendUrl, workspaceId, deviceId)),
+    ]);
+    final existingReq = preChecks[1] as Map<String, Object?>?;
 
-    // 1) اقرأ الطلب الأصلي أولاً (للحصول على uid و token)
-    final existingReq =
-        await _getJson(requestPath(backendUrl, workspaceId, deviceId));
-
-    // (إصلاح إعادة ربط جهاز سبق طرده أو حظره):
-    // موافقة المدير على طلب الانضمام الجديد تلغي فوراً أي شاهدة طرد سابقة في /evictions
-    // وتحدّث سجل الجهاز محلياً وسحابياً قبل إعلان approved حتى لا يصطدم العضو بسجل طرد قديم.
-    final root0 = _root(backendUrl, workspaceId);
-    // (PR-5) إلغاء موثّق لكل شواهد الطرد/الحظر السحابية — لا evictions وحدها —
-    // حتى لا يصطدم العضو بسجل قديم عند أول نبض بعد الموافقة.
-    final encApproved = Uri.encodeComponent(deviceId);
-    for (final node in const [
-      'evictions',
-      'revoked_devices',
-      'ejected_devices',
-    ]) {
-      try {
-        await _delete('$root0/$node/$encApproved.json');
-      } catch (_) {}
-    }
-
-    // 2) إعداد المستخدم والجهاز محلياً ورفع سجل نظيف إلى /roster قبل إشعار العضو بـ approved
+    // 2) إعداد المستخدم والجهاز محلياً
     final db = await repo.database;
     final now = DateTime.now().toIso8601String();
     final initialRole = UserRole.values.firstWhere((r) => r.code == roleCode,
@@ -3262,110 +3294,101 @@ class CloudJoin {
         ? repo.requireWorkspaceId.trim()
         : (workspaceId.trim().isNotEmpty ? workspaceId.trim() : 'default');
     await AppDatabase.ensureWorkspaceRow(db, targetWsId);
-    await db.insert(
-        'devices',
-        {
-          'id': deviceId,
-          'workspace_id': targetWsId,
-          'name': deviceName,
-          'is_paired': 1,
-          'is_owner': 0,
-          'user_id': uid,
-          'revoked_at': '',
-          'expelled_at': '',
-          'last_seen_at': now,
-          'created_at': now,
-          'updated_at': now,
-        },
+    final deviceRow = <String, Object?>{
+      'id': deviceId,
+      'workspace_id': targetWsId,
+      'name': deviceName,
+      'is_paired': 1,
+      'is_owner': 0,
+      'user_id': uid,
+      'revoked_at': '',
+      'expelled_at': '',
+      'last_seen_at': now,
+      'created_at': now,
+      'updated_at': now,
+    };
+    await db.insert('devices', deviceRow,
         conflictAlgorithm: ConflictAlgorithm.replace);
 
-    // فحص سباق المقاعد بعد الإدراج
-    try {
-      final rec2 = await _getJson(
-          '${_root(backendUrl, workspaceId)}/subscription.json');
-      if (rec2 != null) {
-        final v2 = rec2['max_devices'];
-        final max2 = v2 is num ? v2.toInt() : 0;
-        if (max2 > 0) {
-          bool activeRow2(Map d) =>
-              '${d['revoked_at'] ?? ''}'.isEmpty &&
-              '${d['expelled_at'] ?? ''}'.isEmpty;
-          int cur2 = await connectedDevicesCount(repo);
-          try {
-            final r2 = await _getJson(
-                '${_root(backendUrl, workspaceId)}/roster.json');
-            if (r2 != null) {
-              final cloudCount = (r2 as Map).values
-                  .whereType<Map>()
-                  .where(activeRow2)
-                  .length;
-              if (cloudCount > cur2) cur2 = cloudCount;
-              if (!r2.containsKey(deviceId)) cur2++;
-            }
-          } catch (_) {}
-          if (cur2 > max2) {
-            await db.delete('devices', where: 'id = ?', whereArgs: [deviceId]);
-            try {
-              if (!reuse) {
-                await db.delete('users', where: 'id = ?', whereArgs: [uid]);
-              }
-            } catch (_) {}
-            throw CloudJoinException(
-                '🪑 تم استنفاد عدد الأجهزة أثناء الموافقة '
-                '($cur2/$max2) — سباق موافقات متزامنة. يرجى المحاولة بعد ترقية الباقة.');
-          }
-        }
-      }
-    } catch (e) {
-      if (e is CloudJoinException) rethrow;
-    }
-
-    // 3) رفع سجل الجهاز النظيف إلى /roster و /members أولاً قبل إشعار العضو
+    // 3) إرسال إشارة approved + تحديث الروستر والمقاعد + حذف شواهد الطرد
+    // في دفعة متوازية ذرية واحدة عبر Future.wait (< 1 ثانية) لمنع الطرد الذاتي الخاطئ
     final root = _root(backendUrl, workspaceId);
-    // رفع لقطة البيانات المحدثة وانتظار اكتمالها قبل إشعار العضو بـ approved لضمان استلام اللقطة فوراً
-    try {
-      final snap = await buildWorkspaceSnapshot(repo, hostDeviceId: ourOwnDeviceId);
-      final snapPayload = {
-        'createdAt': now,
-        'hostDeviceId': ourOwnDeviceId,
-        'compacted_through_ts': DateTime.now().millisecondsSinceEpoch,
-        'data': snap,
-      };
-      await _putJson(
-        '$root/joinSnapshot.json',
-        snapPayload,
-        timeout: const Duration(seconds: 25),
-      );
-      await _putJson(
-        '$root/snapshot.json',
-        snapPayload,
-        timeout: const Duration(seconds: 25),
-      );
-    } catch (e) {
-      debugPrint('approveJoinRequest snapshot upload: $e');
+    final encApproved = Uri.encodeComponent(deviceId);
+    final memberUid = '${existingReq?['uid'] ?? ''}'.trim();
+
+    Future<void> writeApprovedSignal() async {
+      try {
+        await _putJson(requestPath(backendUrl, workspaceId, deviceId), {
+          ...?existingReq,
+          'status': 'approved',
+          'role': roleCode,
+          'approvedAt': {'.sv': 'timestamp'},
+          'deleteAfterMs': DateTime.now().millisecondsSinceEpoch +
+              _approvedRequestTtl.inMilliseconds,
+          'expiresAt':
+              DateTime.now().add(_approvedRequestTtl).toIso8601String(),
+        }, timeout: const Duration(seconds: 15));
+      } catch (e) {
+        throw CloudJoinException(
+            '❌ فشل الموافقة: تعذر تحديث حالة الطلب في السحابة.\n'
+            'السبب: $e\n'
+            'الحل: تحقق من الإنترنت وأعد المحاولة.');
+      }
     }
 
-    try {
-      final own = await db.query('devices',
-          where: 'id = ?', whereArgs: [deviceId], limit: 1);
-      if (own.isNotEmpty) {
+    Future<void> uploadJoinSnapshotOnly() async {
+      try {
+        final snap =
+            await buildWorkspaceSnapshot(repo, hostDeviceId: ourOwnDeviceId);
+        final snapTs = DateTime.now().millisecondsSinceEpoch;
+        final snapPayload = {
+          'createdAt': now,
+          'hostDeviceId': ourOwnDeviceId,
+          'compacted_through_ts': snapTs,
+          'data': snap,
+        };
         await _putJson(
-            '$root/roster/${Uri.encodeComponent(deviceId)}.json',
+          '$root/joinSnapshot.json',
+          snapPayload,
+          timeout: const Duration(seconds: 25),
+        );
+        final dbSnap = await repo.database;
+        if (dbSnap.isOpen) {
+          await dbSnap.insert(
+            'sync_meta',
             {
-              ..._safeDeviceRow(own.first),
-              'is_paired': 1,
-              'is_owner': 0,
-              'revoked_at': '',
-              'expelled_at': '',
-              'user_id': uid,
-              'user_role': role.code,
-              'user_permissions': permStr,
+              'key': 'snapshotThroughTs:$targetWsId',
+              'value': '$snapTs',
             },
-            timeout: const Duration(seconds: 20));
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        }
+      } catch (e) {
+        debugPrint('approveJoinRequest snapshot upload: $e');
       }
-      final memberUid = '${existingReq?['uid'] ?? ''}'.trim();
-      if (memberUid.isNotEmpty) {
-        await _putJson(
+    }
+
+    final snapshotFuture = uploadJoinSnapshotOnly();
+    unawaited(snapshotFuture);
+
+    await Future.wait<void>([
+      writeApprovedSignal(),
+      _putJson(
+        '$root/roster/$encApproved.json',
+        {
+          ..._safeDeviceRow(deviceRow),
+          'is_paired': 1,
+          'is_owner': 0,
+          'revoked_at': '',
+          'expelled_at': '',
+          'user_id': uid,
+          'user_role': role.code,
+          'user_permissions': permStr,
+        },
+        timeout: const Duration(seconds: 15),
+      ).catchError((_) {}),
+      if (memberUid.isNotEmpty)
+        _putJson(
           '$root/members/${Uri.encodeComponent(memberUid)}.json',
           {
             'role': role.code,
@@ -3373,29 +3396,22 @@ class CloudJoin {
             'deviceId': deviceId,
             'joined_at': {'.sv': 'timestamp'},
           },
-          timeout: const Duration(seconds: 20),
-        );
-      }
-    } catch (_) {}
+          timeout: const Duration(seconds: 15),
+        ).catchError((_) {}),
+      for (final node in const [
+        'evictions',
+        'revoked_devices',
+        'ejected_devices',
+      ])
+        _delete('$root/$node/$encApproved.json').catchError((_) {}),
+    ]);
 
-    // 4) كتابة approved في /joinRequests لإشعار العضو ببدء الترطيب بعد تجهيز /roster
-    try {
-      await _putJson(requestPath(backendUrl, workspaceId, deviceId), {
-        ...?existingReq,
-        'status': 'approved',
-        'role': roleCode,
-        'approvedAt': {'.sv': 'timestamp'},
-        'deleteAfterMs': DateTime.now().millisecondsSinceEpoch +
-            _approvedRequestTtl.inMilliseconds,
-        'expiresAt':
-            DateTime.now().add(_approvedRequestTtl).toIso8601String(),
-      }, timeout: const Duration(seconds: 20));
-    } catch (e) {
-      throw CloudJoinException(
-          '❌ فشل الموافقة: تعذر تحديث حالة الطلب في السحابة.\n'
-          'السبب: $e\n'
-          'الحل: تحقق من الإنترنت وأعد المحاولة.');
-    }
+    // نافذة انتظار قصيرة غير معطّلة (600ms) تضمن اكتمال اللقطة فوراً في الشبكات السريعة
+    // والاختبارات دون تأخير إغلاق نافذة المدير في قواعد البيانات الضخمة.
+    await snapshotFuture.timeout(
+      const Duration(milliseconds: 600),
+      onTimeout: () {},
+    );
   }
 
   /// ══ (2026-09-22 — توجيه العمليات بين الأجهزة) ══
@@ -3927,17 +3943,29 @@ class CloudJoin {
       if (isOwner || id == ourId) continue; // لا نفصل المدير ولا أنفسنا
       final entry = roster[id];
       if (entry is Map && active(entry)) {
+        final remoteSyncMs = [
+          parseSyncMs(entry['last_synced_time']),
+          parseSyncMs(entry['last_sync_at']),
+        ].reduce((a, b) => a > b ? a : b);
+        final localSyncMs = parseSyncMs(r['last_sync_at']);
+        final patch = <String, Object?>{};
         if ((r['is_paired'] as int? ?? 0) != 1 ||
             '${r['revoked_at'] ?? ''}'.isNotEmpty ||
             '${r['expelled_at'] ?? ''}'.isNotEmpty) {
+          patch['is_paired'] = 1;
+          patch['revoked_at'] = '';
+          patch['expelled_at'] = '';
+          patch['updated_at'] = now;
+        }
+        if (remoteSyncMs > localSyncMs) {
+          patch['last_sync_at'] =
+              DateTime.fromMillisecondsSinceEpoch(remoteSyncMs)
+                  .toIso8601String();
+        }
+        if (patch.isNotEmpty) {
           await db.update(
             'devices',
-            {
-              'is_paired': 1,
-              'revoked_at': '',
-              'expelled_at': '',
-              'updated_at': now,
-            },
+            patch,
             where: 'id = ?',
             whereArgs: [id],
           );

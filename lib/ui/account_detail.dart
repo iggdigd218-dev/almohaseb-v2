@@ -91,13 +91,22 @@ class _AccountDetailScreenState extends ConsumerState<AccountDetailScreen> {
 
         var totalDebit = 0.0;
         var totalCredit = 0.0;
+        var totalSales = 0.0;
         for (final t in txs) {
           if (t.currency != activeCur) continue;
+          final isRet = t.description.trim().startsWith('مرتجع ') ||
+              t.category == 'مرتجع مبيعات' ||
+              t.notes.contains('[ORIG_TX:');
+          if (!isRet && (t.type == OpType.revenue || t.type == OpType.debit)) {
+            totalSales += t.amount;
+          } else if (isRet) {
+            totalSales = (totalSales - t.amount).clamp(0.0, double.infinity);
+          }
           final e = t.effectOn(accountId);
           if (e == null) continue;
           if (e > 0) {
             totalDebit += e;
-          } else {
+          } else if (e < 0) {
             totalCredit += e.abs();
           }
         }
@@ -230,6 +239,22 @@ class _AccountDetailScreenState extends ConsumerState<AccountDetailScreen> {
                       const SizedBox(height: 14),
                       Row(
                         children: [
+                          if (a.kind == AccountKind.customer) ...[
+                            Expanded(
+                              child: _MiniStat(
+                                label: 'إجمالي المبيعات',
+                                value: hidden
+                                    ? '••••'
+                                    : Fmt.money(totalSales, c.decimal),
+                                color: AppColors.primaryOf(context),
+                              ),
+                            ),
+                            Container(
+                              width: 1,
+                              height: 32,
+                              color: Theme.of(context).dividerColor,
+                            ),
+                          ],
                           Expanded(
                             child: _MiniStat(
                               label: 'إجمالي عليه',
@@ -431,12 +456,16 @@ class _MiniStat extends StatelessWidget {
         children: [
           Text(
             label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style:
                 TextStyle(fontSize: 11.5, color: Theme.of(context).hintColor),
           ),
           const SizedBox(height: 4),
           Text(
             value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(
               fontSize: 15,
               fontWeight: FontWeight.w800,

@@ -91,21 +91,72 @@ class WorkspaceInfo {
   }
 }
 
+/// حالة نتيجة فحص معالج توجيه الحسابات في السحابة.
+enum CloudWorkspaceResolutionStatus {
+  /// تم العثور على منشأة سابقة مرتبطة بالحساب.
+  found,
+
+  /// تأكد عدم وجود أي منشأة مسجلة بعد اكتمال الفحص السحابي بنجاح.
+  notFound,
+
+  /// تعذر الاتصال بالخادم أو حدث خطأ شبكة.
+  networkError,
+
+  /// انتهت مهلة الاتصال بالخادم.
+  timeout,
+}
+
 /// نتيجة فحص معالج توجيه الحسابات (Workspace Resolver / Auth Gate) في السحابة.
 class CloudWorkspaceResolution {
   final String workspaceId;
   final String role; // 'owner' | 'member' | ''
   final String memberRoleCode;
   final Map<String, dynamic>? meta;
+  final CloudWorkspaceResolutionStatus status;
 
   const CloudWorkspaceResolution({
     required this.workspaceId,
     this.role = 'owner',
     this.memberRoleCode = 'admin',
     this.meta,
-  });
+    CloudWorkspaceResolutionStatus? status,
+  }) : status = status ??
+            (workspaceId != '' && workspaceId != 'default'
+                ? CloudWorkspaceResolutionStatus.found
+                : CloudWorkspaceResolutionStatus.notFound);
 
-  bool get found => workspaceId.isNotEmpty && workspaceId != 'default';
+  const CloudWorkspaceResolution.notFound()
+      : workspaceId = '',
+        role = 'owner',
+        memberRoleCode = 'admin',
+        meta = null,
+        status = CloudWorkspaceResolutionStatus.notFound;
+
+  const CloudWorkspaceResolution.timeout()
+      : workspaceId = '',
+        role = 'owner',
+        memberRoleCode = 'admin',
+        meta = null,
+        status = CloudWorkspaceResolutionStatus.timeout;
+
+  const CloudWorkspaceResolution.networkError()
+      : workspaceId = '',
+        role = 'owner',
+        memberRoleCode = 'admin',
+        meta = null,
+        status = CloudWorkspaceResolutionStatus.networkError;
+
+  bool get found =>
+      status == CloudWorkspaceResolutionStatus.found &&
+      workspaceId.isNotEmpty &&
+      workspaceId != 'default';
+
+  bool get isNotFound =>
+      status == CloudWorkspaceResolutionStatus.notFound && !found;
+
+  bool get isNetworkOrTimeoutError =>
+      status == CloudWorkspaceResolutionStatus.networkError ||
+      status == CloudWorkspaceResolutionStatus.timeout;
 }
 
 /// نتيجة تبنّي/استرداد مساحة الحساب بعد تسجيل الدخول.
@@ -396,11 +447,12 @@ class AccountWorkspace {
     return out;
   }
 
-  /// فحص شامل وموثّق في Firebase Realtime Database لتحديد مساحة العمل المرتبطة بالحساب:
-  ///   1) فهرس البريد (`emails_index`) وفهرس الحساب (`accounts_index`).
-  ///   2) فهرس منشآت المستخدم (`user_workspaces/{emailKey}`).
-  ///   3) فهرس التجربة والاشتراك (`/trials/{uidFp}`) وفهرس الأجهزة (`device_index`).
-  ///   4) فحص عقدة `/workspaces` (عند سماح القواعد) للبحث عن `owner_email` أو عضوية الروستر.
+  /// فحص متوازٍ وسريع (O(1)) في Firebase Realtime Database لتحديد مساحة العمل المرتبطة بالحساب
+  /// بسقف زمني كلي لا يتعدى 8 ثوانٍ (دون أي تنزيل شامل لشجرة `/workspaces.json`):
+  ///   1) فهرس البريد (`/workspaces/_registry/emails_index/{emailKey}`)
+  ///   2) فهرس منشآت المستخدم (`/workspaces/_registry/user_workspaces/{emailKey}`)
+  ///   3) فهرس الحساب المباشر (`/workspaces/_registry/accounts_index/{uid}`)
+  ///   4) فهرس التجربة والاشتراك المرتبط بـ UID (`/trials/{uidFp}`)
   static Future<CloudWorkspaceResolution> resolveWorkspaceInCloud({
     required String backendUrl,
     required String email,
@@ -409,290 +461,214 @@ class AccountWorkspace {
     final clean = email.trim().toLowerCase();
     final cleanUid = uid.trim();
     if (clean.isEmpty && cleanUid.isEmpty) {
-      return const CloudWorkspaceResolution(workspaceId: '');
+      return const CloudWorkspaceResolution.notFound();
     }
     final root = _trimSlashes(backendUrl);
     if (root.isEmpty) {
-      return const CloudWorkspaceResolution(workspaceId: '');
+      return const CloudWorkspaceResolution.notFound();
+    }
+
+    var anyHttpOk = false;
+    var anyTimeout = false;
+    var anyNetworkError = false;
+
+    Future<CloudWorkspaceResolution?> checkEmailsIndex() async {
+      if (clean.isEmpty) return null;
+      try {
+        final res = await _authedGet(
+          _emailIndexPath(backendUrl, clean),
+          timeout: const Duration(seconds: 7),
+        );
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          anyHttpOk = true;
+          final body = utf8.decode(res.bodyBytes).trim();
+          if (body.isNotEmpty && body != 'null') {
+            final m = jsonDecode(body);
+            if (m is Map) {
+              final ws = '${m['workspaceId'] ?? m['workspace_id'] ?? ''}'.trim();
+              if (ws.isNotEmpty && ws != 'default') {
+                final role = '${m['role'] ?? 'owner'}'.trim();
+                final roleCode =
+                    '${m['role_code'] ?? m['roleCode'] ?? (role == 'member' ? 'cashier' : 'admin')}'
+                        .trim();
+                return CloudWorkspaceResolution(
+                  workspaceId: ws,
+                  role: role.isEmpty ? 'owner' : role,
+                  memberRoleCode: roleCode.isEmpty ? 'admin' : roleCode,
+                  meta: Map<String, dynamic>.from(m),
+                  status: CloudWorkspaceResolutionStatus.found,
+                );
+              }
+            }
+          }
+        } else {
+          anyNetworkError = true;
+        }
+      } on TimeoutException {
+        anyTimeout = true;
+      } catch (_) {
+        anyNetworkError = true;
+      }
+      return null;
+    }
+
+    Future<CloudWorkspaceResolution?> checkUserWorkspaces() async {
+      if (clean.isEmpty) return null;
+      try {
+        final uwRes = await _authedGet(
+          '$root/workspaces/_registry/user_workspaces/${emailToKey(clean)}.json',
+          timeout: const Duration(seconds: 7),
+        );
+        if (uwRes.statusCode >= 200 && uwRes.statusCode < 300) {
+          anyHttpOk = true;
+          final uwBody = utf8.decode(uwRes.bodyBytes).trim();
+          if (uwBody.isNotEmpty && uwBody != 'null') {
+            final uwMap = jsonDecode(uwBody);
+            if (uwMap is Map) {
+              for (final entry in uwMap.entries) {
+                final v = entry.value;
+                final ws = v is Map
+                    ? '${v['workspaceId'] ?? v['workspace_id'] ?? entry.key}'
+                        .trim()
+                    : '${entry.key}'.trim();
+                if (ws.isNotEmpty && ws != 'default') {
+                  final role =
+                      v is Map ? '${v['role'] ?? 'owner'}'.trim() : 'owner';
+                  final roleCode = v is Map
+                      ? '${v['role_code'] ?? v['roleCode'] ?? (role == 'member' ? 'cashier' : 'admin')}'
+                          .trim()
+                      : 'admin';
+                  return CloudWorkspaceResolution(
+                    workspaceId: ws,
+                    role: role.isEmpty ? 'owner' : role,
+                    memberRoleCode: roleCode.isEmpty ? 'admin' : roleCode,
+                    meta: v is Map ? Map<String, dynamic>.from(v) : null,
+                    status: CloudWorkspaceResolutionStatus.found,
+                  );
+                }
+              }
+            }
+          }
+        } else {
+          anyNetworkError = true;
+        }
+      } on TimeoutException {
+        anyTimeout = true;
+      } catch (_) {
+        anyNetworkError = true;
+      }
+      return null;
+    }
+
+    Future<CloudWorkspaceResolution?> checkAccountsIndexByUid() async {
+      if (cleanUid.isEmpty) return null;
+      try {
+        final res = await _authedGet(
+          _indexPath(backendUrl, cleanUid),
+          timeout: const Duration(seconds: 7),
+        );
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          anyHttpOk = true;
+          final body = utf8.decode(res.bodyBytes).trim();
+          if (body.isNotEmpty && body != 'null') {
+            final m = jsonDecode(body);
+            if (m is Map) {
+              final ws = '${m['workspaceId'] ?? m['workspace_id'] ?? ''}'.trim();
+              if (ws.isNotEmpty && ws != 'default') {
+                final role = '${m['role'] ?? 'owner'}'.trim();
+                return CloudWorkspaceResolution(
+                  workspaceId: ws,
+                  role: role.isEmpty ? 'owner' : role,
+                  meta: Map<String, dynamic>.from(m),
+                  status: CloudWorkspaceResolutionStatus.found,
+                );
+              }
+            }
+          }
+        } else {
+          anyNetworkError = true;
+        }
+      } on TimeoutException {
+        anyTimeout = true;
+      } catch (_) {
+        anyNetworkError = true;
+      }
+      return null;
+    }
+
+    Future<CloudWorkspaceResolution?> checkTrialsByUid() async {
+      if (cleanUid.isEmpty) return null;
+      try {
+        final uidFp = SubscriptionGuard.fingerprintHash('uid:$cleanUid');
+        final trRes = await _authedGet(
+          '$root/trials/$uidFp.json',
+          timeout: const Duration(seconds: 7),
+        );
+        if (trRes.statusCode >= 200 && trRes.statusCode < 300) {
+          anyHttpOk = true;
+          final trBody = utf8.decode(trRes.bodyBytes).trim();
+          if (trBody.isNotEmpty && trBody != 'null') {
+            final trMap = jsonDecode(trBody);
+            if (trMap is Map) {
+              final ws =
+                  '${trMap['workspace_id'] ?? trMap['workspaceId'] ?? ''}'
+                      .trim();
+              final trEmail =
+                  '${trMap['owner_email'] ?? trMap['email'] ?? ''}'
+                      .trim()
+                      .toLowerCase();
+              if (ws.isNotEmpty &&
+                  ws != 'default' &&
+                  (trEmail.isEmpty || clean.isEmpty || trEmail == clean)) {
+                return CloudWorkspaceResolution(
+                  workspaceId: ws,
+                  role: 'owner',
+                  meta: Map<String, dynamic>.from(trMap),
+                  status: CloudWorkspaceResolutionStatus.found,
+                );
+              }
+            }
+          }
+        } else {
+          anyNetworkError = true;
+        }
+      } on TimeoutException {
+        anyTimeout = true;
+      } catch (_) {
+        anyNetworkError = true;
+      }
+      return null;
     }
 
     try {
-      // 1) فحص الفهرس المباشر للبريد الإلكتروني (emails_index)
-      if (clean.isNotEmpty) {
-        try {
-          final res = await _authedGet(
-            _emailIndexPath(backendUrl, clean),
-            timeout: const Duration(seconds: 10),
-          );
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            final body = utf8.decode(res.bodyBytes).trim();
-            if (body.isNotEmpty && body != 'null') {
-              final m = jsonDecode(body);
-              if (m is Map) {
-                final ws = '${m['workspaceId'] ?? m['workspace_id'] ?? ''}'.trim();
-                if (ws.isNotEmpty && ws != 'default') {
-                  return CloudWorkspaceResolution(
-                    workspaceId: ws,
-                    role: '${m['role'] ?? 'owner'}'.trim().isEmpty
-                        ? 'owner'
-                        : '${m['role'] ?? 'owner'}'.trim(),
-                    meta: Map<String, dynamic>.from(m),
-                  );
-                }
-              }
-            }
-          }
-        } catch (_) {}
-      }
+      final results = await Future.wait<CloudWorkspaceResolution?>([
+        checkEmailsIndex(),
+        checkUserWorkspaces(),
+        checkAccountsIndexByUid(),
+        checkTrialsByUid(),
+      ]).timeout(const Duration(seconds: 8));
 
-      // 2) فحص فهرس UID المباشر (accounts_index/{uid})
-      if (cleanUid.isNotEmpty) {
-        final wsByUid = await lookup(backendUrl: backendUrl, uid: cleanUid);
-        if (wsByUid.isNotEmpty && wsByUid != 'default') {
-          return CloudWorkspaceResolution(
-            workspaceId: wsByUid,
-            role: 'owner',
-          );
+      for (final r in results) {
+        if (r != null && r.found) {
+          return r;
         }
       }
+    } on TimeoutException {
+      return const CloudWorkspaceResolution.timeout();
+    } catch (_) {
+      return const CloudWorkspaceResolution.networkError();
+    }
 
-      // 3) فحص accounts_index العام
-      if (clean.isNotEmpty) {
-        try {
-          final accRes = await _authedGet(
-            '$root/workspaces/_registry/accounts_index.json',
-            timeout: const Duration(seconds: 8),
-          );
-          if (accRes.statusCode >= 200 && accRes.statusCode < 300) {
-            final accBody = utf8.decode(accRes.bodyBytes).trim();
-            if (accBody.isNotEmpty && accBody != 'null') {
-              final allAcc = jsonDecode(accBody);
-              if (allAcc is Map) {
-                for (final entry in allAcc.entries) {
-                  final v = entry.value;
-                  if (v is Map &&
-                      '${v['email'] ?? ''}'.trim().toLowerCase() == clean) {
-                    final ws =
-                        '${v['workspaceId'] ?? v['workspace_id'] ?? ''}'.trim();
-                    if (ws.isNotEmpty && ws != 'default') {
-                      return CloudWorkspaceResolution(
-                        workspaceId: ws,
-                        role: 'owner',
-                        meta: Map<String, dynamic>.from(v),
-                      );
-                    }
-                  }
-                }
-              }
-            }
-          }
-        } catch (_) {}
-      }
-
-      // 4) فحص user_workspaces/{emailKey}
-      if (clean.isNotEmpty) {
-        try {
-          final uwRes = await _authedGet(
-            '$root/workspaces/_registry/user_workspaces/${emailToKey(clean)}.json',
-            timeout: const Duration(seconds: 8),
-          );
-          if (uwRes.statusCode >= 200 && uwRes.statusCode < 300) {
-            final uwBody = utf8.decode(uwRes.bodyBytes).trim();
-            if (uwBody.isNotEmpty && uwBody != 'null') {
-              final uwMap = jsonDecode(uwBody);
-              if (uwMap is Map) {
-                for (final entry in uwMap.entries) {
-                  final v = entry.value;
-                  final ws = v is Map
-                      ? '${v['workspaceId'] ?? v['workspace_id'] ?? entry.key}'
-                          .trim()
-                      : '${entry.key}'.trim();
-                  if (ws.isNotEmpty && ws != 'default') {
-                    return CloudWorkspaceResolution(
-                      workspaceId: ws,
-                      role: 'owner',
-                      meta: v is Map ? Map<String, dynamic>.from(v) : null,
-                    );
-                  }
-                }
-              }
-            }
-          }
-        } catch (_) {}
-      }
-
-      // 5) فحص سجل التجربة والاشتراك المرتبط بـ UID الحساب (/trials/{uidFp})
-      if (cleanUid.isNotEmpty) {
-        try {
-          final uidFp = SubscriptionGuard.fingerprintHash('uid:$cleanUid');
-          final trRes = await _authedGet(
-            '$root/trials/$uidFp.json',
-            timeout: const Duration(seconds: 8),
-          );
-          if (trRes.statusCode >= 200 && trRes.statusCode < 300) {
-            final trBody = utf8.decode(trRes.bodyBytes).trim();
-            if (trBody.isNotEmpty && trBody != 'null') {
-              final trMap = jsonDecode(trBody);
-              if (trMap is Map) {
-                final ws =
-                    '${trMap['workspace_id'] ?? trMap['workspaceId'] ?? ''}'
-                        .trim();
-                final trEmail =
-                    '${trMap['owner_email'] ?? trMap['email'] ?? ''}'
-                        .trim()
-                        .toLowerCase();
-                if (ws.isNotEmpty &&
-                    ws != 'default' &&
-                    (trEmail.isEmpty || clean.isEmpty || trEmail == clean)) {
-                  return CloudWorkspaceResolution(
-                    workspaceId: ws,
-                    role: 'owner',
-                    meta: Map<String, dynamic>.from(trMap),
-                  );
-                }
-              }
-            }
-          }
-        } catch (_) {}
-      }
-
-      // 6) فحص فهرس الأجهزة العام (device_index) للبحث عن منشأة مسجلة بنفس البريد
-      if (clean.isNotEmpty) {
-        try {
-          final diRes = await _authedGet(
-            '$root/workspaces/_registry/device_index.json',
-            timeout: const Duration(seconds: 8),
-          );
-          if (diRes.statusCode >= 200 && diRes.statusCode < 300) {
-            final diBody = utf8.decode(diRes.bodyBytes).trim();
-            if (diBody.isNotEmpty && diBody != 'null') {
-              final diMap = jsonDecode(diBody);
-              if (diMap is Map) {
-                for (final entry in diMap.entries) {
-                  final v = entry.value;
-                  if (v is! Map) continue;
-                  final vEmail =
-                      '${v['owner_email'] ?? v['email'] ?? ''}'
-                          .trim()
-                          .toLowerCase();
-                  if (vEmail.isNotEmpty && vEmail == clean) {
-                    final ws =
-                        '${v['workspaceId'] ?? v['workspace_id'] ?? ''}'.trim();
-                    if (ws.isNotEmpty && ws != 'default') {
-                      return CloudWorkspaceResolution(
-                        workspaceId: ws,
-                        role: '${v['role'] ?? 'owner'}'.trim().isEmpty
-                            ? 'owner'
-                            : '${v['role'] ?? 'owner'}'.trim(),
-                        meta: Map<String, dynamic>.from(v),
-                      );
-                    }
-                  }
-                }
-              }
-            }
-          }
-        } catch (_) {}
-      }
-
-      // 7) فحص عقدة /workspaces للبحث عن owner_email == currentUser.email
-      //    أو وجود البريد كعضو مصرح في روستر (roster / members) إحدى المنشآت.
-      if (clean.isNotEmpty) {
-        try {
-          final wsRes = await _authedGet(
-            '$root/workspaces.json',
-            timeout: const Duration(seconds: 10),
-          );
-          if (wsRes.statusCode >= 200 && wsRes.statusCode < 300) {
-            final wsBody = utf8.decode(wsRes.bodyBytes).trim();
-            if (wsBody.isNotEmpty && wsBody != 'null') {
-              final allWs = jsonDecode(wsBody);
-              if (allWs is Map) {
-                CloudWorkspaceResolution? memberMatch;
-                for (final entry in allWs.entries) {
-                  final wsKey = '${entry.key}'.trim();
-                  if (wsKey.isEmpty ||
-                      wsKey == 'default' ||
-                      wsKey.startsWith('_')) {
-                    continue;
-                  }
-                  final wsVal = entry.value;
-                  if (wsVal is! Map) continue;
-
-                  // أ) فحص meta.owner_email أو subscription.owner_email أو owner_email المباشر
-                  final meta = wsVal['meta'];
-                  final sub = wsVal['subscription'];
-                  final ownerEmail = (meta is Map
-                          ? '${meta['owner_email'] ?? meta['email'] ?? ''}'
-                          : (sub is Map
-                              ? '${sub['owner_email'] ?? sub['email'] ?? ''}'
-                              : '${wsVal['owner_email'] ?? ''}'))
-                      .trim()
-                      .toLowerCase();
-                  if (ownerEmail.isNotEmpty && ownerEmail == clean) {
-                    return CloudWorkspaceResolution(
-                      workspaceId: wsKey,
-                      role: 'owner',
-                      meta: meta is Map
-                          ? Map<String, dynamic>.from(meta)
-                          : (sub is Map
-                              ? Map<String, dynamic>.from(sub)
-                              : null),
-                    );
-                  }
-
-                  // ب) فحص روستر المنشأة (roster / members / devices) للبريد المصرح
-                  if (memberMatch == null) {
-                    for (final nodeName in const [
-                      'roster',
-                      'members',
-                      'devices'
-                    ]) {
-                      final rosterNode = wsVal[nodeName];
-                      if (rosterNode is! Map) continue;
-                      for (final rEntry in rosterNode.entries) {
-                        final rv = rEntry.value;
-                        if (rv is! Map) continue;
-                        if (rv['revoked'] == true ||
-                            '${rv['status'] ?? ''}' == 'expelled' ||
-                            '${rv['status'] ?? ''}' == 'revoked') {
-                          continue;
-                        }
-                        final rEmail =
-                            '${rv['email'] ?? rv['user_email'] ?? rv['owner_email'] ?? ''}'
-                                .trim()
-                                .toLowerCase();
-                        if (rEmail.isNotEmpty && rEmail == clean) {
-                          final isOwnerFlag = rv['is_owner'] == true ||
-                              '${rv['role'] ?? ''}' == 'owner';
-                          final roleCode =
-                              '${rv['role_code'] ?? rv['roleCode'] ?? (isOwnerFlag ? 'admin' : 'cashier')}'
-                                  .trim();
-                          memberMatch = CloudWorkspaceResolution(
-                            workspaceId: wsKey,
-                            role: isOwnerFlag ? 'owner' : 'member',
-                            memberRoleCode:
-                                roleCode.isEmpty ? 'cashier' : roleCode,
-                            meta: meta is Map
-                                ? Map<String, dynamic>.from(meta)
-                                : null,
-                          );
-                          break;
-                        }
-                      }
-                      if (memberMatch != null) break;
-                    }
-                  }
-                }
-                if (memberMatch != null) return memberMatch;
-              }
-            }
-          }
-        } catch (_) {}
-      }
-    } catch (_) {}
-
-    return const CloudWorkspaceResolution(workspaceId: '');
+    if (anyHttpOk) {
+      return const CloudWorkspaceResolution.notFound();
+    }
+    if (anyTimeout) {
+      return const CloudWorkspaceResolution.timeout();
+    }
+    if (anyNetworkError) {
+      return const CloudWorkspaceResolution.networkError();
+    }
+    return const CloudWorkspaceResolution.notFound();
   }
 
   /// قراءة مساحة العمل المرتبطة بالبريد الإلكتروني من الفهرس السحابي — '' إن لم تُسجَّل بعد.
@@ -936,8 +912,8 @@ class AccountWorkspace {
             email: account.email,
             uid: account.uid,
           ).timeout(
-            const Duration(seconds: 14),
-            onTimeout: () => const CloudWorkspaceResolution(workspaceId: ''),
+            const Duration(seconds: 8),
+            onTimeout: () => const CloudWorkspaceResolution.timeout(),
           );
           if (resolution.found) {
             remoteWs = resolution.workspaceId;
@@ -1436,6 +1412,7 @@ class AccountWorkspace {
       await repo.setSetting('account.type', 'enterprise');
       await repo.setSetting('onboardingCompleted', '1');
       await repo.setSetting('has_completed_onboarding', '1');
+      await repo.setSetting('cloudWorkspaceProvisioned', '1');
       await repo.checkAndAutoPromoteManager();
       await repo.ensureSelfPermissionRow(roleCode: 'admin');
       await repo.restoreManagerOwnership();
@@ -2619,6 +2596,7 @@ class AccountWorkspace {
     }
     await repo.setSetting('has_completed_onboarding', '1');
     await repo.setSetting('onboardingCompleted', '1');
+    await repo.setSetting('cloudWorkspaceProvisioned', '1');
     await repo.checkAndAutoPromoteManager();
     await repo.ensureSelfPermissionRow(roleCode: 'admin');
 

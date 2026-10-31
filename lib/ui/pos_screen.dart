@@ -667,7 +667,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
     if (_tabController.index == 1) {
       return Scaffold(
         appBar: AppBar(
-          backgroundColor: const Color(0xFF0F3E78),
+          backgroundColor: const Color(0xFF2563EB),
           foregroundColor: Colors.white,
           leading: IconButton(
             icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
@@ -1525,10 +1525,11 @@ class _PosScreenState extends ConsumerState<PosScreen>
             padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
             child: Row(
               children: [
+                // (PR-8) رأس حيوي صافٍ — بلا أي كحلي قاتم.
                 const Icon(
                   Icons.inventory_2_outlined,
                   size: 19,
-                  color: Color(0xFF0F3E78),
+                  color: Color(0xFF2563EB),
                 ),
                 const SizedBox(width: 6),
                 Text(
@@ -1558,14 +1559,14 @@ class _PosScreenState extends ConsumerState<PosScreen>
                           style: TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w800,
-                            color: Color(0xFF1565C0),
+                            color: Color(0xFF2563EB),
                           ),
                         ),
                         SizedBox(width: 3),
                         Icon(
                           Icons.arrow_forward_rounded,
                           size: 14,
-                          color: Color(0xFF1565C0),
+                          color: Color(0xFF2563EB),
                         ),
                       ],
                     ),
@@ -1747,10 +1748,10 @@ class _PosScreenState extends ConsumerState<PosScreen>
     final hasCartItems = _cart.isNotEmpty;
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF0F3E78),
+        color: const Color(0xFF2563EB),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF0F3E78).withValues(alpha: .18),
+            color: const Color(0xFF2563EB).withValues(alpha: .18),
             blurRadius: 8,
             offset: const Offset(0, 2),
           ),
@@ -2255,7 +2256,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
           enabledBorder: _searchBorder(
             dark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
           ),
-          focusedBorder: _searchBorder(const Color(0xFF1565C0)),
+          focusedBorder: _searchBorder(const Color(0xFF2563EB)),
           suffixIcon: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -2467,7 +2468,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                   const Icon(
                     Icons.receipt_long_outlined,
                     size: 20,
-                    color: Color(0xFF1565C0),
+                    color: Color(0xFF2563EB),
                   ),
                   const SizedBox(width: 8),
                   Column(
@@ -2876,44 +2877,47 @@ class _PosScreenState extends ConsumerState<PosScreen>
                           .toList(),
                       selected: {_payment},
                       onSelectionChanged: (set) {
-                        _cartCtl.setPayment(set.first.code);
+                        final selectedPay = set.first;
+                        _cartCtl.setPayment(selectedPay.code);
+                        if (selectedPay == _PosPayment.cash) {
+                          _cartCtl.setCustomer(null);
+                        }
                         setSheetState(() {});
                         setState(() {});
                       },
                     ),
 
-                    const SizedBox(height: 12),
-
-                    // اختيار العميل — يتوهج بالأحمر إذا كان الدفع آجلاً
-                    // بلا حساب محدد (تنبيه بصري لا نصي فقط).
-                    Container(
-                      decoration: accountMissing
-                          ? BoxDecoration(
-                              border: Border.all(
-                                  color: AppColors.dangerOf(context),
-                                  width: 2),
-                              borderRadius: BorderRadius.circular(10),
-                            )
-                          : null,
-                      padding:
-                          accountMissing ? const EdgeInsets.all(6) : null,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          if (accountMissing)
-                            Padding(
-                              padding: const EdgeInsets.only(bottom: 6),
-                              child: Text(
-                                'يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل',
-                                style: TextStyle(
-                                  color: AppColors.dangerOf(context),
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 12.5,
+                    // اختيار العميل — يظهر فقط عند تحديد العملية آجل أو جزئي،
+                    // ويتوهج بالأحمر إذا لم يُحدَّد حساب عميل.
+                    if (needsAccount) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        decoration: accountMissing
+                            ? BoxDecoration(
+                                border: Border.all(
+                                    color: AppColors.dangerOf(context),
+                                    width: 2),
+                                borderRadius: BorderRadius.circular(10),
+                              )
+                            : null,
+                        padding:
+                            accountMissing ? const EdgeInsets.all(6) : null,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (accountMissing)
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 6),
+                                child: Text(
+                                  'يجب اختيار أو تسجيل حساب عميل لتسجيل المديونية/المتبقي الآجل',
+                                  style: TextStyle(
+                                    color: AppColors.dangerOf(context),
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 12.5,
+                                  ),
                                 ),
                               ),
-                            ),
-                          // آخر 3 مدينين — اختيار بنقرة واحدة في وضع الآجل.
-                          if (needsAccount)
+                            // آخر 3 مدينين — اختيار بنقرة واحدة في وضع الآجل.
                             FutureBuilder<List<Account>>(
                               future: _recentDebtors(customers),
                               builder: (c, snap) {
@@ -2951,36 +2955,37 @@ class _PosScreenState extends ConsumerState<PosScreen>
                                 );
                               },
                             ),
-                          DropdownButtonFormField<int?>(
-                            initialValue: _selectedCustomerId,
-                            decoration: const InputDecoration(
-                              isDense: true,
-                              labelText: 'العميل',
-                              prefixIcon: Icon(Icons.person_outline),
-                            ),
-                            items: [
-                              const DropdownMenuItem<int?>(
-                                value: null,
-                                child: Text('عميل نقدي (بدون حساب)'),
+                            DropdownButtonFormField<int?>(
+                              initialValue: _selectedCustomerId,
+                              decoration: const InputDecoration(
+                                isDense: true,
+                                labelText: 'العميل',
+                                prefixIcon: Icon(Icons.person_outline),
                               ),
-                              for (final c in customers)
-                                DropdownMenuItem<int?>(
-                                  value: c.id,
-                                  child: Text(
-                                    '${c.name} (${c.phone.isNotEmpty ? c.phone : 'بدون هاتف'})',
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
+                              items: [
+                                const DropdownMenuItem<int?>(
+                                  value: null,
+                                  child: Text('بيع نقدي'),
                                 ),
-                            ],
-                            onChanged: (val) {
-                              _cartCtl.setCustomer(val);
-                              setSheetState(() {});
-                              setState(() {});
-                            },
-                          ),
-                        ],
+                                for (final c in customers)
+                                  DropdownMenuItem<int?>(
+                                    value: c.id,
+                                    child: Text(
+                                      c.name,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                              ],
+                              onChanged: (val) {
+                                _cartCtl.setCustomer(val);
+                                setSheetState(() {});
+                                setState(() {});
+                              },
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
+                    ],
 
                     // تحذير تجاوز حد الائتمان — قبل السماح بالتأكيد.
                     if (needsAccount && _selectedCustomerId != null)
@@ -4026,7 +4031,7 @@ class _PosHistoryTabState extends ConsumerState<_PosHistoryTab> {
                 children: [
                   Icon(
                     Icons.assignment_return_rounded,
-                    color: Color(0xFF0F3E78),
+                    color: Color(0xFF2563EB),
                     size: 20,
                   ),
                   SizedBox(width: 6),
@@ -4107,16 +4112,90 @@ class _PosHistoryTabState extends ConsumerState<_PosHistoryTab> {
                 );
               }
 
-              return ListView.separated(
-                padding: const EdgeInsets.all(12),
-                itemCount: posTxs.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 8),
-                itemBuilder: (context, i) {
-                  final tx = posTxs[i];
-                  final account =
-                      tx.accountId != null ? accountById[tx.accountId!] : null;
-                  final isCash = tx.type == OpType.revenue;
-                  final isPartial =
+              var totalSales = 0.0;
+              var cashSales = 0.0;
+              var creditSales = 0.0;
+              final primaryCur = posTxs.first.currency;
+              for (final t in posTxs) {
+                totalSales += t.amount;
+                if (t.type == OpType.revenue) {
+                  cashSales += t.amount;
+                } else {
+                  creditSales += t.amount;
+                }
+              }
+
+              return Column(
+                children: [
+                  Container(
+                    margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppColors.primarySoftOf(context),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: AppColors.primaryOf(context)
+                            .withValues(alpha: 0.25),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.trending_up_rounded,
+                          color: AppColors.primaryOf(context),
+                          size: 22,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'إجمالي المبيعات (${posTxs.length} فاتورة)',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w800,
+                                  color: AppColors.text2Of(context),
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                'نقداً: ${Fmt.money(cashSales)} • آجل: ${Fmt.money(creditSales)}',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.text3Of(context),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Text(
+                          '${Fmt.money(totalSales)} $primaryCur',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w900,
+                            color: AppColors.primaryOf(context),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: ListView.separated(
+                      padding: const EdgeInsets.all(12),
+                      itemCount: posTxs.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (context, i) {
+                        final tx = posTxs[i];
+                        final account = tx.accountId != null
+                            ? accountById[tx.accountId!]
+                            : null;
+                        final isCash = tx.type == OpType.revenue;
+                        final isPartial =
                       !isCash && tx.notes.contains('طريقة الدفع: جزئي');
                   final hasReturnNote = tx.notes.contains('تم إرجاع (');
                   final customerName = account?.name.trim().isNotEmpty == true
@@ -4335,7 +4414,10 @@ class _PosHistoryTabState extends ConsumerState<_PosHistoryTab> {
                     ),
                   );
                 },
-              );
+              ),
+                ),
+              ],
+            );
             },
           ),
         ),
@@ -4833,7 +4915,7 @@ class _SalesReturnSheetState extends ConsumerState<_SalesReturnSheet> {
                   ),
                   FilledButton.icon(
                     style: FilledButton.styleFrom(
-                      backgroundColor: const Color(0xFF0F3E78),
+                      backgroundColor: const Color(0xFF2563EB),
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(
                         horizontal: 18,

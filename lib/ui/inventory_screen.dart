@@ -2685,8 +2685,14 @@ class _ItemFormState extends ConsumerState<_ItemForm> {
                         backgroundColor: AppColors.primarySoftOf(context),
                         backgroundImage: (_image ?? '').isNotEmpty &&
                                 MediaPaths.exists(_image ?? '')
-                            ? FileImage(
-                                File(MediaPaths.toAbsolute(_image ?? '')))
+                            ? ResizeImage(
+                                // (PR-8) حدة Retina لصورة الصنف الدائرية —
+                                // FileImage لا يقبل cacheWidth مباشرة فيُغلَّف.
+                                FileImage(
+                                  File(MediaPaths.toAbsolute(_image ?? '')),
+                                ),
+                                width: crispCacheWidth(context, 68),
+                              )
                             : null,
                         child: (_image ?? '').isEmpty ||
                                 !MediaPaths.exists(_image ?? '')
@@ -3141,6 +3147,8 @@ class _ItemThumb extends StatelessWidget {
     return Image.file(
       File(MediaPaths.toAbsolute(image)),
       fit: BoxFit.cover,
+      // (PR-8) حدة Retina لصورة الصنف بالشبكة.
+      cacheWidth: crispCacheWidth(context, 240),
       filterQuality: FilterQuality.medium,
       errorBuilder: (_, __, ___) => placeholder,
     );
@@ -3175,6 +3183,8 @@ class _Thumb extends StatelessWidget {
             ? Image.file(
                 file,
                 fit: BoxFit.cover,
+                // (PR-8) حدة Retina للمصغّرة (52px).
+                cacheWidth: crispCacheWidth(context, 52),
                 filterQuality: FilterQuality.medium,
                 errorBuilder: (_, __, ___) => _fallback(context),
               )

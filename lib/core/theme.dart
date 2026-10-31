@@ -6,10 +6,18 @@ import 'package:flutter/material.dart';
 /// ويعمل دون اتصال بالكامل وبأعلى دقة قراءة.
 String? get uiFontFamily => 'Tajawal';
 
+/// (PR-8) عرض حاد بلا غباش: يحسب `cacheWidth` بكثافة بكسل الشاشة
+/// الفيزيائية (Retina/8K) — يمنع البكسلة والتمدد في صور الأصناف والشعارات
+/// والصور الشخصية. مرّر الحجم المنطقي المعروض (مثلاً 160 لبطاقة صنف).
+int crispCacheWidth(BuildContext context, double logicalPx) =>
+    (logicalPx * MediaQuery.devicePixelRatioOf(context)).round();
+
 /// ألوان نكسورا — متطابقة تماماً مع تصميم نسخة الويب الأنيقة والعصرية.
 class AppColors {
   // ===== الوضع الفاتح (نسخة الويب العالمية للأنظمة المحاسبية ERP) =====
-  static const bg = Color(0xFFF1F5F9); // Slate-100 خلفية النظام الموحدة
+  // (PR-8) الطابع الحيوي فائق النقاء: خلفية ثلجية أنقى، وأزرق حيوي صافٍ،
+  // وأحمر صريح للأرقام المدينة — بعيداً عن أي قتامة أو غباش.
+  static const bg = Color(0xFFF8FAFC); // Slate-50 خلفية النظام الموحدة (ثلجية فائقة النقاء)
   static const bg2 = Color(0xFFF8FAFC); // Slate-50
   static const surface = Color(0xFFFFFFFF); // أبيض ناصع للبطاقات
   static const surface2 = Color(0xFFF8FAFC); // Slate-50 للبطاقات الداخلية
@@ -18,17 +26,17 @@ class AppColors {
   static const text3 = Color(0xFF64748B); // Slate-500
   static const border = Color(0xFFE2E8F0); // Slate-200 حدود البطاقات الدقيقة
 
-  static const primary = Color(0xFF0284C7); // Sky-600 هوية النظام المحاسبي
+  static const primary = Color(0xFF2563EB); // Blue-600 هوية النظام الحيوية الصافية
   static const primary2 = Color(0xFF0F766E); // Teal-700
-  static const primarySoft = Color(0xFFE0F2FE); // Sky-100
+  static const primarySoft = Color(0xFFDBEAFE); // Blue-100
   static const accent = Color(0xFFF59E0B); // Amber-500
   static const accentSoft = Color(0xFFFEF3C7); // Amber-100
-  static const danger = Color(0xFFE11D48); // Rose-600
-  static const dangerSoft = Color(0xFFFFE4E6); // Rose-100
-  static const green = Color(0xFF059669); // Emerald-600
+  static const danger = Color(0xFFDC2626); // Red-600 أحمر صريح
+  static const dangerSoft = Color(0xFFFEE2E2); // Red-100
+  static const green = Color(0xFF059669); // Emerald-600 أخضر زمردي
   static const greenSoft = Color(0xFFD1FAE5); // Emerald-100
-  static const info = Color(0xFF0284C7); // Sky-600
-  static const infoSoft = Color(0xFFE0F2FE); // Sky-100
+  static const info = Color(0xFF2563EB); // Blue-600
+  static const infoSoft = Color(0xFFDBEAFE); // Blue-100
   static const violet = Color(0xFF7C3AED); // Violet-600
   static const violetSoft = Color(0xFFEDE9FE); // Violet-100
 
@@ -412,8 +420,10 @@ class AppTheme {
       dialogTheme: DialogThemeData(
         backgroundColor: surface,
         surfaceTintColor: Colors.transparent,
+        // (PR-8) حوارات بيضاء ناصعة بحدود ناعمة متباينة — بلا أي بهتان.
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppRadius.sheet),
+          side: BorderSide(color: border, width: 1),
         ),
       ),
       bottomSheetTheme: BottomSheetThemeData(

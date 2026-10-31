@@ -555,6 +555,9 @@ class AttachmentViewState extends State<AttachmentView> {
               width: 200,
               height: 200,
               fit: BoxFit.cover,
+              // (PR-8) حدة Retina لصورة المحادثة.
+              cacheWidth: crispCacheWidth(context, 200),
+              filterQuality: FilterQuality.medium,
               errorBuilder: (_, __, ___) => const SizedBox.shrink(),
             ),
           ),

@@ -23,6 +23,7 @@ import '../core/theme.dart';
 import '../data/providers.dart';
 import '../data/repository.dart';
 import '../data/sync/account_workspace.dart';
+import '../data/sync/cloud_control_service.dart';
 import '../data/sync/cloud_join.dart';
 import '../data/sync/device_id.dart';
 import '../data/sync/firebase_auth_service.dart';
@@ -347,6 +348,10 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       try {
         ref.read(syncEngineProvider).stop();
       } catch (_) {}
+      try {
+        CloudControlService.instance.stop();
+      } catch (_) {}
+      await repo.setSetting('account.type', 'individual');
       await completeOnboarding(
         repo,
         storeName: _name,
@@ -396,6 +401,11 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   }) async {
     final repo = ref.read(repoProvider);
     FirebaseAuthRest.primeAccountInMemory(account);
+    final cleanAuthEmail = account.email.trim().toLowerCase();
+    if (cleanAuthEmail.isNotEmpty) {
+      await repo.setSetting('account.email', cleanAuthEmail);
+      await repo.setSetting('email', cleanAuthEmail);
+    }
     final st = await repo.settings();
     final url = effectiveBackendUrl(st['cloudBackendUrl']);
 
@@ -403,7 +413,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       filterEmail: account.email,
     );
     CloudWorkspaceResolution cloudRes =
-        const CloudWorkspaceResolution(workspaceId: '');
+        const CloudWorkspaceResolution.notFound();
     if (url.isNotEmpty) {
       try {
         cloudRes = await AccountWorkspace.resolveWorkspaceInCloud(
@@ -411,13 +421,61 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           email: account.email,
           uid: account.uid,
         ).timeout(
-          const Duration(seconds: 15),
-          onTimeout: () => const CloudWorkspaceResolution(workspaceId: ''),
+          const Duration(seconds: 8),
+          onTimeout: () => const CloudWorkspaceResolution.timeout(),
         );
-      } catch (_) {}
+      } catch (_) {
+        cloudRes = const CloudWorkspaceResolution.networkError();
+      }
     }
 
     final hasExistingWorkspace = cloudRes.found || localMatches.isNotEmpty;
+
+    // في حال فشل الاتصال أو انتهاء المهلة وعدم وجود نسخة محلية مطابقة:
+    // يُمنع التوجيه لشاشة إنشاء المنشأة ويُمنع استدعاء linkAccountOnly(forceIsolateNewUser: true)
+    if (!hasExistingWorkspace && cloudRes.isNetworkOrTimeoutError) {
+      if (!mounted) return;
+      final retry = await showDialog<bool>(
+        context: context,
+        builder: (dctx) => AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.wifi_off_rounded, color: Colors.orange, size: 22),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'تعذر التحقق من الحساب',
+                  style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w800),
+                ),
+              ),
+            ],
+          ),
+          content: const Text(
+            'تعذر التحقق من حسابك بسبب بطء أو انقطاع الاتصال.. يرجى إعادة المحاولة',
+            style: TextStyle(fontSize: 13.5, height: 1.6),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dctx).pop(false),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(dctx).pop(true),
+              icon: const Icon(Icons.refresh_rounded, size: 18),
+              label: const Text('إعادة المحاولة'),
+            ),
+          ],
+        ),
+      );
+      if (retry == true && mounted) {
+        await _resolveWorkspaceOrRedirectToRegister(
+          account: account,
+          isLoginFlow: isLoginFlow,
+        );
+      }
+      return;
+    }
+
     final existingWsId = cloudRes.found
         ? cloudRes.workspaceId
         : (localMatches.isNotEmpty ? localMatches.first.workspaceId : '');
@@ -467,7 +525,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             repo,
             backendUrl: url,
             account: account,
-            forceIsolateNewUser: true,
+            forceIsolateNewUser: false,
           ).timeout(const Duration(seconds: 35));
           restored = outcome == AccountLinkOutcome.switched ||
               outcome == AccountLinkOutcome.migrated;
@@ -508,18 +566,13 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       }
     }
 
-    // في حال عدم وجود حساب/منشأة مسجلة: توجيه تلقائي مباشر لشاشة إنشاء حساب جديد مع تعبئة البريد مسبقاً
-    if (url.isNotEmpty) {
-      try {
-        await AccountWorkspace.linkAccountOnly(
-          repo,
-          backendUrl: url,
-          account: account,
-          forceIsolateNewUser: true,
-        ).timeout(const Duration(seconds: 20));
-      } catch (_) {}
-    }
+    // في حال تأكد عدم وجود منشأة مسجلة (notFound): حفظ جلسة الحساب فقط دون توليد أو عزل WS-* وهمي
+    // ويتم إنشاء المنشأة الفعلية حصراً عند ضغط المستخدم على زر «إنشاء المنشأة» في CreateWorkspaceScreen
     await FirebaseAuthRest.saveSession(repo, account);
+    if (cleanAuthEmail.isNotEmpty) {
+      await repo.setSetting('account.email', cleanAuthEmail);
+      await repo.setSetting('email', cleanAuthEmail);
+    }
     if (!mounted) return;
     if (isLoginFlow) {
       showSnack(

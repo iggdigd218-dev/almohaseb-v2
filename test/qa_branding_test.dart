@@ -74,13 +74,15 @@ void main() {
   });
 
   // ===================== الثيم =====================
-  test('BRD-01 الثيم: أزرق ملكي + رمادي ثلجي + زوايا 16px', () {
-    expect(AppColors.primary, const Color(0xFF0284C7));
+  test('BRD-01 الثيم: أزرق حيوي صافٍ + رمادي ثلجي فائق النقاء + زوايا 16px', () {
+    // (PR-8) الطابع الحيوي فائق النقاء: Blue-600 وSlate-50.
+    expect(AppColors.primary, const Color(0xFF2563EB));
     expect(AppColors.primary2, const Color(0xFF0F766E));
-    expect(AppColors.bg, const Color(0xFFF1F5F9));
+    expect(AppColors.bg, const Color(0xFFF8FAFC));
     expect(AppColors.surface, const Color(0xFFFFFFFF));
-    // الأخضر الزمردي للأسعار وحالة التوفر.
+    // الأخضر الزمردي للأسعار وحالة التوفر، والأحمر الصريح للمدين.
     expect(AppColors.green, const Color(0xFF059669));
+    expect(AppColors.danger, const Color(0xFFDC2626));
     // توحيد الانحناء.
     expect(AppRadius.card, 16);
     expect(AppRadius.field, 16);
