@@ -473,7 +473,30 @@ class Repo {
         return true;
       }
 
-      // إذا تم تخفيض هذا الجهاز رسمياً إلى «وكيل» بعد انتقال الإدارة بالبريد لجهاز أحدث:
+      final email = (st['account.email'] ?? st['email'] ?? '').trim();
+      final creator = (st['creatorDeviceId'] ?? '').trim();
+      final uidStr =
+          (st['account.uid'] ?? st['account.lastOwnerUid'] ?? '').trim();
+      final wsRows = await db.query(
+        'workspaces',
+        columns: ['owner_email', 'owner_google_id'],
+        where: 'id = ?',
+        whereArgs: [requireWorkspaceId],
+        limit: 1,
+      );
+      final wsOwnerEmail = wsRows.isNotEmpty
+          ? '${wsRows.first['owner_email'] ?? ''}'.trim().toLowerCase()
+          : '';
+      final wsOwnerUid = wsRows.isNotEmpty
+          ? '${wsRows.first['owner_google_id'] ?? ''}'.trim()
+          : '';
+      final isVerifiedSameOwner = (email.isNotEmpty &&
+              email.contains('@') &&
+              (wsOwnerEmail.isEmpty || email.toLowerCase() == wsOwnerEmail)) ||
+          (uidStr.isNotEmpty && wsOwnerUid.isNotEmpty && uidStr == wsOwnerUid);
+
+      // إذا تم تخفيض هذا الجهاز رسمياً إلى «وكيل» بعد انتقال الإدارة لحساب مختلف:
+      // أما إذا كان الجهاز يحمل حساب المالك الموثق للمنشأة، فيتم مسح قفل التخفيض فوراً.
       final demotedMeta = await db.query(
         'sync_meta',
         where: "key = 'demotedToAgentBy'",
@@ -483,11 +506,12 @@ class Repo {
           ? '${demotedMeta.first['value'] ?? ''}'.trim()
           : '';
       if (demotedBy.isNotEmpty && demotedBy != ownId) {
-        return false;
+        if (isVerifiedSameOwner) {
+          await db.delete('sync_meta', where: "key = 'demotedToAgentBy'");
+        } else {
+          return false;
+        }
       }
-
-      final email = (st['account.email'] ?? st['email'] ?? '').trim();
-      final creator = (st['creatorDeviceId'] ?? '').trim();
 
       final ownerMetaRows = await db.query(
         'sync_meta',
@@ -8006,38 +8030,59 @@ class Repo {
             final ownerUid =
                 (stAfter['account.uid'] ?? stAfter['account.lastOwnerUid'] ?? '')
                     .trim();
-            final sigPayload =
-                '$ws|$ownId|$prevOwnerId|$ownerEmail|$ownerUid';
-            final sigKey = utf8.encode(
-                'nexora-sovereign-takeover-v1:$ws:$ownerEmail:$ownerUid');
-            final takeoverSig = Hmac(sha256, sigKey)
-                .convert(utf8.encode(sigPayload))
-                .toString();
-            await queueOperation(
-              entityType: EntityKind.setting,
-              entityId: 'ownershipTransfer',
-              opType: OpKind.settings,
-              payload: {
-                'key': 'ownershipTransfer',
-                'value': jsonEncode({
-                  'owner_device_id': ownId,
-                  'owner_user_id': _currentUserId,
-                  'previous_owner_device_id': prevOwnerId,
-                  'email_takeover': true,
-                  'owner_email': ownerEmail,
-                  'owner_uid': ownerUid,
-                  'takeover_signature': takeoverSig,
-                  'demote_previous_to': 'agent',
-                  'at': now,
-                }),
-              },
+            final wsRows = await db.query(
+              'workspaces',
+              columns: ['owner_email', 'owner_google_id'],
+              where: 'id = ?',
+              whereArgs: [ws],
+              limit: 1,
             );
-            await CloudJoin.demotePreviousOwnersInCloud(
-              this,
-              backendUrl: url,
-              workspaceId: ws,
-              currentOwnerDeviceId: ownId,
-            ).timeout(const Duration(seconds: 6));
+            final wsOwnerEmail = wsRows.isNotEmpty
+                ? '${wsRows.first['owner_email'] ?? ''}'.trim().toLowerCase()
+                : '';
+            final wsOwnerUid = wsRows.isNotEmpty
+                ? '${wsRows.first['owner_google_id'] ?? ''}'.trim()
+                : '';
+            final isSameRegisteredOwner = (ownerUid.isNotEmpty &&
+                    wsOwnerUid.isNotEmpty &&
+                    ownerUid == wsOwnerUid) ||
+                (ownerEmail.isNotEmpty &&
+                    wsOwnerEmail.isNotEmpty &&
+                    ownerEmail == wsOwnerEmail);
+            if (!isSameRegisteredOwner) {
+              final sigPayload =
+                  '$ws|$ownId|$prevOwnerId|$ownerEmail|$ownerUid';
+              final sigKey = utf8.encode(
+                  'nexora-sovereign-takeover-v1:$ws:$ownerEmail:$ownerUid');
+              final takeoverSig = Hmac(sha256, sigKey)
+                  .convert(utf8.encode(sigPayload))
+                  .toString();
+              await queueOperation(
+                entityType: EntityKind.setting,
+                entityId: 'ownershipTransfer',
+                opType: OpKind.settings,
+                payload: {
+                  'key': 'ownershipTransfer',
+                  'value': jsonEncode({
+                    'owner_device_id': ownId,
+                    'owner_user_id': _currentUserId,
+                    'previous_owner_device_id': prevOwnerId,
+                    'email_takeover': true,
+                    'owner_email': ownerEmail,
+                    'owner_uid': ownerUid,
+                    'takeover_signature': takeoverSig,
+                    'demote_previous_to': 'agent',
+                    'at': now,
+                  }),
+                },
+              );
+              await CloudJoin.demotePreviousOwnersInCloud(
+                this,
+                backendUrl: url,
+                workspaceId: ws,
+                currentOwnerDeviceId: ownId,
+              ).timeout(const Duration(seconds: 6));
+            }
           }
           await CloudJoin.registerCreatorIfAbsent(
             this,

@@ -598,6 +598,7 @@ class CloudJoin {
 
   /// عند انتقال الإدارة بالبريد لجهاز جديد: يتم خفض أي جهاز مدير سابق في السجل السحابي
   /// (roster) إلى دور «وكيل» (agent) مع نزع is_owner عنه ليبقى المدير الفعال واحداً فقط.
+  /// يستثنى من التخفيض أي جهاز يتبع نفس حساب المالك الحالي (نفس الـ uid أو البريد).
   static Future<void> demotePreviousOwnersInCloud(
     Repo repo, {
     required String backendUrl,
@@ -606,14 +607,62 @@ class CloudJoin {
   }) async {
     try {
       final root = _root(backendUrl, workspaceId);
-      final roster = await _getJson('$root/roster.json');
+      final st = await repo.settings();
+      final myEmail = (st['account.email'] ??
+              st['email'] ??
+              st['account.lastOwnerEmail'] ??
+              '')
+          .trim()
+          .toLowerCase();
+      final myUid =
+          (st['account.uid'] ?? st['account.lastOwnerUid'] ?? '').trim();
+
+      final results = await Future.wait<Map<String, dynamic>?>([
+        _getJson('$root/roster.json'),
+        _getJson('$root/devices.json').catchError((_) => null),
+        _getJson('$root/meta.json').catchError((_) => null),
+      ]);
+      final roster = results[0];
       if (roster == null || roster.isEmpty) return;
+      final cloudDevices = results[1] ?? const <String, dynamic>{};
+      final meta = results[2] ?? const <String, dynamic>{};
+      final metaOwnerEmail =
+          '${meta['owner_email'] ?? meta['email'] ?? ''}'.trim().toLowerCase();
+      final metaOwnerUid =
+          '${meta['owner_uid'] ?? meta['owner_google_id'] ?? ''}'.trim();
+
+      // إذا كان المستخدم الحالي هو نفسه مالك المنشأة المسجل في meta السحابي،
+      // فإن أجهزته الأخرى المسجلة كمالك تتبع نفس الحساب ولا يجوز تخفيضها.
+      final isSameAsWorkspaceMetaOwner = (myUid.isNotEmpty &&
+              metaOwnerUid.isNotEmpty &&
+              myUid == metaOwnerUid) ||
+          (myEmail.isNotEmpty &&
+              metaOwnerEmail.isNotEmpty &&
+              myEmail == metaOwnerEmail);
+      if (isSameAsWorkspaceMetaOwner) {
+        return;
+      }
+
       final now = DateTime.now().toIso8601String();
       for (final e in roster.entries) {
         final devId = Uri.decodeComponent(e.key);
         if (devId.isEmpty || devId == currentOwnerDeviceId) continue;
         final val = e.value;
         if (val is! Map) continue;
+        final devMeta = cloudDevices[devId];
+        final devEmail = '${val['owner_email'] ?? val['email'] ?? (devMeta is Map ? devMeta['email'] : '') ?? ''}'
+            .trim()
+            .toLowerCase();
+        final devUid = '${val['owner_uid'] ?? val['uid'] ?? (devMeta is Map ? devMeta['owner_uid'] : '') ?? ''}'
+            .trim();
+        final sameOwnerAccount = (myUid.isNotEmpty &&
+                devUid.isNotEmpty &&
+                myUid == devUid) ||
+            (myEmail.isNotEmpty &&
+                devEmail.isNotEmpty &&
+                myEmail == devEmail);
+        if (sameOwnerAccount) continue;
+
         final wasOwner = val['is_owner'] == 1 ||
             val['is_owner'] == true ||
             '${val['is_owner'] ?? 0}' == '1' ||
@@ -2351,7 +2400,16 @@ class CloudJoin {
           if (remoteEntry['is_paired'] != null) map['is_paired'] = remoteEntry['is_paired'];
         }
         if (devIdStr == ourId) {
-          if (selfEmail.isNotEmpty) map['email'] = selfEmail;
+          final selfUid =
+              (stRoster['account.uid'] ?? stRoster['account.lastOwnerUid'] ?? '')
+                  .trim();
+          if (selfEmail.isNotEmpty) {
+            map['email'] = selfEmail;
+            if (isTargetOwner) map['owner_email'] = selfEmail;
+          }
+          if (selfUid.isNotEmpty && isTargetOwner) {
+            map['owner_uid'] = selfUid;
+          }
           if (selfPhone.isNotEmpty) map['phone'] = selfPhone;
           if (myFp.isNotEmpty) {
             map['fingerprint'] = myFp;
@@ -3818,17 +3876,40 @@ class CloudJoin {
         '${d['revoked_at'] ?? ''}'.isEmpty &&
         '${d['expelled_at'] ?? ''}'.isEmpty;
     final db = await repo.database;
-    final ourId = (await repo.settings())['sync.deviceId'] ?? '';
+    final stLocal = await repo.settings();
+    final ourId = stLocal['sync.deviceId'] ?? '';
+    final ourEmail = (stLocal['account.email'] ??
+            stLocal['email'] ??
+            stLocal['account.lastOwnerEmail'] ??
+            '')
+        .trim()
+        .toLowerCase();
+    final ourUid =
+        (stLocal['account.uid'] ?? stLocal['account.lastOwnerUid'] ?? '').trim();
+    final wsRows = await db.query(
+      'workspaces',
+      columns: ['owner_email', 'owner_google_id'],
+      where: 'id = ?',
+      whereArgs: [workspaceId],
+      limit: 1,
+    );
+    final wsOwnerEmail = wsRows.isNotEmpty
+        ? '${wsRows.first['owner_email'] ?? ''}'.trim().toLowerCase()
+        : '';
+    final wsOwnerUid = wsRows.isNotEmpty
+        ? '${wsRows.first['owner_google_id'] ?? ''}'.trim()
+        : '';
+    final isAuthenticatedSameOwner = (ourEmail.isNotEmpty &&
+            ourEmail.contains('@') &&
+            (wsOwnerEmail.isEmpty || ourEmail == wsOwnerEmail)) ||
+        (ourUid.isNotEmpty && wsOwnerUid.isNotEmpty && ourUid == wsOwnerUid);
     var isOwnerDevice = await repo.isWorkspaceOwner();
     final rows = await db.query('devices');
     final now = DateTime.now().toIso8601String();
     var fixed = 0;
 
-    // ══ (قاعدة المدير الواحد الفعّال) ══
-    // إذا ظهر في السجل السحابي جهاز آخر يحمل is_owner = 1 بينما عقدة جهازنا في السحابة
-    // خُفِّضت إلى is_owner = 0 (بسبب تسجيل دخول المدير ببريده على جهاز جديد)،
-    // يتحول جهازنا فوراً إلى عضو بدور «وكيل» (agent) ليبقى المدير واحداً فقط.
-    if (isOwnerDevice && ourId.isNotEmpty) {
+    // ══ (قاعدة المدير الواحد الفعّال — مع استثناء أجهزة نفس المالك الموثق ببريده/معرفه) ══
+    if (isOwnerDevice && ourId.isNotEmpty && !isAuthenticatedSameOwner) {
       String cloudOwnerId = '';
       for (final e in roster.entries) {
         final rId = Uri.decodeComponent(e.key);

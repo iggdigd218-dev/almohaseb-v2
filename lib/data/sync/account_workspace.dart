@@ -1730,9 +1730,19 @@ class AccountWorkspace {
     final address = (st['address'] ?? '').trim();
     final activity = (st['businessActivity'] ?? '').trim();
     final currency = (st['defaultCurrency'] ?? '').trim();
-    final ownerName = account.displayName.trim().isNotEmpty
-        ? account.displayName.trim()
-        : (st['account.name'] ?? st['sync.deviceName'] ?? '').trim();
+    final rawCustomName = (st['profile.owner_name'] ??
+            st['account.name'] ??
+            st['sync.deviceName'] ??
+            '')
+        .trim();
+    final hasCustomOwnerName = rawCustomName.isNotEmpty &&
+        rawCustomName != 'جهاز المحاسب' &&
+        rawCustomName != 'جهاز مدير الحسابات';
+    final ownerName = hasCustomOwnerName
+        ? rawCustomName
+        : (account.displayName.trim().isNotEmpty
+            ? account.displayName.trim()
+            : rawCustomName);
 
     try {
       final db = await repo.database;

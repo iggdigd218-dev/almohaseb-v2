@@ -68,9 +68,12 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
     final user = ref.read(currentUserProvider).valueOrNull;
     final devName = ref.read(ownDeviceNameProvider).valueOrNull?.trim() ?? '';
     final st = ref.read(settingsProvider).valueOrNull ?? const {};
+    final syncedOwnerName = (st['profile.owner_name'] ?? '').trim();
 
     _userNameCtrl = TextEditingController(
-      text: devName.isNotEmpty ? devName : (user?.name ?? ''),
+      text: syncedOwnerName.isNotEmpty
+          ? syncedOwnerName
+          : (devName.isNotEmpty ? devName : (user?.name ?? '')),
     );
     _emailCtrl = TextEditingController(
       text: (st['account.email'] ?? '').trim(),
@@ -227,10 +230,18 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
           _addressCtrl.text = refreshedSt['address']!.trim();
         }
       }
-      if ((refreshedSt['account.name'] ?? '').trim().isNotEmpty &&
-          _userNameCtrl.text.trim().isEmpty) {
-        _userNameCtrl.text = refreshedSt['account.name']!.trim();
-      } else if ((gu.displayName ?? '').trim().isNotEmpty &&
+      final customSavedName = (refreshedSt['profile.owner_name'] ??
+              refreshedSt['account.name'] ??
+              refreshedSt['sync.deviceName'] ??
+              '')
+          .trim();
+      final hasCustomSavedName = customSavedName.isNotEmpty &&
+          customSavedName != 'جهاز المحاسب' &&
+          customSavedName != 'جهاز مدير الحسابات';
+      if (hasCustomSavedName && _userNameCtrl.text.trim().isEmpty) {
+        _userNameCtrl.text = customSavedName;
+      } else if (!hasCustomSavedName &&
+          (gu.displayName ?? '').trim().isNotEmpty &&
           _userNameCtrl.text.trim().isEmpty) {
         _userNameCtrl.text = gu.displayName!.trim();
         await repo.renameSelfDevice(gu.displayName!.trim());
@@ -505,6 +516,10 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
       final newName = _userNameCtrl.text.trim();
       if (newName.isNotEmpty) {
         await repo.renameSelfDevice(newName);
+        if (isOwner) {
+          await repo.setSyncedSetting('profile.owner_name', newName);
+          await repo.setSyncedSetting('account.name', newName);
+        }
         try {
           await ref.read(syncEngineProvider).broadcastRosterChange();
         } catch (_) {}
@@ -758,8 +773,60 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
                 ),
               ),
 
-              // ══════════ 2) ربط هذا الجهاز كعضو في مجموعة (مخفي عند التسجيل بالبريد) ══════════
-              if (wsMode != 'member' && !googleLinked) ...[
+              // ══════════ 2) حالة دور الجهاز (المالك/المدير، العضو، أو الانضمام لمجموعة) ══════════
+              if ((isOwner || wsMode == 'host') && googleLinked) ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF059669).withValues(alpha: .1),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: const Color(0xFF059669).withValues(alpha: .35),
+                    ),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.admin_panel_settings_rounded,
+                          color: Color(0xFF059669), size: 20),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'هذا الجهاز هو جهاز إدارة المنشأة الرئيسي ويزامن لحظياً.',
+                          style: TextStyle(
+                              fontSize: 11.5, fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ] else if (wsMode == 'member') ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF7C3AED).withValues(alpha: .1),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: const Color(0xFF7C3AED).withValues(alpha: .35),
+                    ),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.groups_rounded,
+                          color: Color(0xFF7C3AED), size: 20),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'هذا الجهاز مرتبط كعضو فعّال في مجموعة المنشأة ويزامن لحظياً.',
+                          style: TextStyle(
+                              fontSize: 11.5, fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ] else if (!googleLinked) ...[
                 const SizedBox(height: 10),
                 Container(
                   padding: const EdgeInsets.all(10),
@@ -862,32 +929,6 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
                           ],
                         ),
                       ],
-                    ],
-                  ),
-                ),
-              ] else ...[
-                const SizedBox(height: 10),
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF7C3AED).withValues(alpha: .1),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: const Color(0xFF7C3AED).withValues(alpha: .35),
-                    ),
-                  ),
-                  child: const Row(
-                    children: [
-                      Icon(Icons.groups_rounded,
-                          color: Color(0xFF7C3AED), size: 20),
-                      SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          'هذا الجهاز مرتبط كعضو فعّال في مجموعة المنشأة ويزامن لحظياً.',
-                          style: TextStyle(
-                              fontSize: 11.5, fontWeight: FontWeight.w700),
-                        ),
-                      ),
                     ],
                   ),
                 ),

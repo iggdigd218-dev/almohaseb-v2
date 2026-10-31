@@ -1381,6 +1381,50 @@ extension ApplyRemoteOp on Repo {
     if (op.entityType == EntityKind.setting &&
         op.entityId == 'ownershipTransfer') {
       await _applyOwnershipTransfer(txn, op);
+    } else if (op.entityType == EntityKind.setting &&
+        op.entityId == 'profile.owner_name') {
+      try {
+        final syncedName = '${op.payload['value'] ?? ''}'.trim();
+        if (syncedName.isNotEmpty) {
+          final modeRows = await txn.query(
+            'sync_meta',
+            where: "key = 'workspaceMode'",
+            limit: 1,
+          );
+          final modeVal = modeRows.isNotEmpty
+              ? '${modeRows.first['value'] ?? ''}'.trim()
+              : '';
+          if (modeVal != 'member') {
+            String ourId = '';
+            try {
+              ourId = requireDeviceId;
+            } catch (_) {}
+            await txn.insert(
+              'settings',
+              {'key': 'sync.deviceName', 'value': syncedName},
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+            await txn.insert(
+              'settings',
+              {'key': 'account.name', 'value': syncedName},
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+            if (ourId.isNotEmpty) {
+              await txn.update(
+                'devices',
+                {'name': syncedName, 'updated_at': now},
+                where: 'id = ?',
+                whereArgs: [ourId],
+              );
+            }
+            await txn.update(
+              'users',
+              {'name': syncedName, 'updated_at': now},
+              where: 'is_me = 1',
+            );
+          }
+        }
+      } catch (_) {}
     }
     await _insertStoredOperation(txn, op);
     if (op.entityType == EntityKind.message) {
@@ -1467,6 +1511,77 @@ extension ApplyRemoteOp on Repo {
         if (!allowed) return;
       }
       final now = DateTime.now().toIso8601String();
+      String ourId = '';
+      try {
+        ourId = requireDeviceId;
+      } catch (_) {}
+
+      // فحص ما إذا كان هذا الجهاز يتبع لنفس حساب المالك المرسل لعملية email_takeover
+      var isSameOwnerAccountLocal = false;
+      if (isEmailTakeover && ourId.isNotEmpty && ourId != newOwnerDev) {
+        final incomingEmail =
+            '${decoded['owner_email'] ?? ''}'.trim().toLowerCase();
+        final incomingUid = '${decoded['owner_uid'] ?? ''}'.trim();
+        final localSettings = await txn.query(
+          'settings',
+          where:
+              "key IN ('account.email', 'email', 'account.uid', 'account.lastOwnerUid')",
+        );
+        String localEmail = '';
+        String localUid = '';
+        for (final r in localSettings) {
+          final k = '${r['key'] ?? ''}';
+          final v = '${r['value'] ?? ''}'.trim();
+          if ((k == 'account.email' || k == 'email') &&
+              localEmail.isEmpty &&
+              v.isNotEmpty) {
+            localEmail = v.toLowerCase();
+          } else if ((k == 'account.uid' || k == 'account.lastOwnerUid') &&
+              localUid.isEmpty &&
+              v.isNotEmpty) {
+            localUid = v;
+          }
+        }
+        final modeRows = await txn.query(
+          'sync_meta',
+          where: "key = 'workspaceMode'",
+          limit: 1,
+        );
+        final localMode = modeRows.isNotEmpty
+            ? '${modeRows.first['value'] ?? ''}'.trim()
+            : '';
+        if (localMode != 'member') {
+          isSameOwnerAccountLocal = (incomingUid.isNotEmpty &&
+                  localUid.isNotEmpty &&
+                  incomingUid == localUid) ||
+              (incomingEmail.isNotEmpty &&
+                  localEmail.isNotEmpty &&
+                  incomingEmail == localEmail);
+        }
+      }
+
+      if (isSameOwnerAccountLocal) {
+        // جهاز تابع لنفس حساب المالك: يُمنع تخفيضه إلى وكيل أو عضو ويحتفظ بوضع host ورتبة المالك
+        await txn.insert(
+            'sync_meta', {'key': 'workspaceMode', 'value': 'host'},
+            conflictAlgorithm: ConflictAlgorithm.replace);
+        await txn.delete('sync_meta',
+            where: 'key = ?', whereArgs: ['demotedToAgentBy']);
+        await txn.update(
+          'devices',
+          {
+            'is_owner': 1,
+            'is_paired': 1,
+            'revoked_at': '',
+            'expelled_at': '',
+            'updated_at': now,
+          },
+          where: 'id = ?',
+          whereArgs: [ourId],
+        );
+        return;
+      }
+
       // ذاكرة المالك السابق: تُمكّن قبول عملية «استرجاع» شرعية لاحقاً،
       // ويُتحقق منها أعلاه — لا تُقبل إلا من هذا الجهاز تحديداً.
       final prevOwnerId = curOwner.isNotEmpty
@@ -1522,10 +1637,6 @@ extension ApplyRemoteOp on Repo {
       }
       // 3) إن كنا نحن المستلم: الوضع يصبح host فوراً — تظهر «إدارة
       //    المجموعة» وشاشات الأجهزة دون خروج أو إعادة تشغيل.
-      String ourId = '';
-      try {
-        ourId = requireDeviceId;
-      } catch (_) {}
       if (ourId.isNotEmpty && ourId == newOwnerDev) {
         await txn.insert(
             'sync_meta', {'key': 'workspaceMode', 'value': 'host'},
