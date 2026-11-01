@@ -4260,6 +4260,31 @@ class Repo {
           );
         }
       }
+      await txn.delete(
+        'settings',
+        where: 'key IN (?, ?)',
+        whereArgs: ['deviceExpelled:$deviceId', 'deviceRevoked:$deviceId'],
+      );
+      await txn.delete(
+        'sync_queue',
+        where:
+            "operation_id IN (SELECT id FROM operations WHERE entity_id IN (?, ?) OR (entity_type = 'user' AND op_type = 'delete' AND payload LIKE ?))",
+        whereArgs: [
+          'deviceExpelled:$deviceId',
+          'deviceRevoked:$deviceId',
+          '%$deviceId%',
+        ],
+      );
+      await txn.delete(
+        'operations',
+        where:
+            "entity_id IN (?, ?) OR (entity_type = 'user' AND op_type = 'delete' AND payload LIKE ?)",
+        whereArgs: [
+          'deviceExpelled:$deviceId',
+          'deviceRevoked:$deviceId',
+          '%$deviceId%',
+        ],
+      );
     });
   }
 

@@ -168,7 +168,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       final repo = ref.read(repoProvider);
       final db = await repo.database;
       await db.delete('sync_meta',
-          where: "key IN ('selfRevoked', 'demotedToAgentBy')");
+          where:
+              "key IN ('selfRevoked', 'demotedToAgentBy', 'workspaceStatus')");
       await db.delete('settings', where: "key LIKE 'pendingJoin.%'");
       try {
         final ourId = await ensureDeviceId(repo);

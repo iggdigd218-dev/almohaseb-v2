@@ -1315,6 +1315,40 @@ extension ApplyRemoteOp on Repo {
           } catch (_) {}
         }
         final delTime = (op.deviceTime.isNotEmpty) ? op.deviceTime : (op.timestamp.isNotEmpty ? op.timestamp : now);
+        if (op.entityType == EntityKind.user) {
+          try {
+            final joinedRows = await txn.query(
+              'settings',
+              where: "key = 'sync.joinedAtMs'",
+              limit: 1,
+            );
+            final joinedMs = joinedRows.isNotEmpty
+                ? (int.tryParse('${joinedRows.first['value'] ?? ''}'.trim()) ?? 0)
+                : 0;
+            if (joinedMs > 0) {
+              final isSelfUser = existing.isNotEmpty &&
+                  ((existing.first['is_me'] as num?)?.toInt() ?? 0) == 1;
+              String ourDevId = '';
+              try {
+                ourDevId = requireDeviceId;
+              } catch (_) {}
+              final targetDevId =
+                  '${op.payload['expelled_device_id'] ?? op.payload['revoked_device_id'] ?? ''}'
+                      .trim();
+              if (isSelfUser ||
+                  (ourDevId.isNotEmpty && targetDevId == ourDevId)) {
+                final opDt = DateTime.tryParse(delTime) ??
+                    DateTime.tryParse(op.timestamp) ??
+                    DateTime.tryParse(op.deviceTime);
+                final opMs = opDt?.millisecondsSinceEpoch ?? 0;
+                if (opMs == 0 || opMs <= joinedMs + 10000) {
+                  await _insertStoredOperation(txn, op);
+                  return true;
+                }
+              }
+            }
+          } catch (_) {}
+        }
         if (columns.contains('deleted_at')) {
           final delMap = <String, Object?>{
             'deleted_at': delTime,
@@ -1381,6 +1415,39 @@ extension ApplyRemoteOp on Repo {
     if (op.entityType == EntityKind.setting &&
         op.entityId == 'ownershipTransfer') {
       await _applyOwnershipTransfer(txn, op);
+    } else if (op.entityType == EntityKind.setting &&
+        (op.entityId.startsWith('deviceExpelled:') ||
+            op.entityId.startsWith('deviceRevoked:'))) {
+      try {
+        String ourDevId = '';
+        try {
+          ourDevId = requireDeviceId;
+        } catch (_) {}
+        if (ourDevId.isNotEmpty &&
+            (op.entityId == 'deviceExpelled:$ourDevId' ||
+                op.entityId == 'deviceRevoked:$ourDevId')) {
+          final joinedRows = await txn.query(
+            'settings',
+            where: "key = 'sync.joinedAtMs'",
+            limit: 1,
+          );
+          final joinedMs = joinedRows.isNotEmpty
+              ? (int.tryParse('${joinedRows.first['value'] ?? ''}'.trim()) ?? 0)
+              : 0;
+          final valStr = '${op.payload['value'] ?? ''}'.trim();
+          final opDt = DateTime.tryParse(valStr) ??
+              DateTime.tryParse(op.timestamp) ??
+              DateTime.tryParse(op.deviceTime);
+          final opMs = opDt?.millisecondsSinceEpoch ?? 0;
+          if (joinedMs > 0 && (opMs == 0 || opMs <= joinedMs + 10000)) {
+            await txn.delete(
+              'settings',
+              where: 'key = ?',
+              whereArgs: [op.entityId],
+            );
+          }
+        }
+      } catch (_) {}
     } else if (op.entityType == EntityKind.setting &&
         op.entityId == 'profile.owner_name') {
       try {

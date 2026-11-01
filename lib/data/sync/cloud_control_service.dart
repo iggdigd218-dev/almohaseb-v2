@@ -18,6 +18,7 @@ import '../../core/app_version.dart';
 import '../../core/cloud_config.dart';
 import '../../core/license_model.dart';
 import '../repository.dart';
+import 'cloud_join.dart';
 import 'device_id.dart';
 import 'firebase_auth_service.dart';
 import 'subscription_guard.dart';
@@ -298,22 +299,8 @@ class CloudControlService {
       // الأقدم أثرٌ منتهٍ يُتجاهل ويُمسح ذاتياً — لا طرد بأثرٍ سابقٍ على انضمام.
       if (revokedRec is Map && revokedRec.isNotEmpty) {
         final joinedMs = int.tryParse(st['sync.joinedAtMs'] ?? '') ?? 0;
-        var evictMs = 0;
-        final rawMs = revokedRec['evictedAtMs'] ??
-            revokedRec['ejected_at'] ??
-            revokedRec['timestamp'] ??
-            revokedRec['revokedAtMs'];
-        if (rawMs is int) {
-          evictMs = rawMs;
-        } else if (rawMs is num) {
-          evictMs = rawMs.toInt();
-        } else {
-          final dt = DateTime.tryParse(
-              '${revokedRec['evictedAt'] ?? revokedRec['ejectedAt'] ?? ''}'
-                  .trim());
-          if (dt != null) evictMs = dt.millisecondsSinceEpoch;
-        }
-        if (joinedMs > 0 && (evictMs == 0 || evictMs <= joinedMs)) {
+        final evictMs = CloudJoin.extractEvictionTimeMs(revokedRec);
+        if (joinedMs > 0 && (evictMs == 0 || evictMs <= joinedMs + 5000)) {
           isRevokedOrEvicted = false;
           try {
             await _deleteUrl(

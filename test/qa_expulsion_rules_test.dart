@@ -13,6 +13,7 @@ import 'package:http/testing.dart';
 import 'package:nexora_app/core/database.dart';
 import 'package:nexora_app/core/cloud_config.dart';
 import 'package:nexora_app/data/repository.dart';
+import 'package:nexora_app/data/sync/cloud_firebase_transport.dart';
 import 'package:nexora_app/data/sync/cloud_join.dart';
 import 'package:nexora_app/data/sync/device_registry.dart';
 import 'package:nexora_app/data/sync/firebase_auth_service.dart';
@@ -538,5 +539,142 @@ void main() {
       c.client,
     );
     expect(none, isEmpty);
+  });
+
+  test(
+      'REJOIN-02 إعادة الانضمام بعد الطرد لا تطرد الجهاز ذاتياً عند سحب عمليات طرد تاريخية من /operations',
+      () async {
+    final c = _FakeCloud();
+    seedSubscription(c, max: 5);
+    final memberId = (await repo.settings())['sync.deviceId'] ?? 'DEVICE-MEM1';
+    final pastMs = DateTime.now().millisecondsSinceEpoch - 120000;
+    final pastIso = DateTime.fromMillisecondsSinceEpoch(pastMs).toIso8601String();
+    final joinMs = DateTime.now().millisecondsSinceEpoch;
+    final joinIso = DateTime.fromMillisecondsSinceEpoch(joinMs).toIso8601String();
+
+    // تهيئة الجهاز كعضو أُعيد قبوله للتو في المجموعة
+    await db.update(
+      'devices',
+      {
+        'is_owner': 0,
+        'is_paired': 1,
+        'revoked_at': '',
+        'expelled_at': '',
+        'user_id': 77,
+        'updated_at': joinIso,
+      },
+      where: 'id = ?',
+      whereArgs: [memberId],
+    );
+    await db.insert(
+      'users',
+      {
+        'id': 77,
+        'name': 'كاشير معاد ضمه',
+        'role': 'cashier',
+        'pin': '',
+        'password': '',
+        'permissions': 'add_tx',
+        'is_me': 1,
+        'active': 1,
+        'workspace_id': _ws,
+        'deleted_at': '',
+        'created_at': joinIso,
+        'updated_at': joinIso,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    await db.insert(
+      'sync_meta',
+      {'key': 'workspaceMode', 'value': 'member'},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    await repo.setSetting('sync.joinedAtMs', '$joinMs');
+
+    // الروستر السحابي يثبت أن العضو نشط ومعتمد
+    c.put('$_root/roster/$memberId.json', {
+      'id': memberId,
+      'name': 'كاشير معاد ضمه',
+      'status': 'active',
+      'is_paired': 1,
+      'is_owner': 0,
+      'revoked_at': '',
+      'expelled_at': '',
+      'user_id': 77,
+      'user_role': 'cashier',
+      'joined_at_ms': joinMs,
+      'updated_at': joinIso,
+    });
+
+    // عمليات طرد تاريخية قديمة ما زالت موجودة في /operations في السحابة من حادثة طرد سابقة
+    c.put('$_root/operations/op_old_expel_setting.json', {
+      'id': 'op_old_expel_setting',
+      'device_id': 'DEVICE-OWNER',
+      'workspace_id': _ws,
+      'entity_type': 'setting',
+      'entity_id': 'deviceExpelled:$memberId',
+      'op_type': 'create',
+      'payload': {
+        'key': 'deviceExpelled:$memberId',
+        'value': pastIso,
+      },
+      'timestamp': pastIso,
+      'device_time': pastIso,
+      'server_time': pastMs,
+      'hlc': '$pastIso-0001-DEVICE-OWNER',
+      'seq': 1,
+    });
+    c.put('$_root/operations/op_old_user_del.json', {
+      'id': 'op_old_user_del',
+      'device_id': 'DEVICE-OWNER',
+      'workspace_id': _ws,
+      'entity_type': 'user',
+      'entity_id': '77',
+      'op_type': 'delete',
+      'payload': {
+        'id': 77,
+        'active': 0,
+        'deleted_at': pastIso,
+        'expelled_device_id': memberId,
+      },
+      'timestamp': pastIso,
+      'device_time': pastIso,
+      'server_time': pastMs,
+      'hlc': '$pastIso-0002-DEVICE-OWNER',
+      'seq': 2,
+    });
+
+    // تنفيذ سحب العمليات وفحص الطرد ومزامنة الروستر كما يفعل SyncEngine فور الدخول
+    final transport = CloudFirebaseTransport(
+      repo: repo,
+      dbProvider: () async => db,
+      backendUrl: _url,
+      workspaceId: _ws,
+    );
+    await http.runWithClient(() async {
+      await transport.pull();
+      await CloudJoin.syncRoster(repo, db, backendUrl: _url, workspaceId: _ws);
+    }, c.client);
+
+    final expelledLocally = await repo.amIExpelled();
+    final evictedRemotely = await http.runWithClient(
+      () => CloudJoin.checkLeaveOrEvicted(
+        backendUrl: _url,
+        workspaceId: _ws,
+        deviceId: memberId,
+        joinedAtMs: joinMs,
+      ),
+      c.client,
+    );
+
+    expect(expelledLocally, isFalse,
+        reason: 'عمليات الطرد التاريخية في /operations لا تطرد العضو المعاد ضمه');
+    expect(evictedRemotely, isFalse,
+        reason: 'العضو المعاد ضمه معتمد في الروستر ولا يعتبر مطروداً');
+
+    final userRow =
+        (await db.query('users', where: 'id = ?', whereArgs: [77])).single;
+    expect(userRow['active'], 1);
+    expect('${userRow['deleted_at'] ?? ''}', isEmpty);
   });
 }
