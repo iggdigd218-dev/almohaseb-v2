@@ -30,7 +30,6 @@ import 'sync/snapshot_apply.dart';
 import 'sync/sync_diagnostics.dart';
 import 'sync/sync_queue.dart';
 import 'sync/workspace_service.dart';
-import '../core/factory_reset.dart';
 import '../core/cloud_config.dart';
 
 /// خطأ استعادة واضح؛ لا تُعاد رسالة نجاح عند حدوثه.

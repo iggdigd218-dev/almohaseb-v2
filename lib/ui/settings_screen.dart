@@ -24,6 +24,7 @@ import 'splash.dart' show SplashScreen;
 import 'trial_ui.dart' show SubscriptionDetailsSection;
 import 'update_section.dart';
 import 'account_section.dart';
+import 'profile_dialog.dart' show showAccountProfileDialog;
 import 'appearance_screen.dart';
 import 'join_approval_flow.dart' show startJoinApprovalFlow;
 import 'package:url_launcher/url_launcher.dart';

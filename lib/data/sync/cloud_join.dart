@@ -739,6 +739,53 @@ class CloudJoin {
 
   static Future<Map<String, dynamic>?> getJson(String url) => _getJson(url);
 
+  static Future<void> deleteNode(String url) => _delete(url);
+
+  static Future<void> patchJson(String url, Map<String, dynamic> body,
+          {Duration timeout = const Duration(seconds: 20)}) =>
+      _patchJson(url, body, timeout: timeout);
+
+  static Future<void> publishRoster(Repo repo) async {
+    final st = await repo.settings();
+    final url = effectiveBackendUrl(st['cloudBackendUrl']);
+    final ws = repo.requireWorkspaceId;
+    if (url.isEmpty || ws.isEmpty || ws == 'default') return;
+    final db = await repo.database;
+    await syncRoster(repo, db, backendUrl: url, workspaceId: ws);
+  }
+
+  static Future<void> refreshJoinSnapshot(Repo repo) async {
+    final st = await repo.settings();
+    final url = effectiveBackendUrl(st['cloudBackendUrl']);
+    final ws = repo.requireWorkspaceId;
+    if (url.isEmpty || ws.isEmpty || ws == 'default') return;
+    final ourId = await ensureDeviceId(repo);
+    final snap = await buildWorkspaceSnapshot(repo, hostDeviceId: ourId);
+    final snapTs = DateTime.now().millisecondsSinceEpoch;
+    final root = _root(url, ws);
+    await _putJson(
+      '$root/joinSnapshot.json',
+      {
+        'createdAt': DateTime.now().toIso8601String(),
+        'hostDeviceId': ourId,
+        'compacted_through_ts': snapTs,
+        'data': snap,
+      },
+      timeout: const Duration(seconds: 25),
+    );
+    final db = await repo.database;
+    if (db.isOpen) {
+      await db.insert(
+        'sync_meta',
+        {
+          'key': 'snapshotThroughTs:$ws',
+          'value': '$snapTs',
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+  }
+
   static Future<Map<String, dynamic>?> _getJson(String url) async {
     var token = await _ensureToken();
     var uri = _authedUrl(url, token);
