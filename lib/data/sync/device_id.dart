@@ -201,10 +201,9 @@ Future<String> ensureDeviceId(Repo repo) async {
 
   final globalSavedId =
       (prefs?.getString(kPersistentDeviceIdPrefKey) ?? '').trim();
-  final fresh = hwId ??
-      (globalSavedId.isNotEmpty
-          ? globalSavedId
-          : formatDeviceId(generateDeviceCode()));
+  final fresh = globalSavedId.isNotEmpty
+      ? globalSavedId
+      : (hwId ?? formatDeviceId(generateDeviceCode()));
 
   await repo.setSetting(_deviceIdKey, fresh);
   final effectiveFpHash = hwFpHash ?? _hashToCode('persisted:$fresh', 24);

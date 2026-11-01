@@ -548,7 +548,7 @@ class SnapshotApply {
             whereArgs: [ourDeviceId],
           );
         }
-        // ضبط وضع المساحة على "عضو" وحذف أي سجل ملكية سابق
+        // ضبط وضع المساحة على "عضو" وحذف أي سجل ملكية أو طرد سابق
         await txn.insert(
             'sync_meta',
             {
@@ -556,7 +556,11 @@ class SnapshotApply {
               'value': 'member',
             },
             conflictAlgorithm: ConflictAlgorithm.replace);
-        await txn.delete('sync_meta', where: "key = 'ownerDeviceId'");
+        await txn.delete(
+          'sync_meta',
+          where:
+              "key IN ('ownerDeviceId', 'selfRevoked', 'demotedToAgentBy', 'workspaceStatus')",
+        );
 
         // منشئ هذه المساحة هو المدير (hostId) وليس جهاز العضو
         if (hostId.isNotEmpty) {

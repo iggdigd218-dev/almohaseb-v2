@@ -21,6 +21,7 @@ import '../../core/database.dart';
 import '../../core/desktop_net.dart';
 import '../repository.dart';
 import 'apply_remote.dart';
+import 'cloud_join.dart';
 import 'conflict_resolver.dart';
 import 'device_id.dart';
 import 'firebase_auth_service.dart';
@@ -523,6 +524,49 @@ class CloudFirebaseTransport implements SyncTransport {
         return t != 0 ? t : (a.key as String).compareTo(b.key as String);
       });
 
+      final stPull = await repo.settings();
+      final joinedAtMs =
+          int.tryParse((stPull['sync.joinedAtMs'] ?? '').trim()) ?? 0;
+
+      int opTimeMs(SyncOperation op, [Map<dynamic, dynamic>? rawMap]) {
+        final candidates = <Object?>[
+          if (rawMap != null) rawMap['server_time'],
+          if (rawMap != null) rawMap['server_ts'],
+          op.payload['server_time'],
+          op.payload['server_ts'],
+          op.payload['value'],
+          op.payload['deleted_at'],
+          op.payload['revoked_at'],
+          op.payload['expelled_at'],
+          op.timestamp,
+          op.deviceTime,
+        ];
+        var best = 0;
+        for (final c in candidates) {
+          if (c == null) continue;
+          if (c is int && c > best) {
+            best = c;
+          } else if (c is num && c.toInt() > best) {
+            best = c.toInt();
+          } else if (c is String) {
+            final s = c.trim();
+            if (s.isEmpty) continue;
+            final asInt = int.tryParse(s);
+            if (asInt != null && asInt > 1000000000000 && asInt > best) {
+              best = asInt;
+            } else {
+              final dt = DateTime.tryParse(s);
+              if (dt != null && dt.millisecondsSinceEpoch > best) {
+                best = dt.millisecondsSinceEpoch;
+              }
+            }
+          }
+        }
+        return best;
+      }
+
+      final pendingSelfRevokeOps = <SyncOperation>[];
+
       await _setForeignKeys(false);
       try {
         const microBatchSize = 40;
@@ -583,24 +627,14 @@ class CloudFirebaseTransport implements SyncTransport {
                   (op.entityId == 'deviceExpelled:$ourId' ||
                       op.entityId == 'deviceRevoked:$ourId') &&
                   op.deviceId != ourId) {
-                final nowIso = DateTime.now().toIso8601String();
-                await txn.update(
-                  'devices',
-                  {
-                    'revoked_at': nowIso,
-                    'expelled_at':
-                        op.entityId.startsWith('deviceExpelled:') ? nowIso : '',
-                    'is_paired': 0,
-                    'updated_at': nowIso,
-                  },
-                  where: 'id = ?',
-                  whereArgs: [ourId],
-                );
-                await txn.insert(
-                  'sync_meta',
-                  {'key': 'selfRevoked', 'value': '1'},
-                  conflictAlgorithm: ConflictAlgorithm.replace,
-                );
+                final opMs = opTimeMs(op, v);
+                // حماية حاسمة لإعادة الانضمام بعد الطرد: أي عملية طرد/حظر تاريخية في /operations
+                // أقدم من (أو متزامنة مع) طابع آخر انضمام معتمد (sync.joinedAtMs) هي أثر منتهٍ يُتجاهل تماماً.
+                if (joinedAtMs > 0 && (opMs == 0 || opMs <= joinedAtMs + 10000)) {
+                  // تجاهل أثر الطرد القديم
+                } else {
+                  pendingSelfRevokeOps.add(op);
+                }
               }
               if (ok &&
                   op.entityType == EntityKind.setting &&
@@ -628,6 +662,47 @@ class CloudFirebaseTransport implements SyncTransport {
         }
       } finally {
         await _setForeignKeys(true);
+      }
+
+      if (pendingSelfRevokeOps.isNotEmpty) {
+        for (final op in pendingSelfRevokeOps) {
+          // التحقق المزدوج: إذا كان الجهاز معتمداً ونشطاً حالياً في الروستر السحابي
+          // ولا توجد عليه شاهدة طرد أحدث من انضمامه، لا يطرد نفسه بسبب عملية قديمة في /operations.
+          if (joinedAtMs > 0 && backendUrl.trim().isNotEmpty) {
+            final stillActiveInRoster = await CloudJoin.isDeviceApprovedInRoster(
+              backendUrl: backendUrl,
+              workspaceId: workspaceId,
+              deviceId: ourId,
+            );
+            final evictedInCloud = await CloudJoin.checkLeaveOrEvicted(
+              backendUrl: backendUrl,
+              workspaceId: workspaceId,
+              deviceId: ourId,
+              joinedAtMs: joinedAtMs,
+            );
+            if (stillActiveInRoster && !evictedInCloud) {
+              continue;
+            }
+          }
+          final nowIso = DateTime.now().toIso8601String();
+          await db.update(
+            'devices',
+            {
+              'revoked_at': nowIso,
+              'expelled_at':
+                  op.entityId.startsWith('deviceExpelled:') ? nowIso : '',
+              'is_paired': 0,
+              'updated_at': nowIso,
+            },
+            where: 'id = ?',
+            whereArgs: [ourId],
+          );
+          await db.insert(
+            'sync_meta',
+            {'key': 'selfRevoked', 'value': '1'},
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        }
       }
 
       for (final op in chatOps) {
@@ -673,6 +748,44 @@ class CloudFirebaseTransport implements SyncTransport {
               '${op.payload['deleted_at'] ?? ''}'.trim().isNotEmpty ||
               targetDevId == ourId;
           if (isRevokedOrDeleted) {
+            final opMs = opTimeMs(op);
+            if (joinedAtMs > 0 && (opMs == 0 || opMs <= joinedAtMs + 10000)) {
+              // عملية حذف مستخدم/طرد تاريخية سابقة لإعادة الانضمام المعتمد — نتجاهلها ونحمي المستخدم المحلي
+              if (myUid != null) {
+                await db.update(
+                  'users',
+                  {'active': 1, 'deleted_at': '', 'is_me': 1},
+                  where: 'id = ?',
+                  whereArgs: [myUid],
+                );
+              }
+              continue;
+            }
+            if (joinedAtMs > 0 && backendUrl.trim().isNotEmpty) {
+              final stillActiveInRoster =
+                  await CloudJoin.isDeviceApprovedInRoster(
+                backendUrl: backendUrl,
+                workspaceId: workspaceId,
+                deviceId: ourId,
+              );
+              final evictedInCloud = await CloudJoin.checkLeaveOrEvicted(
+                backendUrl: backendUrl,
+                workspaceId: workspaceId,
+                deviceId: ourId,
+                joinedAtMs: joinedAtMs,
+              );
+              if (stillActiveInRoster && !evictedInCloud) {
+                if (myUid != null) {
+                  await db.update(
+                    'users',
+                    {'active': 1, 'deleted_at': '', 'is_me': 1},
+                    where: 'id = ?',
+                    whereArgs: [myUid],
+                  );
+                }
+                continue;
+              }
+            }
             final nowIso = DateTime.now().toIso8601String();
             await db.update(
               'devices',
