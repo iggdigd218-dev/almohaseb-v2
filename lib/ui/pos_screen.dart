@@ -750,6 +750,26 @@ class _PosScreenState extends ConsumerState<PosScreen>
                                 size: 18),
                             label: const Text('سجل المبيعات'),
                           ),
+                          Consumer(
+                            builder: (ctx, rref, _) {
+                              final perms = rref
+                                  .watch(effectivePermissionsProvider)
+                                  .valueOrNull;
+                              final user =
+                                  rref.watch(currentUserProvider).valueOrNull;
+                              final canViewSales =
+                                  (perms?.canViewSalesSummary ?? false) ||
+                                      (user?.can('can_view_sales_summary') ??
+                                          false);
+                              if (!canViewSales) return const SizedBox.shrink();
+                              return TextButton.icon(
+                                onPressed: _openPosSalesSummarySheet,
+                                icon: const Icon(Icons.bar_chart_rounded,
+                                    size: 18),
+                                label: const Text('ملخص المبيعات'),
+                              );
+                            },
+                          ),
                         ],
                       ),
                     ),
@@ -1855,6 +1875,22 @@ class _PosScreenState extends ConsumerState<PosScreen>
                   tooltip: 'المرتجعات والبحث برقم الفاتورة',
                   onTap: () => setState(() => _tabController.animateTo(1)),
                 ),
+                Consumer(
+                  builder: (ctx, rref, _) {
+                    final perms =
+                        rref.watch(effectivePermissionsProvider).valueOrNull;
+                    final user = rref.watch(currentUserProvider).valueOrNull;
+                    final canViewSales =
+                        (perms?.canViewSalesSummary ?? false) ||
+                            (user?.can('can_view_sales_summary') ?? false);
+                    if (!canViewSales) return const SizedBox.shrink();
+                    return _headerIconButton(
+                      icon: Icons.bar_chart_rounded,
+                      tooltip: 'ملخص وتقارير المبيعات',
+                      onTap: _openPosSalesSummarySheet,
+                    );
+                  },
+                ),
                 _headerIconButton(
                   icon: Icons.tune_rounded,
                   tooltip: 'ترتيب وتصفية الأصناف',
@@ -2010,6 +2046,21 @@ class _PosScreenState extends ConsumerState<PosScreen>
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  void _openPosSalesSummarySheet() {
+    Sfx.click();
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      shape: RoundedRectangleBorder(borderRadius: AppRadius.sheetTop),
+      builder: (_) => const FractionallySizedBox(
+        heightFactor: 0.78,
+        child: _PosSalesSummarySheet(),
       ),
     );
   }
@@ -4125,65 +4176,73 @@ class _PosHistoryTabState extends ConsumerState<_PosHistoryTab> {
                 }
               }
 
+              final perms =
+                  ref.watch(effectivePermissionsProvider).valueOrNull;
+              final curUser = ref.watch(currentUserProvider).valueOrNull;
+              final canViewSales =
+                  (perms?.canViewSalesSummary ?? false) ||
+                      (curUser?.can('can_view_sales_summary') ?? false);
+
               return Column(
                 children: [
-                  Container(
-                    margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 10,
-                    ),
-                    decoration: BoxDecoration(
-                      color: AppColors.primarySoftOf(context),
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                        color: AppColors.primaryOf(context)
-                            .withValues(alpha: 0.25),
+                  if (canViewSales)
+                    Container(
+                      margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppColors.primarySoftOf(context),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: AppColors.primaryOf(context)
+                              .withValues(alpha: 0.25),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.trending_up_rounded,
+                            color: AppColors.primaryOf(context),
+                            size: 22,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'إجمالي المبيعات (${posTxs.length} فاتورة)',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w800,
+                                    color: AppColors.text2Of(context),
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'نقداً: ${Fmt.money(cashSales)} • آجل: ${Fmt.money(creditSales)}',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: AppColors.text3Of(context),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Text(
+                            '${Fmt.money(totalSales)} $primaryCur',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900,
+                              color: AppColors.primaryOf(context),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.trending_up_rounded,
-                          color: AppColors.primaryOf(context),
-                          size: 22,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'إجمالي المبيعات (${posTxs.length} فاتورة)',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w800,
-                                  color: AppColors.text2Of(context),
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                'نقداً: ${Fmt.money(cashSales)} • آجل: ${Fmt.money(creditSales)}',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                  color: AppColors.text3Of(context),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        Text(
-                          '${Fmt.money(totalSales)} $primaryCur',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w900,
-                            color: AppColors.primaryOf(context),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
                   Expanded(
                     child: ListView.separated(
                       padding: const EdgeInsets.all(12),
@@ -5009,3 +5068,332 @@ class _ZeroButtons extends StatelessWidget {
     );
   }
 }
+
+enum _SalesRangePreset { today, week, month, custom }
+
+/// نافذة تقرير وملخص مبيعات نقطة البيع (اليوم، هذا الأسبوع، هذا الشهر، أو نطاق تاريخ مخصص)
+/// محمية بصلاحية `can_view_sales_summary` ومعزولة تماماً عن العمليات الدفترية والسندات.
+class _PosSalesSummarySheet extends ConsumerStatefulWidget {
+  const _PosSalesSummarySheet();
+
+  @override
+  ConsumerState<_PosSalesSummarySheet> createState() =>
+      _PosSalesSummarySheetState();
+}
+
+class _PosSalesSummarySheetState extends ConsumerState<_PosSalesSummarySheet> {
+  _SalesRangePreset _preset = _SalesRangePreset.today;
+  DateTimeRange? _customRange;
+  bool _loading = true;
+  Map<String, dynamic> _data = const {};
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  (DateTime, DateTime) _effectiveDates() {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    switch (_preset) {
+      case _SalesRangePreset.today:
+        return (today, today);
+      case _SalesRangePreset.week:
+        final start = today.subtract(const Duration(days: 6));
+        return (start, today);
+      case _SalesRangePreset.month:
+        final start = DateTime(now.year, now.month, 1);
+        return (start, today);
+      case _SalesRangePreset.custom:
+        if (_customRange != null) {
+          return (_customRange!.start, _customRange!.end);
+        }
+        return (today, today);
+    }
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final repo = ref.read(repoProvider);
+      final (from, to) = _effectiveDates();
+      final res = await repo.posSalesSummary(from: from, to: to);
+      if (!mounted) return;
+      setState(() {
+        _data = res;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _pickCustomRange() async {
+    final now = DateTime.now();
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(now.year + 1),
+      initialDateRange: _customRange ??
+          DateTimeRange(
+            start: now.subtract(const Duration(days: 7)),
+            end: now,
+          ),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _customRange = picked;
+      _preset = _SalesRangePreset.custom;
+    });
+    await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final allowed = _data['allowed'] == true;
+    final invoiceCount = (_data['invoiceCount'] as int?) ?? 0;
+    final returnCount = (_data['returnCount'] as int?) ?? 0;
+    final grossByCur =
+        (_data['grossByCurrency'] as Map<String, double>?) ?? const {};
+    final returnsByCur =
+        (_data['returnsByCurrency'] as Map<String, double>?) ?? const {};
+    final netByCur =
+        (_data['netByCurrency'] as Map<String, double>?) ?? const {};
+    final cashByCur =
+        (_data['cashByCurrency'] as Map<String, double>?) ?? const {};
+    final creditByCur =
+        (_data['creditByCurrency'] as Map<String, double>?) ?? const {};
+    final currencies = {
+      ...grossByCur.keys,
+      ...netByCur.keys,
+      ...returnsByCur.keys,
+    }.toList();
+    final (from, to) = _effectiveDates();
+    final rangeLabel =
+        '${from.year}-${from.month.toString().padLeft(2, '0')}-${from.day.toString().padLeft(2, '0')}'
+        ' ← '
+        '${to.year}-${to.month.toString().padLeft(2, '0')}-${to.day.toString().padLeft(2, '0')}';
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: AppColors.primarySoftOf(context),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  Icons.bar_chart_rounded,
+                  color: AppColors.primaryOf(context),
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'ملخص وتقارير مبيعات نقطة البيع',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    Text(
+                      'مبيعات الفواتير الفعلية فقط (بدون سندات القبض أو الديون الدفترية) • $rangeLabel',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: AppColors.text2Of(context),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                onPressed: () => Navigator.pop(context),
+                icon: const Icon(Icons.close_rounded),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ChoiceChip(
+                label: const Text('اليوم'),
+                selected: _preset == _SalesRangePreset.today,
+                onSelected: (_) {
+                  setState(() => _preset = _SalesRangePreset.today);
+                  _load();
+                },
+              ),
+              ChoiceChip(
+                label: const Text('هذا الأسبوع'),
+                selected: _preset == _SalesRangePreset.week,
+                onSelected: (_) {
+                  setState(() => _preset = _SalesRangePreset.week);
+                  _load();
+                },
+              ),
+              ChoiceChip(
+                label: const Text('هذا الشهر'),
+                selected: _preset == _SalesRangePreset.month,
+                onSelected: (_) {
+                  setState(() => _preset = _SalesRangePreset.month);
+                  _load();
+                },
+              ),
+              ActionChip(
+                avatar: const Icon(Icons.date_range_rounded, size: 17),
+                label: Text(
+                  _preset == _SalesRangePreset.custom
+                      ? 'نطاق مخصص ($rangeLabel)'
+                      : 'تحديد نطاق تاريخ مخصص',
+                ),
+                onPressed: _pickCustomRange,
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          if (_loading)
+            const Expanded(
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (!allowed)
+            const Expanded(
+              child: EmptyState(
+                icon: Icons.lock_outline_rounded,
+                title: 'صلاحية عرض ملخص المبيعات غير مفعّلة لهذا الحساب',
+                message:
+                    'يمكن لمدير المنشأة تفعيل صلاحية «عرض ملخص وتقارير المبيعات» من إدارة الصلاحيات.',
+              ),
+            )
+          else if (currencies.isEmpty)
+            const Expanded(
+              child: EmptyState(
+                icon: Icons.receipt_long_outlined,
+                title: 'لا توجد فواتير مبيعات في هذه الفترة',
+                message: 'اختر فترة زمنية أخرى لعرض إحصائيات الفواتير.',
+              ),
+            )
+          else
+            Expanded(
+              child: ListView(
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: StatCard(
+                          title: 'عدد فواتير البيع',
+                          value: '$invoiceCount',
+                          icon: Icons.receipt_long_rounded,
+                          color: AppColors.primaryOf(context),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: StatCard(
+                          title: 'فواتير المرتجع',
+                          value: '$returnCount',
+                          icon: Icons.assignment_return_rounded,
+                          color: const Color(0xFFD97706),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  for (final code in currencies) ...[
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: AppColors.surfaceOf(context),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: AppColors.borderOf(context)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.trending_up_rounded,
+                                color: AppColors.primaryOf(context),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'صافي المبيعات ($code)',
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w900,
+                                    fontSize: 14.5,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                '${Fmt.money(netByCur[code] ?? 0)} $code',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 18,
+                                  color: AppColors.primaryOf(context),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const Divider(height: 20),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  'نقداً: ${Fmt.money(cashByCur[code] ?? 0)} $code',
+                                  style: TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: AppColors.greenOf(context),
+                                  ),
+                                ),
+                              ),
+                              Expanded(
+                                child: Text(
+                                  'آجل: ${Fmt.money(creditByCur[code] ?? 0)} $code',
+                                  style: TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: AppColors.dangerOf(context),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          if ((returnsByCur[code] ?? 0) > 0) ...[
+                            const SizedBox(height: 6),
+                            Text(
+                              'إجمالي قبل المرتجع: ${Fmt.money(grossByCur[code] ?? 0)} $code • المرتجعات: ${Fmt.money(returnsByCur[code] ?? 0)} $code',
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: AppColors.text2Of(context),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+

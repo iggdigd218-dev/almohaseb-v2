@@ -1125,6 +1125,13 @@ class _HomeShellState extends ConsumerState<HomeShell>
 
   /// يعرض بانر التحذير المصغّر الأنيق وغير المزعج.
   void _showDangerBanner(ScaffoldMessengerState messenger, String message) {
+    final wsMode = ref.read(workspaceModeProvider).valueOrNull ?? 'standalone';
+    final st = ref.read(settingsProvider).valueOrNull ?? const {};
+    if (wsMode == 'standalone' && (st['cloudWorkspaceProvisioned'] ?? '') != '1') {
+      messenger.hideCurrentMaterialBanner();
+      _dangerShown = false;
+      return;
+    }
     final syncing = _dangerSyncing;
     final isDark = Theme.of(context).brightness == Brightness.dark;
     messenger
@@ -1765,7 +1772,51 @@ class _HomeShellState extends ConsumerState<HomeShell>
             },
           ),
           actions: [
-            const SyncArrowsIndicator(),
+            Consumer(
+              builder: (ctx, rref, _) {
+                final wsMode =
+                    rref.watch(workspaceModeProvider).valueOrNull ??
+                        'standalone';
+                final st =
+                    rref.watch(settingsProvider).valueOrNull ?? const {};
+                final hasGoogleAuth =
+                    rref.watch(googleLinkedProvider).valueOrNull ?? false;
+                final isLocalStandalone = wsMode == 'standalone' &&
+                    (st['cloudWorkspaceProvisioned'] ?? '') != '1' &&
+                    (st['account.email'] ?? '').trim().isEmpty &&
+                    !hasGoogleAuth;
+                if (isLocalStandalone) {
+                  final isDark = Theme.of(ctx).brightness == Brightness.dark;
+                  return _appBarSquircleAction(
+                    tooltip: 'محفوظ محلياً على هذا الجهاز',
+                    bg: isDark
+                        ? const Color(0xFF064E3B)
+                        : const Color(0xFFECFDF5),
+                    fg: isDark
+                        ? const Color(0xFF34D399)
+                        : const Color(0xFF059669),
+                    border: Border.all(
+                      color: isDark
+                          ? const Color(0xFF059669)
+                          : const Color(0xFFA7F3D0),
+                      width: 1.1,
+                    ),
+                    icon: Icon(
+                      Icons.save_outlined,
+                      size: 20,
+                      color: isDark
+                          ? const Color(0xFF34D399)
+                          : const Color(0xFF059669),
+                    ),
+                    onTap: () => showSnack(
+                      ctx,
+                      '💾 وضع العمل المحلي المستقل — جميع عملياتك محفوظة محلياً بأمان على هذا الجهاز.',
+                    ),
+                  );
+                }
+                return const SyncArrowsIndicator();
+              },
+            ),
             Consumer(
               builder: (ctx, rref, _) {
                 final isOwner = rref.watch(isOwnerProvider).valueOrNull ?? false;
@@ -1946,7 +1997,23 @@ class _HomeShellState extends ConsumerState<HomeShell>
         // 🔒 شريط الفترة التجريبية أعلى المحتوى (غير مزعج، يختفي ذاتياً).
         body: Column(
           children: [
-            const TrialCountdownBanner(),
+            Consumer(
+              builder: (ctx, rref, _) {
+                final wsMode =
+                    rref.watch(workspaceModeProvider).valueOrNull ??
+                        'standalone';
+                final st =
+                    rref.watch(settingsProvider).valueOrNull ?? const {};
+                final hasGoogleAuth =
+                    rref.watch(googleLinkedProvider).valueOrNull ?? false;
+                final isLocalStandalone = wsMode == 'standalone' &&
+                    (st['cloudWorkspaceProvisioned'] ?? '') != '1' &&
+                    (st['account.email'] ?? '').trim().isEmpty &&
+                    !hasGoogleAuth;
+                if (isLocalStandalone) return const SizedBox.shrink();
+                return const TrialCountdownBanner();
+              },
+            ),
             Expanded(
               child: desktop
                   ? Row(
@@ -2658,12 +2725,18 @@ class _Drawer extends ConsumerWidget {
                 : null));
 
     // (3.70.0) «إدارة المجموعة» متاحة للمالك المرتبط بـ Google أو للوكيل في مجموعة نشطة.
+    final stDrawer = ref.watch(settingsProvider).valueOrNull ?? const {};
     final googleLinked = ref.watch(googleLinkedProvider).valueOrNull ?? false;
-    final allowGroupInDrawer = googleLinked ||
-        effectiveRole == UserRole.agent ||
-        canManageGroup ||
-        wsMode == 'host' ||
-        wsMode == 'lan';
+    final isLocalStandalone = wsMode == 'standalone' &&
+        (stDrawer['cloudWorkspaceProvisioned'] ?? '') != '1' &&
+        (stDrawer['account.email'] ?? '').trim().isEmpty &&
+        !googleLinked;
+    final allowGroupInDrawer = !isLocalStandalone &&
+        (googleLinked ||
+            effectiveRole == UserRole.agent ||
+            canManageGroup ||
+            wsMode == 'host' ||
+            wsMode == 'lan');
     final items = _DrawerItems.of(
       user: effectiveUser,
       isOwner: isOwner,

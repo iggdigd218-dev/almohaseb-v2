@@ -334,6 +334,7 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
       return;
     }
 
+    final pendingCount = await repo.pendingSyncOperationsCount();
     if (!mounted) return;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -341,11 +342,44 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
         icon: const Icon(Icons.warning_amber_rounded,
             color: Colors.orange, size: 40),
         title: const Text('تحذير: الانضمام لمنشأة قائمة'),
-        content: const Text(
-          'سيتم حذف جميع بياناتك المحلية والسحابية السابقة نهائياً (الحسابات، السندات، الأصناف، المحادثات، والنسخ السحابية الخاصة بك) ولن يتم استرجاع أي بيانات سابقة.\n\n'
-          'إذا كان هذا الجهاز مرتبطاً بمؤسسة سابقة فسيتم عزله عنها تلقائياً، وستدخل المنشأة الجديدة نظيفاً تماماً ببيانات المنشأة المرتبط بها فقط.\n\n'
-          'هل توافق على المتابعة؟',
-          style: TextStyle(height: 1.7),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'الانضمام إلى هذه المنشأة سيؤدي إلى استبدال كافة البيانات والعمليات المحلية المسجلة على هذا الهاتف بنسخة المنشأة السحابية. هل ترغب بالاستمرار؟',
+              style: TextStyle(height: 1.7),
+            ),
+            if (pendingCount > 0) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.red.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.red.withValues(alpha: 0.35)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.error_outline,
+                        color: Colors.red, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'تنبيه هام: لديك ($pendingCount) عملية محلية غير متزامنة في طابور المزامنة ستُفقد نهائياً عند المتابعة.',
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.red,
+                          height: 1.5,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ],
         ),
         actions: [
           TextButton(

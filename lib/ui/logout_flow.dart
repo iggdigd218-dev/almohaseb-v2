@@ -91,7 +91,11 @@ Future<void> showSecuredLogout(WidgetRef ref) async {
       ? container.read(repoProvider)
       : ref.read(repoProvider);
   final st = await repo.settings();
-  final individual = (st[Repo.accountModeKey] ?? '') == 'individual';
+  final wsMode = await repo.workspaceMode();
+  final individual = (st[Repo.accountModeKey] ?? '') == 'individual' ||
+      (wsMode == 'standalone' &&
+          (st['cloudWorkspaceProvisioned'] ?? '') != '1' &&
+          (st[Repo.accountEmailKey] ?? '').trim().isEmpty);
   final email = (st[Repo.accountEmailKey] ?? '').trim().toLowerCase();
   final me = await repo.currentUser();
   final isOwner = await repo.isWorkspaceOwner();
@@ -144,7 +148,7 @@ Future<void> _adminLogout(
     }
   }
   // 2) اشتراط وكيل: المدير/المالك فقط (الوكيل نفسه لا يحتاج وكيلاً،
-  //    والفردي لا أعضاء لديه).
+  //    والفردي لا أعضاء لديه، وإذا وُجد وكيل نشط مسبقاً نتجاوز نافذة اختيار الوكيل).
   if (!individual && isOwner && me?.role != UserRole.agent) {
     try {
       final st = await repo.settings();
@@ -170,6 +174,7 @@ Future<void> _adminLogout(
     final candidates = <_DeputyCandidate>[];
     final seenUserIds = <int>{};
     final seenEmails = <String>{};
+    var hasActiveDeputy = false;
 
     for (final d in devices) {
       final devId = '${d['id'] ?? ''}'.trim();
@@ -190,6 +195,13 @@ Future<void> _adminLogout(
           ? users.where((u) => u.id == dUid).firstOrNull
           : null;
       if (linkedUser != null && !linkedUser.active) continue;
+      final dRole =
+          '${d['user_role'] ?? d['role'] ?? ''}'.trim().toLowerCase();
+      if (linkedUser?.role == UserRole.agent ||
+          dRole == 'agent' ||
+          dRole == 'proxy') {
+        hasActiveDeputy = true;
+      }
       final uEmail = (linkedUser?.email ?? '').trim();
       if (uEmail.isNotEmpty && uEmail.toLowerCase() == email) continue;
       if (linkedUser?.id != null && seenUserIds.contains(linkedUser!.id)) {
@@ -215,7 +227,16 @@ Future<void> _adminLogout(
       ));
     }
 
-    if (candidates.isNotEmpty) {
+    if (!hasActiveDeputy) {
+      hasActiveDeputy = users.any(
+        (u) =>
+            u.active &&
+            u.role == UserRole.agent &&
+            u.email.trim().toLowerCase() != email,
+      );
+    }
+
+    if (!hasActiveDeputy && candidates.isNotEmpty) {
       final c1 = rootNavigatorKey.currentContext;
       if (c1 == null || !c1.mounted) return;
       final picked = await _pickDeputy(c1, candidates);
@@ -238,7 +259,7 @@ Future<void> _adminLogout(
           );
         }
       } catch (_) {}
-    } else {
+    } else if (!hasActiveDeputy && candidates.isEmpty) {
       final c2 = rootNavigatorKey.currentContext;
       if (c2 == null || !c2.mounted) return;
       final go = await confirmDialog(

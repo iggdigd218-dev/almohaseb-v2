@@ -24,6 +24,7 @@ import 'splash.dart' show SplashScreen;
 import 'trial_ui.dart' show SubscriptionDetailsSection;
 import 'update_section.dart';
 import 'account_section.dart';
+import 'profile_dialog.dart' show showAccountProfileDialog;
 import 'appearance_screen.dart';
 import 'join_approval_flow.dart' show startJoinApprovalFlow;
 import 'package:url_launcher/url_launcher.dart';
@@ -436,9 +437,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         // المفتاح (مستخدم سابق) يُستنتج نوعه من نمط مساحة العمل بدل أن
         // يُخفى عنه قسم المجموعة الذي يستخدمه فعلاً.
         final storedType = (st['account.type'] ?? '').toString().trim();
+        final isCloudProvisioned =
+            (st['cloudWorkspaceProvisioned'] ?? '').toString().trim() == '1';
         final hasEmailLinked =
-            (st['account.email'] ?? '').toString().trim().isNotEmpty ||
-                (ref.watch(googleLinkedProvider).valueOrNull ?? false);
+            (st['account.email'] ?? '').toString().trim().isNotEmpty &&
+                (isCloudProvisioned || wsMode != 'standalone');
         final accountType = hasEmailLinked
             ? 'enterprise'
             : (storedType.isNotEmpty
@@ -1149,10 +1152,31 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                           if (isIndividual && !hasEmailLinked && wsMode != 'member') ...[
                             const SizedBox(height: 18),
                             _Collapsible(
-                              title: 'الانضمام إلى مؤسسة قائمة',
-                              icon: Icons.group_add_outlined,
-                              color: const Color(0xFF7C3AED),
+                              title: 'ترقية المنشأة إلى السحابة أو الانضمام لمجموعة',
+                              icon: Icons.cloud_upload_outlined,
+                              color: const Color(0xFF0284C7),
                               children: [
+                                Card(
+                                  child: ListTile(
+                                    leading: const Icon(
+                                      Icons.cloud_upload_rounded,
+                                      color: Color(0xFF0284C7),
+                                    ),
+                                    title: const Text(
+                                      'ترقية المنشأة إلى السحابة (حفظ البيانات الحالية)',
+                                      style: TextStyle(fontWeight: FontWeight.w800),
+                                    ),
+                                    subtitle: const Text(
+                                      'اربط حساب Google لتحويل منشأتك المحلية إلى منشأة سحابية ورفع كافة سجلاتك الحالية كلقطة تأسيسية (Seed Snapshot) لتصبح المدير المالك دون فقدان أي عملية.',
+                                      style: TextStyle(
+                                          fontSize: 11.5, height: 1.5),
+                                    ),
+                                    trailing: const Icon(Icons.chevron_left),
+                                    onTap: () =>
+                                        showAccountProfileDialog(context, ref),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
                                 Card(
                                   child: ListTile(
                                     leading: const Icon(

@@ -100,8 +100,14 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       if (mounted && _liveSyncActive != liveSync) {
         setState(() => _liveSyncActive = liveSync);
       }
+      final wsMode = await repo.workspaceMode();
+      final stAll = await repo.settings();
+      final isLocalStandalone = wsMode == 'standalone' &&
+          (stAll['cloudWorkspaceProvisioned'] ?? '') != '1' &&
+          (stAll['account.email'] ?? '').trim().isEmpty;
       final settingEmail = ((await repo.getSetting('account.email')) ??
               (await repo.getSetting('email')) ??
+              (await repo.getSetting('drive.backup_email')) ??
               '')
           .trim();
       final db = await repo.database;
@@ -116,7 +122,8 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       ].firstWhere((e) => e.isNotEmpty && e.contains('@'), orElse: () => '');
       if (resolvedEmail.isNotEmpty) {
         accountEmail = resolvedEmail;
-        if (settingEmail.isEmpty) {
+        await repo.setSetting('drive.backup_email', resolvedEmail);
+        if (settingEmail.isEmpty && !isLocalStandalone) {
           await repo.setSetting('account.email', resolvedEmail);
           await repo.setSetting('email', resolvedEmail);
         }
@@ -130,8 +137,16 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
           accountEmail = account.email.trim();
           try {
             final repo = ref.read(repoProvider);
-            await repo.setSetting('account.email', accountEmail);
-            await repo.setSetting('email', accountEmail);
+            final wsMode = await repo.workspaceMode();
+            final stAll = await repo.settings();
+            final isLocalStandalone = wsMode == 'standalone' &&
+                (stAll['cloudWorkspaceProvisioned'] ?? '') != '1' &&
+                (stAll['account.email'] ?? '').trim().isEmpty;
+            await repo.setSetting('drive.backup_email', accountEmail);
+            if (!isLocalStandalone) {
+              await repo.setSetting('account.email', accountEmail);
+              await repo.setSetting('email', accountEmail);
+            }
           } catch (_) {}
         }
         try {

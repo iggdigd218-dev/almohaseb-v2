@@ -14,6 +14,7 @@ class EffectivePermissions {
   final bool canDiscount;
   final bool canDeleteTx;
   final bool canViewReports;
+  final bool canViewSalesSummary;
   final bool canManageItems;
   final bool isActive;
   final bool isAdmin;
@@ -24,6 +25,7 @@ class EffectivePermissions {
     required this.canDiscount,
     required this.canDeleteTx,
     required this.canViewReports,
+    this.canViewSalesSummary = false,
     required this.canManageItems,
     required this.isActive,
     required this.isAdmin,
@@ -36,6 +38,7 @@ class EffectivePermissions {
         canDiscount: true,
         canDeleteTx: true,
         canViewReports: true,
+        canViewSalesSummary: true,
         canManageItems: true,
         isActive: true,
         isAdmin: true,
@@ -48,6 +51,7 @@ class EffectivePermissions {
         canDiscount: false,
         canDeleteTx: false,
         canViewReports: false,
+        canViewSalesSummary: false,
         canManageItems: false,
         isActive: true,
         isAdmin: false,
@@ -67,6 +71,8 @@ class EffectivePermissions {
       canDiscount: admin || flag('can_discount') == 1,
       canDeleteTx: admin || flag('can_delete_tx') == 1,
       canViewReports: admin || flag('can_view_reports') == 1,
+      canViewSalesSummary:
+          admin || role == 'accountant' || flag('can_view_reports') == 1,
       canManageItems: admin || flag('can_manage_items') == 1,
       isActive: flag('is_active') == 1,
       isAdmin: admin,
@@ -87,6 +93,10 @@ EffectivePermissions deriveFromRolePerms(
     canDiscount: admin || advanced || perms.contains('can_discount'),
     canDeleteTx: admin || perms.contains('delete_tx'),
     canViewReports: admin || perms.contains('view_reports'),
+    canViewSalesSummary: admin ||
+        cleanRole == 'accountant' ||
+        perms.contains('can_view_sales_summary') ||
+        perms.contains('view_reports'),
     canManageItems: admin || advanced || perms.contains('manage_items') || perms.contains('edit_tx'),
     isActive: true,
     isAdmin: admin,
