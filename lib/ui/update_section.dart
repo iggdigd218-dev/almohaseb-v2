@@ -47,7 +47,8 @@ String _directBinaryUrlOf(UpdateInfo info) {
     return 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe';
   }
   final abi = androidAbiKey();
-  final apkName = abi == 'armv7' ? 'nexora-armv7.apk' : 'nexora-arm64.apk';
+  final apkName =
+      abi == 'armv7' ? 'Almohaseb-armv7.apk' : 'Almohaseb-arm64.apk';
   return 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/$apkName';
 }
 

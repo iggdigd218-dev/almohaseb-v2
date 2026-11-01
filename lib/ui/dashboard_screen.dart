@@ -213,7 +213,7 @@ class _CurrencyCardState extends State<_CurrencyCard> {
     return Column(
       children: [
         SizedBox(
-          height: 244,
+          height: 192,
           child: PageView.builder(
             controller: _controller,
             onPageChanged: (i) => setState(() => _page = i),
@@ -224,7 +224,6 @@ class _CurrencyCardState extends State<_CurrencyCard> {
               final netV = widget.net[c.code] ?? 0;
               final toUs = widget.owedToUs[c.code] ?? 0;
               final byUs = widget.owedByUs[c.code] ?? 0;
-              final salesV = widget.salesByCurrency[c.code] ?? 0;
               return Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 2),
                 child: Container(
@@ -325,15 +324,6 @@ class _CurrencyCardState extends State<_CurrencyCard> {
                             ),
                           ),
                         ],
-                      ),
-                      const SizedBox(height: 8),
-                      _AmountPill(
-                        label: 'إجمالي المبيعات',
-                        arrow: Icons.trending_up_rounded,
-                        value: salesV,
-                        currency: c,
-                        hidden: widget.hidden,
-                        positive: true,
                       ),
                     ],
                   ),

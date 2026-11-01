@@ -882,6 +882,15 @@ class _ActivationScreenState extends State<ActivationScreen> {
       setState(() => _error = 'أدخل كود الجهاز أو معرف المساحة أو رقم الهاتف أولاً');
       return;
     }
+    if (_preview != null &&
+        !_preview!.foundInCloud &&
+        _preview!.ownerEmail.trim().isEmpty &&
+        _preview!.phone.trim().isEmpty &&
+        !RegExp(r'^DEVICE-', caseSensitive: false).hasMatch(raw)) {
+      setState(() => _error =
+          'يُحظر إنشاء منشأة شبحية غير مسجلة في السحابة بدون بريد إلكتروني موثق أو معرف جهاز صالح.');
+      return;
+    }
 
     final parsedMax = int.tryParse(_maxDevicesCtrl.text.trim()) ?? _maxDevices;
     final seats = parsedMax < 1 ? 1 : parsedMax;
@@ -1090,6 +1099,14 @@ class _ActivationScreenState extends State<ActivationScreen> {
                           icon: Icons.person_outline,
                           label: 'المالك:',
                           value: p.ownerName.isNotEmpty ? p.ownerName : '—',
+                        ),
+                        const SizedBox(height: 6),
+                        _PreviewInfoRow(
+                          icon: Icons.alternate_email_rounded,
+                          label: 'البريد الإلكتروني:',
+                          value: p.ownerEmail.isNotEmpty
+                              ? p.ownerEmail
+                              : '— (غير مرتبط بحساب Google)',
                         ),
                         const SizedBox(height: 6),
                         _PreviewInfoRow(
@@ -2614,6 +2631,42 @@ class _SubscriberCardState extends State<SubscriberCard> {
                           ],
                         ],
                       ),
+                      if (s.ownerEmail.isNotEmpty) ...[
+                        const SizedBox(height: 3),
+                        Row(
+                          children: [
+                            const Icon(Icons.alternate_email_rounded,
+                                size: 13.5, color: Color(0xFF0284C7)),
+                            const SizedBox(width: 4),
+                            Flexible(
+                              child: Directionality(
+                                textDirection: TextDirection.ltr,
+                                child: Text(
+                                  s.ownerEmail,
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                    color: Color(0xFF0369A1),
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            InkWell(
+                              onTap: () => copyText(
+                                  context, s.ownerEmail, 'البريد الإلكتروني'),
+                              borderRadius: BorderRadius.circular(6),
+                              child: const Padding(
+                                padding: EdgeInsets.all(2),
+                                child: Icon(Icons.copy_rounded,
+                                    size: 13, color: Color(0xFF64748B)),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -2672,13 +2725,44 @@ class _SubscriberCardState extends State<SubscriberCard> {
                   ),
                 ),
               ),
-            if (s.phone.isNotEmpty)
+            if (s.phone.isNotEmpty || s.ownerEmail.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
                 child: Wrap(
                   spacing: 8,
                   runSpacing: 4,
                   children: [
+                    if (s.ownerEmail.isNotEmpty)
+                      ActionChip(
+                        avatar: const Icon(Icons.mail_outline_rounded,
+                            size: 14, color: Color(0xFF0284C7)),
+                        label: const Text('مراسلة بريدية',
+                            style: TextStyle(
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFF0284C7))),
+                        backgroundColor:
+                            const Color(0xFF0284C7).withValues(alpha: .08),
+                        side: BorderSide(
+                            color:
+                                const Color(0xFF0284C7).withValues(alpha: .2)),
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        visualDensity: VisualDensity.compact,
+                        onPressed: () async {
+                          final uri = Uri(
+                            scheme: 'mailto',
+                            path: s.ownerEmail.trim(),
+                            queryParameters: {
+                              'subject':
+                                  'ترخيص تطبيق المحاسب — ${s.storeName.isNotEmpty ? s.storeName : s.workspaceId}',
+                            },
+                          );
+                          try {
+                            await launchUrl(uri);
+                          } catch (_) {}
+                        },
+                      ),
+                    if (s.phone.isNotEmpty) ...[
                     ActionChip(
                       avatar: const Icon(Icons.phone_in_talk,
                           size: 14, color: Color(0xFF2563EB)),
@@ -2743,6 +2827,7 @@ class _SubscriberCardState extends State<SubscriberCard> {
                         openWhatsApp(context, s.phone, msg: reminderMsg);
                       },
                     ),
+                    ],
                   ],
                 ),
               ),

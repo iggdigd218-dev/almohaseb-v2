@@ -105,14 +105,16 @@ jobs:
           flutter build apk --release --split-per-abi \
             --target-platform android-arm,android-arm64 \
             --obfuscate --split-debug-info=build/app/symbols
-          cp build/app/outputs/apk/release/app-arm64-v8a-release.apk nexora-arm64.apk
-          cp build/app/outputs/apk/release/app-armeabi-v7a-release.apk nexora-armv7.apk
-          ls -lh nexora-arm64.apk nexora-armv7.apk
+          cp build/app/outputs/apk/release/app-arm64-v8a-release.apk Almohaseb-arm64.apk
+          cp build/app/outputs/apk/release/app-armeabi-v7a-release.apk Almohaseb-armv7.apk
+          cp -f Almohaseb-arm64.apk nexora-arm64.apk
+          cp -f Almohaseb-armv7.apk nexora-armv7.apk
+          ls -lh Almohaseb-arm64.apk Almohaseb-armv7.apk nexora-arm64.apk nexora-armv7.apk
 
       - name: Verify APK (zipalign + apksigner)
         run: |
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          for f in nexora-arm64.apk nexora-armv7.apk; do
+          for f in Almohaseb-arm64.apk Almohaseb-armv7.apk; do
             echo "— $f"
             "$BT/zipalign" -c -v 4 "$f" | tail -1
             "$BT/apksigner" verify --print-certs "$f" | head -3
@@ -126,8 +128,8 @@ jobs:
           VDIR="${NAME}-${BUILD}"
           GH_REL_BASE="https://github.com/${{ github.repository }}/releases/download/latest"
           PAGES_BASE="https://${{ github.repository_owner }}.github.io/almohaseb-v2/releases/${VDIR}"
-          SHA_ARM64=$(sha256sum nexora-arm64.apk | awk '{print $1}')
-          SHA_ARMV7=$(sha256sum nexora-armv7.apk | awk '{print $1}')
+          SHA_ARM64=$(sha256sum Almohaseb-arm64.apk | awk '{print $1}')
+          SHA_ARMV7=$(sha256sum Almohaseb-armv7.apk | awk '{print $1}')
           NOTES=$(python3 -c "import json; lines=[l.strip() for l in open('release_notes.txt',encoding='utf-8').read().splitlines() if l.strip()]; lines=lines[:3]; lines=[(l[:219].rstrip()+'…') if len(l)>220 else l for l in lines]; t='\\n'.join(lines); print(json.dumps(t,ensure_ascii=False)[1:-1])")
           echo "إصدار البناء: $NAME (build $BUILD)"
           cat > version.json <<EOF
@@ -140,28 +142,28 @@ jobs:
               "armv7": "$SHA_ARMV7"
             },
             "releaseUrl": "https://github.com/${{ github.repository }}/releases/tag/latest",
-            "download_url": "${GH_REL_BASE}/nexora-arm64.apk",
+            "download_url": "${GH_REL_BASE}/Almohaseb-arm64.apk",
             "downloads": {
-              "android": "${GH_REL_BASE}/nexora-arm64.apk",
+              "android": "${GH_REL_BASE}/Almohaseb-arm64.apk",
               "androidVariants": {
-                "arm64": "${GH_REL_BASE}/nexora-arm64.apk",
-                "armv7": "${GH_REL_BASE}/nexora-armv7.apk"
+                "arm64": "${GH_REL_BASE}/Almohaseb-arm64.apk",
+                "armv7": "${GH_REL_BASE}/Almohaseb-armv7.apk"
               },
               "windows": "${GH_REL_BASE}/NexoraSetup.exe"
             },
             "downloadsMirror": {
-              "android": "${PAGES_BASE}/nexora-arm64.apk",
+              "android": "${PAGES_BASE}/Almohaseb-arm64.apk",
               "androidVariants": {
-                "arm64": "${PAGES_BASE}/nexora-arm64.apk",
-                "armv7": "${PAGES_BASE}/nexora-armv7.apk"
+                "arm64": "${PAGES_BASE}/Almohaseb-arm64.apk",
+                "armv7": "${PAGES_BASE}/Almohaseb-armv7.apk"
               },
               "windows": "${PAGES_BASE}/NexoraSetup.exe"
             },
             "downloadsFallbackGithub": {
-              "android": "${GH_REL_BASE}/nexora-arm64.apk",
+              "android": "${GH_REL_BASE}/Almohaseb-arm64.apk",
               "androidVariants": {
-                "arm64": "${GH_REL_BASE}/nexora-arm64.apk",
-                "armv7": "${GH_REL_BASE}/nexora-armv7.apk"
+                "arm64": "${GH_REL_BASE}/Almohaseb-arm64.apk",
+                "armv7": "${GH_REL_BASE}/Almohaseb-armv7.apk"
               },
               "windows": "${GH_REL_BASE}/NexoraSetup.exe"
             },
@@ -176,6 +178,8 @@ jobs:
         with:
           name: nexora-flutter-universal
           path: |
+            Almohaseb-arm64.apk
+            Almohaseb-armv7.apk
             nexora-arm64.apk
             nexora-armv7.apk
             version.json
@@ -202,14 +206,14 @@ jobs:
         run: |
           find dist -type f -exec mv -f {} . \;
           rm -rf dist
-          ls -lh nexora-arm64.apk nexora-armv7.apk version.json
+          ls -lh Almohaseb-arm64.apk Almohaseb-armv7.apk nexora-arm64.apk nexora-armv7.apk version.json
 
       - name: Build upload list (existing files only)
         id: filelist
         shell: bash
         run: |
           files=""
-          for f in nexora-arm64.apk nexora-armv7.apk version.json; do
+          for f in Almohaseb-arm64.apk Almohaseb-armv7.apk nexora-arm64.apk nexora-armv7.apk version.json; do
             if [ -s "$f" ]; then files="${files}${f}"$'\n'; fi
           done
           {
@@ -228,8 +232,8 @@ jobs:
             ## 📥 التحميل المباشر لتطبيق المحاسب
 
             ### 📱 للأندرويد (نسختان فقط حسب نوع الهاتف):
-            1. **للهواتف الحديثة (64-بت):** حمّل **`nexora-arm64.apk`** *(متوافقة مع أحدث إصدارات أندرويد 14/15/16 بدون أي تحذير)*.
-            2. **للهواتف القديمة (32-بت):** حمّل **`nexora-armv7.apk`**.
+            1. **للهواتف الحديثة (64-بت):** حمّل **`Almohaseb-arm64.apk`** *(متوافقة مع أحدث إصدارات أندرويد 14/15/16 بدون أي تحذير)*.
+            2. **للهواتف القديمة (32-بت):** حمّل **`Almohaseb-armv7.apk`**.
 
             ### 🖥️ لويندوز
             - حمّل **`NexoraSetup.exe`** وثبّته مباشرة، أو النسخة المحمولة `nexora-windows.zip`.
@@ -245,7 +249,7 @@ jobs:
         run: |
           set -euo pipefail
           files=()
-          for f in nexora-arm64.apk nexora-armv7.apk version.json; do
+          for f in Almohaseb-arm64.apk Almohaseb-armv7.apk nexora-arm64.apk nexora-armv7.apk version.json; do
             [ -s "$f" ] && files+=("$f")
           done
           if [ ${#files[@]} -eq 0 ]; then
@@ -280,8 +284,8 @@ jobs:
           git config --global user.email "actions@users.noreply.github.com"
           git init -q mrepo && cd mrepo
           mkdir -p "releases/$VDIR"
-          cp -f ../nexora-arm64.apk ../nexora-armv7.apk ../NexoraSetup.exe ../version.json "releases/$VDIR/" 2>/dev/null || true
-          cp -f ../nexora-arm64.apk ../nexora-armv7.apk ../NexoraSetup.exe ../version.json . 2>/dev/null || true
+          cp -f ../Almohaseb-arm64.apk ../Almohaseb-armv7.apk ../nexora-arm64.apk ../nexora-armv7.apk ../NexoraSetup.exe ../version.json "releases/$VDIR/" 2>/dev/null || true
+          cp -f ../Almohaseb-arm64.apk ../Almohaseb-armv7.apk ../nexora-arm64.apk ../nexora-armv7.apk ../NexoraSetup.exe ../version.json . 2>/dev/null || true
           touch .nojekyll
           git add -A
           git commit -qm "mirror: $VER"
@@ -289,7 +293,7 @@ jobs:
           cd ..
           rm -rf mrepo
 
-          PAGES_URL="https://${{ github.repository_owner }}.github.io/almohaseb-v2/releases/$VDIR/nexora-arm64.apk"
+          PAGES_URL="https://${{ github.repository_owner }}.github.io/almohaseb-v2/releases/$VDIR/Almohaseb-arm64.apk"
           echo "التحقق من جهوزية رابط Fastly قبل نشر البيان إلى RTDB: $PAGES_URL"
           for i in $(seq 1 24); do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -r 0-0 -L "$PAGES_URL")

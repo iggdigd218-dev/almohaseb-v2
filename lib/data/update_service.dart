@@ -415,9 +415,10 @@ class UpdateService {
             'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe';
       } else {
         final apkName = downloadUrl.endsWith('nexora-armv7.apk') ||
+                downloadUrl.endsWith('Almohaseb-armv7.apk') ||
                 abiKey == 'armv7'
-            ? 'nexora-armv7.apk'
-            : 'nexora-arm64.apk';
+            ? 'Almohaseb-armv7.apk'
+            : 'Almohaseb-arm64.apk';
         downloadUrl =
             'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/$apkName';
       }
@@ -427,7 +428,7 @@ class UpdateService {
         platform == UpdatePlatform.android &&
         downloadUrl != null) {
       final apkName =
-          abiKey == 'armv7' ? 'nexora-armv7.apk' : 'nexora-arm64.apk';
+          abiKey == 'armv7' ? 'Almohaseb-armv7.apk' : 'Almohaseb-arm64.apk';
       if (downloadUrl.contains('github.io/')) {
         fallbackDownloadUrl =
             'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/$apkName';

@@ -1334,18 +1334,12 @@ class CloudJoin {
       snap = Map<String, Object?>.from(snapRec!['data'] as Map);
       snapshotCompactedTs =
           (snapRec['compacted_through_ts'] as num?)?.toInt() ?? 0;
-    } else {
-      final fallbackRec = await _getJson('$root/snapshot.json');
-      if (fallbackRec?['data'] is Map) {
-        snap = Map<String, Object?>.from(fallbackRec!['data'] as Map);
-        snapshotCompactedTs =
-            (fallbackRec['compacted_through_ts'] as num?)?.toInt() ?? 0;
-      } else if (fallbackRec?['accounts'] != null ||
-          fallbackRec?['items'] != null) {
-        snap = Map<String, Object?>.from(fallbackRec!);
-        snapshotCompactedTs =
-            (fallbackRec['compacted_through_ts'] as num?)?.toInt() ?? 0;
-      }
+    } else if (snapRec?['accounts'] != null ||
+        snapRec?['items'] != null ||
+        snapRec?['transactions'] != null) {
+      snap = Map<String, Object?>.from(snapRec!);
+      snapshotCompactedTs =
+          (snapRec['compacted_through_ts'] as num?)?.toInt() ?? 0;
     }
 
     // فحص نسخة النسخ الاحتياطي التلقائي backup.json إن كانت اللقطة مفقودة أو ناقصة الحسابات/الأصناف
@@ -1449,9 +1443,8 @@ class CloudJoin {
       debugPrint('CloudJoin: silent backup: $e');
     }
 
-    // 2) تفريغ الجداول المحاسبية — تمنع تداخل حركات الموظف السابقة مع
-    //    حسابات المتجر. هوية الجهاز وإعداداته لا تُمسّ.
-    await FactoryReset.wipeAccountingTables(await repo.database);
+    // 2) التحويل الذري (Download-then-Swap) يتم داخل SnapshotApply.applySnapshot
+    //    بعد فتح قاعدة بيانات المنشأة المعزولة دون مسح الجداول مسبقاً.
 
     // 3) هوية مجهولة مقترنة بمساحة المالك: تسجيل خروج أي حساب Google
     //    شخصي أولاً، ثم جلسة مجهولة مستقلة لا ترث بصمة الموظف.
@@ -2200,6 +2193,34 @@ class CloudJoin {
               }
             }
           }
+          final wasLocallyExpelledOrRevoked =
+              '${local['revoked_at'] ?? ''}'.trim().isNotEmpty ||
+                  '${local['expelled_at'] ?? ''}'.trim().isNotEmpty ||
+                  ((local['is_paired'] as num?)?.toInt() ?? 1) == 0;
+          var hadSelfRevokedFlag = false;
+          if (!isOwner && !remoteRevokedOrExpelled) {
+            try {
+              final srRows = await db.query(
+                'sync_meta',
+                columns: ['value'],
+                where: 'key = ?',
+                whereArgs: ['selfRevoked'],
+                limit: 1,
+              );
+              hadSelfRevokedFlag =
+                  srRows.isNotEmpty && '${srRows.first['value'] ?? ''}' == '1';
+            } catch (_) {}
+          }
+          final reinstatedAtStr = '${r['reinstated_at'] ?? ''}'.trim();
+          final reinstatedMs = parseSyncMs(reinstatedAtStr);
+          final localReinstatedMs =
+              parseSyncMs((await repo.settings())['sync.lastReinstatedAt']);
+          final needsCleanSlateReentry = !isOwner &&
+              !remoteRevokedOrExpelled &&
+              (wasLocallyExpelledOrRevoked ||
+                  hadSelfRevokedFlag ||
+                  (reinstatedMs > 0 && reinstatedMs > localReinstatedMs));
+
           try {
             await db.update(
               'devices',
@@ -2213,9 +2234,23 @@ class CloudJoin {
                 {'key': 'selfRevoked', 'value': '1'},
                 conflictAlgorithm: ConflictAlgorithm.replace,
               );
+            } else if (!isOwner && !remoteRevokedOrExpelled) {
+              await db.delete(
+                'sync_meta',
+                where: 'key = ?',
+                whereArgs: ['selfRevoked'],
+              );
             }
             changed = true;
           } catch (_) {}
+          if (needsCleanSlateReentry) {
+            try {
+              await repo.wipeLocalAndImportCloudSnapshot();
+              if (reinstatedAtStr.isNotEmpty) {
+                await repo.setSetting('sync.lastReinstatedAt', reinstatedAtStr);
+              }
+            } catch (_) {}
+          }
           continue;
         }
         final remoteExpelled = '${r['expelled_at'] ?? ''}'.trim().isNotEmpty ||

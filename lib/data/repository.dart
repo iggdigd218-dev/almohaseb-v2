@@ -1992,6 +1992,129 @@ class Repo {
     return rows.map(InvoiceLine.fromMap).toList();
   }
 
+  /// معرّفات العمليات التي تمثل فواتير مبيعات فعلية مرتبطة بأصناف في transaction_items.
+  Future<Set<int>> posInvoiceTxIds() async {
+    final db = await _db;
+    final rows = await db.rawQuery(
+      'SELECT DISTINCT tx_id FROM transaction_items WHERE tx_id IS NOT NULL',
+    );
+    final ids = <int>{};
+    for (final r in rows) {
+      final id = (r['tx_id'] as num?)?.toInt();
+      if (id != null && id > 0) ids.add(id);
+    }
+    return ids;
+  }
+
+  /// عدد العمليات المحلية غير المتزامنة في طابور المزامنة (sync_queue).
+  Future<int> pendingSyncOperationsCount() async {
+    try {
+      final db = await _db;
+      final rows = await db.rawQuery(
+        "SELECT COUNT(*) AS c FROM sync_queue WHERE status IS NULL OR status != 'done'",
+      );
+      if (rows.isEmpty) return 0;
+      return (rows.first['c'] as num?)?.toInt() ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// ملخص المبيعات الفعلية لفواتير نقطة البيع فقط (نقدية + آجلة - مرتجعات) ضمن نطاق زمني محدد.
+  /// محمي بصلاحية `can_view_sales_summary`.
+  Future<Map<String, dynamic>> posSalesSummary({
+    DateTime? from,
+    DateTime? to,
+  }) async {
+    final allowed = await can('can_view_sales_summary') ||
+        (await effectivePermissions()).canViewSalesSummary;
+    if (!allowed) {
+      return const {
+        'allowed': false,
+        'invoiceCount': 0,
+        'returnCount': 0,
+        'grossByCurrency': <String, double>{},
+        'returnsByCurrency': <String, double>{},
+        'netByCurrency': <String, double>{},
+        'cashByCurrency': <String, double>{},
+        'creditByCurrency': <String, double>{},
+      };
+    }
+    final db = await _db;
+    final whereParts = <String>[
+      "(t.deleted_at IS NULL OR t.deleted_at = '')",
+      "t.description NOT LIKE 'دفعة مقدمة من فاتورة%'",
+      "("
+          "EXISTS (SELECT 1 FROM transaction_items ti WHERE ti.tx_id = t.id) OR "
+          "t.description LIKE 'فاتورة نقدية مدفوعة%' OR "
+          "t.description LIKE 'فاتورة مبيعات%' OR "
+          "t.description LIKE 'مرتجع %' OR "
+          "t.category = 'مرتجع مبيعات' OR "
+          "t.notes LIKE '%[ORIG_TX:%'"
+          ")",
+    ];
+    final args = <Object?>[];
+    if (from != null) {
+      final dFrom =
+          '${from.year.toString().padLeft(4, '0')}-${from.month.toString().padLeft(2, '0')}-${from.day.toString().padLeft(2, '0')}';
+      whereParts.add('substr(t.date, 1, 10) >= ?');
+      args.add(dFrom);
+    }
+    if (to != null) {
+      final dTo =
+          '${to.year.toString().padLeft(4, '0')}-${to.month.toString().padLeft(2, '0')}-${to.day.toString().padLeft(2, '0')}';
+      whereParts.add('substr(t.date, 1, 10) <= ?');
+      args.add(dTo);
+    }
+    final rows = await db.rawQuery(
+      'SELECT t.* FROM transactions t WHERE ${whereParts.join(' AND ')} ORDER BY t.date DESC, t.id DESC',
+      args,
+    );
+    var invoiceCount = 0;
+    var returnCount = 0;
+    final grossByCur = <String, double>{};
+    final returnsByCur = <String, double>{};
+    final netByCur = <String, double>{};
+    final cashByCur = <String, double>{};
+    final creditByCur = <String, double>{};
+
+    for (final r in rows) {
+      final t = Tx.fromMap(r);
+      final desc = t.description.trim();
+      final isRet = desc.startsWith('مرتجع ') ||
+          t.category == 'مرتجع مبيعات' ||
+          t.notes.contains('[ORIG_TX:');
+      if (isRet) {
+        returnCount++;
+        returnsByCur[t.currency] = (returnsByCur[t.currency] ?? 0) + t.amount;
+        netByCur[t.currency] = (netByCur[t.currency] ?? 0) - t.amount;
+      } else if (t.type == OpType.revenue ||
+          (t.type == OpType.debit && t.accountKind != AccountKind.supplier)) {
+        invoiceCount++;
+        grossByCur[t.currency] = (grossByCur[t.currency] ?? 0) + t.amount;
+        netByCur[t.currency] = (netByCur[t.currency] ?? 0) + t.amount;
+        if (t.type == OpType.revenue) {
+          cashByCur[t.currency] = (cashByCur[t.currency] ?? 0) + t.amount;
+        } else {
+          creditByCur[t.currency] = (creditByCur[t.currency] ?? 0) + t.amount;
+        }
+      }
+    }
+    for (final k in netByCur.keys.toList()) {
+      if ((netByCur[k] ?? 0) < 0) netByCur[k] = 0;
+    }
+    return {
+      'allowed': true,
+      'invoiceCount': invoiceCount,
+      'returnCount': returnCount,
+      'grossByCurrency': grossByCur,
+      'returnsByCurrency': returnsByCur,
+      'netByCurrency': netByCur,
+      'cashByCurrency': cashByCur,
+      'creditByCurrency': creditByCur,
+    };
+  }
+
   /// البحث في فواتير المبيعات (النقدية والآجلة) برقم الفاتورة أو المعرّف أو اسم العميل.
   Future<List<Tx>> searchSalesInvoices({
     String query = '',
@@ -2002,7 +2125,12 @@ class Repo {
     final cleanNum = q.replaceAll('#', '').trim();
     final whereParts = <String>[
       "(t.deleted_at IS NULL OR t.deleted_at = '')",
-      "(t.type IN ('revenue', 'debit', 'inflow') OR EXISTS (SELECT 1 FROM transaction_items ti WHERE ti.tx_id = t.id))",
+      "t.description NOT LIKE 'دفعة مقدمة من فاتورة%'",
+      "("
+          "EXISTS (SELECT 1 FROM transaction_items ti WHERE ti.tx_id = t.id) OR "
+          "t.description LIKE 'فاتورة نقدية مدفوعة%' OR "
+          "t.description LIKE 'فاتورة مبيعات%'"
+          ")",
       "t.description NOT LIKE 'مرتجع %'",
     ];
     final args = <Object?>[];
@@ -4286,6 +4414,34 @@ class Repo {
         ],
       );
     });
+    // تنظيف أوسمة الطرد السحابية وتحديث عقدة الجهاز ونسخة joinSnapshot.json
+    // ليتمكن الجهاز المعاد تفعيله من الدخول على بياض (Clean-Slate Re-entry).
+    try {
+      final st = await settings();
+      final url = effectiveBackendUrl(st['cloudBackendUrl']);
+      final ws = requireWorkspaceId;
+      if (url.isNotEmpty && ws.isNotEmpty && ws != 'default') {
+        final root =
+            '${url.replaceAll(RegExp(r'/+$'), '')}/workspaces/${Uri.encodeComponent(ws)}';
+        await CloudJoin.deleteNode('$root/evictions/$deviceId.json');
+        await CloudJoin.deleteNode('$root/revoked_devices/$deviceId.json');
+        await CloudJoin.deleteNode('$root/ejected_devices/$deviceId.json');
+        await CloudJoin.deleteNode(
+            '$root/settings/deviceExpelled:$deviceId.json');
+        await CloudJoin.deleteNode(
+            '$root/settings/deviceRevoked:$deviceId.json');
+        await CloudJoin.patchJson('$root/roster/$deviceId.json', {
+          'revoked_at': '',
+          'expelled_at': '',
+          'is_paired': 1,
+          'status': 'active',
+          'reinstated_at': now,
+          'updated_at': now,
+        });
+        await CloudJoin.publishRoster(this);
+        await CloudJoin.refreshJoinSnapshot(this);
+      }
+    } catch (_) {}
   }
 
   // (دفعة 58) حُذفت createPairingToken (اقتران LAN عبر QR بعنوان IP) —
@@ -8124,7 +8280,7 @@ class Repo {
     }
   }
 
-  /// حذف البيانات المحلية واستيراد نسخة السحابة كلياً كما هي
+  /// حذف البيانات المحلية واستيراد نسخة السحابة كلياً كما هي (Download-then-Validate-then-Swap)
   Future<bool> wipeLocalAndImportCloudSnapshot({dynamic engine}) async {
     final bool amIOwnerBefore = await isWorkspaceOwner();
     var db = await _db;
@@ -8136,24 +8292,42 @@ class Repo {
         '${url.replaceAll(RegExp(r'/+$'), '')}/workspaces/${Uri.encodeComponent(ws)}';
 
     Map<String, Object?>? snap;
+    var snapshotCompactedTs = 0;
     try {
-      final snapRec = await CloudJoin.getJson('$root/snapshot.json') ??
-          await CloudJoin.getJson('$root/joinSnapshot.json');
+      final snapRec = await CloudJoin.getJson('$root/joinSnapshot.json');
       if (snapRec != null) {
+        snapshotCompactedTs =
+            (snapRec['compacted_through_ts'] as num?)?.toInt() ??
+                (snapRec['updatedAt'] as num?)?.toInt() ??
+                0;
         if (snapRec['data'] is Map) {
           snap = Map<String, Object?>.from(snapRec['data'] as Map);
-        } else if (snapRec['accounts'] != null || snapRec['items'] != null) {
+        } else if (snapRec['accounts'] != null ||
+            snapRec['items'] != null ||
+            snapRec['transactions'] != null) {
           snap = Map<String, Object?>.from(snapRec);
         }
       }
     } catch (_) {}
 
-    if (snap != null) {
-      await SnapshotApply.applySnapshot(() => _db, ourId, snap);
-    } else {
-      db = await _db;
-      await FactoryReset.wipeAccountingTables(db);
+    final hasValidContent = snap != null &&
+        ((snap['accounts'] is List && (snap['accounts'] as List).isNotEmpty) ||
+            (snap['items'] is List && (snap['items'] as List).isNotEmpty) ||
+            (snap['transactions'] is List &&
+                (snap['transactions'] as List).isNotEmpty) ||
+            (snap['currencies'] is List &&
+                (snap['currencies'] as List).isNotEmpty) ||
+            (snap['workspaces'] is List &&
+                (snap['workspaces'] as List).isNotEmpty));
+
+    if (!hasValidContent) {
+      // حظر صارم: لا نمسح أي جدول محلي إذا فشل التنزيل أو كانت اللقطة السحابية فارغة.
+      throw StateError(
+        'تعذر تنزيل نسخة المنشأة السحابية (joinSnapshot) أو أنها غير متوفرة حالياً. لم يتم مسح أي بيانات محلية حفاظاً على سلامة سجلاتك.',
+      );
     }
+
+    await SnapshotApply.applySnapshot(() => _db, ourId, snap);
 
     if (amIOwnerBefore) {
       await restoreManagerOwnership();
@@ -8163,12 +8337,31 @@ class Repo {
     await db.delete('sync_queue');
     await db.delete('operations');
     await db.delete('sync_meta',
-        where: 'key IN (?, ?, ?)',
+        where: 'key IN (?, ?, ?, ?)',
         whereArgs: [
           'last_synced_cursor:$ws',
           'last_synced_cursor',
           'lastCloudTs:$ws',
+          'selfRevoked',
         ]);
+    if (snapshotCompactedTs > 0) {
+      await db.insert(
+        'sync_meta',
+        {
+          'key': 'last_synced_cursor:$ws',
+          'value': '$snapshotCompactedTs',
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await db.insert(
+        'sync_meta',
+        {
+          'key': 'lastCloudTs:$ws',
+          'value': '$snapshotCompactedTs',
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
 
     if (engine != null) {
       try {

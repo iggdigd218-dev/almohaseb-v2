@@ -249,31 +249,38 @@ class SubscriberEntry {
   final Map<String, bool> featureFlags;
   final List<ConnectedDevice> rosterDevices;
   final bool hasSubscriptionNode;
+  final String ownerEmail;
 
   int get expiryDate => expiresAtMs;
 
   bool get hasValidPhone => normalizeSubscriberPhone(phone).isNotEmpty;
 
+  bool get hasValidEmail => ownerEmail.trim().contains('@');
+
   bool isAbandonedAt([int? nowMs]) =>
       isAbandoned(nowMs ?? DateTime.now().millisecondsSinceEpoch);
 
   /// هل تعتبر هذه المساحة معلقة أو مهجورة في السحابة؟
-  /// (لا ترتبط برقم هاتف مشترك صالح، أو ليس لها عقدة اشتراك فعالة، أو تجربة منتهية/مهجورة، أو معلقة).
+  /// (لا ترتبط ببريد إلكتروني موثق أو رقم هاتف مشترك صالح، أو ليس لها عقدة اشتراك فعالة، أو تجربة منتهية/مهجورة، أو معلقة).
   bool isAbandoned(int nowMs) {
     if (isFrozen) return true;
     if (!hasSubscriptionNode || status == 'abandoned' || status == 'none') {
       return true;
     }
     final hasValidPhone = normalizeSubscriberPhone(phone).isNotEmpty;
+    final hasEmail = hasValidEmail;
     final lifetime = expiresAtMs >= DateTime(2090).millisecondsSinceEpoch;
     final isActiveSub =
         status == 'active' && (lifetime || expiresAtMs > nowMs);
-    if (!hasValidPhone && !isActiveSub) return true;
+    if (!hasValidPhone && !hasEmail && !isActiveSub) return true;
     if (status != 'active' &&
         (expiresAtMs <= 0 || (!lifetime && expiresAtMs <= nowMs))) {
       return true;
     }
-    if (!hasValidPhone && storeName.trim().isEmpty && clientName.trim().isEmpty) {
+    if (!hasValidPhone &&
+        !hasEmail &&
+        storeName.trim().isEmpty &&
+        clientName.trim().isEmpty) {
       return true;
     }
     return false;
@@ -298,6 +305,7 @@ class SubscriberEntry {
     this.featureFlags = const {},
     this.rosterDevices = const [],
     this.hasSubscriptionNode = true,
+    this.ownerEmail = '',
   });
 
   SubscriberEntry copyWith({
@@ -319,6 +327,7 @@ class SubscriberEntry {
     Map<String, bool>? featureFlags,
     List<ConnectedDevice>? rosterDevices,
     bool? hasSubscriptionNode,
+    String? ownerEmail,
   }) {
     return SubscriberEntry(
       workspaceId: workspaceId ?? this.workspaceId,
@@ -339,6 +348,7 @@ class SubscriberEntry {
       featureFlags: featureFlags ?? this.featureFlags,
       rosterDevices: rosterDevices ?? this.rosterDevices,
       hasSubscriptionNode: hasSubscriptionNode ?? this.hasSubscriptionNode,
+      ownerEmail: ownerEmail ?? this.ownerEmail,
     );
   }
 
@@ -450,6 +460,7 @@ class SubscriberEntry {
       featureFlags: {...other.featureFlags, ...featureFlags},
       rosterDevices: mergedList,
       hasSubscriptionNode: hasSubscriptionNode || other.hasSubscriptionNode,
+      ownerEmail: ownerEmail.isNotEmpty ? ownerEmail : other.ownerEmail,
     );
   }
 
@@ -516,6 +527,10 @@ class SubscriberEntry {
       isFrozen: map['is_frozen'] == true || map['frozen'] == true,
       featureFlags: flags,
       rosterDevices: rosterDevices,
+      ownerEmail: asStr(map['owner_email'] ??
+          map['ownerEmail'] ??
+          map['email'] ??
+          map['user_email']),
     );
   }
 }
@@ -525,6 +540,7 @@ class WorkspaceLookupPreview {
   final String workspaceId;
   final String storeName;
   final String ownerName;
+  final String ownerEmail;
   final String phone;
   final String deviceId;
   final String fingerprint;
@@ -540,6 +556,7 @@ class WorkspaceLookupPreview {
     required this.workspaceId,
     this.storeName = '',
     this.ownerName = '',
+    this.ownerEmail = '',
     this.phone = '',
     this.deviceId = '',
     this.fingerprint = '',

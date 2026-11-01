@@ -212,12 +212,14 @@ final summaryProvider = FutureProvider<Summary>((ref) async {
   List<Account> accounts = const [];
   List<Tx> txs = const [];
   Map<int, double> balances = const {};
+  Set<int> posTxIds = const {};
   try {
     accounts = await repo.accounts().timeout(const Duration(seconds: 6));
     balances = await repo
         .allBalances(accounts)
         .timeout(const Duration(seconds: 6));
     txs = await repo.transactions().timeout(const Duration(seconds: 6));
+    posTxIds = await repo.posInvoiceTxIds().timeout(const Duration(seconds: 6));
   } catch (_) {}
 
   final toUs = <String, double>{};
@@ -243,10 +245,16 @@ final summaryProvider = FutureProvider<Summary>((ref) async {
     if (g == 'inflow') inflow += t.amount;
     if (g == 'outflow') outflow += t.amount;
 
-    final isRet = t.description.trim().startsWith('مرتجع ') ||
+    final desc = t.description.trim();
+    if (desc.startsWith('دفعة مقدمة من فاتورة')) continue;
+    final isRet = desc.startsWith('مرتجع ') ||
         t.category == 'مرتجع مبيعات' ||
         t.notes.contains('[ORIG_TX:');
+    final isPosInvoice = (t.id != null && posTxIds.contains(t.id)) ||
+        desc.startsWith('فاتورة نقدية مدفوعة') ||
+        desc.startsWith('فاتورة مبيعات');
     final isSale = !isRet &&
+        isPosInvoice &&
         (t.type == OpType.revenue ||
             (t.type == OpType.debit && t.accountKind != AccountKind.supplier));
     if (isSale) {
@@ -484,6 +492,7 @@ final txPageProvider = FutureProvider<TxPage>((ref) async {
   }
 
   // إجماليات الداخل والخارج وإجمالي المبيعات لكل عملة على المجموعة المعروضة.
+  final posTxIds = await repo.posInvoiceTxIds();
   final inflow = <String, double>{};
   final outflow = <String, double>{};
   final sales = <String, double>{};
@@ -494,10 +503,16 @@ final txPageProvider = FutureProvider<TxPage>((ref) async {
     } else if (g == 'outflow') {
       outflow[t.currency] = (outflow[t.currency] ?? 0) + t.amount;
     }
-    final isRet = t.description.trim().startsWith('مرتجع ') ||
+    final desc = t.description.trim();
+    if (desc.startsWith('دفعة مقدمة من فاتورة')) continue;
+    final isRet = desc.startsWith('مرتجع ') ||
         t.category == 'مرتجع مبيعات' ||
         t.notes.contains('[ORIG_TX:');
+    final isPosInvoice = (t.id != null && posTxIds.contains(t.id)) ||
+        desc.startsWith('فاتورة نقدية مدفوعة') ||
+        desc.startsWith('فاتورة مبيعات');
     final isSale = !isRet &&
+        isPosInvoice &&
         (t.type == OpType.revenue ||
             (t.type == OpType.debit && t.accountKind != AccountKind.supplier));
     if (isSale) {

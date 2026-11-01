@@ -1218,8 +1218,18 @@ class Rtdb {
         sub?['device_ref'] ??
         trialEntry?['device_id'] ??
         trialEntry?['deviceId']);
+    String ownerEmail = asStr(sub?['owner_email'] ??
+        sub?['ownerEmail'] ??
+        sub?['email'] ??
+        trialEntry?['owner_email'] ??
+        trialEntry?['ownerEmail'] ??
+        trialEntry?['email']);
 
-    if (storeName.isEmpty || ownerName.isEmpty || phone.isEmpty || devId.isEmpty) {
+    if (storeName.isEmpty ||
+        ownerName.isEmpty ||
+        phone.isEmpty ||
+        devId.isEmpty ||
+        ownerEmail.isEmpty) {
       try {
         final req = await _get('workspaces/$enc/license_request');
         if (req is Map) {
@@ -1233,8 +1243,28 @@ class Rtdb {
           if (devId.isEmpty) {
             devId = asStr(req['deviceId'] ?? req['device_id']);
           }
+          if (ownerEmail.isEmpty) {
+            ownerEmail = asStr(req['owner_email'] ?? req['email']);
+          }
         }
       } catch (_) {}
+    }
+
+    if (ownerEmail.isEmpty && rosterList.isNotEmpty) {
+      for (final d in rosterList) {
+        if (d.isOwner && d.email.trim().contains('@')) {
+          ownerEmail = d.email.trim();
+          break;
+        }
+      }
+      if (ownerEmail.isEmpty) {
+        for (final d in rosterList) {
+          if (d.email.trim().contains('@')) {
+            ownerEmail = d.email.trim();
+            break;
+          }
+        }
+      }
     }
 
     if (devId.isEmpty && rosterList.isNotEmpty) {
@@ -1266,6 +1296,7 @@ class Rtdb {
       workspaceId: ws,
       storeName: storeName,
       ownerName: ownerName,
+      ownerEmail: ownerEmail,
       phone: phone,
       deviceId: devId,
       fingerprint: fp,
@@ -1551,6 +1582,14 @@ class Rtdb {
 
     final orgOnly = raw.where((entry) {
       if (includeAbandoned) return true;
+      // منع المنشآت الشبحية الفارغة التي لا تملك بريد مالك موثق ولا هاتف صالح ولا اسم منشأة/عميل ولا اشتراك نشط
+      if (!entry.hasValidEmail &&
+          !entry.hasValidPhone &&
+          entry.storeName.trim().isEmpty &&
+          entry.clientName.trim().isEmpty &&
+          entry.status != 'active') {
+        return false;
+      }
       final dev = entry.deviceId.trim().toUpperCase();
       final wsUpper = entry.workspaceId.trim().toUpperCase();
       if (dev.isNotEmpty &&
@@ -1561,15 +1600,13 @@ class Rtdb {
       return true;
     }).toList();
 
-    // ترتيب: الحسابات الفعالة أولاً، ثم الأطول مدة والأحدث نشاطاً
+    // ترتيب تنازلي حسب تاريخ الإنشاء/التفعيل أو آخر ظهور (الأحدث أولاً)
     orgOnly.sort((a, b) {
-      final aActive = a.status == 'active' ? 1 : 0;
-      final bActive = b.status == 'active' ? 1 : 0;
-      final cmp = bActive.compareTo(aActive);
-      if (cmp != 0) return cmp;
-      final expCmp = b.expiresAtMs.compareTo(a.expiresAtMs);
-      if (expCmp != 0) return expCmp;
-      return b.activatedAtMs.compareTo(a.activatedAtMs);
+      final aTs = a.activatedAtMs > 0 ? a.activatedAtMs : a.lastSeenAtMs;
+      final bTs = b.activatedAtMs > 0 ? b.activatedAtMs : b.lastSeenAtMs;
+      final tsCmp = bTs.compareTo(aTs);
+      if (tsCmp != 0) return tsCmp;
+      return b.expiresAtMs.compareTo(a.expiresAtMs);
     });
 
     // تجميع ودمج سجلات المشتركين:
@@ -1734,6 +1771,10 @@ class Rtdb {
     String phoneFallback = asStr(live?['phone'] ??
         live?['phone_number'] ??
         live?['whatsapp']);
+    String emailFallback = asStr(live?['owner_email'] ??
+        live?['ownerEmail'] ??
+        live?['email'] ??
+        live?['user_email']);
     String devIdFallback = asStr(live?['deviceId'] ??
         live?['device_id'] ??
         live?['deviceRef'] ??
@@ -1744,6 +1785,7 @@ class Rtdb {
         storeFallback.isEmpty ||
         clientFallback.isEmpty ||
         phoneFallback.isEmpty ||
+        emailFallback.isEmpty ||
         devIdFallback.isEmpty ||
         rosterById.isEmpty) {
       try {
@@ -1773,6 +1815,10 @@ class Rtdb {
               if (phoneFallback.isEmpty) {
                 phoneFallback = asStr(dv['phone'] ?? dv['phone_number']);
               }
+              if (emailFallback.isEmpty) {
+                emailFallback = asStr(
+                    dv['owner_email'] ?? dv['email'] ?? dv['user_email']);
+              }
               if (devIdFallback.isEmpty) {
                 devIdFallback = asStr(dv['deviceId'] ?? dv['device_id'] ?? id);
               }
@@ -1795,12 +1841,17 @@ class Rtdb {
       if (phoneFallback.isEmpty) {
         phoneFallback = asStr(meta['phone'] ?? meta['whatsapp']);
       }
+      if (emailFallback.isEmpty) {
+        emailFallback =
+            asStr(meta['owner_email'] ?? meta['ownerEmail'] ?? meta['email']);
+      }
     }
 
     if (clientOverride == null &&
         (storeFallback.isEmpty ||
             clientFallback.isEmpty ||
             phoneFallback.isEmpty ||
+            emailFallback.isEmpty ||
             devIdFallback.isEmpty)) {
       try {
         final req = (preloadedNode != null &&
@@ -1816,6 +1867,9 @@ class Rtdb {
           }
           if (phoneFallback.isEmpty) {
             phoneFallback = asStr(req['phone']);
+          }
+          if (emailFallback.isEmpty) {
+            emailFallback = asStr(req['owner_email'] ?? req['email']);
           }
           if (devIdFallback.isEmpty) {
             devIdFallback = asStr(req['deviceId'] ?? req['device_id']);
@@ -1888,6 +1942,23 @@ class Rtdb {
     final rosterList = rosterById.values.toList()
       ..sort((a, b) => b.lastSeenAt.compareTo(a.lastSeenAt));
 
+    if (emailFallback.isEmpty && rosterList.isNotEmpty) {
+      for (final d in rosterList) {
+        if (d.isOwner && d.email.trim().contains('@')) {
+          emailFallback = d.email.trim();
+          break;
+        }
+      }
+      if (emailFallback.isEmpty) {
+        for (final d in rosterList) {
+          if (d.email.trim().contains('@')) {
+            emailFallback = d.email.trim();
+            break;
+          }
+        }
+      }
+    }
+
     var maxLastSeen = asMs(live?['last_seen_at'] ??
         live?['lastSeenAt'] ??
         live?['updated_at'] ??
@@ -1913,6 +1984,12 @@ class Rtdb {
         latestLog?['phone'] ??
         latestLog?['phone_number'] ??
         phoneFallback);
+    final resolvedEmail = asStr(live?['owner_email'] ??
+        live?['ownerEmail'] ??
+        live?['email'] ??
+        latestLog?['owner_email'] ??
+        latestLog?['email'] ??
+        emailFallback);
 
     final rawKey = asStr(live?['licenseKey'] ??
         live?['license_key'] ??
@@ -1954,6 +2031,7 @@ class Rtdb {
             : const {},
         rosterDevices: rosterList,
         hasSubscriptionNode: hasSub,
+        ownerEmail: resolvedEmail,
       ),
     ];
   }

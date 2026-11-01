@@ -10,10 +10,10 @@ import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
 /// إصدار تطبيق مدير التراخيص الحالي (يطابق admin_app/pubspec.yaml).
-const String kAdminAppVersion = '1.8.1';
+const String kAdminAppVersion = '1.8.2';
 
 /// رقم بناء تطبيق مدير التراخيص (ما بعد + في admin_app/pubspec.yaml).
-const int kAdminAppBuild = 51;
+const int kAdminAppBuild = 52;
 
 String get adminFullVersion => '$kAdminAppVersion+$kAdminAppBuild';
 
@@ -25,7 +25,7 @@ class AdminSemVer implements Comparable<AdminSemVer> {
 
   const AdminSemVer(this.major, this.minor, this.patch, [this.build = 0]);
 
-  static const AdminSemVer current = AdminSemVer(1, 8, 1, kAdminAppBuild);
+  static const AdminSemVer current = AdminSemVer(1, 8, 2, kAdminAppBuild);
 
   static AdminSemVer? tryParse(String? raw) {
     if (raw == null) return null;
@@ -124,13 +124,13 @@ class AdminUpdateService {
       'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/admin_version_manifest.json';
 
   static const String kFallbackManifestUrl =
-      'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/admin_version.json';
+      'https://github.com/iggdigd218-dev/almohaseb-plus/releases/download/admin-latest/admin_version.json';
 
   static const String kFallbackReleaseUrl =
-      'https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/admin-latest';
+      'https://github.com/iggdigd218-dev/almohaseb-plus/releases/tag/admin-latest';
 
   static const String kDefaultApkUrl =
-      'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk';
+      'https://github.com/iggdigd218-dev/almohaseb-plus/releases/download/admin-latest/license-admin.apk';
 
   final String manifestUrl;
   final AdminSemVer current;

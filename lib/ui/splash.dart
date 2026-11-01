@@ -1,9 +1,10 @@
 // شاشة البداية: شعار متحرك يظهر لحظة فتح التطبيق ثم ينتقل للتطبيق.
 // عند أول تشغيل (قاعدة فارغة بلا إعداد سابق) تُعرض شاشة الإعداد الأول.
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../core/theme.dart';
 import '../data/providers.dart';
 import 'create_workspace_screen.dart';
 import 'home_shell.dart';
@@ -28,15 +29,15 @@ class _SplashScreenState extends State<SplashScreen>
     super.initState();
     _c = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1400),
+      duration: const Duration(milliseconds: 700),
     )..forward();
     _scale = CurvedAnimation(
       parent: _c,
-      curve: const Interval(0, 0.7, curve: Curves.easeOutBack),
+      curve: Curves.easeOutCubic,
     );
     _fade = CurvedAnimation(
       parent: _c,
-      curve: const Interval(0.35, 1, curve: Curves.easeIn),
+      curve: Curves.easeOut,
     );
     _go();
   }
@@ -44,7 +45,7 @@ class _SplashScreenState extends State<SplashScreen>
   Future<void> _go() async {
     Widget nextTarget = const LockGate(child: HomeShell());
     await Future.wait([
-      Future.delayed(const Duration(milliseconds: 1400)),
+      Future.delayed(const Duration(milliseconds: 750)),
       () async {
         try {
           final container = ProviderScope.containerOf(context, listen: false);
@@ -70,13 +71,15 @@ class _SplashScreenState extends State<SplashScreen>
 
           // العضو المقترن أو أي حساب به بيانات سابقة لا يُقذف إلى شاشة الإعداد أو البداية أبداً
           final isMember = mode == 'member';
-          final hasCompletedOnboarding = st['has_completed_onboarding'] == '1' || st['onboardingCompleted'] == '1';
-          final localAccounts = await repo.accounts(includeArchived: true, includeDeleted: true);
+          final hasCompletedOnboarding =
+              st['has_completed_onboarding'] == '1' ||
+                  st['onboardingCompleted'] == '1';
+          final localAccounts = await repo.accounts(
+              includeArchived: true, includeDeleted: true);
           final hasData = localAccounts.isNotEmpty;
 
           if (!isMember && !hasCompletedOnboarding && !hasData) {
-            final email =
-                (st['account.email'] ?? st['email'] ?? '').trim();
+            final email = (st['account.email'] ?? st['email'] ?? '').trim();
             final uid = (st['account.uid'] ?? '').trim();
             final name = (st['account.name'] ?? '').trim();
             if (email.isNotEmpty) {
@@ -91,26 +94,33 @@ class _SplashScreenState extends State<SplashScreen>
             return;
           }
           if (mode != 'member') {
-            await repo
-                .restoreManagerOwnership()
-                .timeout(const Duration(seconds: 2));
-            await repo
-                .checkAndAutoPromoteManager()
-                .timeout(const Duration(seconds: 2));
-            await repo
-                .ensureSelfPermissionRow(roleCode: 'admin')
-                .timeout(const Duration(seconds: 2));
+            unawaited(() async {
+              try {
+                await repo
+                    .restoreManagerOwnership()
+                    .timeout(const Duration(seconds: 2));
+                await repo
+                    .checkAndAutoPromoteManager()
+                    .timeout(const Duration(seconds: 2));
+                await repo
+                    .ensureSelfPermissionRow(roleCode: 'admin')
+                    .timeout(const Duration(seconds: 2));
+              } catch (_) {}
+            }());
           }
-          await repo
-              .setSetting(kOnboardingDoneKey, '1')
-              .timeout(const Duration(seconds: 2));
+          unawaited(
+            repo
+                .setSetting(kOnboardingDoneKey, '1')
+                .timeout(const Duration(seconds: 2))
+                .catchError((_) {}),
+          );
         } catch (_) {}
       }(),
     ]);
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
-        transitionDuration: const Duration(milliseconds: 400),
+        transitionDuration: const Duration(milliseconds: 220),
         pageBuilder: (_, __, ___) => nextTarget,
         transitionsBuilder: (_, anim, __, child) =>
             FadeTransition(opacity: anim, child: child),
@@ -127,71 +137,90 @@ class _SplashScreenState extends State<SplashScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.primaryOf(context),
-      body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ScaleTransition(
-              scale: Tween(begin: 0.5, end: 1.0).animate(_scale),
-              child: FadeTransition(
-                opacity: _fade,
-                child: Container(
-                  width: 120,
-                  height: 120,
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(28),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.2),
-                        blurRadius: 24,
-                        offset: const Offset(0, 10),
+      backgroundColor: const Color(0xFFE0F2FE),
+      body: Container(
+        width: double.infinity,
+        height: double.infinity,
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Color(0xFFF0F9FF),
+              Color(0xFFE0F2FE),
+              Color(0xFFBAE6FD),
+            ],
+          ),
+        ),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ScaleTransition(
+                scale: Tween(begin: 0.88, end: 1.0).animate(_scale),
+                child: FadeTransition(
+                  opacity: _fade,
+                  child: Container(
+                    width: 118,
+                    height: 118,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(28),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFF0284C7).withValues(alpha: 0.16),
+                          blurRadius: 24,
+                          offset: const Offset(0, 10),
+                        ),
+                      ],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(28),
+                      child: Image.asset(
+                        'assets/images/logo.png',
+                        fit: BoxFit.contain,
+                        filterQuality: FilterQuality.medium,
                       ),
-                    ],
-                  ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(28),
-                    child: Image.asset(
-                      'assets/images/logo.png',
-                      fit: BoxFit.contain,
-                      // (PR-8) جودة معالجة عالية للشعار — بلا غباش.
-                      filterQuality: FilterQuality.medium,
                     ),
                   ),
                 ),
               ),
-            ),
-            const SizedBox(height: 26),
-            FadeTransition(
-              opacity: _fade,
-              child: const Text(
-                'المحاسب',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 22,
-                  fontWeight: FontWeight.w800,
+              const SizedBox(height: 22),
+              FadeTransition(
+                opacity: _fade,
+                child: const Text(
+                  'المحاسب',
+                  style: TextStyle(
+                    color: Color(0xFF0F172A),
+                    fontSize: 24,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 0.2,
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 10),
-            FadeTransition(
-              opacity: _fade,
-              child: const Text(
-                'سجل المبيعات والديون',
-                style: TextStyle(color: Colors.white70, fontSize: 14),
+              const SizedBox(height: 8),
+              FadeTransition(
+                opacity: _fade,
+                child: const Text(
+                  'نظام محاسبي متكامل',
+                  style: TextStyle(
+                    color: Color(0xFF0369A1),
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(height: 34),
-            const SizedBox(
-              width: 26,
-              height: 26,
-              child: CircularProgressIndicator(
-                strokeWidth: 2.4,
-                color: Colors.white,
+              const SizedBox(height: 30),
+              const SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.3,
+                  color: Color(0xFF0284C7),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
