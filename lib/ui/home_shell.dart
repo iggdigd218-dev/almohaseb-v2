@@ -1779,9 +1779,12 @@ class _HomeShellState extends ConsumerState<HomeShell>
                         'standalone';
                 final st =
                     rref.watch(settingsProvider).valueOrNull ?? const {};
+                final hasGoogleAuth =
+                    rref.watch(googleLinkedProvider).valueOrNull ?? false;
                 final isLocalStandalone = wsMode == 'standalone' &&
                     (st['cloudWorkspaceProvisioned'] ?? '') != '1' &&
-                    (st['account.email'] ?? '').trim().isEmpty;
+                    (st['account.email'] ?? '').trim().isEmpty &&
+                    !hasGoogleAuth;
                 if (isLocalStandalone) {
                   final isDark = Theme.of(ctx).brightness == Brightness.dark;
                   return _appBarSquircleAction(
@@ -2001,9 +2004,12 @@ class _HomeShellState extends ConsumerState<HomeShell>
                         'standalone';
                 final st =
                     rref.watch(settingsProvider).valueOrNull ?? const {};
+                final hasGoogleAuth =
+                    rref.watch(googleLinkedProvider).valueOrNull ?? false;
                 final isLocalStandalone = wsMode == 'standalone' &&
                     (st['cloudWorkspaceProvisioned'] ?? '') != '1' &&
-                    (st['account.email'] ?? '').trim().isEmpty;
+                    (st['account.email'] ?? '').trim().isEmpty &&
+                    !hasGoogleAuth;
                 if (isLocalStandalone) return const SizedBox.shrink();
                 return const TrialCountdownBanner();
               },
@@ -2720,11 +2726,11 @@ class _Drawer extends ConsumerWidget {
 
     // (3.70.0) «إدارة المجموعة» متاحة للمالك المرتبط بـ Google أو للوكيل في مجموعة نشطة.
     final stDrawer = ref.watch(settingsProvider).valueOrNull ?? const {};
+    final googleLinked = ref.watch(googleLinkedProvider).valueOrNull ?? false;
     final isLocalStandalone = wsMode == 'standalone' &&
         (stDrawer['cloudWorkspaceProvisioned'] ?? '') != '1' &&
-        (stDrawer['account.email'] ?? '').trim().isEmpty;
-    final googleLinked = !isLocalStandalone &&
-        (ref.watch(googleLinkedProvider).valueOrNull ?? false);
+        (stDrawer['account.email'] ?? '').trim().isEmpty &&
+        !googleLinked;
     final allowGroupInDrawer = !isLocalStandalone &&
         (googleLinked ||
             effectiveRole == UserRole.agent ||
