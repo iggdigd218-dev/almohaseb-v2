@@ -1,22 +1,25 @@
 {
-  "version": "1.8.4+54",
-  "sha256": "69117865e0060f70883adb1bff40ff4bf855881788984e274744c616eefec694",
+  "version": "1.8.5+55",
+  "sha256": "284f1ed49b1230c01d03faf7e438518b090ca36c8d5899be3769d0cb5b7d9264",
   "sha256Variants": {
-    "arm64": "69117865e0060f70883adb1bff40ff4bf855881788984e274744c616eefec694"
+    "arm64": "284f1ed49b1230c01d03faf7e438518b090ca36c8d5899be3769d0cb5b7d9264",
+    "armv7": "6a6442d0c807b28ffeccd1c84f6c138eae89d3b389d89231b7167aafca0fe41a"
   },
   "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/admin-latest",
   "downloads": {
     "android": "https://iggdigd218-dev.github.io/almohaseb-v2/license-admin.apk",
     "androidVariants": {
-      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/license-admin.apk"
+      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/license-admin.apk",
+      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/license-admin-armv7.apk"
     }
   },
   "downloadsFallbackGithub": {
     "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk",
     "androidVariants": {
-      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk"
+      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk",
+      "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin-armv7.apk"
     }
   },
-  "publishedAt": "2026-11-04T11:29:40Z",
-  "notes": "• حقل جديد «رمز مشرف قاعدة البيانات» في إعدادات الاتصال (⚙️): الصق التوكن الطويل AMf-… مرة واحدة ليحل محل الرمز القديم فورًا.\n• إصلاح آلية تجديد الجلسة: اللصق يستبدل الرمز المحفوظ مهما كان ويعيد المحاولة فورًا.\n• تحديثات أمان وتحسينات عامة."
+  "publishedAt": "2026-11-04T19:01:46Z",
+  "notes": "• إصلاح التحديث المباشر داخل تطبيق الإدارة (In-App Update) دون التحويل القسري للمتصفح.\n• استعادة بناء --split-per-abi ورفع versionCode (2055) لحل خطأ «الحزمة تبدو غير صالحة» عند التثبيت فوق النسخة السابقة.\n• توحيد تطبيق الإدارة وقناة تحديثه وسياسة التحديث الإجباري لكلا المستودعين (المحاسب v2 + المحاسب بلاس)."
 }
