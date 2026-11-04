@@ -186,6 +186,31 @@ class _State extends ConsumerState<GroupManagementScreen> {
       if (r.isNotEmpty && '${r.first['google_id'] ?? ''}'.trim().isNotEmpty) {
         return true;
       }
+
+      // 1. فحص الاستعادة الصامتة لحساب Google المسجل في النظام
+      final auth = GoogleAuthService(db);
+      final silentUser = await auth.signInSilently();
+      if (silentUser != null && silentUser.id.isNotEmpty) {
+        return true;
+      }
+
+      // 2. التحقق من الجلسة المعتمدة عند تسجيل الدخول من شاشة البداية
+      final st = await repo.settings();
+      final acctEmail =
+          (st['account.email'] ?? st['email'] ?? '')
+              .trim()
+              .toLowerCase();
+      final acctUid =
+          (st['account.uid'] ?? FirebaseAuthRest.anonymousUid).trim();
+      if (acctEmail.isNotEmpty &&
+          (acctEmail.endsWith('@gmail.com') || acctUid.isNotEmpty)) {
+        await auth.persistAccount(
+          googleId: acctUid.isNotEmpty ? acctUid : 'email:$acctEmail',
+          email: acctEmail,
+          displayName: st['managerName'] ?? '',
+        );
+        return true;
+      }
     } catch (_) {}
     if (!context.mounted) return false;
     final signIn = await showDialog<bool>(

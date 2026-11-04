@@ -27,14 +27,20 @@ android {
 
     defaultConfig {
         applicationId = "com.nexora.almohaseb"
-        minSdk = 24
-        targetSdk = 35
+        // (PR-7) 23 هي الأرضية الصلبة لـFlutter 3.35 (فحص ReleaseMinSdkCheck
+        // يرفض 21) — الفجوة 21-22 أندرويد 5 فقط وهي 32-بت مستبعدة أصلًا
+        // بسياسة arm64 حصراً.
+        minSdk = 23
+        targetSdk = 34
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         multiDexEnabled = true
-        // (3.70) حزمة شاملة Universal — كل معالجات أندرويد المدعومة
-        // (armeabi-v7a + arm64-v8a + x86_64): إنهاء خطأ «الحزمة تبدو
-        // غير صالحة» على الأجهزة غير arm64. لا فلترة ABI بعد اليوم.
+        // (PR-7) حصر المعمارية على الحديثة 64-بت فقط (قرار المالك
+        // 2026-10-29): مع التوقيع الصارم V1+V2+V3 عبر apksigner ومحاذاة
+        // zipalign في مسار CI — تثبيت سلس على أندرويد 12/13/14/15+.
+        ndk {
+            abiFilters "arm64-v8a"
+        }
     }
 
     // ضغط المكتبات الأصلية داخل APK لتقليل الحجم.
@@ -55,19 +61,20 @@ android {
             }
             v1SigningEnabled true
             v2SigningEnabled true
+            // (PR-7) V3 في AGP بصيغة enableV3Signing حصراً — ليست
+            // v3SigningEnabled مثل v1/v2 القديمتين.
+            enableV3Signing = true
         }
     }
 
     buildTypes {
         release {
-            // توقيع ثابت إلزامي للإصدارات: إذا غاب المفتاح نُفشل البناء بدل
-            // التوقيع بمفتاح debug مؤقت (الذي يكسر التحديث فوق نسخة مثبّتة).
-            if (!keystorePropertiesFile.exists()) {
-                throw new GradleException(
-                    "توقيع release مفقود: أضف android/key.properties (أو سرّ ANDROID_KEYSTORE_BASE64 في CI). " +
-                    "التوقيع بمفتاح debug يمنع تثبيت التحديث فوق النسخة السابقة.")
-            }
-            signingConfig = signingConfigs.release
+            // (PR-7) توافق الأجهزة الحديثة (قرار المالك 2026-10-29): مع مفتاح
+            // رسمي (android/key.properties من الأسرار) يوقّع Gradle مباشرة
+            // بـ V1+V2+V3؛ وبدونه يخرج APK غير موقّع ليتولى مسار CI التوقيع
+            // الصارم عبر apksigner بالمفتاح الثابت بعد محاذاة zipalign —
+            // لا فشل بناء ولا حزمة غير موقعة تصل النشر.
+            signingConfig = keystorePropertiesFile.exists() ? signingConfigs.release : null
             minifyEnabled = false
             shrinkResources = false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),

@@ -3996,7 +3996,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
         (st['org.icon.b64'] ?? st['logoBase64'] ?? '').trim();
 
     // (2026-09-24) بناء الفاتورة انتقل إلى thermal_invoice_doc.dart: المستند
-    // صار يحمل الخط العربي المدمج (Cairo) واتجاه RTL، بدل مستند بلا ثيم
+    // صار يحمل الخط العربي المدمج (AppNaskh) واتجاه RTL، بدل مستند بلا ثيم
     // الذي كان يُخرج الحروف العربية مربعات «▯» في المعاينة والطباعة.
     final bytes = await buildThermalInvoicePdf(
       tx: tx,

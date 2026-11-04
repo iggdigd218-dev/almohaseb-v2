@@ -14,6 +14,8 @@ import 'package:qr_flutter/qr_flutter.dart';
 import '../core/sfx.dart';
 import '../data/providers.dart';
 import '../data/sync/cloud_join.dart';
+import '../data/sync/firebase_auth_service.dart';
+import '../data/sync/google_auth_service.dart';
 import 'group_management_screen.dart' show showJoinApprovalSheet;
 import 'widgets.dart';
 
@@ -28,8 +30,32 @@ Future<void> showCloudInviteDialog(BuildContext context, WidgetRef ref) async {
     if (!isAuthorizedDeputy) {
       final db = await repo.database;
       final r = await db.query('google_auth', where: 'id = 1', limit: 1);
-      final linked =
+      bool linked =
           r.isNotEmpty && '${r.first['google_id'] ?? ''}'.trim().isNotEmpty;
+      if (!linked) {
+        final auth = GoogleAuthService(db);
+        final silentUser = await auth.signInSilently();
+        if (silentUser != null && silentUser.id.isNotEmpty) {
+          linked = true;
+        } else {
+          final st = await repo.settings();
+          final acctEmail =
+              (st['account.email'] ?? st['email'] ?? '')
+                  .trim()
+                  .toLowerCase();
+          final acctUid =
+              (st['account.uid'] ?? FirebaseAuthRest.anonymousUid).trim();
+          if (acctEmail.isNotEmpty &&
+              (acctEmail.endsWith('@gmail.com') || acctUid.isNotEmpty)) {
+            await auth.persistAccount(
+              googleId: acctUid.isNotEmpty ? acctUid : 'email:$acctEmail',
+              email: acctEmail,
+              displayName: st['managerName'] ?? '',
+            );
+            linked = true;
+          }
+        }
+      }
       if (!linked) {
         if (context.mounted) {
           showSnack(

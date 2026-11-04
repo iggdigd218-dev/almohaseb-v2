@@ -12,14 +12,15 @@ subprojects {
 
 // (2026-09-22) النافذة العائمة (flutter_overlay_window) تُصرّح في build.gradle
 // الخاص بها بـ compileSdk 34 و minSdk 16 ولا تُعلن اعتماديات androidx.
-// نوّحد إعدادات كل الوحدات الفرعية مع التطبيق (36 / 24) ونضمن androidx.core
-// حتى لا يفشل تجميع حزمة أندرويد لأسباب خارجة عن كودنا.
+// نوّحد إعدادات كل الوحدات الفرعية مع التطبيق (36 / 23 — PR-7: أرضية
+// Flutter) ونضمن androidx.core حتى لا يفشل تجميع حزمة أندرويد لأسباب
+// خارجة عن كودنا.
 subprojects {
     afterEvaluate { p ->
         try {
             if (p.extensions.findByName('android') != null) {
                 p.android.compileSdk = 36
-                p.android.defaultConfig.minSdk = 24
+                p.android.defaultConfig.minSdk = 23
                 p.dependencies.add("implementation", "androidx.core:core:1.13.1")
             }
         } catch (e) {

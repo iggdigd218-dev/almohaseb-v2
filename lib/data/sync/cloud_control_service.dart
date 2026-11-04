@@ -262,8 +262,9 @@ class CloudControlService {
       }
 
       // 2) فحص سياسة التحديث الإجباري (Force Update)
-      var verPolicy = await _getJson('$base/system/version_policy.json');
-      verPolicy ??= await _getJson('$base/system/force_update.json');
+      // (2026-10-29) من مسار بلاس المستقل `/system/plus/*` — لا تتبع سياسات إصدار v2.
+      var verPolicy = await _getJson('$base/system/plus/version_policy.json');
+      verPolicy ??= await _getJson('$base/system/plus/force_update.json');
       if (verPolicy != null) {
         final minBuild = _asInt(verPolicy['min_build'] ??
             verPolicy['min_version'] ??

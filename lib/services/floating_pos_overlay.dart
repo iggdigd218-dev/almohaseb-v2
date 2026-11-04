@@ -91,7 +91,7 @@ class QuickPosOverlayApp extends StatelessWidget {
       locale: const Locale('ar'),
       theme: ThemeData(
         useMaterial3: true,
-        fontFamily: 'Cairo',
+        fontFamily: 'AppNaskh',
         colorScheme: ColorScheme.fromSeed(seedColor: kQuickPosTeal),
       ),
       home: Directionality(

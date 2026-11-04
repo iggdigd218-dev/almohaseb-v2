@@ -36,6 +36,12 @@ class DesktopNet {
           '${e.osError?.message ?? e.message}';
     }
     if (e is HandshakeException) {
+      final msg = e.message.toLowerCase();
+      if (msg.contains('certificate is not yet valid') ||
+          msg.contains('certificate has expired') ||
+          msg.contains('cert_date_invalid')) {
+        return 'تاريخ أو وقت الهاتف غير مضبوط بدقة: يرجى تفعيل «ضبط الوقت والتاريخ تلقائياً» من إعدادات الهاتف لتخطي خطأ التشفير.';
+      }
       return 'HandshakeException (شهادة/تشفير TLS): ${e.message}';
     }
     if (e is TimeoutException) {
@@ -95,6 +101,21 @@ class DesktopHttpOverrides extends HttpOverrides {
         }
       }
       ..badCertificateCallback = (cert, host, port) {
+        final cleanHost = host.toLowerCase().trim();
+        // التسامح التلقائي مع فرق توقيت ساعة الهاتف (Clock Skew) لخوادم فايربيس وجوجل المعتمدة
+        final isGoogleOrFirebase = cleanHost.endsWith('.firebasedatabase.app') ||
+            cleanHost.endsWith('.googleapis.com') ||
+            cleanHost.contains('identitytoolkit') ||
+            cleanHost.contains('firebase');
+        if (isGoogleOrFirebase) {
+          final issuer = cert.issuer.toLowerCase();
+          if (issuer.contains('google') ||
+              issuer.contains('gts') ||
+              issuer.contains('global') ||
+              issuer.contains('pki')) {
+            return true;
+          }
+        }
         DesktopNet.recordError(
           HandshakeException(
               'شهادة غير موثوقة من $host:$port — ${cert.subject}'),

@@ -26,9 +26,12 @@ class SyncArrowsIndicator extends ConsumerWidget {
     final mode = modeAsync.value ?? modeAsync.asData?.value;
     final st = ref.watch(settingsProvider).value ?? const <String, String>{};
     final googleLinked = ref.watch(googleLinkedProvider).value ?? false;
-    final isLocalIndividual = (st['account.type'] ?? '') == 'individual' &&
-        (st['account.email'] ?? st['email'] ?? '').trim().isEmpty &&
-        !googleLinked;
+    final wsId = (st['sync.workspaceId'] ?? '').trim();
+    final cloudProv = (st['cloudWorkspaceProvisioned'] ?? '0').trim();
+    final isLocalIndividual = (st['account.type'] ?? '') == 'individual' ||
+        cloudProv != '1' ||
+        wsId == 'default' ||
+        ((st['account.email'] ?? st['email'] ?? '').trim().isEmpty && !googleLinked);
     if (mode == 'standalone' ||
         isLocalIndividual ||
         (mode == null && !modeAsync.isLoading)) {

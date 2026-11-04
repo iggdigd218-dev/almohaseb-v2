@@ -1,7 +1,7 @@
 name: nexora_app
 description: مدير الحسابات — سجل المبيعات والديون
 publish_to: 'none'
-version: 3.98.14+329
+version: 3.98.21+336
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -56,25 +56,9 @@ flutter:
     - assets/images/
     - assets/audio/
   fonts:
-    - family: Tajawal
+    - family: AppNaskh
       fonts:
-        - asset: assets/fonts/Tajawal-Regular.ttf
-        - asset: assets/fonts/Tajawal-Medium.ttf
-          weight: 500
-        - asset: assets/fonts/Tajawal-Bold.ttf
+        - asset: assets/fonts/NotoNaskhArabic-Regular.ttf
+        - asset: assets/fonts/NotoNaskhArabic-Bold.ttf
           weight: 700
-    # (الهوية البصرية) خط الواجهة الحديث — **Cairo** مضمّن محلياً بالكامل
-    # في assets/fonts/ (لا `google_fonts` ولا أي سحب عبر الشبكة) فيعمل
-    # بنسبة 100% أوفلاين على كل المنصات.
-    # يُترك Tajawal أعلاه لأن شبكة PDF (voucher/reports) تحمّله بالمسار.
-    # رخصة Cairo: OFL-1.1 — assets/fonts/OFL-Cairo.txt
-    - family: Cairo
-      fonts:
-        - asset: assets/fonts/Cairo-Regular.ttf
-          weight: 400
-        - asset: assets/fonts/Cairo-Medium.ttf
-          weight: 500
-        - asset: assets/fonts/Cairo-SemiBold.ttf
-          weight: 600
-        - asset: assets/fonts/Cairo-Bold.ttf
-          weight: 700
+

@@ -1616,46 +1616,41 @@ class Rtdb {
     final out = <SubscriberEntry>[];
     final indexByKey = <String, int>{};
 
-    bool isExplicitMultiWorkspace(String wsId) =>
-        wsId.trim().toUpperCase().startsWith('WS-');
-
     for (final entry in orgOnly) {
       final wsTrim = entry.workspaceId.trim();
       final wsKey = 'ws:${wsTrim.toLowerCase()}';
-      final isExplicitWs = isExplicitMultiWorkspace(wsTrim);
       final normPhone = normalizeSubscriberPhone(entry.phone);
-      final phoneKey =
-          (!isExplicitWs && normPhone.isNotEmpty) ? 'phone:$normPhone' : '';
+      final phoneKey = normPhone.isNotEmpty ? 'phone:$normPhone' : '';
       final dev = entry.deviceId.trim().toUpperCase();
-      final devKey = (!isExplicitWs &&
-              !includeAbandoned &&
-              dev.isNotEmpty &&
-              dev.startsWith('DEVICE-'))
-          ? 'dev:$dev'
-          : '';
+      final devKey = (dev.isNotEmpty && dev.startsWith('DEVICE-')) ? 'dev:$dev' : '';
+      final email = entry.ownerEmail.trim().toLowerCase();
+      final emailKey = (email.isNotEmpty && email.contains('@')) ? 'email:$email' : '';
 
       int? existingIdx = indexByKey[wsKey];
-      if (existingIdx == null &&
-          phoneKey.isNotEmpty &&
-          (!includeAbandoned || entry.hasSubscriptionNode)) {
-        existingIdx = indexByKey[phoneKey];
-      }
       if (existingIdx == null && devKey.isNotEmpty) {
         existingIdx = indexByKey[devKey];
+      }
+      if (existingIdx == null && emailKey.isNotEmpty) {
+        existingIdx = indexByKey[emailKey];
+      }
+      if (existingIdx == null && phoneKey.isNotEmpty && (!includeAbandoned || entry.hasSubscriptionNode)) {
+        existingIdx = indexByKey[phoneKey];
       }
 
       if (existingIdx != null) {
         final merged = out[existingIdx].mergeWith(entry);
         out[existingIdx] = merged;
         indexByKey[wsKey] = existingIdx;
-        if (phoneKey.isNotEmpty) indexByKey[phoneKey] = existingIdx;
         if (devKey.isNotEmpty) indexByKey[devKey] = existingIdx;
+        if (emailKey.isNotEmpty) indexByKey[emailKey] = existingIdx;
+        if (phoneKey.isNotEmpty) indexByKey[phoneKey] = existingIdx;
       } else {
         final newIdx = out.length;
         out.add(entry);
         indexByKey[wsKey] = newIdx;
-        if (phoneKey.isNotEmpty) indexByKey[phoneKey] = newIdx;
         if (devKey.isNotEmpty) indexByKey[devKey] = newIdx;
+        if (emailKey.isNotEmpty) indexByKey[emailKey] = newIdx;
+        if (phoneKey.isNotEmpty) indexByKey[phoneKey] = newIdx;
       }
     }
 

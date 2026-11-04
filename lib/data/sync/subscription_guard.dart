@@ -20,6 +20,7 @@ import 'package:http/http.dart' as http;
 import '../repository.dart';
 import '../../core/license_model.dart';
 import 'device_id.dart';
+import 'device_id.dart' as dev_id;
 import 'firebase_auth_service.dart';
 import 'workspace_service.dart';
 
@@ -297,6 +298,10 @@ class SubscriptionGuard {
   static Future<int> Function(String backendUrl)? debugServerNowOverride;
 
   static SubscriptionState get lastState => _last;
+
+  /// جلب البصمة العتادية الأولية غير المشفرة.
+  static Future<String?> hardwareFingerprintRaw() =>
+      dev_id.hardwareFingerprintRaw();
 
   /// تجزئة البصمة العتادية إلى مفتاح سحابي ثابت وآمن (لا نص خام يصعد).
   static String fingerprintHash(String raw) =>

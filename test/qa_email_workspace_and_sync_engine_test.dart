@@ -696,4 +696,123 @@ void main() {
       );
     }, () => client);
   });
+
+  // ══ (إصلاح المنشآت الوهمية — Ghost Workspaces) ══
+
+  test('GHOST-01 تسجيل الدخول العادي ببريد مختلف لا يولّد منشأة وهمية جديدة', () async {
+    final store = <String, Object?>{};
+    final client = makeMockCloud(store);
+
+    // جهاز يملك منشأة قائمة بمالك بريد آخر (لا منشأة للبريد الوارد في السحابة).
+    await repo.setSetting('account.email', 'old.owner@example.com');
+    await repo.setSetting('businessName', 'متجر المالك الأصلي');
+    final wsBefore = repo.requireWorkspaceId;
+    expect(wsBefore, 'WS-EMAILTST');
+
+    final outcome = await http.runWithClient(
+      () => AccountWorkspace.linkAccountOnly(repo,
+          backendUrl: url, account: managerAccount),
+      () => client,
+    );
+
+    // بلا طلب عزل صريح: لا توليد WS-* ولا إنشاء قاعدة جديدة — يبقى على
+    // مساحته الحالية ويربط الجلسة بها (migrated).
+    expect(outcome, AccountLinkOutcome.migrated);
+    expect(repo.requireWorkspaceId, wsBefore,
+        reason: 'لا يجوز توليد مساحة عمل جديدة من خلف المستخدم');
+  });
+
+  test('GHOST-02 طلب العزل الصريح forceIsolateNewUser هو وحده من ينشئ مساحة جديدة',
+      () async {
+    final store = <String, Object?>{};
+    final client = makeMockCloud(store);
+    await repo.setSetting('account.email', 'old.owner@example.com');
+
+    final outcome = await http.runWithClient(
+      () => AccountWorkspace.linkAccountOnly(repo,
+          backendUrl: url,
+          account: managerAccount,
+          forceIsolateNewUser: true),
+      () => client,
+    );
+
+    expect(outcome, AccountLinkOutcome.isolatedNewWorkspace);
+    expect(repo.requireWorkspaceId.startsWith('WS-'), isTrue);
+    expect(repo.requireWorkspaceId, isNot('WS-EMAILTST'));
+  });
+
+  test('GHOST-03 معيار مسودة المنشأة الوهمية: بلا اسم حقيقي وبلا حسابات وحركات',
+      () {
+    // مسودة فارغة تماماً → شبح.
+    expect(
+      AccountWorkspace.isGhostWorkspaceSnapshot(
+          storeName: '', accountsCount: 0, transactionsCount: 0),
+      isTrue,
+    );
+    // الاسم الافتراضي لا يعدها منشأة حقيقية.
+    expect(
+      AccountWorkspace.isGhostWorkspaceSnapshot(
+          storeName: 'متجري', accountsCount: 0, transactionsCount: 0),
+      isTrue,
+    );
+    expect(
+      AccountWorkspace.isGhostWorkspaceSnapshot(
+          storeName: 'منشأتي', accountsCount: 0, transactionsCount: 0),
+      isTrue,
+    );
+    // اسم تجاري حقيقي → ليست شبحاً حتى لو كانت فارغة مؤقتاً.
+    expect(
+      AccountWorkspace.isGhostWorkspaceSnapshot(
+          storeName: 'متجر الأمانة', accountsCount: 0, transactionsCount: 0),
+      isFalse,
+    );
+    // وجود بيانات مالية (حسابات أو حركات) يمنع اعتبارها شبحاً إطلاقاً.
+    expect(
+      AccountWorkspace.isGhostWorkspaceSnapshot(
+          storeName: '', accountsCount: 5, transactionsCount: 0),
+      isFalse,
+    );
+    expect(
+      AccountWorkspace.isGhostWorkspaceSnapshot(
+          storeName: 'منشأتي', accountsCount: 0, transactionsCount: 3),
+      isFalse,
+    );
+  });
+
+  test('GHOST-04 حذف منشأة لا يمس مؤشر البريد الرئيسي emails_index في السحابة',
+      () async {
+    final email = managerAccount.email.trim().toLowerCase();
+    final emailKey = AccountWorkspace.emailToKey(email);
+    const ws = 'WS-GHOST04';
+    final store = <String, Object?>{
+      '/workspaces/$ws.json': {'workspaceId': ws},
+      '/workspaces/_registry/emails_index/$emailKey.json': {
+        'workspaceId': ws,
+        'email': email,
+      },
+      '/workspaces/_registry/user_workspaces/$emailKey/$ws.json': {
+        'workspaceId': ws,
+      },
+    };
+    final client = makeMockCloud(store);
+
+    await http.runWithClient(
+      () => AccountWorkspace.deleteWorkspaceRegistration(
+        repo,
+        backendUrl: url,
+        workspaceId: ws,
+        ownerEmail: email,
+        deleteLocalDbFile: false,
+      ),
+      () => client,
+    );
+
+    // الفهرس الرئيسي للبريد يبقى سليماً — هو ما يهتدي به الدخول اللاحق.
+    expect(store['/workspaces/_registry/emails_index/$emailKey.json'], isNotNull,
+        reason: 'يُمنع مسح مؤشر البريد الرئيسي عند حذف منشأة');
+    // إدخال المنشأة نفسها يُحذف من قائمة منشآت البريد ومن العقدة الجذرية.
+    expect(store['/workspaces/_registry/user_workspaces/$emailKey/$ws.json'],
+        isNull);
+    expect(store['/workspaces/$ws.json'], isNull);
+  });
 }

@@ -1,0 +1,153 @@
+name: Cleanup and merge duplicate workspaces in RTDB
+on:
+  workflow_dispatch: {}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run RTDB consolidation script
+        env:
+          ADMIN_RTDB_REFRESH_TOKEN: ${{ secrets.ADMIN_RTDB_REFRESH_TOKEN }}
+          ADMIN_REFRESH_TOKEN: ${{ secrets.ADMIN_REFRESH_TOKEN }}
+        run: |
+          set -euo pipefail
+          TOKEN="${ADMIN_RTDB_REFRESH_TOKEN:-$ADMIN_REFRESH_TOKEN}"
+          if [ -z "$TOKEN" ]; then
+            echo "::error::ADMIN_RTDB_REFRESH_TOKEN is empty"
+            exit 1
+          fi
+
+          echo "Exchanging refresh token for ID token..."
+          RESP=$(curl -s -X POST \
+            "https://securetoken.googleapis.com/v1/token?key=AIzaSyAh6_kGvoPvse3Mt3Yy06dmDaCpTKHp0F4" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=refresh_token" \
+            --data-urlencode "refresh_token=$TOKEN")
+          IDTOK=$(echo "$RESP" | python3 -c "import json,sys;print(json.load(sys.stdin).get('id_token',''))")
+          if [ -z "$IDTOK" ]; then
+            echo "::error::Failed to obtain ID token"
+            exit 1
+          fi
+
+          python3 - << 'EOF'
+          import json, urllib.request, hashlib
+
+          id_tok = """$IDTOK""".strip()
+          base = "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app"
+
+          def api_get(path):
+              url = f"{base}/{path}.json?auth={id_tok}"
+              req = urllib.request.Request(url)
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as resp:
+                      return json.loads(resp.read().decode('utf-8'))
+              except Exception as e:
+                  print(f"GET error on {path}: {e}")
+                  return None
+
+          def api_put(path, data):
+              url = f"{base}/{path}.json?auth={id_tok}"
+              body = json.dumps(data).encode('utf-8')
+              req = urllib.request.Request(url, data=body, method='PUT')
+              req.add_header('Content-Type', 'application/json')
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  return resp.read()
+
+          def api_patch(path, data):
+              url = f"{base}/{path}.json?auth={id_tok}"
+              body = json.dumps(data).encode('utf-8')
+              req = urllib.request.Request(url, data=body, method='PATCH')
+              req.add_header('Content-Type', 'application/json')
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  return resp.read()
+
+          def api_delete(path):
+              url = f"{base}/{path}.json?auth={id_tok}"
+              req = urllib.request.Request(url, method='DELETE')
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as resp:
+                      return resp.read()
+              except Exception as e:
+                  print(f"DELETE error on {path}: {e}")
+                  return None
+
+          print("=== Auditing and Consolidating Workspaces in RTDB ===")
+          
+          # Target mappings for subscribed customers
+          mappings = {
+              "DEVICE-YZLBJ6ZGTMKW": {
+                  "primary_ws": "WS-KNRMCFMV",
+                  "name": "عبد العليم",
+              },
+              "DEVICE-Y97XSWBLWH2B": {
+                  "primary_ws": "WS-S35A67PT",
+                  "name": "مصطفى",
+              }
+          }
+
+          # 1. Fetch shallow workspaces list
+          ws_keys = api_get("workspaces?shallow=true") or {}
+          print(f"Found {len(ws_keys)} workspaces in RTDB")
+
+          # 2. For each mapping, inspect all workspaces referencing that device
+          for dev_id, info in mappings.items():
+              primary_ws = info["primary_ws"]
+              cust_name = info["name"]
+              print(f"\nProcessing {cust_name} ({dev_id}) -> Primary: {primary_ws}")
+
+              for ws_id in list(ws_keys.keys()):
+                  if ws_id.startswith("_") or ws_id == "default" or ws_id == primary_ws:
+                      continue
+
+                  # Check subscription / roster of candidate
+                  sub = api_get(f"workspaces/{ws_id}/subscription")
+                  roster = api_get(f"workspaces/{ws_id}/roster") or {}
+                  
+                  sub_dev = ""
+                  if sub and isinstance(sub, dict):
+                      sub_dev = (sub.get("deviceId") or sub.get("device_id") or "").strip().upper()
+                  
+                  is_duplicate = (sub_dev == dev_id) or (dev_id in roster)
+                  
+                  if is_duplicate:
+                      print(f"  Found duplicate workspace {ws_id} for {dev_id}!")
+                      # Merge operations if any
+                      dup_ops = api_get(f"workspaces/{ws_id}/operations") or {}
+                      if dup_ops:
+                          print(f"    Merging {len(dup_ops)} operations from {ws_id} to {primary_ws}...")
+                          api_patch(f"workspaces/{primary_ws}/operations", dup_ops)
+
+                      # Delete duplicate workspace
+                      print(f"    Deleting duplicate workspace node {ws_id}...")
+                      api_delete(f"workspaces/{ws_id}")
+
+              # Ensure device indices point to primary
+              print(f"  Securing registry pointers for {dev_id} -> {primary_ws}")
+              api_put(f"workspaces/_registry/device_index/{dev_id}", {
+                  "workspaceId": primary_ws,
+                  "workspace_id": primary_ws,
+                  "updated_at": 1730656000000
+              })
+              api_put(f"workspaces/_registry/device_to_workspace/{dev_id}", {
+                  "workspaceId": primary_ws,
+                  "workspace_id": primary_ws
+              })
+
+          # 3. Clean trials node of duplicates
+          trials = api_get("trials") or {}
+          for fp_key, t_data in list(trials.items()):
+              if not isinstance(t_data, dict):
+                  continue
+              t_dev = (t_data.get("device_id") or t_data.get("deviceId") or "").strip().upper()
+              t_ws = (t_data.get("workspace_id") or t_data.get("workspaceId") or "").strip()
+              for dev_id, info in mappings.items():
+                  if t_dev == dev_id and t_ws != info["primary_ws"]:
+                      print(f"  Purging duplicate trial record {fp_key} for {dev_id} pointing to {t_ws}")
+                      api_delete(f"trials/{fp_key}")
+
+          print("\n=== Consolidation and Cleanup Finished Successfully ===")
+          EOF

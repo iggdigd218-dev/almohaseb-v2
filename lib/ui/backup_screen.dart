@@ -422,7 +422,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
         showSnack(context, 'تم رفع نسخة Google Drive (${backup.name}) ✅');
       }
     } catch (e) {
-      if (mounted) showSnack(context, 'تعذّر رفع النسخة: $e', error: true);
+      if (mounted) showSnack(context, '$e', error: true);
     } finally {
       if (mounted) setState(() => _busy = false);
     }

@@ -4,7 +4,8 @@ import 'dart:io' as io;
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 
-import 'sync/google_auth_service.dart' show createUnifiedGoogleSignIn;
+import 'sync/google_auth_service.dart'
+    show createUnifiedGoogleSignIn, kDriveGoogleScopes;
 
 /// معلومات تعريفية للحساب المرتبط فقط.
 class GoogleAccountInfo {
@@ -580,10 +581,35 @@ class GoogleDriveService {
       );
     }
     final signedIn = account;
-    final headers = await signedIn.authHeaders;
+    var headers = await signedIn.authHeaders;
     final client = http.Client();
     try {
-      return await operation(client, headers);
+      try {
+        return await operation(client, headers);
+      } catch (e) {
+        final errStr = e.toString().toLowerCase();
+        // عند حدوث خطأ 401 أو 403 أو نقص صلاحيات Drive (Scopes)
+        if (errStr.contains('401') ||
+            errStr.contains('403') ||
+            errStr.contains('scope') ||
+            errStr.contains('permission') ||
+            errStr.contains('access_token_scope_insufficient') ||
+            errStr.contains('insufficientpermissions')) {
+          // محاولة طلب صلاحية Drive بشكل تفاعلي من Google
+          bool granted = false;
+          try {
+            granted = await signIn?.requestScopes(kDriveGoogleScopes) ?? false;
+          } catch (_) {}
+          if (granted) {
+            headers = await signedIn.authHeaders;
+            return await operation(client, headers);
+          }
+          throw const GoogleDriveException(
+            'لم يتم منح إذن الوصول إلى مساحة Google Drive لحفظ النسخ السحابية. يرجى الموافقة على منح الصلاحية، أو استخدام خيار "رفع إلى تطبيق Google Drive" في الأسفل.',
+          );
+        }
+        rethrow;
+      }
     } on GoogleDriveException {
       rethrow;
     } catch (e) {
@@ -603,7 +629,7 @@ class GoogleDriveService {
     var detail = response.body.trim();
     if (detail.length > 300) detail = '${detail.substring(0, 300)}…';
     throw GoogleDriveException(
-      '$operation فشل (HTTP ${response.statusCode})${detail.isEmpty ? '' : ': $detail'}',
+      'Google Drive: $operation فشل (HTTP ${response.statusCode})${detail.isEmpty ? '' : ': $detail'}',
     );
   }
 
