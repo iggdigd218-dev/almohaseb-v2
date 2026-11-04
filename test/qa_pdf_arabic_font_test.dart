@@ -159,9 +159,9 @@ void main() {
     );
 
     // الخط الذي تحمّله الخدمة هو نفسه المدمج في المستند — نتحقق من هويته
-    // العربية من ملف TTF نفسه (Cairo) قبل فحص أثره داخل البايتات.
+    // العربية من ملف TTF نفسه (Noto Naskh Arabic) قبل فحص أثره داخل البايتات.
     final parser = TtfParser(await rootBundle.load(kPdfFontRegularAsset));
-    expect(parser.fontName, contains('Cairo'),
+    expect(parser.fontName, contains('Noto'),
         reason: 'الخط الأساس ليس عربياً: ${parser.fontName}');
     expect(parser.unicode, isTrue,
         reason: 'الخط بلا خريطة يونيكود ⇒ لا يمكن ترميز العربية');
@@ -178,7 +178,7 @@ void main() {
       expect(raw, isNot(contains('/$latinFont')),
           reason: 'يستخدم الخط اللاتيني $latinFont ⇒ حروف عربية مفقودة');
     }
-    expect(raw, contains('Cairo'), reason: 'الخط العربي غير مذكور في الملف');
+    expect(raw, contains('Noto'), reason: 'الخط العربي غير مذكور في الملف');
     expect(raw, contains('Identity-H'),
         reason: 'الخط ليس بترميز Identity-H (نص يونيكود ثنائي البايت)');
     expect(raw, contains('FontFile2'), reason: 'ملف الخط غير مضمّن في PDF');

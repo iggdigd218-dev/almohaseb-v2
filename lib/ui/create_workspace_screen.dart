@@ -23,9 +23,12 @@ import '../core/sfx.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
 import '../data/sync/account_workspace.dart';
+import '../data/sync/device_id.dart';
+import '../data/sync/subscription_guard.dart';
 import 'home_shell.dart';
 import 'lock_gate.dart';
 import 'logout_flow.dart';
+import 'onboarding_screen.dart' show kOnboardingDoneKey;
 import 'widgets.dart';
 
 class CreateWorkspaceScreen extends ConsumerStatefulWidget {
@@ -127,6 +130,164 @@ class _CreateWorkspaceScreenState extends ConsumerState<CreateWorkspaceScreen> {
       final effectiveUid = widget.ownerUid.trim().isNotEmpty
           ? widget.ownerUid.trim()
           : 'email:${AccountWorkspace.emailToKey(email)}';
+
+      if (!widget.isAdditionalWorkspace) {
+        final localMatches = await AccountWorkspace.findLocalWorkspacesOnDevice(
+          filterEmail: email,
+        );
+        if (localMatches.isNotEmpty) {
+          final existingWs = localMatches.first.workspaceId;
+          final existingName = localMatches.first.storeName;
+          if (!mounted) return;
+          setState(() {
+            _busy = false;
+            _errorMsg =
+                'البريد الإلكتروني ($email) مسجل مسبقاً لمنشأة «$existingName» على هذا الجهاز.\nلا يُسمح بإنشاء حساب مكرر بنفس البريد الإلكتروني.';
+          });
+          final openExisting = await showDialog<bool>(
+            context: context,
+            barrierDismissible: false,
+            builder: (dctx) => AlertDialog(
+              title: const Text('البريد مسجل مسبقاً',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+              content: Text(
+                'البريد الإلكتروني ($email) مرتبط بمنشأة سابقة معتمدة على هذا الجهاز باسم «$existingName».\n\n'
+                'لا يُسمح بتكرار الحسابات أو إنشاء منشآت مكررة بنفس البريد. هل ترغب بفتح منشأتك السابقة؟',
+                style: const TextStyle(fontSize: 13.5, height: 1.6),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dctx).pop(false),
+                  child: const Text('إلغاء'),
+                ),
+                FilledButton.icon(
+                  onPressed: () => Navigator.of(dctx).pop(true),
+                  icon: const Icon(Icons.login_rounded, size: 18),
+                  label: const Text('فتح المنشأة السابقة'),
+                ),
+              ],
+            ),
+          );
+          if (openExisting == true && mounted) {
+            final restored = await AccountWorkspace.switchToExistingWorkspace(
+              repo,
+              backendUrl: url,
+              targetWorkspaceId: existingWs,
+            );
+            if (restored) {
+              await repo.setSetting('account.type', 'enterprise');
+              await repo.setSetting(kOnboardingDoneKey, '1');
+              await repo.setSetting('onboardingCompleted', '1');
+              if (!mounted) return;
+              Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+                MaterialPageRoute(
+                    builder: (_) => const LockGate(child: HomeShell())),
+                (route) => false,
+              );
+              return;
+            }
+          }
+          return;
+        }
+      }
+
+      if (!widget.isAdditionalWorkspace && url.isNotEmpty) {
+        final devId = await ensureDeviceId(repo);
+        final rawFp =
+            await SubscriptionGuard.hardwareFingerprintRaw() ?? 'fallback:$devId';
+        final hwFp = SubscriptionGuard.fingerprintHash(rawFp);
+
+        final preCheck = await AccountWorkspace.resolveWorkspaceInCloud(
+          backendUrl: url,
+          email: email,
+          uid: effectiveUid,
+          deviceId: devId,
+          deviceFingerprint: hwFp,
+          phone: fullPhone,
+        ).timeout(
+          const Duration(seconds: 7),
+          onTimeout: () => const CloudWorkspaceResolution.notFound(),
+        );
+
+        if (preCheck.found && preCheck.workspaceId.isNotEmpty) {
+          final existingWs = preCheck.workspaceId;
+          final existingName = (preCheck.meta?['storeName'] ??
+                  preCheck.meta?['store_name'] ??
+                  existingWs)
+              .toString()
+              .trim();
+          if (!mounted) return;
+          final confirmed = await showDialog<bool>(
+            context: context,
+            barrierDismissible: false,
+            builder: (dctx) => AlertDialog(
+              title: const Row(
+                children: [
+                  Icon(Icons.shield_outlined,
+                      color: Color(0xFF16A34A), size: 24),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'منشأة سابقة معتمدة',
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ],
+              ),
+              content: Text(
+                'تم العثور على منشأتك السابقة المرتبطة بهذا الجهاز/البيانات باسم «$existingName».\n\n'
+                'لحماية بياناتك المالية من التشتت، هل ترغب بفتح منشأتك المعتمدة بدلاً من إنشاء مساحة فارغة جديدة؟',
+                style: const TextStyle(fontSize: 13.5, height: 1.6),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dctx).pop(false),
+                  child: const Text('إلغاء'),
+                ),
+                FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF16A34A),
+                  ),
+                  onPressed: () => Navigator.of(dctx).pop(true),
+                  icon: const Icon(Icons.restore_rounded, size: 18),
+                  label: const Text('فتح المنشأة واستعادة البيانات'),
+                ),
+              ],
+            ),
+          );
+
+          if (confirmed == true && mounted) {
+            final restored = await AccountWorkspace.switchToExistingWorkspace(
+              repo,
+              backendUrl: url,
+              targetWorkspaceId: existingWs,
+            );
+            if (restored) {
+              await repo.setSetting('account.type', 'enterprise');
+              await repo.setSetting(kOnboardingDoneKey, '1');
+              await repo.setSetting('onboardingCompleted', '1');
+              if (mounted) {
+                Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+                  MaterialPageRoute(
+                      builder: (_) => const LockGate(child: HomeShell())),
+                  (route) => false,
+                );
+              }
+              return;
+            }
+          } else {
+            if (mounted) {
+              setState(() {
+                _busy = false;
+                _errorMsg =
+                    'البريد الإلكتروني ($email) مسجل مسبقاً في السحابة لمنشأة «$existingName».\nلا يُسمح بإنشاء منشآت مكررة بنفس البريد الإلكتروني.';
+              });
+            }
+            return;
+          }
+        }
+      }
 
       await AccountWorkspace.createAndRegisterNewWorkspace(
         repo,

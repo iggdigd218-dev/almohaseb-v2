@@ -1781,10 +1781,9 @@ class _HomeShellState extends ConsumerState<HomeShell>
                     rref.watch(settingsProvider).valueOrNull ?? const {};
                 final hasGoogleAuth =
                     rref.watch(googleLinkedProvider).valueOrNull ?? false;
-                final isLocalStandalone = wsMode == 'standalone' &&
-                    (st['cloudWorkspaceProvisioned'] ?? '') != '1' &&
-                    (st['account.email'] ?? '').trim().isEmpty &&
-                    !hasGoogleAuth;
+                final isLocalStandalone =
+                    (wsMode == 'standalone' && !hasGoogleAuth) ||
+                        (st['account.type'] ?? '') == 'individual';
                 if (isLocalStandalone) {
                   final isDark = Theme.of(ctx).brightness == Brightness.dark;
                   return _appBarSquircleAction(
@@ -2727,10 +2726,9 @@ class _Drawer extends ConsumerWidget {
     // (3.70.0) «إدارة المجموعة» متاحة للمالك المرتبط بـ Google أو للوكيل في مجموعة نشطة.
     final stDrawer = ref.watch(settingsProvider).valueOrNull ?? const {};
     final googleLinked = ref.watch(googleLinkedProvider).valueOrNull ?? false;
-    final isLocalStandalone = wsMode == 'standalone' &&
-        (stDrawer['cloudWorkspaceProvisioned'] ?? '') != '1' &&
-        (stDrawer['account.email'] ?? '').trim().isEmpty &&
-        !googleLinked;
+    final isLocalStandalone =
+        (wsMode == 'standalone' && !googleLinked) ||
+            (stDrawer['account.type'] ?? '') == 'individual';
     final allowGroupInDrawer = !isLocalStandalone &&
         (googleLinked ||
             effectiveRole == UserRole.agent ||
@@ -2740,7 +2738,7 @@ class _Drawer extends ConsumerWidget {
     final items = _DrawerItems.of(
       user: effectiveUser,
       isOwner: isOwner,
-      workspaceMode: (wsMode == 'standalone' && googleLinked) ? 'host' : wsMode,
+      workspaceMode: isLocalStandalone ? 'standalone' : ((wsMode == 'standalone' && googleLinked) ? 'host' : wsMode),
     );
     final dark = Theme.of(context).brightness == Brightness.dark;
 

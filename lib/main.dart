@@ -25,11 +25,8 @@ import 'ui/splash.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   initDbForPlatform();
-  // (دفعة 52) سطح المكتب: بروكسي تلقائي + مهلات + تشخيص أخطاء TLS دقيق
-  // لكل عملاء HTTP في التطبيق.
-  if (isDesktop) {
-    HttpOverrides.global = DesktopHttpOverrides();
-  }
+  // حماية موحدة عبر كافة المنصات: بروكسي + تشخيص أخطاء TLS والتسامح مع تباعد توقيت الأجهزة
+  HttpOverrides.global = DesktopHttpOverrides();
   await initializeDateFormatting('ar');
   await initializeDateFormatting('en');
   // جذر documents لمسارات الوسائط النسبية (chat_media/...).

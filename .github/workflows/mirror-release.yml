@@ -50,20 +50,16 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p assets && cd assets
-          for f in version.json Almohaseb-arm64.apk Almohaseb-armv7.apk nexora-arm64.apk nexora-armv7.apk NexoraSetup.exe; do
+          for f in version.json Almohaseb-Plus-arm64.apk nexora-arm64.apk nexora-armv7.apk NexoraSetup.exe; do
             gh release download latest --repo "$GITHUB_REPOSITORY" --pattern "$f" --clobber || true
           done
-          if [ -s Almohaseb-arm64.apk ] && [ ! -s nexora-arm64.apk ]; then
-            cp -f Almohaseb-arm64.apk nexora-arm64.apk
-          elif [ -s nexora-arm64.apk ] && [ ! -s Almohaseb-arm64.apk ]; then
-            cp -f nexora-arm64.apk Almohaseb-arm64.apk
-          fi
-          if [ -s Almohaseb-armv7.apk ] && [ ! -s nexora-armv7.apk ]; then
-            cp -f Almohaseb-armv7.apk nexora-armv7.apk
-          elif [ -s nexora-armv7.apk ] && [ ! -s Almohaseb-armv7.apk ]; then
-            cp -f nexora-armv7.apk Almohaseb-armv7.apk
+          if [ -s Almohaseb-Plus-arm64.apk ] && [ ! -s nexora-arm64.apk ]; then
+            cp -f Almohaseb-Plus-arm64.apk nexora-arm64.apk
+          elif [ -s nexora-arm64.apk ] && [ ! -s Almohaseb-Plus-arm64.apk ]; then
+            cp -f nexora-arm64.apk Almohaseb-Plus-arm64.apk
           fi
           echo "الأصول المتاحة:"; ls -lh . || true
+          if [ ! -s version.json ]; then cp ../version.json ./version.json 2>/dev/null || true; fi
           if [ ! -s version.json ]; then
             echo "::warning::لا يوجد version.json على إصدار latest بعد — لا شيء للمرآة."
             exit 0
@@ -100,7 +96,7 @@ jobs:
           fi
           npm install -g firebase-tools --no-fund --no-audit >/dev/null 2>&1
           mkdir -p "site/releases/$VDIR"
-          cp -f assets/Almohaseb-arm64.apk assets/Almohaseb-armv7.apk assets/nexora-arm64.apk assets/nexora-armv7.apk assets/NexoraSetup.exe "site/releases/$VDIR/" 2>/dev/null || true
+          cp -f assets/Almohaseb-Plus-arm64.apk assets/nexora-arm64.apk assets/nexora-armv7.apk assets/NexoraSetup.exe "site/releases/$VDIR/" 2>/dev/null || true
           cat > site/firebase.json <<'EOF'
           {
             "hosting": {
@@ -139,9 +135,9 @@ jobs:
           git config --global user.email "actions@users.noreply.github.com"
           git init -q mrepo && cd mrepo
           mkdir -p "releases/$VDIR"
-          cp -f ../assets/Almohaseb-arm64.apk ../assets/Almohaseb-armv7.apk ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk \
+          cp -f ../assets/Almohaseb-Plus-arm64.apk ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk \
                 ../assets/NexoraSetup.exe ../assets/version.json "releases/$VDIR/" 2>/dev/null || true
-          cp -f ../assets/Almohaseb-arm64.apk ../assets/Almohaseb-armv7.apk ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk \
+          cp -f ../assets/Almohaseb-Plus-arm64.apk ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk \
                 ../assets/NexoraSetup.exe ../assets/version.json . 2>/dev/null || true
           touch .nojekyll
           echo "محتويات الفرع:"; ls -lh "releases/$VDIR/"
@@ -175,7 +171,7 @@ jobs:
           fi
           echo "المزوّد: $PROVIDER → $BASE"
           fail=0
-          for f in Almohaseb-arm64.apk Almohaseb-armv7.apk nexora-arm64.apk nexora-armv7.apk NexoraSetup.exe; do
+          for f in Almohaseb-Plus-arm64.apk nexora-arm64.apk nexora-armv7.apk NexoraSetup.exe; do
             [ -s "assets/$f" ] || continue
             code=""
             for i in $(seq 1 18); do
@@ -240,17 +236,16 @@ jobs:
           dl = man.setdefault('downloads', {})
           sv = man.setdefault('sha256Variants', {})
 
-          apk_arm64 = 'Almohaseb-arm64.apk' if have('Almohaseb-arm64.apk') else 'nexora-arm64.apk'
-          apk_armv7 = 'Almohaseb-armv7.apk' if have('Almohaseb-armv7.apk') else 'nexora-armv7.apk'
+          apk_arm64 = 'Almohaseb-Plus-arm64.apk' if have('Almohaseb-Plus-arm64.apk') else 'nexora-arm64.apk'
           if have(apk_arm64):
               man['download_url'] = gh(apk_arm64)
               dl['android'] = gh(apk_arm64)
               dl.setdefault('androidVariants', {})['arm64'] = gh(apk_arm64)
               sv['arm64'] = sha(apk_arm64)
               man['sha256'] = sv['arm64']
-          if have(apk_armv7):
-              dl.setdefault('androidVariants', {})['armv7'] = gh(apk_armv7)
-              sv['armv7'] = sha(apk_armv7)
+          if have('nexora-armv7.apk'):
+              dl.setdefault('androidVariants', {})['armv7'] = gh('nexora-armv7.apk')
+              sv['armv7'] = sha('nexora-armv7.apk')
           if have('NexoraSetup.exe'):
               dl['windows'] = gh('NexoraSetup.exe')
               sv['windows'] = sha('NexoraSetup.exe')
@@ -259,7 +254,7 @@ jobs:
               'android': f'{base}/{apk_arm64}',
               'androidVariants': {
                   'arm64': f'{base}/{apk_arm64}',
-                  'armv7': f'{base}/{apk_armv7}',
+                  'armv7': f'{base}/nexora-armv7.apk',
               },
               'windows': f'{base}/NexoraSetup.exe',
           }
@@ -267,7 +262,7 @@ jobs:
               'android': gh(apk_arm64),
               'androidVariants': {
                   'arm64': gh(apk_arm64),
-                  'armv7': gh(apk_armv7),
+                  'armv7': gh('nexora-armv7.apk'),
               },
               'windows': gh('NexoraSetup.exe'),
           }
@@ -308,6 +303,7 @@ jobs:
               echo "::warning::فشل نشر بيان المرآة إلى ${2##*/}"
             fi
           }
+          # (2026-10-29) مسار بلاس المستقل — فصل بيان التحديث عن تطبيق v2.
           publish PUT   "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/version_manifest.json"
-          publish PATCH "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/force_update.json"
+          publish PATCH "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/plus/force_update.json"
           echo "✔ نُشر بيان المرآة — روابط $MIRROR_PROVIDER فعّالة الآن."

@@ -4268,7 +4268,7 @@ void _drawCanvasText(
         fontSize: fontSize,
         fontWeight: fontWeight,
         color: color,
-        fontFamily: 'Cairo',
+        fontFamily: 'AppNaskh',
       ),
     ),
     textDirection: TextDirection.rtl,

@@ -350,6 +350,28 @@ class GoogleAuthService {
     );
   }
 
+  Future<void> persistUser(GoogleUser u) => _persist(u);
+
+  Future<void> persistAccount({
+    required String googleId,
+    required String email,
+    String? displayName,
+    String? photoUrl,
+    String? idToken,
+    String? accessToken,
+  }) async {
+    final u = GoogleUser(
+      id: googleId.trim(),
+      email: email.trim().toLowerCase(),
+      displayName: displayName,
+      photoUrl: photoUrl,
+      idToken: idToken,
+      accessToken: accessToken,
+      signedInAt: DateTime.now(),
+    );
+    await _persist(u);
+  }
+
   Future<void> _persist(GoogleUser u) async {
     // التوكن يُعمّى قبل التخزين — لا نص صريح في SQLite.
     final tok = (u.idToken == null || u.idToken!.isEmpty)

@@ -29,9 +29,9 @@ void main() {
   setUpAll(() async {
     await initializeDateFormatting('ar');
     Sfx.setMuted(true);
-    await (FontLoader('Tajawal')
-          ..addFont(rootBundle.load('assets/fonts/Tajawal-Regular.ttf'))
-          ..addFont(rootBundle.load('assets/fonts/Tajawal-Bold.ttf')))
+    await (FontLoader('AppNaskh')
+          ..addFont(rootBundle.load('assets/fonts/NotoNaskhArabic-Regular.ttf'))
+          ..addFont(rootBundle.load('assets/fonts/NotoNaskhArabic-Bold.ttf')))
         .load();
   });
 

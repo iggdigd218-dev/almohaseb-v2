@@ -201,6 +201,8 @@ List<String> releaseNoteLines(String notes, {int maxLines = 3}) =>
 class UpdateService {
   /// الرابط الافتراضي لبيان الإصدار (يُقرأ من العقدة السيادية المحصنة `/system/version_manifest`
   /// في قاعدة Firebase RTDB والتي تقتصر كتابتها على حساب المشرف فقط).
+  /// (2026-10-29) مسار مستقل لتطبيق «المحاسب بلاس»: تطبيق v2 يقرأ `/system/version_manifest`
+  /// — الفصل يمنع أن يعرض كل تطبيق تحديثات الآخر ويُركّبها فوق مستخدميه.
   static const String kDefaultManifestUrl =
       'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/version_manifest.json';
 
@@ -415,10 +417,9 @@ class UpdateService {
             'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe';
       } else {
         final apkName = downloadUrl.endsWith('nexora-armv7.apk') ||
-                downloadUrl.endsWith('Almohaseb-armv7.apk') ||
                 abiKey == 'armv7'
-            ? 'Almohaseb-armv7.apk'
-            : 'Almohaseb-arm64.apk';
+            ? 'nexora-armv7.apk'
+            : 'Almohaseb-Plus-arm64.apk';
         downloadUrl =
             'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/$apkName';
       }
@@ -428,7 +429,7 @@ class UpdateService {
         platform == UpdatePlatform.android &&
         downloadUrl != null) {
       final apkName =
-          abiKey == 'armv7' ? 'Almohaseb-armv7.apk' : 'Almohaseb-arm64.apk';
+          abiKey == 'armv7' ? 'nexora-armv7.apk' : 'Almohaseb-Plus-arm64.apk';
       if (downloadUrl.contains('github.io/')) {
         fallbackDownloadUrl =
             'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/$apkName';

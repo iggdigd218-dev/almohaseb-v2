@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 
-/// خط واجهة التطبيق.
+/// خط واجهة التطبيق المعتمد.
 ///
-/// **Tajawal** مضمّن محلياً في `assets/fonts/Tajawal-*.ttf`
-/// ويعمل دون اتصال بالكامل وبأعلى دقة قراءة.
-String? get uiFontFamily => 'Tajawal';
+/// **AppNaskh** (Noto Naskh Arabic) مضمّن محلياً في `assets/fonts/NotoNaskhArabic-*.ttf`
+/// ويعمل دون اتصال بالكامل وبأعلى دقة قراءة للمنظومة المحاسبية.
+String? get uiFontFamily => 'AppNaskh';
 
 /// (PR-8) عرض حاد بلا غباش: يحسب `cacheWidth` بكثافة بكسل الشاشة
 /// الفيزيائية (Retina/8K) — يمنع البكسلة والتمدد في صور الأصناف والشعارات

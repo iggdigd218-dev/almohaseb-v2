@@ -124,13 +124,13 @@ class AdminUpdateService {
       'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/admin_version_manifest.json';
 
   static const String kFallbackManifestUrl =
-      'https://github.com/iggdigd218-dev/almohaseb-plus/releases/download/admin-latest/admin_version.json';
+      'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/admin_version.json';
 
   static const String kFallbackReleaseUrl =
-      'https://github.com/iggdigd218-dev/almohaseb-plus/releases/tag/admin-latest';
+      'https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/admin-latest';
 
   static const String kDefaultApkUrl =
-      'https://github.com/iggdigd218-dev/almohaseb-plus/releases/download/admin-latest/license-admin.apk';
+      'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk';
 
   final String manifestUrl;
   final AdminSemVer current;
