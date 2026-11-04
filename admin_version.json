@@ -1,0 +1,24 @@
+{
+  "version": "1.8.3+53",
+  "sha256": "5e795fc6dba1281f919895e46df44e379bf8366f16daeba2f05e8a082592e7d5",
+  "sha256Variants": {
+    "arm64": "5e795fc6dba1281f919895e46df44e379bf8366f16daeba2f05e8a082592e7d5"
+  },
+  "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/admin-latest",
+  "downloads": {
+    "android": "https://iggdigd218-dev.github.io/almohaseb-v2/license-admin.apk",
+    "androidVariants": {
+      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/license-admin.apk",
+      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/license-admin-armv7.apk"
+    }
+  },
+  "publishedAt": "2026-11-04T07:27:16Z",
+  "notes": "• حقل جديد «رمز مشرف قاعدة البيانات» في إعدادات الاتصال (⚙️): الصق التوكن الطويل AMf-… مرة واحدة ليحل محل الرمز القديم فورًا.\n• إصلاح آلية تجديد الجلسة: اللصق يستبدل الرمز المحفوظ مهما كان ويعيد المحاولة فورًا.\n• تحديثات أمان وتحسينات عامة.",
+  "downloadsFallbackGithub": {
+    "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk",
+    "androidVariants": {
+      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk",
+      "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin-armv7.apk"
+    }
+  }
+}
