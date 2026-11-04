@@ -50,7 +50,7 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p assets && cd assets
-          for f in version.json Almohaseb-Plus-arm64.apk nexora-arm64.apk nexora-armv7.apk NexoraSetup.exe; do
+          for f in version.json Almohaseb-Plus-arm64.apk Almohaseb-arm64.apk nexora-arm64.apk nexora-armv7.apk Almohaseb-armv7.apk NexoraSetup.exe; do
             gh release download latest --repo "$GITHUB_REPOSITORY" --pattern "$f" --clobber || true
           done
           if [ -s Almohaseb-Plus-arm64.apk ] && [ ! -s nexora-arm64.apk ]; then
@@ -96,7 +96,7 @@ jobs:
           fi
           npm install -g firebase-tools --no-fund --no-audit >/dev/null 2>&1
           mkdir -p "site/releases/$VDIR"
-          cp -f assets/Almohaseb-Plus-arm64.apk assets/nexora-arm64.apk assets/nexora-armv7.apk assets/NexoraSetup.exe "site/releases/$VDIR/" 2>/dev/null || true
+          cp -f assets/Almohaseb-Plus-arm64.apk assets/Almohaseb-arm64.apk assets/nexora-arm64.apk assets/nexora-armv7.apk assets/Almohaseb-armv7.apk assets/NexoraSetup.exe "site/releases/$VDIR/" 2>/dev/null || true
           cat > site/firebase.json <<'EOF'
           {
             "hosting": {
@@ -135,9 +135,9 @@ jobs:
           git config --global user.email "actions@users.noreply.github.com"
           git init -q mrepo && cd mrepo
           mkdir -p "releases/$VDIR"
-          cp -f ../assets/Almohaseb-Plus-arm64.apk ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk \
+          cp -f ../assets/Almohaseb-Plus-arm64.apk ../assets/Almohaseb-arm64.apk ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk ../assets/Almohaseb-armv7.apk \
                 ../assets/NexoraSetup.exe ../assets/version.json "releases/$VDIR/" 2>/dev/null || true
-          cp -f ../assets/Almohaseb-Plus-arm64.apk ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk \
+          cp -f ../assets/Almohaseb-Plus-arm64.apk ../assets/Almohaseb-arm64.apk ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk ../assets/Almohaseb-armv7.apk \
                 ../assets/NexoraSetup.exe ../assets/version.json . 2>/dev/null || true
           touch .nojekyll
           echo "محتويات الفرع:"; ls -lh "releases/$VDIR/"
@@ -171,7 +171,7 @@ jobs:
           fi
           echo "المزوّد: $PROVIDER → $BASE"
           fail=0
-          for f in Almohaseb-Plus-arm64.apk nexora-arm64.apk nexora-armv7.apk NexoraSetup.exe; do
+          for f in Almohaseb-Plus-arm64.apk Almohaseb-arm64.apk nexora-arm64.apk nexora-armv7.apk Almohaseb-armv7.apk NexoraSetup.exe; do
             [ -s "assets/$f" ] || continue
             code=""
             for i in $(seq 1 18); do
