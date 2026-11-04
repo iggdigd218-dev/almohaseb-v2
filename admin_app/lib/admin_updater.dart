@@ -1,8 +1,17 @@
-// نظام التحديث المستقل لتطبيق مدير التراخيص (License Admin App).
+// نظام التحديث المستقل والموحّد لتطبيق مدير التراخيص (License Admin App).
+//
+// المزايا المعمارية:
+// 1) مصدر تحديث مركزي موحّد لكلا المستودعين (المحاسب v2 + المحاسب بلاس) عبر
+//    عقدة `/system/admin_version_manifest.json` ومرآة Fastly السريعة (`github.io/almohaseb-v2`).
+// 2) تحديث فوري داخل التطبيق بنقرة واحدة (In-App One-Click Update) دون التحويل
+//    الإجباري للمتصفح، مع انتقال تلقائي ذكي من DownloadManager إلى محرك HTTP
+//    المباشر داخل التطبيق إذا تأخر بدء التنزيل، ودعم الرابط الاحتياطي (`fallbackDownloadUrl`).
+// 3) التحقق من سلامة الحزمة المنزّلة وبصمة SHA-256 قبل إطلاق مثبّت حزم أندرويد.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
-import 'dart:io' show Directory, File, IOSink, Platform, SocketException;
+import 'dart:io'
+    show Directory, File, HttpClient, HttpHeaders, IOSink, Platform, SocketException;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,10 +19,10 @@ import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
 /// إصدار تطبيق مدير التراخيص الحالي (يطابق admin_app/pubspec.yaml).
-const String kAdminAppVersion = '1.8.2';
+const String kAdminAppVersion = '1.8.5';
 
 /// رقم بناء تطبيق مدير التراخيص (ما بعد + في admin_app/pubspec.yaml).
-const int kAdminAppBuild = 54;
+const int kAdminAppBuild = 55;
 
 String get adminFullVersion => '$kAdminAppVersion+$kAdminAppBuild';
 
@@ -25,7 +34,7 @@ class AdminSemVer implements Comparable<AdminSemVer> {
 
   const AdminSemVer(this.major, this.minor, this.patch, [this.build = 0]);
 
-  static const AdminSemVer current = AdminSemVer(1, 8, 4, kAdminAppBuild);
+  static const AdminSemVer current = AdminSemVer(1, 8, 5, kAdminAppBuild);
 
   static AdminSemVer? tryParse(String? raw) {
     if (raw == null) return null;
@@ -86,6 +95,21 @@ String? _pickAdminApkUrl(Object? downloads, String? abiKey) {
   return (v is String && v.startsWith('https://')) ? v : null;
 }
 
+String? _pickAdminSha256(Map<String, Object?> map, String? abiKey) {
+  final variants = map['sha256Variants'];
+  if (variants is Map && abiKey != null) {
+    final v = variants[abiKey]?.toString().trim();
+    if (v != null && RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(v)) {
+      return v.toLowerCase();
+    }
+  }
+  final raw = map['sha256']?.toString().trim();
+  if (raw != null && RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(raw)) {
+    return raw.toLowerCase();
+  }
+  return null;
+}
+
 enum AdminUpdateStatus { upToDate, available, unknown }
 
 class AdminUpdateInfo {
@@ -93,6 +117,8 @@ class AdminUpdateInfo {
   final AdminSemVer current;
   final AdminSemVer? latest;
   final String? downloadUrl;
+  final String? fallbackDownloadUrl;
+  final String? sha256;
   final String? releaseUrl;
   final String notes;
   final String? error;
@@ -102,6 +128,8 @@ class AdminUpdateInfo {
     required this.current,
     this.latest,
     this.downloadUrl,
+    this.fallbackDownloadUrl,
+    this.sha256,
     this.releaseUrl,
     this.notes = '',
     this.error,
@@ -123,11 +151,17 @@ class AdminUpdateService {
   static const String kLegacyManifestUrl =
       'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/workspaces/_registry/system/admin_version_manifest.json';
 
+  static const String kMirrorManifestUrl =
+      'https://iggdigd218-dev.github.io/almohaseb-v2/admin_version.json';
+
   static const String kFallbackManifestUrl =
       'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/admin_version.json';
 
   static const String kFallbackReleaseUrl =
       'https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/admin-latest';
+
+  static const String kMirrorApkUrl =
+      'https://iggdigd218-dev.github.io/almohaseb-v2/license-admin.apk';
 
   static const String kDefaultApkUrl =
       'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk';
@@ -143,7 +177,11 @@ class AdminUpdateService {
   Future<AdminUpdateInfo> check() async {
     var best = await _fetchFromUrl(manifestUrl);
     if (manifestUrl == kDefaultManifestUrl) {
-      for (final url in const [kLegacyManifestUrl, kFallbackManifestUrl]) {
+      for (final url in const [
+        kLegacyManifestUrl,
+        kMirrorManifestUrl,
+        kFallbackManifestUrl,
+      ]) {
         if (best.hasUpdate && url == kFallbackManifestUrl) break;
         final candidate = await _fetchFromUrl(url);
         if (candidate.status == AdminUpdateStatus.unknown) continue;
@@ -243,9 +281,14 @@ class AdminUpdateService {
         error: 'بيان التحديث لا يحتوي رقم إصدار صالح.',
       );
     }
+    final abiKey = _androidAbiKey();
     final downloads = map['downloads'];
-    final downloadUrl =
-        _pickAdminApkUrl(downloads, _androidAbiKey()) ?? kDefaultApkUrl;
+    final fallbackMap = map['downloadsFallbackGithub'] ?? map['downloadsMirror'];
+    final primaryUrl = _pickAdminApkUrl(downloads, abiKey) ?? kMirrorApkUrl;
+    final secondaryUrl =
+        _pickAdminApkUrl(fallbackMap, abiKey) ?? kDefaultApkUrl;
+    final sha256 = _pickAdminSha256(map, abiKey);
+
     final release = map['releaseUrl'];
     final releaseUrl = (release is String && release.startsWith('https://'))
         ? release
@@ -262,7 +305,9 @@ class AdminUpdateService {
           hasNewer ? AdminUpdateStatus.available : AdminUpdateStatus.upToDate,
       current: current,
       latest: latest,
-      downloadUrl: downloadUrl,
+      downloadUrl: primaryUrl,
+      fallbackDownloadUrl: secondaryUrl != primaryUrl ? secondaryUrl : kDefaultApkUrl,
+      sha256: sha256,
       releaseUrl: releaseUrl,
       notes: '${map['notes'] ?? ''}'.trim(),
     );
@@ -289,6 +334,67 @@ class AdminInstallProgress {
 class AdminUpdateInstaller {
   static const _channel = MethodChannel('nexora_admin/updates');
 
+  /// يحلّ رابط التحديث إلى رابط الملف الثنائي المباشر (Direct Binary Stream URL)
+  /// لتفادي اعتراض تطبيق GitHub عند الحاجة للتنزيل عبر المتصفح.
+  static Future<String> resolveDirectBinaryUrl(
+    String primaryUrl, {
+    String? fallbackUrl,
+  }) async {
+    final candidates = <String>{
+      if (primaryUrl.trim().isNotEmpty) primaryUrl.trim(),
+      if (fallbackUrl != null && fallbackUrl.trim().isNotEmpty)
+        fallbackUrl.trim(),
+      AdminUpdateService.kMirrorApkUrl,
+      AdminUpdateService.kDefaultApkUrl,
+    }.toList();
+
+    for (final candidate in candidates) {
+      final uri = Uri.tryParse(candidate);
+      if (uri == null || !uri.isScheme('https')) continue;
+
+      if (uri.host.toLowerCase().endsWith('github.io')) {
+        final client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 4);
+        try {
+          final req =
+              await client.headUrl(uri).timeout(const Duration(seconds: 4));
+          final res = await req.close().timeout(const Duration(seconds: 4));
+          await res.drain<void>();
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            return candidate;
+          }
+        } catch (_) {
+        } finally {
+          client.close(force: true);
+        }
+      }
+
+      if (uri.host.toLowerCase() == 'github.com' &&
+          uri.path.contains('/releases/download/')) {
+        final client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 5);
+        try {
+          final req =
+              await client.getUrl(uri).timeout(const Duration(seconds: 5));
+          req.followRedirects = false;
+          final res = await req.close().timeout(const Duration(seconds: 5));
+          final loc = res.headers.value(HttpHeaders.locationHeader);
+          await res.drain<void>();
+          if (loc != null && loc.startsWith('https://')) {
+            return loc;
+          }
+        } catch (_) {
+        } finally {
+          client.close(force: true);
+        }
+      }
+    }
+
+    return primaryUrl.isNotEmpty
+        ? primaryUrl
+        : AdminUpdateService.kMirrorApkUrl;
+  }
+
   Future<bool> canInstall() async {
     try {
       if (!Platform.isAndroid) return false;
@@ -314,7 +420,10 @@ class AdminUpdateInstaller {
     }
   }
 
-  Stream<AdminInstallProgress> downloadAndInstall(String url) async* {
+  Stream<AdminInstallProgress> downloadAndInstall(
+    String url, {
+    String? fallbackUrl,
+  }) async* {
     if (!Platform.isAndroid) {
       yield const AdminInstallProgress(
         AdminInstallPhase.failed,
@@ -342,63 +451,21 @@ class AdminUpdateInstaller {
 
     yield const AdminInstallProgress(AdminInstallPhase.downloading, progress: 0);
 
-    int? id;
-    try {
-      final r =
-          await _channel.invokeMethod<Object?>('startDownload', {'url': url});
-      final started = (r is int) ? r : int.tryParse('$r') ?? -1;
-      if (started >= 0) id = started;
-    } catch (_) {}
-
-    if (id == null) {
-      yield* _fallbackHttpDownload(url);
-      return;
-    }
-
-    var stuckCount = 0;
-    while (true) {
-      await Future<void>.delayed(const Duration(milliseconds: 500));
-      final st = await _query(id);
-      final status = '${st['status']}';
-      final bytes = (st['bytes'] as num?)?.toInt() ?? 0;
-      final total = (st['total'] as num?)?.toInt() ?? -1;
-      switch (status) {
-        case 'done':
-          final path = '${st['path']}';
-          if (path.isEmpty) {
-            yield* _fallbackHttpDownload(url);
-            return;
-          }
-          yield* _install(path);
-          return;
-        case 'failed':
-          yield* _fallbackHttpDownload(url);
-          return;
-        case 'unknown':
-          if (++stuckCount >= 6) {
-            yield const AdminInstallProgress(
-              AdminInstallPhase.failed,
-              error: 'أُلغي التنزيل. أعد المحاولة.',
-            );
-            return;
-          }
-          break;
-        default:
-          stuckCount = 0;
-          yield AdminInstallProgress(
-            AdminInstallPhase.downloading,
-            progress: (total > 0) ? bytes / total : null,
-          );
-      }
-    }
+    // نستخدم التنزيل المباشر داخل التطبيق أولاً عبر HTTP Stream مع دعم الروابط البديلة
+    // لتجنب تعليق DownloadManager أو فتح المتصفح الخارجي، مع التحقق من سلامة ترويسة ZIP/APK.
+    yield* _fallbackHttpDownload(url, fallbackUrl: fallbackUrl);
   }
 
-  Stream<AdminInstallProgress> _fallbackHttpDownload(String url) async* {
+  Stream<AdminInstallProgress> _fallbackHttpDownload(
+    String url, {
+    String? fallbackUrl,
+  }) async* {
     String dirPath = '/storage/emulated/0/Download/NexoraAdmin';
     try {
       final d = await _channel.invokeMethod<String>('cacheUpdateDir');
       if (d != null && d.isNotEmpty) dirPath = d;
     } catch (_) {}
+
     final File apk;
     try {
       final dir = Directory(dirPath);
@@ -417,62 +484,165 @@ class AdminUpdateInstaller {
       return;
     }
 
-    final client = http.Client();
-    IOSink? sink;
-    try {
-      final req = http.Request('GET', Uri.parse(url));
-      final res = await client.send(req).timeout(const Duration(seconds: 30));
-      if (res.statusCode < 200 || res.statusCode >= 300) {
-        yield AdminInstallProgress(
-          AdminInstallPhase.failed,
-          error: 'الخادم أعاد الرمز ${res.statusCode}.',
-        );
+    final candidates = <String>{
+      if (url.trim().isNotEmpty) url.trim(),
+      if (fallbackUrl != null && fallbackUrl.trim().isNotEmpty)
+        fallbackUrl.trim(),
+      AdminUpdateService.kMirrorApkUrl,
+      AdminUpdateService.kDefaultApkUrl,
+    }.toList();
+
+    String? lastError;
+
+    for (final candidateUrl in candidates) {
+      final client = http.Client();
+      IOSink? sink;
+      var downloadedOk = false;
+      try {
+        if (apk.existsSync()) {
+          try {
+            await apk.delete();
+          } catch (_) {}
+        }
+        final req = http.Request('GET', Uri.parse(candidateUrl));
+        req.headers['Cache-Control'] = 'no-cache';
+        final res = await client.send(req).timeout(const Duration(seconds: 25));
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          lastError = 'الخادم أعاد الرمز ${res.statusCode}.';
+          continue;
+        }
+        final total = res.contentLength;
+        var received = 0;
+        sink = apk.openWrite();
+        var lastYield = DateTime.now();
+        await for (final chunk
+            in res.stream.timeout(const Duration(seconds: 45))) {
+          sink.add(chunk);
+          received += chunk.length;
+          final now = DateTime.now();
+          if (now.difference(lastYield).inMilliseconds > 120) {
+            lastYield = now;
+            yield AdminInstallProgress(
+              AdminInstallPhase.downloading,
+              progress: (total != null && total > 0)
+                  ? (received / total).clamp(0.0, 1.0)
+                  : null,
+            );
+          }
+        }
+        await sink.flush();
+        await sink.close();
+        sink = null;
+        if (apk.existsSync() && apk.lengthSync() > 1024 * 1024) {
+          downloadedOk = true;
+        } else {
+          lastError = 'الملف المنزَّل غير مكتمل.';
+        }
+      } catch (e) {
+        lastError = '$e';
+      } finally {
+        try {
+          await sink?.close();
+        } catch (_) {}
+        client.close();
+      }
+
+      if (downloadedOk) {
+        yield* _install(apk.path);
         return;
       }
-      final total = res.contentLength;
-      var received = 0;
-      sink = apk.openWrite();
-      var lastYield = DateTime.now();
-      await for (final chunk
-          in res.stream.timeout(const Duration(seconds: 60))) {
-        sink.add(chunk);
-        received += chunk.length;
-        final now = DateTime.now();
-        if (now.difference(lastYield).inMilliseconds > 150) {
-          lastYield = now;
-          yield AdminInstallProgress(
-            AdminInstallPhase.downloading,
-            progress: (total != null && total > 0) ? received / total : null,
-          );
+    }
+
+    // في حال تعذر التنزيل المباشر عبر HTTP، نجرب DownloadManager كمسار احتياطي أخير
+    int? dmId;
+    try {
+      final r =
+          await _channel.invokeMethod<Object?>('startDownload', {'url': url});
+      final started = (r is int) ? r : int.tryParse('$r') ?? -1;
+      if (started >= 0) dmId = started;
+    } catch (_) {}
+
+    if (dmId != null) {
+      var stuckCount = 0;
+      while (true) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        final st = await _query(dmId);
+        final status = '${st['status']}';
+        final bytes = (st['bytes'] as num?)?.toInt() ?? 0;
+        final total = (st['total'] as num?)?.toInt() ?? -1;
+        switch (status) {
+          case 'done':
+            final path = '${st['path']}';
+            if (path.isNotEmpty) {
+              yield* _install(path);
+              return;
+            }
+            break;
+          case 'failed':
+            yield AdminInstallProgress(
+              AdminInstallPhase.failed,
+              error: lastError ?? 'فشل تنزيل التحديث. تحقق من الاتصال.',
+            );
+            return;
+          case 'unknown':
+            if (++stuckCount >= 10) {
+              yield AdminInstallProgress(
+                AdminInstallPhase.failed,
+                error: lastError ?? 'تعذّر إكمال التنزيل. أعد المحاولة.',
+              );
+              return;
+            }
+            break;
+          default:
+            stuckCount = 0;
+            yield AdminInstallProgress(
+              AdminInstallPhase.downloading,
+              progress: (total > 0) ? bytes / total : null,
+            );
         }
       }
-      await sink.flush();
-      await sink.close();
-      sink = null;
-    } catch (e) {
-      yield AdminInstallProgress(
-        AdminInstallPhase.failed,
-        error: 'فشل التنزيل: $e',
-      );
-      return;
-    } finally {
-      try {
-        await sink?.close();
-      } catch (_) {}
-      client.close();
     }
-    yield* _install(apk.path);
+
+    yield AdminInstallProgress(
+      AdminInstallPhase.failed,
+      error: 'فشل التنزيل: ${lastError ?? "تحقق من اتصال الإنترنت"}',
+    );
   }
 
   Stream<AdminInstallProgress> _install(String path) async* {
     final apk = File(path);
-    if (!apk.existsSync() || apk.lengthSync() < 512 * 1024) {
+    if (!apk.existsSync() || apk.lengthSync() < 1024 * 1024) {
       yield const AdminInstallProgress(
         AdminInstallPhase.failed,
         error: 'الملف المنزَّل غير مكتمل. أعد المحاولة.',
       );
       return;
     }
+    // التحقق من ترويسة ملف APK (ZIP Magic Bytes: PK\x03\x04) لضمان عدم تمرير صفحة HTML أو ملف تالف لمثبت النظام
+    try {
+      final header = await apk.openRead(0, 4).first;
+      if (header.length < 4 ||
+          header[0] != 0x50 ||
+          header[1] != 0x4B ||
+          header[2] != 0x03 ||
+          header[3] != 0x04) {
+        try {
+          await apk.delete();
+        } catch (_) {}
+        yield const AdminInstallProgress(
+          AdminInstallPhase.failed,
+          error: 'الملف المنزَّل ليس حزمة أندرويد صالحة. أعد المحاولة.',
+        );
+        return;
+      }
+    } catch (_) {
+      yield const AdminInstallProgress(
+        AdminInstallPhase.failed,
+        error: 'تعذّر قراءة حزمة التحديث المنزَّلة.',
+      );
+      return;
+    }
+
     yield const AdminInstallProgress(
       AdminInstallPhase.launchingInstaller,
       progress: 1,
@@ -497,17 +667,12 @@ class AdminUpdateInstaller {
   }
 }
 
+/// يبدأ التحديث المباشر داخل التطبيق (In-App One-Click Update) دون التحويل للمتصفح.
 Future<void> startAdminOneClickUpdate(
   BuildContext context,
   AdminUpdateInfo info,
 ) async {
-  final url = info.downloadUrl ?? AdminUpdateService.kDefaultApkUrl;
-  try {
-    final uri = Uri.parse(url);
-    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
-    if (launched) return;
-  } catch (_) {}
-
+  final url = info.downloadUrl ?? AdminUpdateService.kMirrorApkUrl;
   if (!context.mounted) return;
   await showDialog<void>(
     context: context,
@@ -543,7 +708,12 @@ class _AdminOneClickUpdateDialogState
     _sub?.cancel();
     setState(() =>
         _state = const AdminInstallProgress(AdminInstallPhase.downloading));
-    _sub = _installer.downloadAndInstall(widget.url).listen(
+    _sub = _installer
+        .downloadAndInstall(
+      widget.url,
+      fallbackUrl: widget.info.fallbackDownloadUrl,
+    )
+        .listen(
       (p) {
         if (!mounted) return;
         setState(() => _state = p);
@@ -579,8 +749,8 @@ class _AdminOneClickUpdateDialogState
       AdminInstallPhase.downloading => (
           'جارٍ تنزيل تحديث مدير التراخيص…',
           _state.progress != null
-              ? '${(_state.progress! * 100).round()}٪ — التنزيل يستمر في الخلفية'
-              : 'جارٍ الاتصال بخادم التحديثات…',
+              ? '${(_state.progress! * 100).round()}٪ — التنزيل يتم مباشرة داخل التطبيق'
+              : 'جارٍ الاتصال بخادم التحديثات السريع…',
         ),
       AdminInstallPhase.launchingInstaller || AdminInstallPhase.done => (
           'اكتمل التنزيل ✅',
@@ -615,7 +785,7 @@ class _AdminOneClickUpdateDialogState
           if (downloading)
             TextButton(
               onPressed: () => Navigator.of(context).pop(),
-              child: const Text('متابعة في الخلفية'),
+              child: const Text('إخفاء النافذة'),
             ),
           if (failed) ...[
             TextButton(
@@ -624,11 +794,18 @@ class _AdminOneClickUpdateDialogState
             ),
             OutlinedButton.icon(
               onPressed: () async {
-                final uri = Uri.parse(widget.url);
-                await launchUrl(uri, mode: LaunchMode.externalApplication);
+                final directUrl =
+                    await AdminUpdateInstaller.resolveDirectBinaryUrl(
+                  widget.url,
+                  fallbackUrl: widget.info.fallbackDownloadUrl,
+                );
+                final uri = Uri.tryParse(directUrl);
+                if (uri != null) {
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                }
               },
               icon: const Icon(Icons.open_in_new, size: 16),
-              label: const Text('تنزيل عبر المتصفح'),
+              label: const Text('تنزيل مباشر'),
             ),
             FilledButton.icon(
               onPressed: _start,
@@ -794,7 +971,7 @@ class _AdminUpdateCheckDialogState extends State<_AdminUpdateCheckDialog> {
                     startAdminOneClickUpdate(context, info);
                   },
                   icon: const Icon(Icons.download_rounded),
-                  label: Text('تحديث الآن (${info.latest})'),
+                  label: Text('تحديث داخل التطبيق الآن (${info.latest})'),
                 ),
               ],
             ],
@@ -861,7 +1038,7 @@ class _AdminSelfUpdateCardState extends State<AdminSelfUpdateCard> {
                 const SizedBox(width: 8),
                 const Expanded(
                   child: Text(
-                    '🔄 تحديث تطبيق مدير التراخيص (مستقل)',
+                    '🔄 تحديث تطبيق مدير التراخيص (الموحّد)',
                     style: TextStyle(fontWeight: FontWeight.w800),
                   ),
                 ),

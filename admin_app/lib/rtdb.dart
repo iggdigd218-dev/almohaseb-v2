@@ -2710,7 +2710,7 @@ class Rtdb {
     return null;
   }
 
-  /// 2. فرض التحديث الإجباري (Force Update Policy)
+  /// 2. فرض التحديث الإجباري (Force Update Policy) — يطبَّق بشكل موحّد على (المحاسب v2 + المحاسب بلاس)
   Future<void> setForceUpdateMinVersion(int minBuild, String minVersion) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     final payload = {
@@ -2723,6 +2723,11 @@ class Rtdb {
     };
     await _patch('system/force_update', payload);
     await _patch('system/version_policy', payload);
+    if (clientOverride == null) {
+      try {
+        await _patch('system/plus/force_update', payload);
+      } catch (_) {}
+    }
   }
 
   Future<Map<String, dynamic>?> getForceUpdatePolicy() async {

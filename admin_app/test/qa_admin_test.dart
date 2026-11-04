@@ -165,6 +165,23 @@ void main() {
     expect(rtdb.isAdminTokenMissing, isTrue);
     expect(rtdb.lastAuthError, contains('ADMIN_REFRESH_TOKEN'));
   });
+
+  test('ADMIN-09 التحديث الداخلي المباشر وتوحيد قناة تحديث الإدارة (almohaseb-v2)', () {
+    final updaterSrc = File('lib/admin_updater.dart').existsSync()
+        ? File('lib/admin_updater.dart').readAsStringSync()
+        : File('admin_app/lib/admin_updater.dart').readAsStringSync();
+    // عدم وجود تحويل مبكر للمتصفح قبل فتح نافذة التحديث الداخلي
+    final fnIdx = updaterSrc.indexOf('Future<void> startAdminOneClickUpdate');
+    final dlgIdx = updaterSrc.indexOf('showDialog<void>', fnIdx);
+    expect(fnIdx, greaterThanOrEqualTo(0));
+    expect(dlgIdx, greaterThan(fnIdx));
+    final beforeDialog = updaterSrc.substring(fnIdx, dlgIdx);
+    expect(beforeDialog.contains('launchUrl'), isFalse);
+    // التحقق من فحص ترويسة ZIP/APK Magic Bytes (0x50, 0x4B, 0x03, 0x04)
+    expect(updaterSrc.contains('0x50') && updaterSrc.contains('0x4B'), isTrue);
+    // قناة التحديث موحّدة على almohaseb-v2
+    expect(updaterSrc.contains('iggdigd218-dev/almohaseb-v2'), isTrue);
+  });
 }
 
 // ملاحظة: تصنيف العدادات (paid/trial/expired) يُختبر منطقياً هنا
