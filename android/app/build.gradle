@@ -35,12 +35,9 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         multiDexEnabled = true
-        // (PR-7) حصر المعمارية على الحديثة 64-بت فقط (قرار المالك
-        // 2026-10-29): مع التوقيع الصارم V1+V2+V3 عبر apksigner ومحاذاة
-        // zipalign في مسار CI — تثبيت سلس على أندرويد 12/13/14/15+.
-        ndk {
-            abiFilters "arm64-v8a"
-        }
+        // (2026-11-04) إلغاء حصر abiFilters: بناء --split-per-abi (arm+arm64)
+        // هو المسؤول عن المعماريات، والقيد هنا كان يتعارض معه ويعطّل آلية
+        // abiCode*1000+build التي تجعل versionCode يتجاوز المثبت لدى المستخدمين.
     }
 
     // ضغط المكتبات الأصلية داخل APK لتقليل الحجم.
