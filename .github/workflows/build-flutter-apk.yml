@@ -335,14 +335,18 @@ jobs:
           gh release download latest --repo "${{ github.repository }}" --pattern "NexoraSetup.exe" --clobber || true
           git config --global user.name  "nexora-mirror-bot"
           git config --global user.email "actions@users.noreply.github.com"
-          git init -q mrepo && cd mrepo
+          # (2026-11-04) دفع محافظ: استنساخ فرع releases القائم بدل init الماحية —
+          # حتى تبقى أصول الأدمن والمجلدات التاريخية على المرآة بعد كل بناء.
+          git clone -q --depth 1 -b releases "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" mrepo && cd mrepo
           mkdir -p "releases/$VDIR"
           cp -f ../Almohaseb-Plus-arm64.apk ../Almohaseb-arm64.apk ../nexora-arm64.apk ../nexora-armv7.apk ../Almohaseb-armv7.apk ../NexoraSetup.exe ../version.json "releases/$VDIR/" 2>/dev/null || true
           cp -f ../Almohaseb-Plus-arm64.apk ../Almohaseb-arm64.apk ../nexora-arm64.apk ../nexora-armv7.apk ../Almohaseb-armv7.apk ../NexoraSetup.exe ../version.json . 2>/dev/null || true
           touch .nojekyll
           git add -A
+          if [ -z "$(git status --porcelain)" ]; then echo "لا تغييرات على المرآة"; cd ..; rm -rf mrepo; exit 0; fi
           git commit -qm "mirror: $VER"
-          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:refs/heads/releases || true
+          git pull -q --rebase "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" releases || true
+          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:refs/heads/releases || true
           cd ..
           rm -rf mrepo
 

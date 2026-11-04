@@ -100,6 +100,10 @@ jobs:
           NAME="${VER%%+*}"; BUILD="${VER##*+}"
           SHA_ARM64=$(sha256sum ../license-admin.apk | awk '{print $1}')
           NOTES=$(python3 -c "import json,os; p='release_notes.txt'; lines=[l.strip() for l in open(p,encoding='utf-8').read().splitlines() if l.strip()] if os.path.exists(p) else ['تحديث تطبيق تراخيص المحاسب']; lines=lines[:3]; t='\\n'.join(lines); print(json.dumps(t,ensure_ascii=False)[1:-1])")
+          # (2026-11-04) المرآة أولًا: github.com محجوب/متقطع على شبكة اليمن — رابط
+          # Fastly (GitHub Pages) هو الأساسي للتنزيل وgithub احتياطي للبقية.
+          PG_BASE="https://${{ github.repository_owner }}.github.io/almohaseb-v2"
+          GH_REL_BASE="https://github.com/${{ github.repository }}/releases/download/admin-latest"
           cat > ../admin_version.json <<EOF
           {
             "version": "$NAME+$BUILD",
@@ -109,9 +113,15 @@ jobs:
             },
             "releaseUrl": "https://github.com/${{ github.repository }}/releases/tag/admin-latest",
             "downloads": {
-              "android": "https://github.com/${{ github.repository }}/releases/download/admin-latest/license-admin.apk",
+              "android": "${PG_BASE}/license-admin.apk",
               "androidVariants": {
-                "arm64": "https://github.com/${{ github.repository }}/releases/download/admin-latest/license-admin.apk"
+                "arm64": "${PG_BASE}/license-admin.apk"
+              }
+            },
+            "downloadsFallbackGithub": {
+              "android": "${GH_REL_BASE}/license-admin.apk",
+              "androidVariants": {
+                "arm64": "${GH_REL_BASE}/license-admin.apk"
               }
             },
             "publishedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
@@ -181,3 +191,28 @@ jobs:
           make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # (2026-11-04) رفع حزمة الأدمن وبيانه إلى فرع releases (مرآة Fastly)
+      # بطريقة محافظة (استنساخ + دفع عادي) حتى لا تُمسح ملفات المرآة الأخرى.
+      - name: "Push admin APK + manifest to releases branch (Fastly mirror)"
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VER=$(python3 -c "import json;print(json.load(open('../admin_version.json',encoding='utf-8'))['version'])")
+          cd ..
+          git clone -q --depth 1 -b releases "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" mrepo
+          cd mrepo
+          cp -f ../license-admin.apk ../admin_version.json .
+          gh release download admin-latest --repo "${GITHUB_REPOSITORY}" --pattern "license-admin-armv7.apk" --clobber 2>/dev/null || true
+          touch .nojekyll
+          git config user.name "nexora-mirror-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          if [ -z "$(git status --porcelain)" ]; then echo "لا تغييرات على المرآة"; exit 0; fi
+          git commit -qm "mirror: admin ${VER}"
+          git pull -q --rebase "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" releases || true
+          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/releases
+          echo "✔ رُفعت حزمة الأدمن وبيانه إلى مرآة Fastly"
