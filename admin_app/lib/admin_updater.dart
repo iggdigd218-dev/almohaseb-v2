@@ -13,7 +13,7 @@ import 'package:url_launcher/url_launcher.dart';
 const String kAdminAppVersion = '1.8.2';
 
 /// رقم بناء تطبيق مدير التراخيص (ما بعد + في admin_app/pubspec.yaml).
-const int kAdminAppBuild = 52;
+const int kAdminAppBuild = 53;
 
 String get adminFullVersion => '$kAdminAppVersion+$kAdminAppBuild';
 
@@ -25,7 +25,7 @@ class AdminSemVer implements Comparable<AdminSemVer> {
 
   const AdminSemVer(this.major, this.minor, this.patch, [this.build = 0]);
 
-  static const AdminSemVer current = AdminSemVer(1, 8, 2, kAdminAppBuild);
+  static const AdminSemVer current = AdminSemVer(1, 8, 3, kAdminAppBuild);
 
   static AdminSemVer? tryParse(String? raw) {
     if (raw == null) return null;
