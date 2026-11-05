@@ -363,11 +363,18 @@ void main() {
       expect(appSrc, isNot(contains("SegmentedButton<ThemeMode>")));
     });
 
-    test('SET-02 أيقونة التبديل السريع لليلي/النهاري ثابتة في شريط التطبيق العلوي', () {
+    test('SET-02 نقل إعدادات الوضع الليلي والنهاري إلى الإعدادات وإزالتها من شريط التطبيق العلوي', () {
       final shellSrc = File('lib/ui/home_shell.dart').readAsStringSync();
-      expect(shellSrc, contains('themeModeProvider.notifier'));
-      expect(shellSrc, contains('Icons.light_mode_rounded'));
-      expect(shellSrc, contains('Icons.dark_mode_rounded'));
+      expect(shellSrc, isNot(contains("value: 'theme'")));
+
+      final settingsSrc = File('lib/ui/settings_screen.dart').readAsStringSync();
+      expect(settingsSrc, contains('ThemeModeSelectorCard'));
+
+      final appSrc = File('lib/ui/appearance_screen.dart').readAsStringSync();
+      expect(appSrc, contains('saveAppThemeMode'));
+      expect(appSrc, contains('Icons.light_mode_rounded'));
+      expect(appSrc, contains('Icons.dark_mode_rounded'));
+      expect(appSrc, contains('Icons.brightness_auto_rounded'));
     });
 
     test('SET-03 طي بيانات المؤسسة وحذف خيار تعديل الشعار من الإعدادات', () {

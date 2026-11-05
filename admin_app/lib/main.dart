@@ -5694,6 +5694,10 @@ class SystemControlScreen extends StatefulWidget {
 class _SystemControlScreenState extends State<SystemControlScreen> {
   final _bcastTitle = TextEditingController();
   final _bcastBody = TextEditingController();
+  final _schedTitleCtrl = TextEditingController();
+  final _schedBodyCtrl = TextEditingController();
+  TimeOfDay _schedTime = const TimeOfDay(hour: 8, minute: 0);
+  List<Map<String, dynamic>> _scheduledRules = [];
   final _maintMsg = TextEditingController();
   final _minBuildCtrl = TextEditingController(text: '162');
   final _minVerCtrl = TextEditingController(text: '3.81.0');
@@ -5723,6 +5727,8 @@ class _SystemControlScreenState extends State<SystemControlScreen> {
     adminRefreshTick.removeListener(_onTick);
     _bcastTitle.dispose();
     _bcastBody.dispose();
+    _schedTitleCtrl.dispose();
+    _schedBodyCtrl.dispose();
     _maintMsg.dispose();
     _minBuildCtrl.dispose();
     _minVerCtrl.dispose();
@@ -5769,6 +5775,23 @@ class _SystemControlScreenState extends State<SystemControlScreen> {
       final ret = await Rtdb.instance.getGroupChatRetentionDays();
       if (mounted) setState(() => _retentionDays = ret);
     } catch (_) {}
+
+    await _reloadScheduledRules();
+  }
+
+  Future<void> _reloadScheduledRules() async {
+    try {
+      final rules = await Rtdb.instance.getScheduledNotifications();
+      if (mounted) setState(() => _scheduledRules = rules);
+    } catch (_) {}
+  }
+
+  String _formatTimeAr(int hour, int minute) {
+    final period = hour >= 12 ? 'م' : 'ص';
+    final h12 = hour % 12 == 0 ? 12 : hour % 12;
+    final hStr = h12.toString().padLeft(2, '0');
+    final mStr = minute.toString().padLeft(2, '0');
+    return '$hStr:$mStr $period';
   }
 
   @override
@@ -6020,6 +6043,270 @@ class _SystemControlScreenState extends State<SystemControlScreen> {
                   icon: const Icon(Icons.send_rounded, size: 16),
                   label: const Text('بث التنبيه لجميع الأجهزة'),
                 ),
+              ],
+            ),
+          ),
+        ),
+
+        const SizedBox(height: 10),
+
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Row(
+                  children: [
+                    Icon(Icons.schedule_send_rounded, color: Color(0xFF0D9488)),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '⏰ الإشعارات التلقائية المجدولة حسب الوقت ونص الإشعار',
+                        style: TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'تُرسل وتنبثق تلقائياً لدى جميع المستخدمين في الوقت المحدد يومياً بنافذة منبثقة أنيقة.',
+                  style: TextStyle(fontSize: 11.5, color: Colors.black54),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    ActionChip(
+                      visualDensity: VisualDensity.compact,
+                      avatar: const Icon(Icons.wb_sunny_outlined,
+                          size: 15, color: Color(0xFFD97706)),
+                      label: const Text('قالب صباحي (08:00 ص)',
+                          style: TextStyle(fontSize: 11)),
+                      onPressed: () {
+                        setState(() {
+                          _schedTime = const TimeOfDay(hour: 8, minute: 0);
+                          if (_schedTitleCtrl.text.trim().isEmpty) {
+                            _schedTitleCtrl.text = 'صباح الخير';
+                          }
+                          if (_schedBodyCtrl.text.trim().isEmpty) {
+                            _schedBodyCtrl.text =
+                                'نتمنى لكم يوماً موفقاً مليئاً بالبركة والمبيعات الطيبة.';
+                          }
+                        });
+                      },
+                    ),
+                    ActionChip(
+                      visualDensity: VisualDensity.compact,
+                      avatar: const Icon(Icons.nights_stay_outlined,
+                          size: 15, color: Color(0xFF4F46E5)),
+                      label: const Text('قالب مسائي (08:00 م)',
+                          style: TextStyle(fontSize: 11)),
+                      onPressed: () {
+                        setState(() {
+                          _schedTime = const TimeOfDay(hour: 20, minute: 0);
+                          if (_schedTitleCtrl.text.trim().isEmpty) {
+                            _schedTitleCtrl.text = 'مساء الخير';
+                          }
+                          if (_schedBodyCtrl.text.trim().isEmpty) {
+                            _schedBodyCtrl.text =
+                                'نتمنى لكم أمسية هادئة وحسابات مضبوطة. لا تنسَ أخذ نسخة احتياطية.';
+                          }
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _schedTitleCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'عنوان الإشعار التلقائي',
+                    prefixIcon: Icon(Icons.title_rounded),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _schedBodyCtrl,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'نص الإشعار التلقائي',
+                    prefixIcon: Icon(Icons.short_text_rounded),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          final picked = await showTimePicker(
+                            context: context,
+                            initialTime: _schedTime,
+                          );
+                          if (picked != null && mounted) {
+                            setState(() => _schedTime = picked);
+                          }
+                        },
+                        icon: const Icon(Icons.access_time_filled_rounded,
+                            size: 18),
+                        label: Text(
+                          'وقت الإشعار: ${_formatTimeAr(_schedTime.hour, _schedTime.minute)}',
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF0D9488),
+                        ),
+                        onPressed: _busy
+                            ? null
+                            : () async {
+                                final t = _schedTitleCtrl.text.trim();
+                                final b = _schedBodyCtrl.text.trim();
+                                if (t.isEmpty || b.isEmpty) return;
+                                setState(() => _busy = true);
+                                await Rtdb.instance.saveScheduledNotification(
+                                  title: t,
+                                  body: b,
+                                  hour: _schedTime.hour,
+                                  minute: _schedTime.minute,
+                                  enabled: true,
+                                );
+                                _schedTitleCtrl.clear();
+                                _schedBodyCtrl.clear();
+                                await _reloadScheduledRules();
+                                if (mounted) setState(() => _busy = false);
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                          'تم حفظ وجدولة الإشعار التلقائي بنجاح ✓'),
+                                    ),
+                                  );
+                                }
+                              },
+                        icon: const Icon(Icons.add_alarm_rounded, size: 17),
+                        label: const Text('إضافة الجدولة'),
+                      ),
+                    ),
+                  ],
+                ),
+                if (_scheduledRules.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  const Divider(height: 1),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'الإشعارات المجدولة النشطة:',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF0F766E),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  for (final r in _scheduledRules)
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF0FDFA),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFF99F6E4)),
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF0D9488),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              _formatTimeAr(
+                                (r['hour'] as num?)?.toInt() ?? 8,
+                                (r['minute'] as num?)?.toInt() ?? 0,
+                              ),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '${r['title'] ?? ''}',
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                                Text(
+                                  '${r['body'] ?? ''}',
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 11.5,
+                                    color: Colors.black87,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Switch(
+                            value: r['enabled'] != false,
+                            onChanged: (val) async {
+                              await Rtdb.instance.saveScheduledNotification(
+                                id: '${r['id']}',
+                                title: '${r['title'] ?? ''}',
+                                body: '${r['body'] ?? ''}',
+                                hour: (r['hour'] as num?)?.toInt() ?? 8,
+                                minute: (r['minute'] as num?)?.toInt() ?? 0,
+                                enabled: val,
+                              );
+                              await _reloadScheduledRules();
+                            },
+                          ),
+                          IconButton(
+                            tooltip: 'تعديل',
+                            icon: const Icon(Icons.edit_outlined,
+                                size: 19, color: Color(0xFF0284C7)),
+                            onPressed: () {
+                              setState(() {
+                                _schedTitleCtrl.text = '${r['title'] ?? ''}';
+                                _schedBodyCtrl.text = '${r['body'] ?? ''}';
+                                _schedTime = TimeOfDay(
+                                  hour: (r['hour'] as num?)?.toInt() ?? 8,
+                                  minute: (r['minute'] as num?)?.toInt() ?? 0,
+                                );
+                              });
+                            },
+                          ),
+                          IconButton(
+                            tooltip: 'حذف الجدولة',
+                            icon: const Icon(Icons.delete_outline_rounded,
+                                size: 19, color: Colors.redAccent),
+                            onPressed: () async {
+                              await Rtdb.instance
+                                  .deleteScheduledNotification('${r['id']}');
+                              await _reloadScheduledRules();
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
               ],
             ),
           ),

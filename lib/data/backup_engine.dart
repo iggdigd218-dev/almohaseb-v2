@@ -4,13 +4,15 @@ import 'dart:io';
 import 'package:archive/archive.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:sqflite/sqflite.dart';
 
 import '../core/app_version.dart';
-import '../core/cloud_config.dart';
 import '../core/database.dart';
+import '../core/desktop_net.dart';
 import '../core/format.dart';
 import 'repository.dart';
 import 'sync/subscription_guard.dart';
+import 'sync/sync_diagnostics.dart';
 import 'sync/sync_engine.dart';
 
 /// استثناء مخصص لعمليات النسخ الاحتياطي والاستعادة.
@@ -210,6 +212,20 @@ class BackupEngine {
   static const String syncActiveRestoreDisabledMessage =
       kActiveSyncRestoreBlockedMessage;
 
+  /// ترويسة ملفات SQLite 3 القياسية (16 بايت: "SQLite format 3\x00").
+  static const List<int> _sqliteMagicHeader = <int>[
+    0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66,
+    0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00,
+  ];
+
+  static bool _hasValidSqliteHeader(List<int> bytes) {
+    if (bytes.length < _sqliteMagicHeader.length) return false;
+    for (var i = 0; i < _sqliteMagicHeader.length; i++) {
+      if (bytes[i] != _sqliteMagicHeader[i]) return false;
+    }
+    return true;
+  }
+
   /// تجاوز اختباري لحالة المزامنة النشطة.
   static bool? debugForceCloudSyncActive;
 
@@ -235,11 +251,22 @@ class BackupEngine {
     if (debugForceCloudSyncActive != null) {
       return debugForceCloudSyncActive!;
     }
-    if (effectiveEngine != null && effectiveEngine.isCloudSyncActive) {
-      final effectiveSub = sub ?? SubscriptionGuard.lastState;
-      if (!effectiveSub.expired && !effectiveSub.isFrozen && effectiveSub.isActive) {
-        return true;
-      }
+    if (effectiveEngine != null) {
+      if (!effectiveEngine.isCloudSyncActive) return false;
+    }
+    // فحص انقطاع الاتصال الفعلي: لا نمنع المستخدم من الاستعادة أوفلاين
+    final diag = SyncDiagnostics.instance.snapshot;
+    if (DesktopNet.netErrorNotifier.value != null ||
+        diag.lastPullFault == SyncFaultSource.network ||
+        diag.lastPushFault == SyncFaultSource.network) {
+      return false;
+    }
+    final effectiveSub = sub ?? SubscriptionGuard.lastState;
+    if (effectiveSub.expired || effectiveSub.isFrozen || !effectiveSub.isActive) {
+      return false;
+    }
+    if (effectiveEngine != null) {
+      return effectiveEngine.isCloudSyncActive;
     }
     try {
       final st = await repo.settings();
@@ -251,10 +278,9 @@ class BackupEngine {
       if (mode == 'standalone') {
         return false;
       }
-      final url = effectiveBackendUrl(st['cloudBackendUrl']);
-      if (url.isEmpty) return false;
-      final effectiveSub = sub ?? SubscriptionGuard.lastState;
-      if (effectiveSub.expired || effectiveSub.isFrozen) {
+      // عدم الاعتماد على الرابط الافتراضي الساكن؛ يتطلب وجود رابط مهيأ فعلياً في الإعدادات
+      final configuredUrl = (st['cloudBackendUrl'] ?? '').trim();
+      if (configuredUrl.isEmpty) {
         return false;
       }
       return true;
@@ -435,15 +461,74 @@ class BackupEngine {
     }
   }
 
+  /// يفحص ما إذا كانت المنشأة المحلية فارغة/جديدة تماماً (للسماح باستعادة نسخة المالك على هاتف جديد).
+  static Future<bool> _isLocalWorkspaceFreshOrEmpty(
+    Repo repo,
+    DateTime? localLastTx,
+  ) async {
+    if (localLastTx != null) return false;
+    try {
+      final db = await repo.database;
+      final accCount = await db.rawQuery(
+        "SELECT COUNT(*) AS c FROM accounts WHERE COALESCE(deleted_at, '') = ''",
+      );
+      if (((accCount.first['c'] as num?)?.toInt() ?? 0) > 0) return false;
+      final itemCount = await db.rawQuery(
+        "SELECT COUNT(*) AS c FROM items WHERE COALESCE(deleted_at, '') = '' AND COALESCE(is_deleted, 0) = 0",
+      );
+      if (((itemCount.first['c'] as num?)?.toInt() ?? 0) > 0) return false;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// إنشاء لقطة الأمان التلقائية الصامتة قبل الاستعادة باسم:
-  /// `Safety_Snapshot_Before_Restore.nexora`
+  /// `Safety_Snapshot_Before_Restore.nexora` مع تنفيذ `PRAGMA wal_checkpoint(TRUNCATE)`
+  /// والاحتفاظ بآخر لقطتي أمان لمنع الكتابة الفورية فوق اللقطة السليمة عند تكرار المحاولة.
   static Future<File> createSafetySnapshotBeforeRestore(
     Repo repo, {
     Directory? targetDir,
   }) async {
+    try {
+      final db = await repo.database;
+      await db.rawQuery('PRAGMA wal_checkpoint(TRUNCATE)');
+    } catch (_) {}
+
     final dir = targetDir ?? await backupsDirectory();
+    await dir.create(recursive: true);
     final snapshotFile =
         File(p.join(dir.path, '$kSafetySnapshotBaseName.nexora'));
+
+    if (await snapshotFile.exists()) {
+      try {
+        final ts = DateTime.now().toUtc().millisecondsSinceEpoch;
+        final rotatedFile = File(
+          p.join(dir.path, '${kSafetySnapshotBaseName}_$ts.nexora'),
+        );
+        await snapshotFile.copy(rotatedFile.path);
+
+        // الاحتفاظ بآخر لقطتي أمان مؤرختين بجانب اللقطة الأساسية الحالية
+        final historical = <File>[];
+        await for (final entity in dir.list(followLinks: false)) {
+          if (entity is! File) continue;
+          final name = p.basename(entity.path);
+          if (name.startsWith('${kSafetySnapshotBaseName}_') &&
+              name.endsWith('.nexora')) {
+            historical.add(entity);
+          }
+        }
+        if (historical.length > 2) {
+          historical.sort((a, b) => p.basename(b.path).compareTo(p.basename(a.path)));
+          for (final old in historical.skip(2)) {
+            try {
+              await old.delete();
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+    }
+
     return createNexoraPackage(
       repo,
       targetFile: snapshotFile,
@@ -459,6 +544,7 @@ class BackupEngine {
     SyncEngine? engine,
     SubscriptionState? sub,
     bool enforceSyncGuard = true,
+    bool allowCrossWorkspace = false,
   }) async {
     if (!await canAccessBackupAndRestore(repo)) {
       throw const BackupRestoreException(
@@ -475,6 +561,8 @@ class BackupEngine {
 
     final currentWorkspaceId = await repo.activeWorkspaceId();
     final localLastTx = await repo.latestTransactionTime();
+    final isFreshLocal =
+        allowCrossWorkspace || await _isLocalWorkspaceFreshOrEmpty(repo, localLastTx);
 
     // التحقق مما إذا كان الملف بصيغة Gzip (.nexora المحمية) أو JSON قديم
     final isGzip =
@@ -490,6 +578,7 @@ class BackupEngine {
         ArchiveFile? manifestEntry;
         ArchiveFile? dbEntry;
         for (final entry in archive.files) {
+          if (!entry.isFile) continue;
           final base = p.basename(entry.name);
           if (base == 'manifest.json') {
             manifestEntry = entry;
@@ -519,8 +608,9 @@ class BackupEngine {
           Map<String, dynamic>.from(decodedManifest),
         );
 
-        // التحقق من هوية المنشأة (workspace_id)
-        if (manifest.workspaceId.isNotEmpty &&
+        // التحقق من هوية المنشأة (workspace_id) مع السماح بالاستعادة على هاتف جديد فارغ أو عند تفعيل allowCrossWorkspace
+        if (!isFreshLocal &&
+            manifest.workspaceId.isNotEmpty &&
             currentWorkspaceId.isNotEmpty &&
             currentWorkspaceId != 'default' &&
             manifest.workspaceId != currentWorkspaceId) {
@@ -532,18 +622,55 @@ class BackupEngine {
 
         final extractedDbFile = File(p.join(tempExtractDir.path, 'database.db'));
         final dbContent = dbEntry.content as List<int>;
-        if (dbContent.length < 16) {
+        if (!_hasValidSqliteHeader(dbContent)) {
           throw const BackupRestoreException(
-            'ملف قاعدة البيانات داخل الحزمة تالف أو فارغ.',
+            'ملف قاعدة البيانات داخل الحزمة تالف أو ليس بصيغة SQLite 3 صالحة.',
           );
         }
         await extractedDbFile.writeAsBytes(dbContent, flush: true);
 
-        final backupCompareTime = manifest.effectiveComparisonDate;
+        // فحص سلامة قاعدة البيانات المستخرجة وقراءة أحدث حركة فعلية بداخلها
+        DateTime? embeddedDbLatestTx;
+        Database? inspectDb;
+        try {
+          inspectDb = await databaseFactory.openDatabase(
+            extractedDbFile.path,
+            options: OpenDatabaseOptions(readOnly: true),
+          );
+          final checkRows = await inspectDb.rawQuery('PRAGMA quick_check');
+          if (checkRows.isNotEmpty) {
+            final status = '${checkRows.first.values.first ?? ''}'.trim().toLowerCase();
+            if (status.isNotEmpty && status != 'ok') {
+              throw BackupRestoreException(
+                'ملف قاعدة البيانات داخل الحزمة تالف (فشل فحص السلامة: $status).',
+              );
+            }
+          }
+          embeddedDbLatestTx = await Repo.latestTransactionTimeFromDb(inspectDb);
+        } catch (e) {
+          if (e is BackupRestoreException) rethrow;
+          throw BackupRestoreException(
+            'ملف قاعدة البيانات داخل الحزمة غير صالح للقراءة: $e',
+          );
+        } finally {
+          if (inspectDb != null && inspectDb.isOpen) {
+            try {
+              await inspectDb.close();
+            } catch (_) {}
+          }
+        }
+
+        final effectiveTxDate =
+            embeddedDbLatestTx != null && manifest.lastTransactionDate != null
+                ? (embeddedDbLatestTx.isAfter(manifest.lastTransactionDate!)
+                    ? embeddedDbLatestTx
+                    : manifest.lastTransactionDate)
+                : (embeddedDbLatestTx ?? manifest.lastTransactionDate);
+        final backupCompareTime = effectiveTxDate ?? manifest.createdAtDate;
         final isOutdated = _isBackupOlder(
           backupTime: backupCompareTime,
           localLastTxTime: localLastTx,
-          backupHasTx: manifest.lastTransactionDate != null,
+          backupHasTx: effectiveTxDate != null,
         );
 
         return BackupInspectionResult(
@@ -577,7 +704,8 @@ class BackupEngine {
       final wsId =
           '${map['workspace_id'] ?? map['workspaceId'] ?? currentWorkspaceId}'
               .trim();
-      if (wsId.isNotEmpty &&
+      if (!isFreshLocal &&
+          wsId.isNotEmpty &&
           currentWorkspaceId.isNotEmpty &&
           currentWorkspaceId != 'default' &&
           map.containsKey('workspace_id') &&
@@ -648,6 +776,7 @@ class BackupEngine {
     SyncEngine? engine,
     SubscriptionState? sub,
     bool enforceSyncGuard = true,
+    bool allowCrossWorkspace = false,
   }) async {
     if (!await file.exists()) {
       throw const BackupRestoreException('ملف النسخة الاحتياطية غير موجود.');
@@ -659,6 +788,7 @@ class BackupEngine {
       engine: engine,
       sub: sub,
       enforceSyncGuard: enforceSyncGuard,
+      allowCrossWorkspace: allowCrossWorkspace,
     );
   }
 
@@ -669,6 +799,7 @@ class BackupEngine {
     SyncEngine? syncEngine,
     SubscriptionState? sub,
     bool enforceSyncGuard = true,
+    bool allowCrossWorkspace = false,
   }) =>
       inspectBackupFile(
         repo,
@@ -676,6 +807,7 @@ class BackupEngine {
         engine: syncEngine,
         sub: sub,
         enforceSyncGuard: enforceSyncGuard,
+        allowCrossWorkspace: allowCrossWorkspace,
       );
 
   static bool _isBackupOlder({
@@ -742,13 +874,38 @@ class BackupEngine {
       throw const BackupRestoreException(kActiveSyncRestoreBlockedMessage);
     }
 
-    if (inspection.isOutdated && !confirmedOutdated) {
+    final liveLocalLastTx =
+        await repo.latestTransactionTime() ?? inspection.localLastTransactionTime;
+    final isFreshLocal =
+        allowCrossWorkspace || await _isLocalWorkspaceFreshOrEmpty(repo, liveLocalLastTx);
+
+    if (!isFreshLocal) {
+      final currentWorkspaceId = await repo.activeWorkspaceId();
+      final backupWsId = inspection.manifest.workspaceId.trim();
+      if (backupWsId.isNotEmpty &&
+          currentWorkspaceId.isNotEmpty &&
+          currentWorkspaceId != 'default' &&
+          backupWsId != currentWorkspaceId) {
+        throw BackupWorkspaceMismatchException(
+          backupWorkspaceId: backupWsId,
+          currentWorkspaceId: currentWorkspaceId,
+        );
+      }
+    }
+    final backupCompareTime =
+        inspection.backupComparisonTime ?? inspection.manifest.effectiveComparisonDate;
+    final isCurrentlyOutdated = inspection.isOutdated ||
+        _isBackupOlder(
+          backupTime: backupCompareTime,
+          localLastTxTime: liveLocalLastTx,
+          backupHasTx: inspection.manifest.lastTransactionDate != null ||
+              inspection.backupComparisonTime != null,
+        );
+
+    if (isCurrentlyOutdated && !confirmedOutdated) {
       throw BackupOutdatedConflictException(
-        backupTime: inspection.backupComparisonTime ??
-            inspection.manifest.effectiveComparisonDate ??
-            DateTime.now(),
-        currentLastTxTime:
-            inspection.localLastTransactionTime ?? DateTime.now(),
+        backupTime: backupCompareTime ?? DateTime.now(),
+        currentLastTxTime: liveLocalLastTx ?? DateTime.now(),
       );
     }
 

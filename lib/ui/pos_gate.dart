@@ -378,20 +378,20 @@ class PosSectionsStrip extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsetsDirectional.fromSTEB(12, 6, 12, 4),
+          padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 12, 2),
           child: Row(
             children: [
               // (PR-8) رأس حيوي صافٍ — بلا أي كحلي قاتم.
               const Icon(
                 Icons.folder_outlined,
-                size: 18,
+                size: 17,
                 color: Color(0xFF2563EB),
               ),
               const SizedBox(width: 6),
               Text(
                 'الأقسام',
                 style: TextStyle(
-                  fontSize: 13.5,
+                  fontSize: 13.0,
                   fontWeight: FontWeight.w800,
                   color: AppColors.textOf(context),
                 ),
@@ -401,7 +401,7 @@ class PosSectionsStrip extends StatelessWidget {
                 borderRadius: BorderRadius.circular(8),
                 onTap: onShowAll ?? () => onSelect(null),
                 child: const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                  padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -427,7 +427,7 @@ class PosSectionsStrip extends StatelessWidget {
           ),
         ),
         SizedBox(
-          height: 92,
+          height: 82,
           child: ListView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsetsDirectional.fromSTEB(12, 2, 12, 2),
@@ -517,8 +517,8 @@ class _HorizontalSectionTile extends StatelessWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(14),
           child: Container(
-            width: 90,
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+            width: 86,
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(14),
               border: Border.all(
@@ -530,16 +530,16 @@ class _HorizontalSectionTile extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Container(
-                  padding: const EdgeInsets.all(5),
+                  padding: const EdgeInsets.all(4.5),
                   decoration: BoxDecoration(
                     color: dark
                         ? Colors.white.withValues(alpha: 0.12)
                         : Colors.white,
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(9),
                   ),
-                  child: Icon(icon, size: 19, color: glyphColor),
+                  child: Icon(icon, size: 18, color: glyphColor),
                 ),
-                const SizedBox(height: 3),
+                const SizedBox(height: 2.5),
                 Text(
                   label,
                   maxLines: 1,
@@ -551,7 +551,7 @@ class _HorizontalSectionTile extends StatelessWidget {
                     color: AppColors.textOf(context),
                   ),
                 ),
-                const SizedBox(height: 2),
+                const SizedBox(height: 1.5),
                 Container(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
@@ -614,7 +614,7 @@ class PosCategoryStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final strip = SizedBox(
-      height: 86,
+      height: 78,
       child: ListView(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsetsDirectional.fromSTEB(12, 2, 12, 2),
@@ -655,20 +655,20 @@ class PosCategoryStrip extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 12, 3),
+          padding: const EdgeInsetsDirectional.fromSTEB(12, 3, 12, 2),
           child: Row(
             children: [
               // (PR-8) رأس حيوي صافٍ — بلا أي كحلي قاتم.
               const Icon(
                 Icons.grid_view_rounded,
-                size: 18,
+                size: 17,
                 color: Color(0xFF2563EB),
               ),
               const SizedBox(width: 6),
               Text(
                 'الفئات',
                 style: TextStyle(
-                  fontSize: 13.5,
+                  fontSize: 13.0,
                   fontWeight: FontWeight.w800,
                   color: AppColors.textOf(context),
                 ),
@@ -678,7 +678,7 @@ class PosCategoryStrip extends StatelessWidget {
                 borderRadius: BorderRadius.circular(8),
                 onTap: onShowAll ?? () => _openSheet(context),
                 child: const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                  padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -709,16 +709,20 @@ class PosCategoryStrip extends StatelessWidget {
   }
 
   Future<void> _openSheet(BuildContext context) async {
-    final pick = await showModalBottomSheet<int?>(
+    final result = await showModalBottomSheet<({int? categoryId})>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) => _CategoriesSheet(
         categories: categories,
         selectedId: selectedId,
+        itemCountOf: itemCountOf,
+        allItemsCount: allItemsCount,
       ),
     );
-    onPick(pick);
+    if (result != null) {
+      onPick(result.categoryId);
+    }
   }
 }
 
@@ -726,10 +730,14 @@ class _CategoriesSheet extends StatefulWidget {
   const _CategoriesSheet({
     required this.categories,
     required this.selectedId,
+    this.itemCountOf,
+    this.allItemsCount,
   });
 
   final List<ItemCategory> categories;
   final int? selectedId;
+  final int Function(ItemCategory category)? itemCountOf;
+  final int? allItemsCount;
 
   @override
   State<_CategoriesSheet> createState() => _CategoriesSheetState();
@@ -750,13 +758,17 @@ class _CategoriesSheetState extends State<_CategoriesSheet> {
     final list = q.isEmpty
         ? widget.categories
         : widget.categories
-            .where((c) => c.name.contains(q) || c.name.toLowerCase().contains(q))
+            .where(
+              (c) =>
+                  c.name.contains(q) ||
+                  c.name.toLowerCase().contains(q.toLowerCase()),
+            )
             .toList();
 
     return DraggableScrollableSheet(
-      initialChildSize: .55,
-      minChildSize: .3,
-      maxChildSize: .85,
+      initialChildSize: .65,
+      minChildSize: .35,
+      maxChildSize: .88,
       builder: (ctx, scroll) => Container(
         decoration: BoxDecoration(
           color: AppColors.surfaceOf(context),
@@ -774,30 +786,44 @@ class _CategoriesSheetState extends State<_CategoriesSheet> {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+              padding: const EdgeInsets.fromLTRB(16, 8, 12, 6),
               child: Row(
                 children: [
-                  Icon(Icons.category_outlined,
+                  Icon(Icons.grid_view_rounded,
                       color: AppColors.primaryOf(context)),
                   const SizedBox(width: 8),
-                  const Text(
-                    'اختر الفئة',
-                    style: TextStyle(
+                  Text(
+                    'جميع الفئات (${widget.categories.length})',
+                    style: const TextStyle(
                         fontSize: 16, fontWeight: FontWeight.w800),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.close_rounded),
+                    onPressed: () => Navigator.pop(context),
                   ),
                 ],
               ),
             ),
-            if (widget.categories.length > 8)
+            if (widget.categories.length > 4)
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
                 child: TextField(
                   controller: _q,
                   onChanged: (_) => setState(() {}),
                   decoration: InputDecoration(
-                    hintText: 'بحث…',
+                    hintText: 'ابحث عن فئة…',
                     isDense: true,
                     prefixIcon: const Icon(Icons.search, size: 20),
+                    suffixIcon: q.isEmpty
+                        ? null
+                        : IconButton(
+                            icon: const Icon(Icons.clear, size: 18),
+                            onPressed: () {
+                              _q.clear();
+                              setState(() {});
+                            },
+                          ),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(AppRadius.field),
                     ),
@@ -805,31 +831,53 @@ class _CategoriesSheetState extends State<_CategoriesSheet> {
                 ),
               ),
             Expanded(
-              child: ListView.builder(
-                controller: scroll,
-                padding: const EdgeInsets.only(bottom: 12),
-                itemCount: list.length + 1,
-                itemBuilder: (ctx, i) {
-                  if (i == 0) {
-                    return _CatRow(
-                      label: 'كل الفئات',
-                      icon: Icons.widgets_outlined,
-                      tone: AppTone.blue,
-                      active: widget.selectedId == null,
-                      onTap: () => Navigator.pop(context, null),
-                    );
-                  }
-                  final c = list[i - 1];
-                  return _CatRow(
-                    label: c.name,
-                    icon: IconCatalog.of(c.iconKey),
-                    tone: IconCatalog.resolveTone(
-                      colorHex: c.colorHex,
-                      iconKey: c.iconKey,
-                      fallbackSeed: i,
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final w = constraints.maxWidth;
+                  final cross = w >= 900 ? 6 : (w >= 600 ? 5 : 3);
+                  return GridView.builder(
+                    controller: scroll,
+                    padding: const EdgeInsets.fromLTRB(14, 4, 14, 20),
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: cross,
+                      childAspectRatio: 1.15,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 10,
                     ),
-                    active: c.id == widget.selectedId,
-                    onTap: () => Navigator.pop(context, c.id),
+                    itemCount: list.length + 1,
+                    itemBuilder: (ctx, i) {
+                      if (i == 0) {
+                        final countLbl = widget.allItemsCount != null
+                            ? '${widget.allItemsCount} صنف'
+                            : '${widget.categories.length} فئة';
+                        return _CatChip(
+                          label: 'كل الفئات',
+                          icon: Icons.widgets_outlined,
+                          tone: AppTone.blue,
+                          countLabel: countLbl,
+                          active: widget.selectedId == null,
+                          onTap: () =>
+                              Navigator.pop(context, (categoryId: null)),
+                        );
+                      }
+                      final c = list[i - 1];
+                      final countLbl = widget.itemCountOf != null
+                          ? '${widget.itemCountOf!(c)} أصناف'
+                          : 'أصناف';
+                      return _CatChip(
+                        label: c.name,
+                        icon: IconCatalog.of(c.iconKey),
+                        tone: IconCatalog.resolveTone(
+                          colorHex: c.colorHex,
+                          iconKey: c.iconKey,
+                          fallbackSeed: i,
+                        ),
+                        countLabel: countLbl,
+                        active: c.id == widget.selectedId,
+                        onTap: () =>
+                            Navigator.pop(context, (categoryId: c.id)),
+                      );
+                    },
                   );
                 },
               ),
@@ -837,48 +885,6 @@ class _CategoriesSheetState extends State<_CategoriesSheet> {
           ],
         ),
       ),
-    );
-  }
-}
-
-class _CatRow extends StatelessWidget {
-  const _CatRow({
-    required this.label,
-    required this.icon,
-    required this.tone,
-    required this.active,
-    required this.onTap,
-  });
-
-  final String label;
-  final IconData icon;
-  final AppTone tone;
-  final bool active;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    return ListTile(
-      onTap: onTap,
-      leading: Container(
-        width: 38,
-        height: 38,
-        decoration: BoxDecoration(
-          color: dark ? tone.foreground.withValues(alpha: 0.2) : tone.background,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Icon(
-          icon,
-          // (PR-8) أيقونات الفئات كحلية أنيقة موحدة.
-          color: dark ? Colors.white : const Color(0xFF1E3A8A),
-          size: 20,
-        ),
-      ),
-      title: Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
-      trailing: active
-          ? Icon(Icons.check_circle_rounded, color: AppColors.primaryOf(context))
-          : null,
     );
   }
 }

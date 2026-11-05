@@ -156,6 +156,9 @@ class _JoinApprovalScreenState extends ConsumerState<JoinApprovalScreen> {
       final url = effectiveBackendUrl(st['cloudBackendUrl']);
       final ws = await CloudJoin.findWorkspaceByInvite(
           backendUrl: url, tokenOrPin: pin);
+      // (دفعة الواجهات) الشبكة قد تتأخر والمستخدم قد يغادر الشاشة — setState
+      // بعد التخلص من الحالة يرمي، وكان ذلك يبتلع رسالة الخطأ الحقيقية.
+      if (!mounted) return;
       if (ws == null) {
         setState(() {
           _busy = false;
@@ -166,6 +169,7 @@ class _JoinApprovalScreenState extends ConsumerState<JoinApprovalScreen> {
       _busy = false;
       await _sendRequest(url: url, ws: ws, tokenOrPin: pin);
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _busy = false;
         _error = e is CloudJoinException ? e.message : '$e';

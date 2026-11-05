@@ -109,6 +109,9 @@ class _State extends ConsumerState<AccountFormScreen> {
     final rawNotify = (a?.notifyChannel ?? 'none').trim();
     _notifyChannel = switch (rawNotify) {
       'auto_whatsapp' || 'auto_w4b' || 'auto_sms' || 'auto_system' => rawNotify,
+      // (دفعة التدقيق) ترحيل القيمتين القديمتين بأمان إلى نظيريهما
+      // التلقائيين بدل إسقاطهما إلى «عدم المشاركة».
+      'whatsapp' => 'auto_whatsapp',
       'sms' => 'auto_sms',
       _ => 'none',
     };

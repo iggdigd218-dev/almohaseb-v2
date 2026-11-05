@@ -49,7 +49,12 @@ class CurrencyDef {
   final String name;
   final String symbol;
   final int decimal;
-  const CurrencyDef(this.code, this.name, this.symbol, this.decimal);
+
+  /// (دفعة التدقيق) سعر الصرف مقابل العملة الأساسية — من عمود rate في
+  /// جدول currencies (المصدر الموحد للقراءة والحفظ).
+  final double rate;
+  const CurrencyDef(this.code, this.name, this.symbol, this.decimal,
+      [this.rate = 1]);
 
   Map<String, Object?> toMap() => {
         'code': code,
@@ -63,6 +68,7 @@ class CurrencyDef {
         (m['name'] ?? '') as String,
         (m['symbol'] ?? '') as String,
         (m['decimal'] ?? 0) as int,
+        ((m['rate'] ?? 1) as num?)?.toDouble() ?? 1,
       );
 
   String get flag {

@@ -225,10 +225,82 @@ class AutoBackupService {
         } catch (_) {}
         await src.copy(dest);
       }
+      // (دفعة التدقيق) دورة فورية بعد كل لقطة: نُبقي أحدث 10 فقط.
+      await _pruneLocalBackups(dir);
       return dest;
     } catch (_) {
       return null;
     }
+  }
+
+  /// (دفعة التدقيق) تدوير النسخ المحلية: يُبقي أحدث 10 ملفات لكل نمط
+  /// (backup_*.db وMyAccounts_Auto_*.nexora) — كانت اللقطات تتراكم بلا
+  /// سقف (لقطة كل ساعتين) حتى يمتلئ تخزين الجهاز. لا يرمي استثناءات أبداً.
+  static Future<void> _pruneLocalBackups(Directory dir) async {
+    try {
+      const keepPerPattern = 10;
+      const patterns = ['backup_', 'MyAccounts_Auto_'];
+      final entities = await dir.list().toList();
+      for (final pattern in patterns) {
+        final files = <File>[];
+        for (final e in entities) {
+          if (e is! File) continue;
+          final name = e.uri.pathSegments.last.toLowerCase();
+          if (name.startsWith(pattern.toLowerCase()) &&
+              (name.endsWith('.db') || name.endsWith('.nexora'))) {
+            files.add(e);
+          }
+        }
+        if (files.length <= keepPerPattern) continue;
+        final withTimes = <MapEntry<File, DateTime>>[];
+        for (final f in files) {
+          try {
+            withTimes.add(MapEntry(f, await f.lastModified()));
+          } catch (_) {}
+        }
+        withTimes.sort((a, b) => b.value.compareTo(a.value));
+        for (final entry in withTimes.skip(keepPerPattern)) {
+          try {
+            await entry.key.delete();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// (دفعة التدقيق) تنظيف حزم Auto المؤقتة القديمة بعد رفعها إلى Drive —
+  /// يُبقي أحدث 10 أيضاً؛ الحزمة التي رفعت للتو هي الأحدث فلا تُمس.
+  static Future<void> _pruneTempAutoPackages() async {
+    try {
+      Directory tmp;
+      try {
+        tmp = await getTemporaryDirectory();
+      } catch (_) {
+        tmp = Directory.systemTemp;
+      }
+      const keep = 10;
+      final files = <File>[];
+      await for (final e in tmp.list()) {
+        if (e is! File) continue;
+        final name = e.uri.pathSegments.last.toLowerCase();
+        if (name.startsWith('myaccounts_auto_') && name.endsWith('.nexora')) {
+          files.add(e);
+        }
+      }
+      if (files.length <= keep) return;
+      final withTimes = <MapEntry<File, DateTime>>[];
+      for (final f in files) {
+        try {
+          withTimes.add(MapEntry(f, await f.lastModified()));
+        } catch (_) {}
+      }
+      withTimes.sort((a, b) => b.value.compareTo(a.value));
+      for (final entry in withTimes.skip(keep)) {
+        try {
+          await entry.key.delete();
+        } catch (_) {}
+      }
+    } catch (_) {}
   }
 
   /// دورة نسخ مجدولة كاملة: لقطة محلية + حزمة (.nexora) إلى Drive (مجاني دائماً عند توفر
@@ -248,6 +320,8 @@ class AutoBackupService {
           await svc.uploadLatest(pkg, auto: true);
         }
       } catch (_) {}
+      // (دفعة التدقيق) تنظيف حزم Auto المؤقتة القديمة بعد محاولة الرفع.
+      await _pruneTempAutoPackages();
     }
     // (4) إيقاف اللقطات الشاملة والفحص العشوائي (No Full Dumps):
     // تم تعطيل رفع اللقطة الكاملة تلقائياً إلى Firebase RTDB في الخلفية

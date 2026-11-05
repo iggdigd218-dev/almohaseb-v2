@@ -210,6 +210,13 @@ class UpdateService {
   static const String kFallbackManifestUrl =
       'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/version.json';
 
+  /// (دفعة التحديث) مرآة الثقة الوسيطة على GitHub Pages: نفس محتوى بيان
+  /// إصدار `latest` (يُنشر آلياً مع كل بناء) لكن على نطاق لا يحجب github.com
+  /// — وهو النطاق الذي تُقرأ منه التنزيلات أصلاً في الشبكات المحجوبة.
+  /// الترتيب: العقدة السيادية ← هذه المرآة ← GitHub Releases.
+  static const String kMirrorManifestUrl =
+      'https://iggdigd218-dev.github.io/almohaseb-v2/version.json';
+
   /// صفحة الإصدار الرسمية (احتياطي إذا لم يذكر البيان رابطًا).
   static const String kFallbackReleaseUrl =
       'https://github.com/iggdigd218-dev/almohaseb-v2/releases/latest';
@@ -239,15 +246,25 @@ class UpdateService {
 
   /// يفحص وجود تحديث. لا يرمي استثناءً أبدًا — يُعيد status=unknown عند الفشل.
   Future<UpdateInfo> check() async {
-    var info = await _fetchFromUrl(manifestUrl);
-    // (متانة القناة) للرابط الافتراضي حصريًا: نجلِب بيان GitHub الاحتياطي
-    // أيضًا ونُعمل الأحدث إصدارًا منهما — فلا تتجمد قناة التحديث أبدًا إن
-    // تأخر نشر أحد المصدرين (مثلاً بعد تفعيل قواعد كتابة المشرف حصرًا على
-    // القاعدة بينما بيان GitHub يُحدَّث مع كل إصدار آليًا).
-    if (manifestUrl == kDefaultManifestUrl &&
-        kFallbackManifestUrl != kDefaultManifestUrl) {
-      final fallbackInfo = await _fetchFromUrl(kFallbackManifestUrl);
-      info = _newerOf(info, fallbackInfo);
+    // مصدر مخصص (اختبارات/بناء خاص): لا سلاسل احتياطية.
+    if (manifestUrl != kDefaultManifestUrl) {
+      return _fetchFromUrl(manifestUrl);
+    }
+    // (متانة القناة) للرابط الافتراضي حصريًا: نجلب المصادر الثلاثة **بالتوازي**
+    // — العقدة السيادية، مرآة GitHub Pages، ثم GitHub Releases — ونُعمل الأحدث
+    // إصدارًا منها. فتأخر أحدها أو حجبه لا يجمّد قناة التحديث، وزمن الفحص يبقى
+    // مهلة واحدة لا ثلاث (مهم على شبكات المحمول البطيئة).
+    final sources = <String>{
+      manifestUrl,
+      kMirrorManifestUrl,
+      if (kFallbackManifestUrl != kDefaultManifestUrl &&
+          kFallbackManifestUrl != kMirrorManifestUrl)
+        kFallbackManifestUrl,
+    }.toList();
+    final results = await Future.wait(sources.map(_fetchFromUrl));
+    var info = results.first;
+    for (final candidate in results.skip(1)) {
+      info = _newerOf(info, candidate);
     }
     return info;
   }

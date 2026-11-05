@@ -135,7 +135,15 @@ class GoogleAuthService {
               await gs
                   .signInSilently(suppressErrors: true)
                   .timeout(const Duration(seconds: 5), onTimeout: () => null);
-          if (a != null) {
+          // (دفعة التدقيق) جدول google_auth المحلي هو المرجع: التحديث
+          // الصامت يجدّد توكنات الحساب المسجّل نفسه فقط — إن كان حساب
+          // المنصة الحالي (currentUser الذاكري أو silent) يخالف السجل
+          // المحلي فلا استبدال صامت للهوية؛ التبديل يتم عبر تسجيل دخول
+          // صريح من المستخدم.
+          if (a != null &&
+              (a.id == cached.id ||
+                  a.email.trim().toLowerCase() ==
+                      cached.email.trim().toLowerCase())) {
             final tokens = await _extractTokensWithRetry(a);
             final u = _mapAccount(
               a,
@@ -166,14 +174,23 @@ class GoogleAuthService {
               .timeout(const Duration(seconds: 6), onTimeout: () => null);
       if (a != null) {
         final cached = await currentUserFromDb();
-        final tokens = await _extractTokensWithRetry(a);
-        final u = _mapAccount(
-          a,
-          tokens.idToken ?? cached?.idToken,
-          accessToken: tokens.accessToken ?? cached?.accessToken,
-        );
-        await _persist(u);
-        return u;
+        // (دفعة التدقيق) لا استبدال صامت للهوية: حساب المنصة الحالي إن
+        // خالف السجل المحلي نتجاهله ونعيد السجل المحلي كما هو — رفع
+        // النسخ إلى Drive بحساب مختلف يتم بقرار صريح من المستخدم.
+        final sameAccount = cached == null ||
+            a.id == cached.id ||
+            a.email.trim().toLowerCase() ==
+                cached.email.trim().toLowerCase();
+        if (sameAccount) {
+          final tokens = await _extractTokensWithRetry(a);
+          final u = _mapAccount(
+            a,
+            tokens.idToken ?? cached?.idToken,
+            accessToken: tokens.accessToken ?? cached?.accessToken,
+          );
+          await _persist(u);
+          return u;
+        }
       }
     } catch (_) {}
     return await currentUserFromDb();

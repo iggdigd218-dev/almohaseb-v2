@@ -30,7 +30,6 @@ class AccountsScreen extends ConsumerWidget {
     final balanceFilter = ref.watch(_balanceFilterProvider);
     final txCounts =
         ref.watch(accountTxCountsProvider).valueOrNull ?? const {};
-    final summary = ref.watch(summaryProvider).valueOrNull;
 
     return Stack(
       children: [
@@ -41,7 +40,6 @@ class AccountsScreen extends ConsumerWidget {
               filter: filter,
               currencies: curs,
               balanceFilter: balanceFilter,
-              summary: summary,
             ),
             Expanded(
               child: list.when(
@@ -85,16 +83,32 @@ class AccountsScreen extends ConsumerWidget {
                 ),
                 data: (rawItems) {
                   // تطبيق فلتر الرصيد (الكل، عليكم، لكم، مسدد)
+                  //
+                  // (دفعة الواجهات) الحكم على الرصيد يُحسب بمنازل عملة **كل
+                  // حساب** لا بهامش ثابت: حساب بعملة بلا منازل (ريال) برصيد
+                  // 0.4 كان يُصنّف «عليه» بالهامش الثابت، بينما البطاقة تعرضه
+                  // «0» — أي تناقض بين الفلتر وما يراه المستخدم. التقريب بمنازل
+                  // العملة يجعل الحكم مطابقاً للرقم المعروض، ويصحّ للحسابات
+                  // متعددة العملات لأن كل حساب يُقاس بعملته هو.
+                  final decimals = <String, int>{
+                    for (final c in curs)
+                      c.code.trim().toUpperCase(): c.decimal,
+                  };
                   final items = rawItems.where((it) {
+                    // الموجب = «عليه» (مدين، مستحق لنا) والسالب = «له»،
+                    // مطابقاً لـ accounting.dart و account_detail و Dashboard.
+                    final dec =
+                        decimals[it.account.currency.trim().toUpperCase()];
+                    final bal = Fmt.roundMoney(it.balance, dec ?? 2);
                     switch (balanceFilter) {
                       case _BalanceFilter.all:
                         return true;
                       case _BalanceFilter.debt:
-                        return it.balance < -Fmt.moneyEpsilon;
+                        return bal > 0;
                       case _BalanceFilter.credit:
-                        return it.balance > Fmt.moneyEpsilon;
+                        return bal < 0;
                       case _BalanceFilter.settled:
-                        return it.balance.abs() <= Fmt.moneyEpsilon;
+                        return bal == 0;
                     }
                   }).toList();
 
@@ -162,13 +176,11 @@ class _EnhancedFilterBar extends ConsumerStatefulWidget {
   final AccountFilter filter;
   final List<CurrencyDef> currencies;
   final _BalanceFilter balanceFilter;
-  final Summary? summary;
 
   const _EnhancedFilterBar({
     required this.filter,
     required this.currencies,
     required this.balanceFilter,
-    required this.summary,
   });
 
   @override
@@ -308,14 +320,14 @@ class _EnhancedFilterBarState extends ConsumerState<_EnhancedFilterBar> {
                   'عليكم',
                   balanceFilter == _BalanceFilter.debt,
                   () => bNotifier.state = _BalanceFilter.debt,
-                  color: const Color(0xFFEF4444),
+                  color: const Color(0xFF10B981),
                 ),
                 _chip(
                   context,
                   'لكم',
                   balanceFilter == _BalanceFilter.credit,
                   () => bNotifier.state = _BalanceFilter.credit,
-                  color: const Color(0xFF10B981),
+                  color: const Color(0xFFEF4444),
                 ),
                 _chip(
                   context,
@@ -427,8 +439,14 @@ class _AccountCard extends StatelessWidget {
       orElse: () => kDefaultCurrencies.first,
     );
 
-    final isDebt = item.balance < -Fmt.moneyEpsilon;
-    final isCredit = item.balance > Fmt.moneyEpsilon;
+    // (دفعة التدقيق) نفس التوحيد: موجب = عليكم (مدين، أخضر كما في كشف
+    // الحساب)، سالب = لكم (دائن، أحمر).
+    // (دفعة الواجهات) الحكم بمنازل عملة الحساب لا بهامش ثابت: كان رصيد
+    // 0.4 في عملة بلا منازل يظهر «+ 0» أخضر، ويُدرج في فلتر «عليكم» بينما
+    // يظهر صفراً — الآن التصنيف والفلتر والعرض كلها بمنازل العملة نفسها.
+    final shown = Fmt.roundMoney(item.balance, c.decimal);
+    final isDebt = shown > 0;
+    final isCredit = shown < 0;
     final initials = _getInitials(a.name);
     final accent = _avatarColor(a.name);
 
@@ -538,17 +556,17 @@ class _AccountCard extends StatelessWidget {
                     else
                       Text(
                         isDebt
-                            ? '${Fmt.moneyFor(item.balance.abs(), c)} ${c.symbol}'
+                            ? '+ ${Fmt.moneyFor(item.balance, c)} ${c.symbol}'
                             : (isCredit
-                                ? '+ ${Fmt.moneyFor(item.balance, c)} ${c.symbol}'
+                                ? '${Fmt.moneyFor(item.balance.abs(), c)} ${c.symbol}'
                                 : '0 ${c.symbol}'),
                         style: TextStyle(
                           fontSize: 15.5,
                           fontWeight: FontWeight.w900,
                           color: isDebt
-                              ? const Color(0xFFEF4444)
+                              ? const Color(0xFF10B981)
                               : (isCredit
-                                  ? const Color(0xFF10B981)
+                                  ? const Color(0xFFEF4444)
                                   : (isDark
                                       ? const Color(0xFF94A3B8)
                                       : const Color(0xFF64748B))),
@@ -561,9 +579,9 @@ class _AccountCard extends StatelessWidget {
                         fontSize: 11,
                         fontWeight: FontWeight.w700,
                         color: isDebt
-                            ? const Color(0xFFEF4444)
+                            ? const Color(0xFF10B981)
                             : (isCredit
-                                ? const Color(0xFF10B981)
+                                ? const Color(0xFFEF4444)
                                 : (isDark
                                     ? const Color(0xFF64748B)
                                     : const Color(0xFF94A3B8))),

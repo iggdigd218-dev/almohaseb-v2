@@ -103,28 +103,26 @@ class AppDatabase {
         return Future.value(_db!);
       }
     }
+    if (_opening != null) return _opening!;
     if (_activeWorkspaceId == defaultWorkspaceIdConst && !_isTestOverride) {
-      return SharedPreferences.getInstance().then((prefs) {
-        final saved = (prefs.getString(kPrefActiveWorkspaceId) ?? '').trim();
-        if (saved.isNotEmpty && saved != defaultWorkspaceIdConst) {
-          _activeWorkspaceId = saved;
+      _opening = () async {
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          final saved = (prefs.getString(kPrefActiveWorkspaceId) ?? '').trim();
+          if (saved.isNotEmpty && saved != defaultWorkspaceIdConst) {
+            _activeWorkspaceId = saved;
+          }
+        } catch (_) {}
+        try {
+          final db = await _openDb(_activeWorkspaceId);
+          _db = db;
+          return db;
+        } catch (e, st) {
+          _opening = null;
+          Error.throwWithStackTrace(e, st);
         }
-        return _opening ??= _openDb(_activeWorkspaceId).then((db) {
-          _db = db;
-          return db;
-        }, onError: (Object e, StackTrace st) {
-          _opening = null;
-          Error.throwWithStackTrace(e, st);
-        });
-      }).catchError((_) {
-        return _opening ??= _openDb(_activeWorkspaceId).then((db) {
-          _db = db;
-          return db;
-        }, onError: (Object e, StackTrace st) {
-          _opening = null;
-          Error.throwWithStackTrace(e, st);
-        });
-      });
+      }();
+      return _opening!;
     }
     return _opening ??= _openDb(_activeWorkspaceId).then((db) {
       _db = db;
@@ -179,7 +177,7 @@ class AppDatabase {
       final dir = await databaseDirectory();
       final legacyPath = p.join(dir, 'nexora.db');
       if (!File(legacyPath).existsSync()) return;
-      final tmpDb = await openDatabase(legacyPath, readOnly: true);
+      final tmpDb = await openDatabase(legacyPath);
       String legacyWs = '';
       try {
         final rows = await tmpDb.query(
@@ -192,21 +190,30 @@ class AppDatabase {
         if (rows.isNotEmpty) {
           legacyWs = '${rows.first['value'] ?? ''}'.trim();
         }
-      } catch (_) {}
-      await tmpDb.close();
-      if (legacyWs.isNotEmpty && legacyWs != defaultWorkspaceIdConst) {
-        final wsFileName = dbFileNameFor(legacyWs);
-        final wsTargetPath = p.join(dir, wsFileName);
-        if (!File(wsTargetPath).existsSync()) {
-          await File(legacyPath).copy(wsTargetPath);
-          for (final suffix in const ['-wal', '-shm']) {
-            final sFile = File('$legacyPath$suffix');
-            if (sFile.existsSync()) {
+        if (legacyWs.isNotEmpty && legacyWs != defaultWorkspaceIdConst) {
+          final wsFileName = dbFileNameFor(legacyWs);
+          final wsTargetPath = p.join(dir, wsFileName);
+          if (!File(wsTargetPath).existsSync()) {
+            final escapedTarget = wsTargetPath.replaceAll("'", "''");
+            try {
+              await tmpDb.execute("VACUUM INTO '$escapedTarget'");
+            } catch (_) {
+              // fallback آمن: دمج WAL بالكامل قبل النسخ الذري للملف الرئيسي فقط
               try {
-                await sFile.copy('$wsTargetPath$suffix');
+                await tmpDb.rawQuery('PRAGMA wal_checkpoint(TRUNCATE)');
               } catch (_) {}
+              await tmpDb.close();
+              final tempCopyPath = '$wsTargetPath.tmp';
+              await File(legacyPath).copy(tempCopyPath);
+              await File(tempCopyPath).rename(wsTargetPath);
+              return;
             }
           }
+        }
+      } catch (_) {
+      } finally {
+        if (tmpDb.isOpen) {
+          await tmpDb.close();
         }
       }
     } catch (_) {}
@@ -330,11 +337,11 @@ class AppDatabase {
             }
           } catch (_) {}
 
-          final isConfigured = (storeName.isNotEmpty &&
-                  storeName != 'متجري' &&
-                  storeName != 'منشأتي') ||
-              accountsCount > 0 ||
-              ownerEmail.isNotEmpty;
+          final hasRealStoreName = storeName.isNotEmpty &&
+              storeName != 'متجري' &&
+              storeName != 'منشأتي' &&
+              !storeName.startsWith('منشأة (');
+          final isConfigured = hasRealStoreName || accountsCount > 0;
 
           if (isConfigured) {
             results.add({
@@ -698,6 +705,7 @@ class AppDatabase {
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         workspace_id TEXT NOT NULL DEFAULT 'default',
         name        TEXT NOT NULL,
+        email       TEXT DEFAULT '',
         role        TEXT NOT NULL DEFAULT 'viewer',
         pin         TEXT DEFAULT '',
         password    TEXT DEFAULT '',
@@ -1869,32 +1877,38 @@ class AppDatabase {
 
     // 2) currencies بمفتاح مركّب: SQLite لا يدعم تعديل PK — إعادة بناء.
     //    idempotent: إن كان الجدول الجديد مبنياً (فهرس التحقق موجود) نتخطى.
+    //    يتم تعطيل PRAGMA foreign_keys خارج الـ transaction قبل DROP/RENAME ثم إعادته.
     final already = await db.rawQuery(
         "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_curr_pk_v21'");
     if (already.isEmpty) {
-      await db.transaction((txn) async {
-        await txn.execute('''
-          CREATE TABLE IF NOT EXISTS currencies_v21 (
-            code    TEXT NOT NULL,
-            workspace_id TEXT NOT NULL DEFAULT 'default',
-            name    TEXT NOT NULL,
-            symbol  TEXT NOT NULL,
-            decimal INTEGER NOT NULL DEFAULT 0,
-            rate    REAL NOT NULL DEFAULT 1,
-            deleted_at TEXT DEFAULT '',
-            PRIMARY KEY (code, workspace_id)
-          )''');
-        await txn.execute('''
-          INSERT OR IGNORE INTO currencies_v21
-            (code, workspace_id, name, symbol, decimal, rate, deleted_at)
-          SELECT code, COALESCE(workspace_id,'default'), name, symbol,
-                 decimal, rate, COALESCE(deleted_at,'')
-          FROM currencies''');
-        await txn.execute('DROP TABLE currencies');
-        await txn.execute('ALTER TABLE currencies_v21 RENAME TO currencies');
-        await txn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_curr_pk_v21 '
-            'ON currencies(code, workspace_id)');
-      });
+      await db.execute('PRAGMA foreign_keys = OFF');
+      try {
+        await db.transaction((txn) async {
+          await txn.execute('''
+            CREATE TABLE IF NOT EXISTS currencies_v21 (
+              code    TEXT NOT NULL,
+              workspace_id TEXT NOT NULL DEFAULT 'default',
+              name    TEXT NOT NULL,
+              symbol  TEXT NOT NULL,
+              decimal INTEGER NOT NULL DEFAULT 0,
+              rate    REAL NOT NULL DEFAULT 1,
+              deleted_at TEXT DEFAULT '',
+              PRIMARY KEY (code, workspace_id)
+            )''');
+          await txn.execute('''
+            INSERT OR IGNORE INTO currencies_v21
+              (code, workspace_id, name, symbol, decimal, rate, deleted_at)
+            SELECT code, COALESCE(workspace_id,'default'), name, symbol,
+                   decimal, rate, COALESCE(deleted_at,'')
+            FROM currencies''');
+          await txn.execute('DROP TABLE currencies');
+          await txn.execute('ALTER TABLE currencies_v21 RENAME TO currencies');
+          await txn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_curr_pk_v21 '
+              'ON currencies(code, workspace_id)');
+        });
+      } finally {
+        await db.execute('PRAGMA foreign_keys = ON');
+      }
     }
 
     // 3) حذف ناعم للدردشة.
@@ -1924,45 +1938,50 @@ class AppDatabase {
     if (names.contains('ip_address') ||
         names.contains('port') ||
         fks.isNotEmpty) {
-      await db.transaction((txn) async {
-        await txn.execute('''
-          CREATE TABLE IF NOT EXISTS devices_v22 (
-            id             TEXT PRIMARY KEY,
-            workspace_id   TEXT NOT NULL DEFAULT 'default',
-            name           TEXT NOT NULL DEFAULT '',
-            platform       TEXT DEFAULT '',
-            app_version    TEXT DEFAULT '',
-            last_seen_at   TEXT DEFAULT '',
-            last_sync_at   TEXT DEFAULT '',
-            pair_token     TEXT DEFAULT '',
-            pair_token_exp TEXT DEFAULT '',
-            auth_secret    TEXT DEFAULT '',
-            revoked_at     TEXT DEFAULT '',
-            expelled_at    TEXT DEFAULT '',
-            user_id        INTEGER,
-            paired_by      INTEGER,
-            is_paired      INTEGER NOT NULL DEFAULT 1,
-            is_owner       INTEGER NOT NULL DEFAULT 0,
-            created_at     TEXT NOT NULL,
-            updated_at     TEXT NOT NULL
-          )''');
-        await txn.execute('''
-          INSERT OR IGNORE INTO devices_v22
-            (id, workspace_id, name, platform, app_version, last_seen_at,
-             last_sync_at, pair_token, pair_token_exp, auth_secret,
-             revoked_at, expelled_at, user_id, paired_by, is_paired,
-             is_owner, created_at, updated_at)
-          SELECT id, workspace_id, name, COALESCE(platform,''),
-                 COALESCE(app_version,''), COALESCE(last_seen_at,''),
-                 COALESCE(last_sync_at,''), COALESCE(pair_token,''),
-                 COALESCE(pair_token_exp,''), COALESCE(auth_secret,''),
-                 COALESCE(revoked_at,''), COALESCE(expelled_at,''),
-                 user_id, paired_by, COALESCE(is_paired,1),
-                 COALESCE(is_owner,0), created_at, updated_at
-          FROM devices''');
-        await txn.execute('DROP TABLE devices');
-        await txn.execute('ALTER TABLE devices_v22 RENAME TO devices');
-      });
+      await db.execute('PRAGMA foreign_keys = OFF');
+      try {
+        await db.transaction((txn) async {
+          await txn.execute('''
+            CREATE TABLE IF NOT EXISTS devices_v22 (
+              id             TEXT PRIMARY KEY,
+              workspace_id   TEXT NOT NULL DEFAULT 'default',
+              name           TEXT NOT NULL DEFAULT '',
+              platform       TEXT DEFAULT '',
+              app_version    TEXT DEFAULT '',
+              last_seen_at   TEXT DEFAULT '',
+              last_sync_at   TEXT DEFAULT '',
+              pair_token     TEXT DEFAULT '',
+              pair_token_exp TEXT DEFAULT '',
+              auth_secret    TEXT DEFAULT '',
+              revoked_at     TEXT DEFAULT '',
+              expelled_at    TEXT DEFAULT '',
+              user_id        INTEGER,
+              paired_by      INTEGER,
+              is_paired      INTEGER NOT NULL DEFAULT 1,
+              is_owner       INTEGER NOT NULL DEFAULT 0,
+              created_at     TEXT NOT NULL,
+              updated_at     TEXT NOT NULL
+            )''');
+          await txn.execute('''
+            INSERT OR IGNORE INTO devices_v22
+              (id, workspace_id, name, platform, app_version, last_seen_at,
+               last_sync_at, pair_token, pair_token_exp, auth_secret,
+               revoked_at, expelled_at, user_id, paired_by, is_paired,
+               is_owner, created_at, updated_at)
+            SELECT id, workspace_id, name, COALESCE(platform,''),
+                   COALESCE(app_version,''), COALESCE(last_seen_at,''),
+                   COALESCE(last_sync_at,''), COALESCE(pair_token,''),
+                   COALESCE(pair_token_exp,''), COALESCE(auth_secret,''),
+                   COALESCE(revoked_at,''), COALESCE(expelled_at,''),
+                   user_id, paired_by, COALESCE(is_paired,1),
+                   COALESCE(is_owner,0), created_at, updated_at
+            FROM devices''');
+          await txn.execute('DROP TABLE devices');
+          await txn.execute('ALTER TABLE devices_v22 RENAME TO devices');
+        });
+      } finally {
+        await db.execute('PRAGMA foreign_keys = ON');
+      }
     }
     // مفاتيح LAN التاريخية في settings — لم يعد يقرؤها أحد.
     try {
@@ -2015,7 +2034,7 @@ class AppDatabase {
 
     // الأصناف التي بلا رقم فقط (التعبئة idempotent وتعمل على أي قاعدة).
     final rows = await db.rawQuery('''
-      SELECT i.id AS id
+      SELECT i.id AS id, COALESCE(i.workspace_id, 'default') AS ws_id
       FROM items i
       LEFT JOIN item_categories c ON c.id = i.category_id
       LEFT JOIN sections s ON s.id = COALESCE(i.section_id, c.section_id)
@@ -2025,18 +2044,30 @@ class AppDatabase {
                i.name, i.id
     ''');
     if (rows.isEmpty) return;
-    var next = await nextPlu(db);
+    final nextByWs = <String, int>{};
+    final batch = db.batch();
     for (final r in rows) {
-      await db.update('items', {'plu': next},
+      final wsId = ('${r['ws_id'] ?? defaultWorkspaceIdConst}').trim();
+      final effectiveWs = wsId.isEmpty ? defaultWorkspaceIdConst : wsId;
+      final next = nextByWs[effectiveWs] ??
+          await nextPlu(db, workspaceId: effectiveWs);
+      batch.update('items', {'plu': next},
           where: 'id = ?', whereArgs: [r['id']]);
-      next++;
+      nextByWs[effectiveWs] = next + 1;
     }
+    await batch.commit(noResult: true);
   }
 
-  /// أول رقم PLU متاح (MAX الحالي + 1) — لا يُعاد استخدام رقم محذوف أبداً.
-  static Future<int> nextPlu(Database db) async {
+  /// أول رقم PLU متاح (MAX الحالي + 1) مقيداً بـ workspace_id الفعّال — لا يُعاد استخدام رقم محذوف أبداً.
+  static Future<int> nextPlu(Database db, {String? workspaceId}) async {
     try {
-      final rows = await db.rawQuery('SELECT COALESCE(MAX(plu), 0) AS m FROM items');
+      final rawWs = (workspaceId ?? _activeWorkspaceId).trim();
+      final effectiveWs = rawWs.isEmpty ? defaultWorkspaceIdConst : rawWs;
+      final rows = await db.rawQuery(
+        "SELECT COALESCE(MAX(plu), 0) AS m FROM items "
+        "WHERE COALESCE(workspace_id, 'default') IN (?, ?)",
+        [effectiveWs, defaultWorkspaceIdConst],
+      );
       return ((rows.first['m'] ?? 0) as num).toInt() + 1;
     } catch (_) {
       return 1;

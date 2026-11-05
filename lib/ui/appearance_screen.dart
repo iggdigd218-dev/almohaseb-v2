@@ -6,6 +6,129 @@ import '../core/sfx.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
 
+class ThemeModeSelectorCard extends ConsumerWidget {
+  const ThemeModeSelectorCard({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final currentMode = ref.watch(themeModeProvider);
+    final primary = AppColors.primaryOf(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  currentMode == ThemeMode.dark
+                      ? Icons.dark_mode_rounded
+                      : (currentMode == ThemeMode.system
+                          ? Icons.brightness_auto_rounded
+                          : Icons.light_mode_rounded),
+                  color: primary,
+                  size: 21,
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'وضع المظهر (النهاري / الليلي)',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'يُحفظ اختيارك بشكل دائم، ولا يتأثر الوضع النهاري بإعدادات الجهاز الليلية.',
+              style: TextStyle(
+                fontSize: 12,
+                color: AppColors.text3Of(context),
+              ),
+            ),
+            const SizedBox(height: 8),
+            RadioListTile<ThemeMode>(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              value: ThemeMode.light,
+              groupValue: currentMode,
+              secondary: const Icon(
+                Icons.light_mode_rounded,
+                color: Color(0xFFD97706),
+              ),
+              title: const Text(
+                'الوضع النهاري (فاتح دائماً)',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
+              ),
+              subtitle: const Text(
+                'ثابت ومستقل تماماً عن إعدادات الجهاز',
+                style: TextStyle(fontSize: 11.5),
+              ),
+              onChanged: (v) async {
+                if (v == null) return;
+                Sfx.tap();
+                await saveAppThemeMode(ref, v);
+              },
+            ),
+            const Divider(height: 1),
+            RadioListTile<ThemeMode>(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              value: ThemeMode.dark,
+              groupValue: currentMode,
+              secondary: const Icon(
+                Icons.dark_mode_rounded,
+                color: Color(0xFF6366F1),
+              ),
+              title: const Text(
+                'الوضع الليلي (داكن دائماً)',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
+              ),
+              subtitle: const Text(
+                'مريح للعين في الإضاءة المنخفضة بشكل دائم',
+                style: TextStyle(fontSize: 11.5),
+              ),
+              onChanged: (v) async {
+                if (v == null) return;
+                Sfx.tap();
+                await saveAppThemeMode(ref, v);
+              },
+            ),
+            const Divider(height: 1),
+            RadioListTile<ThemeMode>(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              value: ThemeMode.system,
+              groupValue: currentMode,
+              secondary: Icon(
+                Icons.brightness_auto_rounded,
+                color: primary,
+              ),
+              title: const Text(
+                'حسب إعدادات الجهاز (تلقائي)',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
+              ),
+              subtitle: const Text(
+                'يتبع وضع النظام (نهاري أو ليلي) تلقائياً',
+                style: TextStyle(fontSize: 11.5),
+              ),
+              onChanged: (v) async {
+                if (v == null) return;
+                Sfx.tap();
+                await saveAppThemeMode(ref, v);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class AppearanceScreen extends ConsumerWidget {
   const AppearanceScreen({super.key});
 
@@ -17,6 +140,8 @@ class AppearanceScreen extends ConsumerWidget {
       body: ListView(
         padding: const EdgeInsets.all(14),
         children: [
+          const ThemeModeSelectorCard(),
+          const SizedBox(height: 12),
           Card(
             child: Column(
               children: [

@@ -97,10 +97,20 @@ class _AccountDetailScreenState extends ConsumerState<AccountDetailScreen> {
           final isRet = t.description.trim().startsWith('مرتجع ') ||
               t.category == 'مرتجع مبيعات' ||
               t.notes.contains('[ORIG_TX:');
-          if (!isRet && (t.type == OpType.revenue || t.type == OpType.debit)) {
+          // (دفعة التدقيق) حصر إجمالي المبيعات بفواتير المبيعات الفعلية:
+          // نقدي (revenue) أو آجل (debit) لغير المورد — مطابق لتعريف
+          // الفواتير في المستودع؛ إدخالات «عليه» على الموردين ليست مبيعات.
+          final isSale = !isRet &&
+              (t.type == OpType.revenue ||
+                  (t.type == OpType.debit &&
+                      t.accountKind != AccountKind.supplier));
+          if (isSale) {
             totalSales += t.amount;
           } else if (isRet) {
-            totalSales = (totalSales - t.amount).clamp(0.0, double.infinity);
+            // (دفعة التدقيق) المرتجعات تُجمع صافية داخل الحلقة ويُحصر
+            // الناتج مرة واحدة بعدها — الحصر داخل الحلقة كان يصفّر
+            // مبكراً ويخطئ مع مرتجع يسبق فاتورته في الترتيب.
+            totalSales -= t.amount;
           }
           final e = t.effectOn(accountId);
           if (e == null) continue;
@@ -110,6 +120,17 @@ class _AccountDetailScreenState extends ConsumerState<AccountDetailScreen> {
             totalCredit += e.abs();
           }
         }
+        // (دفعة التدقيق) الرصيد الافتتاحي جزء من كشف الحساب عند عملة
+        // الحساب: موجب ⇒ مدين (عليه)، سالب ⇒ دائن (له).
+        if (activeCur == a.currency && a.openingBalance != 0) {
+          if (a.openingBalance > 0) {
+            totalDebit += a.openingBalance;
+          } else {
+            totalCredit += a.openingBalance.abs();
+          }
+        }
+        // الحصر بعد اكتمال الجمع الصافي.
+        totalSales = totalSales.clamp(0.0, double.infinity);
 
         return Scaffold(
           appBar: AppBar(
@@ -509,9 +530,16 @@ class _TxTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final isCashSale = tx.type == OpType.revenue;
     final effect = tx.effectOn(accountId) ?? 0;
+    // (دفعة التدقيق) توحيد الألوان مع الملخص والكبسولات: «عليه»
+    // (موجب، مستحق لنا) أخضر و«له» (سالب، مستحق علينا) أحمر — كان
+    // معكوساً هنا بينما الملخص المجاور يستخدم الاتجاه الصحيح.
     final color = isCashSale
         ? AppColors.green
-        : (effect > 0 ? AppColors.red : AppColors.green);
+        : (effect > 0
+            ? AppColors.green
+            : (effect < 0
+                ? AppColors.red
+                : Theme.of(context).hintColor));
 
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 13, vertical: 2),

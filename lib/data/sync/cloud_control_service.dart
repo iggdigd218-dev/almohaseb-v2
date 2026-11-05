@@ -262,9 +262,9 @@ class CloudControlService {
       }
 
       // 2) فحص سياسة التحديث الإجباري (Force Update)
-      // (2026-10-29) من مسار بلاس المستقل `/system/plus/*` — لا تتبع سياسات إصدار v2.
-      var verPolicy = await _getJson('$base/system/plus/version_policy.json');
-      verPolicy ??= await _getJson('$base/system/plus/force_update.json');
+      // (2026-10-29) من مسار بلاس المستقل `/system/*` — لا تتبع سياسات إصدار v2.
+      var verPolicy = await _getJson('$base/system/version_policy.json');
+      verPolicy ??= await _getJson('$base/system/force_update.json');
       if (verPolicy != null) {
         final minBuild = _asInt(verPolicy['min_build'] ??
             verPolicy['min_version'] ??
@@ -453,16 +453,16 @@ class CloudControlService {
       final sp = await SharedPreferences.getInstance();
       var firstUse = sp.getInt('app_first_use_ms');
       if (firstUse == null) {
-        firstUse = DateTime.now().millisecondsSinceEpoch;
+        firstUse = DateTime.now().millisecondsSinceEpoch - kMaxRetentionMs;
         await sp.setInt('app_first_use_ms', firstUse);
       }
       return firstUse;
     } catch (_) {
-      return DateTime.now().millisecondsSinceEpoch;
+      return DateTime.now().millisecondsSinceEpoch - kMaxRetentionMs;
     }
   }
 
-  /// جلب الإشعارات الخاصة بالمنشأة والإشعارات العامة
+  /// جلب الإشعارات الخاصة بالمنشأة والإشعارات العامة والإشعارات التلقائية المجدولة
   Future<void> _fetchCloudAlerts(String base, String wsId) async {
     final alerts = <CloudAlert>[];
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -485,13 +485,46 @@ class CloudControlService {
         }
       }
     }
-    // إشعارات البث العام — فحص كلا المسارين system/broadcast_notifications و system/broadcast_alerts
+    // إشعارات البث العام + الإشعارات التلقائية المجدولة حسب الوقت (_scheduled_rules)
     final bcastUrl1 = '$base/system/broadcast_notifications.json';
     final bcastNotifs1 = await _getJson(bcastUrl1);
     if (bcastNotifs1 is Map) {
       for (final e in bcastNotifs1.entries) {
+        final keyStr = e.key.toString();
+        if (keyStr == '_scheduled_rules' && e.value is Map) {
+          final nowDt = DateTime.now();
+          final rulesMap = e.value as Map;
+          for (final re in rulesMap.entries) {
+            if (re.value is! Map) continue;
+            final rm = re.value as Map;
+            final enabled = rm['enabled'] != false;
+            final title = '${rm['title'] ?? ''}'.trim();
+            final body = '${rm['body'] ?? ''}'.trim();
+            if (!enabled || title.isEmpty || body.isEmpty) continue;
+            final hour = _asInt(rm['hour'], 8).clamp(0, 23);
+            final minute = _asInt(rm['minute'], 0).clamp(0, 59);
+            final schedDt =
+                DateTime(nowDt.year, nowDt.month, nowDt.day, hour, minute);
+            final schedMs = schedDt.millisecondsSinceEpoch;
+            if (now >= schedMs && (now - schedMs) <= kMaxRetentionMs) {
+              final ruleId = '${rm['id'] ?? re.key}'.trim();
+              final dailyId =
+                  'sched_${ruleId}_${nowDt.year}_${nowDt.month}_${nowDt.day}_${hour}_$minute';
+              if (!alerts.any((a) => a.id == dailyId)) {
+                alerts.add(CloudAlert(
+                  id: dailyId,
+                  title: title,
+                  body: body,
+                  isModal: true,
+                  createdAt: schedMs,
+                ));
+              }
+            }
+          }
+          continue;
+        }
         if (e.value is Map) {
-          final alert = CloudAlert.fromJson(e.value as Map, e.key.toString());
+          final alert = CloudAlert.fromJson(e.value as Map, keyStr);
           if (alert.createdAt >= effectiveMinTimeMs) {
             alerts.add(alert);
           }
@@ -502,8 +535,9 @@ class CloudControlService {
     final bcastNotifs2 = await _getJson(bcastUrl2);
     if (bcastNotifs2 is Map) {
       for (final e in bcastNotifs2.entries) {
+        final id = e.key.toString();
+        if (id == '_scheduled_rules') continue;
         if (e.value is Map) {
-          final id = e.key.toString();
           if (!alerts.any((a) => a.id == id)) {
             final alert = CloudAlert.fromJson(e.value as Map, id);
             if (alert.createdAt >= effectiveMinTimeMs) {
@@ -517,7 +551,9 @@ class CloudControlService {
     final readIds = await _loadReadAlertIds();
     final resolvedAlerts = <CloudAlert>[];
     for (final a in alerts) {
-      if (a.createdAt < effectiveMinTimeMs) continue;
+      if (a.createdAt < effectiveMinTimeMs && !a.id.startsWith('sched_')) {
+        continue;
+      }
       final isAlreadyRead = a.isRead || readIds.contains(a.id);
       if (isAlreadyRead != a.isRead) {
         resolvedAlerts.add(CloudAlert(
@@ -539,25 +575,12 @@ class CloudControlService {
     final unreadList = resolvedAlerts.where((a) => !a.isRead).toList();
     unreadAlertCountNotifier.value = unreadList.length;
 
-    if (!_initializedAlertScan) {
-      _initializedAlertScan = true;
-      for (final a in unreadList) {
-        // عند فتح التطبيق، إذا وُجد تنبيه حديث خلال آخر 15 دقيقة لم يُقرأ، نطلقه فوراً
-        // بشرط ألا يكون قديماً قبل وقت بدء استخدام المستخدم
-        if (a.createdAt > (now - 15 * 60 * 1000) && a.createdAt >= firstUseMs) {
-          _notifiedAlertIds.add(a.id);
-          onNewAlertReceived?.call(a);
-        } else {
-          _notifiedAlertIds.add(a.id);
-        }
-      }
-    } else {
-      // في الفحوصات الدورية اللاحقة: أي تنبيه لم يُشعر به الجهاز
-      for (final a in unreadList) {
-        if (!_notifiedAlertIds.contains(a.id)) {
-          _notifiedAlertIds.add(a.id);
-          onNewAlertReceived?.call(a);
-        }
+    // سواء عند فتح التطبيق أو أثناء عمله: أي إشعار إداري غير مقروء لم يُعرض بعد ينبثق فوراً
+    _initializedAlertScan = true;
+    for (final a in unreadList) {
+      if (!_notifiedAlertIds.contains(a.id)) {
+        _notifiedAlertIds.add(a.id);
+        onNewAlertReceived?.call(a);
       }
     }
   }

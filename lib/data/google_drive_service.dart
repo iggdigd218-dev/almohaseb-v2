@@ -384,6 +384,9 @@ class GoogleDriveService {
         }),
         headers: headers,
       );
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        _ensureSuccess(response, 'استعراض النسخ الاحتياطية (appDataFolder)');
+      }
       if (response.statusCode >= 200 && response.statusCode < 300) {
         final decoded = jsonDecode(response.body);
         if (decoded is Map && decoded['files'] is List) {
@@ -397,6 +400,8 @@ class GoogleDriveService {
           }
         }
       }
+    } on GoogleDriveException {
+      rethrow;
     } catch (_) {}
 
     // 2. البحث في المساحة العادية لـ Drive
@@ -410,6 +415,9 @@ class GoogleDriveService {
         }),
         headers: headers,
       );
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        _ensureSuccess(response, 'استعراض النسخ الاحتياطية');
+      }
       if (response.statusCode >= 200 && response.statusCode < 300) {
         final decoded = jsonDecode(response.body);
         if (decoded is Map && decoded['files'] is List) {
@@ -423,6 +431,8 @@ class GoogleDriveService {
           }
         }
       }
+    } on GoogleDriveException {
+      rethrow;
     } catch (_) {}
 
     final sorted = byId.values.toList()
@@ -450,6 +460,9 @@ class GoogleDriveService {
         }),
         headers: headers,
       );
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        _ensureSuccess(response, 'البحث عن النسخة الاحتياطية (appDataFolder)');
+      }
       if (response.statusCode >= 200 && response.statusCode < 300) {
         final decoded = jsonDecode(response.body);
         if (decoded is Map &&
@@ -461,6 +474,8 @@ class GoogleDriveService {
           }
         }
       }
+    } on GoogleDriveException {
+      rethrow;
     } catch (_) {}
 
     // 2. البحث العام في المساحة العادية للـ Drive
@@ -474,6 +489,9 @@ class GoogleDriveService {
         }),
         headers: headers,
       );
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        _ensureSuccess(response, 'البحث عن النسخة الاحتياطية');
+      }
       if (response.statusCode >= 200 && response.statusCode < 300) {
         final decoded = jsonDecode(response.body);
         if (decoded is Map &&
@@ -485,6 +503,8 @@ class GoogleDriveService {
           }
         }
       }
+    } on GoogleDriveException {
+      rethrow;
     } catch (_) {}
 
     return null;

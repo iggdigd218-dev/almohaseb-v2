@@ -367,40 +367,9 @@ class AccountWorkspace {
       }
     } catch (_) {}
 
-    // 3) فحص فهرس الاشتراكات السحابي (/workspaces/_registry/subscriptions_index) لضمان عدم تكرار الرقم في أي منشأة سابقة
-    final root = _trimSlashes(backendUrl);
-    try {
-      final subRes = await _authedGet(
-        '$root/workspaces/_registry/subscriptions_index.json',
-        timeout: const Duration(seconds: 10),
-      );
-      if (subRes.statusCode >= 200 && subRes.statusCode < 300) {
-        final body = utf8.decode(subRes.bodyBytes).trim();
-        if (body.isNotEmpty && body != 'null') {
-          final decoded = jsonDecode(body);
-          if (decoded is Map) {
-            for (final entry in decoded.entries) {
-              final wsKey = '${entry.key}'.trim();
-              if (wsKey.isEmpty ||
-                  wsKey == 'default' ||
-                  wsKey.startsWith('_') ||
-                  wsKey == cleanExclude) {
-                continue;
-              }
-              final val = entry.value;
-              if (val is Map) {
-                final candPhone = normalizePhone(
-                  '${val['phone'] ?? val['owner_phone'] ?? val['whatsapp'] ?? ''}',
-                );
-                if (candPhone.isNotEmpty && candPhone == norm) {
-                  return wsKey;
-                }
-              }
-            }
-          }
-        }
-      }
-    } catch (_) {}
+    // (تدقيق 2026-11-04) أُلغي سحب عقدة subscriptions_index.json الكاملة —
+    // فهرس phones_index الموحد (بمفتاح SHA-256) هو المرجع الوحيد للهواتف؛
+    // حفاظاً على الخصوصية والباندويث.
 
     return '';
   }
@@ -773,13 +742,12 @@ class AccountWorkspace {
 
     Future<CloudWorkspaceResolution?> checkPhonesIndex() async {
       if (cleanPhone.length < 7) return null;
-      final normPhone = cleanPhone.startsWith('00')
-          ? '+${cleanPhone.substring(2)}'
-          : (cleanPhone.startsWith('+') ? cleanPhone : '+$cleanPhone');
-      final phoneKey = normPhone.replaceAll(RegExp(r'[.#\$\[\]/]'), '_');
+      // (تدقيق 2026-11-04) الاتحاد مع مسار الفهرس الفعلي: bindPhoneWorkspace
+      // يحفظ الرقم بمفتاح SHA-256 عبر _phoneIndexPath — البحث بالرقم الخام
+      // كان يفوّت كل روابط الهواتف القائمة في السحابة.
       try {
         final res = await _authedGet(
-          '$root/workspaces/_registry/phones_index/$phoneKey.json',
+          _phoneIndexPath(root, cleanPhone),
           timeout: const Duration(seconds: 7),
         );
         if (res.statusCode >= 200 && res.statusCode < 300) {
@@ -883,7 +851,9 @@ class AccountWorkspace {
         }
       }
 
-      await _authedPut(
+      // (تدقيق 2026-11-04) PATCH بدل PUT: دمج الحقول دون مسح ما كتبته تدفقات
+      // أخرى (الاشتراك/الحالة/الملكية) في نفس العقدة.
+      await _authedPatch(
         _emailIndexPath(backendUrl, clean),
         body: jsonEncode({
           'workspaceId': targetWs,
@@ -894,7 +864,8 @@ class AccountWorkspace {
       );
 
       final root = backendUrl.replaceAll(RegExp(r'/+$'), '');
-      await _authedPut(
+      // meta.json بالـPATCH حصراً — PUT كان يمحو حقول الاشتراك والحالة كاملة.
+      await _authedPatch(
         '$root/workspaces/${Uri.encodeComponent(targetWs)}/meta.json',
         body: jsonEncode({
           'id': targetWs,
@@ -906,7 +877,7 @@ class AccountWorkspace {
 
       // تسجيل المنشأة أيضاً في سجل منشآت المستخدم لتمكينه من التبديل بين منشآته بسهولة
       try {
-        await _authedPut(
+        await _authedPatch(
           '$root/workspaces/_registry/user_workspaces/${emailToKey(clean)}/${Uri.encodeComponent(targetWs)}.json',
           body: jsonEncode({
             'workspaceId': targetWs,
@@ -961,7 +932,8 @@ class AccountWorkspace {
       }
       if (uid.isNotEmpty) {
         try {
-          await _authedPut(
+          // (تدقيق 2026-11-04) PATCH: الحفاظ على الحقول المرافقة (الهاتف/الوسوم).
+          await _authedPatch(
             _indexPath(backendUrl, uid),
             body: jsonEncode({
               'workspaceId': workspaceId,
@@ -1644,6 +1616,18 @@ class AccountWorkspace {
       }
     }
     if (backupData == null) return AccountLinkOutcome.switchDataLost;
+    // (تدقيق 2026-11-04) إعادة فتح ملف قاعدة بيانات المنشأة الأصلية قبل
+    // الاستعادة: مسار التبديل فتح ملف المنشأة الجديدة وبقي فعّالاً، فكانت
+    // استعادة النسخة تكتب بيانات المنشأة القديمة داخل ملف المنشأة الجديدة.
+    try {
+      if (!repo.hasCustomDatabaseProvider) {
+        await AppDatabase.instance.openForWorkspace(fromWorkspaceId);
+      }
+      await repo.setSetting('sync.workspaceId', fromWorkspaceId);
+      repo.debugSetWorkspaceId(fromWorkspaceId);
+    } catch (e) {
+      debugPrint('AccountWorkspace: تعذّر إعادة فتح قاعدة المنشأة الأصلية: $e');
+    }
     try {
       await repo.importAll(backupData, allowCrossFingerprint: true);
       return AccountLinkOutcome.switchRestored;
@@ -2501,7 +2485,7 @@ class AccountWorkspace {
       if (isDraftPrev && w.workspaceId == prevWsId) return false;
       return w.workspaceId.isNotEmpty && w.workspaceId != 'default';
     }).toList();
-    if (nonDraftLocalEmailMatches.isNotEmpty) {
+    if (!isAdditionalWorkspace && nonDraftLocalEmailMatches.isNotEmpty) {
       final existingName = nonDraftLocalEmailMatches.first.storeName;
       throw StateError(
         'البريد الإلكتروني ($email) مسجل مسبقاً لمنشأة قائمة'
@@ -2510,7 +2494,7 @@ class AccountWorkspace {
       );
     }
 
-    if (backendUrl.isNotEmpty) {
+    if (backendUrl.isNotEmpty && !isAdditionalWorkspace) {
       final cloudRes = await resolveWorkspaceInCloud(
         backendUrl: backendUrl,
         email: email,
@@ -2536,7 +2520,8 @@ class AccountWorkspace {
 
     // 0.2) منع تكرار رقم الهاتف في منشأتين مختلفتين
     final normPhone = normalizePhone(phone);
-    if (normPhone.length >= 7) {
+    // المنشأة الإضافية قد تشارك المالك نفسه هاتفه وبريده — لا تُفحص التكرار.
+    if (normPhone.length >= 7 && !isAdditionalWorkspace) {
       final existingPhoneWs = await lookupByPhone(
         backendUrl: backendUrl,
         phone: normPhone,
@@ -2698,17 +2683,38 @@ class AccountWorkspace {
         'defaultCurrency': cleanCurrency,
         'subscriptionStatus': 'unactivated',
       };
-      try {
-        await bind(
-          backendUrl: backendUrl,
-          uid: uid,
-          workspaceId: newWsId,
-          email: email,
-          phone: cleanPhone,
-          extraMeta: extraMeta,
-          force: true,
-        );
-      } catch (_) {}
+      if (isAdditionalWorkspace) {
+        // (تدقيق بند 12) منشأة إضافية معزولة: تُسجَّل في user_workspaces فقط
+        // دون طمس المنشأة الأساسية في emails_index أو فهرس uid — فتبقى
+        // المنشأة الأساسية وجهة الدخول الافتراضية للبريد نفسه.
+        try {
+          final regRoot = backendUrl.replaceAll(RegExp(r'/+$'), '');
+          await _authedPatch(
+            '$regRoot/workspaces/_registry/user_workspaces/${emailToKey(email)}/${Uri.encodeComponent(newWsId)}.json',
+            body: jsonEncode({
+              'workspaceId': newWsId,
+              'ownerEmail': email,
+              'role': 'owner',
+              'isAdditional': true,
+              ...extraMeta,
+              'updated_at': {'.sv': 'timestamp'},
+            }),
+            timeout: const Duration(seconds: 10),
+          );
+        } catch (_) {}
+      } else {
+        try {
+          await bind(
+            backendUrl: backendUrl,
+            uid: uid,
+            workspaceId: newWsId,
+            email: email,
+            phone: cleanPhone,
+            extraMeta: extraMeta,
+            force: true,
+          );
+        } catch (_) {}
+      }
       try {
         await syncMemberDeviceInWorkspace(
           repo,

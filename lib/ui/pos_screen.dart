@@ -698,45 +698,55 @@ class _PosScreenState extends ConsumerState<PosScreen>
         ref.watch(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
     final cur = currencies.first;
     final held = ref.watch(heldInvoicesProvider);
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final cartPaneWidth = (screenWidth * 0.23).clamp(275.0, 315.0);
     return Scaffold(
       body: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(10),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // ---- اللوح الأيمن في RTL (الأول): الكتالوج 60% ----
+            // ---- اللوح الأيمن في RTL (الأول): الكتالوج يأخذ المساحة الكبرى للأصناف ----
             Expanded(
-              flex: 6,
               child: DesktopPanel(
                 padding: EdgeInsets.zero,
                 child: Column(
                   children: [
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+                      padding: const EdgeInsets.fromLTRB(10, 4, 10, 0),
                       child: Row(
                         children: [
-                          const Icon(Icons.point_of_sale_outlined, size: 20),
-                          const SizedBox(width: 8),
+                          const Icon(Icons.point_of_sale_outlined, size: 19),
+                          const SizedBox(width: 6),
                           Text('نقطة البيع',
                               style:
                                   Theme.of(context).textTheme.titleMedium),
                           const Spacer(),
                           TextButton.icon(
+                            style: TextButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                            ),
                             onPressed: _quickHoldAndNewBill,
                             onLongPress: _promptHoldInvoice,
-                            icon: const Icon(Icons.post_add_rounded, size: 18),
+                            icon: const Icon(Icons.post_add_rounded, size: 17),
                             label: Text(_cart.isNotEmpty
                                 ? 'تعليق / جديد'
                                 : 'فاتورة جديدة'),
                           ),
                           if (held.isNotEmpty)
                             TextButton.icon(
+                              style: TextButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                              ),
                               onPressed: () => _showHeldSheet(),
                               icon: const Icon(Icons.pause_circle_outline,
-                                  size: 18),
+                                  size: 17),
                               label: Text('معلّقة (${held.length})'),
                             ),
                           TextButton.icon(
+                            style: TextButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                            ),
                             onPressed: () => showModalBottomSheet(
                               context: context,
                               isScrollControlled: true,
@@ -747,7 +757,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                               ),
                             ),
                             icon: const Icon(Icons.history_edu_outlined,
-                                size: 18),
+                                size: 17),
                             label: const Text('سجل المبيعات'),
                           ),
                           Consumer(
@@ -763,9 +773,12 @@ class _PosScreenState extends ConsumerState<PosScreen>
                                           false);
                               if (!canViewSales) return const SizedBox.shrink();
                               return TextButton.icon(
+                                style: TextButton.styleFrom(
+                                  visualDensity: VisualDensity.compact,
+                                ),
                                 onPressed: _openPosSalesSummarySheet,
                                 icon: const Icon(Icons.bar_chart_rounded,
-                                    size: 18),
+                                    size: 17),
                                 label: const Text('ملخص المبيعات'),
                               );
                             },
@@ -778,10 +791,10 @@ class _PosScreenState extends ConsumerState<PosScreen>
                 ),
               ),
             ),
-            const SizedBox(width: 12),
-            // ---- اللوح الأيسر: الفاتورة الحية 40% ----
-            Expanded(
-              flex: 4,
+            const SizedBox(width: 10),
+            // ---- اللوح الأيسر: الفاتورة الحية بعرض مدمج ومختصر لترك مساحة أكبر للأصناف ----
+            SizedBox(
+              width: cartPaneWidth,
               child: DesktopPanel(
                 padding: EdgeInsets.zero,
                 child: _buildDesktopInvoicePane(cur),
@@ -1229,9 +1242,9 @@ class _PosScreenState extends ConsumerState<PosScreen>
                   },
                 ),
         ),
-        // الملخص المالي الحي.
+        // الملخص المالي الحي (مدمج وأنيق ليناسب العرض المقلّص للسلة).
         Container(
-          padding: const EdgeInsets.all(14),
+          padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
             border: BorderDirectional(
               top: BorderSide(
@@ -1246,17 +1259,19 @@ class _PosScreenState extends ConsumerState<PosScreen>
             children: [
               _summaryRow('الإجمالي', _subtotal, cur),
               if (_discount > 0) _summaryRow('الخصم', -_discount, cur),
-              const SizedBox(height: 4),
+              const SizedBox(height: 2),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text('الصافي',
-                      style: Theme.of(context).textTheme.titleLarge),
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w800,
+                          )),
                   Text(
                     '${Fmt.money(_netTotal)} ${cur.symbol}',
                     style: Theme.of(context)
                         .textTheme
-                        .headlineSmall
+                        .titleLarge
                         ?.copyWith(
                           fontWeight: FontWeight.w900,
                           color: AppColors.primaryOf(context),
@@ -1264,63 +1279,76 @@ class _PosScreenState extends ConsumerState<PosScreen>
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
-              // أزرار تسوية عريضة + تلميحات الاختصارات.
+              const SizedBox(height: 8),
+              // أزرار تسوية مدمجة + تلميحات الاختصارات.
               Row(
                 children: [
                   Expanded(
                     child: FilledButton.icon(
                       style: FilledButton.styleFrom(
                         padding:
-                            const EdgeInsets.symmetric(vertical: 16),
+                            const EdgeInsets.symmetric(vertical: 11, horizontal: 6),
                       ),
                       onPressed: _saving || _cart.isEmpty
                           ? null
                           : () => _quickSettle(_PosPayment.cash),
-                      icon: const Icon(Icons.payments_outlined),
-                      label: const Text('دفع نقدي (F1)'),
+                      icon: const Icon(Icons.payments_outlined, size: 17),
+                      label: const FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text('دفع نقدي (F1)', style: TextStyle(fontSize: 12)),
+                      ),
                     ),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 6),
                   Expanded(
                     child: FilledButton.tonalIcon(
                       style: FilledButton.styleFrom(
                         padding:
-                            const EdgeInsets.symmetric(vertical: 16),
+                            const EdgeInsets.symmetric(vertical: 11, horizontal: 6),
                       ),
                       onPressed: _saving || _cart.isEmpty
                           ? null
                           : () => _quickSettle(_PosPayment.credit),
-                      icon: const Icon(Icons.schedule_outlined),
-                      label: const Text('آجل (F2)'),
+                      icon: const Icon(Icons.schedule_outlined, size: 17),
+                      label: const FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text('آجل (F2)', style: TextStyle(fontSize: 12)),
+                      ),
                     ),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 6),
                   IconButton.filledTonal(
                     tooltip: 'تعليق الفاتورة (F12)',
                     style: IconButton.styleFrom(
-                      padding: const EdgeInsets.all(15),
+                      padding: const EdgeInsets.all(10),
                     ),
-                    icon: const Icon(Icons.pause_circle_outline_rounded, size: 22),
+                    icon: const Icon(Icons.pause_circle_outline_rounded, size: 20),
                     onPressed: _saving || _cart.isEmpty
                         ? null
                         : _promptHoldInvoice,
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
               OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+                  visualDensity: VisualDensity.compact,
+                ),
                 onPressed:
                     _saving || _cart.isEmpty ? null : _openCheckoutSheet,
-                icon: const Icon(Icons.tune),
-                label: const Text('خيارات الدفع الكاملة (خصم/جزئي)'),
+                icon: const Icon(Icons.tune, size: 16),
+                label: const FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text('خيارات الدفع الكاملة (خصم/جزئي)', style: TextStyle(fontSize: 11.5)),
+                ),
               ),
-              const SizedBox(height: 6),
+              const SizedBox(height: 4),
               Text(
                 'F3 بحث • F12 تعليق الفاتورة • Esc إفراغ',
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                    fontSize: 11, color: AppColors.text3Of(context)),
+                    fontSize: 10.5, color: AppColors.text3Of(context)),
               ),
             ],
           ),
@@ -1526,7 +1554,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                     ),
             ),
 
-            // 4) شريط الفئات الأفقي التابع للقسم النشط
+            // 4) شريط الفئات الأفقي التابع للقسم النشط (الضغط على «عرض الكل» يفتح لوحة جميع الفئات)
             if (!_atSectionsGate)
               PosCategoryStrip(
                 categories: sectionCategories,
@@ -1536,7 +1564,6 @@ class _PosScreenState extends ConsumerState<PosScreen>
                 itemCountOf: (cat) =>
                     _countCategoryItems(cat, allItems, categories),
                 onPick: (cid) => setState(() => _selectedCategoryId = cid),
-                onShowAll: () => setState(() => _selectedCategoryId = null),
               ),
           ],
 
@@ -4163,18 +4190,31 @@ class _PosHistoryTabState extends ConsumerState<_PosHistoryTab> {
                 );
               }
 
-              var totalSales = 0.0;
-              var cashSales = 0.0;
-              var creditSales = 0.0;
+              // (دفعة الواجهات) الفواتير المعروضة قد تحمل عملات مختلفة، وكان
+              // الجمع يخلطها ثم يسمّي الناتج بعملة أحدث فاتورة — رقم لا معنى له.
+              // الآن: العمود الرئيسي بعملة أحدث فاتورة، وبقية العملات مفصّلة.
               final primaryCur = posTxs.first.currency;
+              final salesByCur = <String, double>{};
+              final cashByCur = <String, double>{};
+              final creditByCur = <String, double>{};
               for (final t in posTxs) {
-                totalSales += t.amount;
+                salesByCur[t.currency] =
+                    (salesByCur[t.currency] ?? 0) + t.amount;
                 if (t.type == OpType.revenue) {
-                  cashSales += t.amount;
+                  cashByCur[t.currency] =
+                      (cashByCur[t.currency] ?? 0) + t.amount;
                 } else {
-                  creditSales += t.amount;
+                  creditByCur[t.currency] =
+                      (creditByCur[t.currency] ?? 0) + t.amount;
                 }
               }
+              final totalSales = salesByCur[primaryCur] ?? 0.0;
+              final cashSales = cashByCur[primaryCur] ?? 0.0;
+              final creditSales = creditByCur[primaryCur] ?? 0.0;
+              final otherCurrencies = salesByCur.entries
+                  .where((e) => e.key != primaryCur && e.value != 0)
+                  .map((e) => '${Fmt.money(e.value)} ${e.key}')
+                  .toList();
 
               final perms =
                   ref.watch(effectivePermissionsProvider).valueOrNull;
@@ -4229,6 +4269,15 @@ class _PosHistoryTabState extends ConsumerState<_PosHistoryTab> {
                                     color: AppColors.text3Of(context),
                                   ),
                                 ),
+                                if (otherCurrencies.isNotEmpty)
+                                  Text(
+                                    'عملات أخرى: ${otherCurrencies.join(' • ')}',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      color: AppColors.text3Of(context),
+                                    ),
+                                  ),
                               ],
                             ),
                           ),

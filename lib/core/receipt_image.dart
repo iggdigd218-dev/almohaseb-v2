@@ -95,7 +95,8 @@ class ReceiptData {
         title: tx.type == OpType.revenue
             ? 'فاتورة نقدية مدفوعة'
             : (tx.type == OpType.debit && items.isNotEmpty
-                ? (tx.notes.contains('المبلغ المدفوع:')
+                ? ((tx.notes.contains('المبلغ المدفوع') ||
+                        tx.notes.contains('المبلغ المتبقي'))
                     ? 'فاتورة مبيعات (دفع جزئي)'
                     : 'فاتورة مبيع آجل')
                 : tx.type.label),
@@ -175,18 +176,24 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   const cardW = w - outerPad * 2;
   const pad = outerPad + 32.0; // 46.0 من حافة الصورة
 
-  // استخراج المبلغ المدفوع والمتبقي في حال البيع الجزئي
+  // استخراج المبلغ المدفوع والمتبقي في حال البيع الجزئي بجميع الصيغ المعتمدة
   String? paidVal;
   String? remainVal;
   final extraNotes = <String>[];
+  final paidRegex = RegExp(r'^المبلغ المدفوع(?:\s*مقدماً)?\s*:\s*(.+)$');
+  final remainRegex = RegExp(
+    r'^(?:المبلغ\s+)?المتبقي(?:\s*\(آجل\)|\s*آجل)?\s*:\s*(.+)$',
+  );
   for (final l in d.notes.split('\n')) {
     final t = l.trim();
     if (t.isEmpty) continue;
     if (t.startsWith('[ORIG_TX:')) continue;
-    if (t.startsWith('المبلغ المدفوع:')) {
-      paidVal = t.substring('المبلغ المدفوع:'.length).trim();
-    } else if (t.startsWith('المبلغ المتبقي:')) {
-      remainVal = t.substring('المبلغ المتبقي:'.length).trim();
+    final paidMatch = paidRegex.firstMatch(t);
+    final remainMatch = remainRegex.firstMatch(t);
+    if (paidMatch != null) {
+      paidVal = paidMatch.group(1)?.trim();
+    } else if (remainMatch != null) {
+      remainVal = remainMatch.group(1)?.trim();
     } else {
       extraNotes.add(t);
     }
@@ -210,11 +217,15 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     } catch (_) {}
   }
   if (logoBytes != null && logoBytes.isNotEmpty) {
+    ui.Codec? codec;
     try {
-      final codec = await ui.instantiateImageCodec(logoBytes);
-      logo = (await codec.getNextFrame()).image;
+      codec = await ui.instantiateImageCodec(logoBytes);
+      final frame = await codec.getNextFrame();
+      logo = frame.image;
     } catch (_) {
       // شعار غير صالح لا يمنع إنشاء السند؛ نتابع من دون صورة.
+    } finally {
+      codec?.dispose();
     }
   }
 
@@ -1113,12 +1124,35 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   );
 
   final picture = recorder.endRecording();
-  final img = await picture.toImage(w.toInt(), height.ceil());
-  final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
-  final data = bytes!.buffer.asUint8List();
+  ui.Image? img;
+  late final Uint8List data;
+  try {
+    img = await picture.toImage(w.toInt(), height.ceil());
+    final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
+    data = bytes!.buffer.asUint8List();
+  } finally {
+    img?.dispose();
+    picture.dispose();
+    logo?.dispose();
+  }
 
   final dir = await getTemporaryDirectory();
   final shared = Directory('${dir.path}/receipts')..createSync(recursive: true);
+  // تنظيف تلقائي لملفات الإيصالات المؤقتة الأقدم من 24 ساعة لمنع تضخم التخزين
+  try {
+    final cutoff = DateTime.now().subtract(const Duration(hours: 24));
+    for (final entity in shared.listSync(followLinks: false)) {
+      if (entity is File) {
+        try {
+          final stat = entity.statSync();
+          if (stat.modified.isBefore(cutoff)) {
+            entity.deleteSync();
+          }
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+
   final stamp = DateTime.now().millisecondsSinceEpoch;
   final file = File('${shared.path}/receipt-$stamp.png');
   await file.writeAsBytes(data, flush: true);

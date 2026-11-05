@@ -68,9 +68,11 @@ class DeviceCard extends StatelessWidget {
     final lastSeenDt = DateTime.tryParse(lastSeen);
     final staleForMonth = lastSeenDt != null &&
         DateTime.now().difference(lastSeenDt) > const Duration(days: 30);
-    // (دفعة 56) مؤشر الاتصال السحابي: ظهور خلال آخر 3 دقائق = متصل.
+    // (دفعة 56) مؤشر الاتصال السحابي: ظهور خلال آخر 5 دقائق = متصل.
+    // (دفعة الواجهات) رُفع التسامح من 3 إلى 5 دقائق: فروق التوقيت البسيطة
+    // بين الأجهزة وتأخر نبضة الظهور كانت تُظهر أعضاء متصلين كغائبين.
     final cloudOnline = lastSeenDt != null &&
-        DateTime.now().difference(lastSeenDt) < const Duration(minutes: 3);
+        DateTime.now().difference(lastSeenDt) < const Duration(minutes: 5);
     // دور الجهاز الفعلي (شارة ملونة عالية التباين).
     final role = isOwnerDevice
         ? UserRole.admin
@@ -583,6 +585,10 @@ Future<void> showDevicePermissionsDialog(
                   await repo.setDevicePermissions(
                       device['id'] as String, role, perms);
                   await engine.broadcastRosterChange();
+                  // (دفعة التدقيق) تحديث المزودات فوراً — كان الحوار يغلق
+                  // دون bump فتبقى الأدوار/الصلاحيات المعروضة قديمة حتى
+                  // إعادة الدخول للشاشة.
+                  bump(ref);
                   if (ctx.mounted) Navigator.pop(ctx);
                   Sfx.success();
                 } catch (e) {

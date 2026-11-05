@@ -567,6 +567,13 @@ class CloudFirebaseTransport implements SyncTransport {
 
       final pendingSelfRevokeOps = <SyncOperation>[];
 
+      // (تصويب معماري — دفعة التدقيق) التحقق الشبكي لعمليات email_takeover
+      // يتم هنا خارج معاملة SQLite: نتائج accounts:lookup تُحضَّر سلفاً
+      // وتُمرَّر للمعاملة جاهزة، فتُفحص داخلها بصورة متزامنة وفورية —
+      // لا يُحتجز قفل قاعدة البيانات بانتظار الشبكة (كان يصل إلى 12ث).
+      final preverifiedTakeoverIdentities =
+          await _preverifyTakeoverIdentities(entries);
+
       await _setForeignKeys(false);
       try {
         const microBatchSize = 40;
@@ -611,7 +618,9 @@ class CloudFirebaseTransport implements SyncTransport {
                   prevOwnerBeforeOp = '${curOwnQ.first['id'] ?? ''}';
                 }
               }
-              final ok = await repo.applyRemoteOperation(txn, op, r);
+              final ok = await repo.applyRemoteOperation(txn, op, r,
+                  preverifiedTakeoverIdentities:
+                      preverifiedTakeoverIdentities);
               if (ok) applied++;
               if (ok &&
                   op.entityType == EntityKind.message &&
@@ -1006,6 +1015,42 @@ class CloudFirebaseTransport implements SyncTransport {
     _sseClient = null;
   }
 
+  /// (تصويب معماري — دفعة التدقيق) تحضير هويات email_takeover الموثقة
+  /// قبل فتح معاملات السحب: لكل عملية ownershipTransfer بحمولة
+  /// email_takeover وتوكن ثلاثي الأجزاء، تُستعلم هوية التوكن من Firebase
+  /// خارج القفل، وتُخزَّن النتيجة (أو null للتوكن التالف/الفارغ) بمفتاح
+  /// معرف العملية لاستهلاكها داخل المعاملة دون أي شبكة.
+  Future<Map<String, Map<String, String>?>> _preverifyTakeoverIdentities(
+      List<MapEntry<dynamic, dynamic>> entries) async {
+    final result = <String, Map<String, String>?>{};
+    try {
+      for (final entry in entries) {
+        final v = entry.value;
+        if (v is! Map) continue;
+        final op = SyncOperation.fromMap(Map<String, Object?>.from(v));
+        if (op.entityType != EntityKind.setting ||
+            op.entityId != 'ownershipTransfer') {
+          continue;
+        }
+        try {
+          final decoded = jsonDecode('${op.payload['value'] ?? '{}'}');
+          if (decoded is! Map || decoded['email_takeover'] != true) continue;
+          final claim =
+              '${decoded['verified_claim'] ?? decoded['auth_token'] ?? ''}'
+                  .trim();
+          if (claim.isEmpty || claim.split('.').length != 3) {
+            result[op.id] = null;
+            continue;
+          }
+          result[op.id] = await lookupFirebaseIdentity(claim);
+        } catch (_) {
+          result[op.id] = null;
+        }
+      }
+    } catch (_) {}
+    return result;
+  }
+
   Future<void> _sseLoop() async {
     while (_listening) {
       try {
@@ -1059,10 +1104,18 @@ class CloudFirebaseTransport implements SyncTransport {
             eventName = line.substring(6).trim();
           } else if (line.startsWith('data:')) {
             if (eventName == 'put' || eventName == 'patch') {
-              // أول حدث put هو اللقطة الأولية عند فتح القناة — نتجاهله
-              // (السحب الدوري/الافتتاحي يغطيه) ونتفاعل مع ما بعده فقط.
+              // أول حدث put عند فتح القناة: إن كانت حمولته فارغة (data
+              // = null) فهو إشعار اللقطة الافتتاحية الفارغة فنتجاهله
+              // (السحب الدوري/الافتتاحي يغطيه). أما إن حمل بيانات فعلية
+              // فهو تغيير حقيقي وصل بعد مؤشر الاستئناف — إسقاطه كان يفقد
+              // أول تحديث حي (وأسوأه: في مساحة هادئة لا يصل بعده شيء).
               if (!skippedInitial && eventName == 'put') {
                 skippedInitial = true;
+                if (_ssePutHasPayload(line.substring(5).trim())) {
+                  try {
+                    onCloudChanged?.call();
+                  } catch (_) {}
+                }
               } else {
                 try {
                   onCloudChanged?.call();
@@ -1088,6 +1141,23 @@ class CloudFirebaseTransport implements SyncTransport {
       await Future<void>.delayed(Duration(seconds: _sseRetrySeconds));
       // تراجع سريع بين 2 إلى 15 ثانية كحد أقصى لسرعة التعافي وإعادة الاتصال.
       _sseRetrySeconds = (_sseRetrySeconds * 2).clamp(2, 15);
+    }
+  }
+
+  /// (دفعة التدقيق) هل يحمل حدث put الوارد حمولة بيانات فعلية؟
+  /// أحداث Firebase SSE تأتي بصيغة {"path": "...", "data": {...}} —
+  /// فقرة data تساوي null عند اللقطة الافتتاحية الفارغة فقط.
+  static bool _ssePutHasPayload(String dataLine) {
+    if (dataLine.isEmpty) return false;
+    try {
+      final decoded = jsonDecode(dataLine);
+      if (decoded is Map) {
+        return decoded['data'] != null;
+      }
+      return decoded != null;
+    } catch (_) {
+      // حمولة غير قابلة للتفكيك — نتحفظ بها كتغيير محتمل.
+      return true;
     }
   }
 }

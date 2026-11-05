@@ -250,10 +250,17 @@ class _NotificationsSheet extends ConsumerWidget {
                                     style: const TextStyle(fontSize: 13)),
                               ),
                               onTap: () {
+                                final created = ca.createdAt > 0
+                                    ? DateTime.fromMillisecondsSinceEpoch(
+                                        ca.createdAt)
+                                    : null;
+                                final when = created == null
+                                    ? ''
+                                    : '\n\n🕓 ${Fmt.dateTime(created)}';
                                 showAppNotice(
                                   context,
                                   title: ca.title,
-                                  message: ca.body,
+                                  message: '${ca.body}$when'.trim(),
                                   kind: AppNoticeKind.info,
                                   playSound: false,
                                 );
