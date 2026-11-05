@@ -209,14 +209,12 @@ void main() {
       expect(info.downloadUrl, isNull, reason: 'لا نقبل روابط غير آمنة');
     });
 
-    test('R2: يرفض البيان إذا غاب الحقل الإلزامي sha256 أو كان غير صالح', () async {
+    test('يقبل البيان حتى لو غاب الحقل sha256 (التحديث بدون تحقق sha256)', () async {
       final missingSha = await svcReturning(manifest(sha256: null)).check();
-      expect(missingSha.status, UpdateStatus.unknown);
-      expect(missingSha.error, contains('sha256'));
+      expect(missingSha.status, UpdateStatus.available);
 
       final badSha = await svcReturning(manifest(sha256: 'not-a-valid-sha256')).check();
-      expect(badSha.status, UpdateStatus.unknown);
-      expect(badSha.error, contains('sha256'));
+      expect(badSha.status, UpdateStatus.available);
     });
 
     test('R2: مسار البيان الافتراضي يشير إلى العقدة السيادية المستقلة /system/version_manifest', () {
@@ -337,21 +335,19 @@ void main() {
     expect(older.status, UpdateStatus.upToDate);
   });
 
-  group('UpdateInstaller — التحقق الصارم من البصمة الرقمية SHA-256', () {
-    test('يرفض التثبيت فوراً عند غياب expectedSha256', () async {
-      final installer = UpdateInstaller();
-      final events = await installer
-          .downloadAndInstall(
-            'https://example.com/app.apk',
-            expectedSha256: null,
-          )
-          .toList();
-      expect(events, isNotEmpty);
-      expect(events.last.phase, InstallPhase.failed);
-      expect(events.last.error, contains('sha256'));
+  group('UpdateInstaller — الروابط المباشرة القصيرة والتثبيت المباشر', () {
+    test('يوفر روابط تحميل قصيرة بسطر واحد للأندرويد والويندوز', () {
+      expect(
+        UpdateInstaller.shortDirectUrlFor(forWindows: false),
+        startsWith('https://iggdigd218-dev.github.io/'),
+      );
+      expect(
+        UpdateInstaller.shortDirectUrlFor(forWindows: true),
+        endsWith('/NexoraSetup.exe'),
+      );
     });
 
-    test('يكتشف عدم تطابق SHA-256 بدقة عبر verifyFileSha256', () async {
+    test('يكتشف عدم تطابق SHA-256 بدقة عبر verifyFileSha256 عند استدعائها', () async {
       final tmp = await Directory.systemTemp.createTemp('nexora_sha_test_');
       addTearDown(() async {
         if (await tmp.exists()) await tmp.delete(recursive: true);

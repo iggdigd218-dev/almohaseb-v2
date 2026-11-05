@@ -5,7 +5,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../core/app_version.dart';
 import '../core/platform_info.dart';
@@ -31,6 +33,9 @@ final updateInstallerProvider =
 
 /// يحسم رابط ملف الحزمة الثنائي المباشر (.apk أو .exe) دون الرجوع أبداً إلى صفحة المستودع.
 String _directBinaryUrlOf(UpdateInfo info) {
+  if (PlatformInfo.isWindows) {
+    return UpdateInstaller.kShortWindowsUrl;
+  }
   final dl = info.downloadUrl?.trim() ?? '';
   if (dl.isNotEmpty &&
       !dl.contains('/releases/tag/') &&
@@ -43,13 +48,8 @@ String _directBinaryUrlOf(UpdateInfo info) {
       !fb.endsWith('/releases/latest')) {
     return fb;
   }
-  if (PlatformInfo.isWindows) {
-    return 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe';
-  }
   final abi = androidAbiKey();
-  final apkName =
-      abi == 'armv7' ? 'nexora-armv7.apk' : 'Almohaseb-Plus-arm64.apk';
-  return 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/$apkName';
+  return UpdateInstaller.shortDirectUrlFor(abi: abi);
 }
 
 /// يفتح الرابط المباشر لملف التحديث (.apk / .exe) في المتصفح ليبدأ التحميل فوراً
@@ -325,9 +325,38 @@ class _OneClickUpdateDialogState extends State<_OneClickUpdateDialog> {
 class UpdateSection extends ConsumerWidget {
   const UpdateSection({super.key});
 
+  Future<void> _copyShortLink(
+    BuildContext context,
+    String url,
+    String label,
+  ) async {
+    await Clipboard.setData(ClipboardData(text: url));
+    if (context.mounted) {
+      showSnack(context, 'تم نسخ $label (رابط مباشر قصير بسطر واحد)');
+    }
+  }
+
+  Future<void> _shareShortLink(
+    BuildContext context,
+    String text,
+    String fallbackUrl,
+  ) async {
+    try {
+      await Share.share(text);
+    } catch (_) {
+      await Clipboard.setData(ClipboardData(text: fallbackUrl));
+      if (context.mounted) {
+        showSnack(context, 'تم نسخ الرابط القصير إلى الحافظة');
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(updateCheckProvider);
+    final androidShortUrl = UpdateInstaller.kShortAndroidArm64Url;
+    final windowsShortUrl = UpdateInstaller.kShortWindowsUrl;
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -366,6 +395,148 @@ class UpdateSection extends ConsumerWidget {
               onPressed: () => ref.invalidate(updateCheckProvider),
               icon: const Icon(Icons.refresh),
               label: const Text('التحقق الآن'),
+            ),
+            const SizedBox(height: 14),
+            const Divider(height: 1),
+            const SizedBox(height: 12),
+            // خيارات مشاركة الرابط القصير وتنزيل نسخة الويندوز من داخل التطبيق
+            Text(
+              'روابط التحميل المباشر والمشاركة (رابط قصير بسطر واحد)',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: AppColors.textOf(context),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _copyShortLink(
+                      context,
+                      androidShortUrl,
+                      'رابط نسخة الأندرويد',
+                    ),
+                    icon: const Icon(Icons.copy_rounded, size: 17),
+                    label: const Text(
+                      'نسخ رابط الأندرويد',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _shareShortLink(
+                      context,
+                      'تحميل تطبيق المحاسب (رابط مباشر قصير):\n'
+                      '📱 للأندرويد:\n$androidShortUrl\n\n'
+                      '🖥️ للكمبيوتر (ويندوز):\n$windowsShortUrl',
+                      androidShortUrl,
+                    ),
+                    icon: const Icon(Icons.share_outlined, size: 17),
+                    label: const Text(
+                      'مشاركة رابط التطبيق',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppColors.surface2Of(context),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppColors.borderOf(context)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.desktop_windows_outlined,
+                        size: 20,
+                        color: AppColors.primaryOf(context),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'نسخة الكمبيوتر (Windows 64-bit)',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.textOf(context),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'يمكنك تنزيل ملف تثبيت الكمبيوتر (NexoraSetup.exe) مباشرة أو نسخ ومشاركة رابطه القصير لإرساله للكمبيوتر.',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      height: 1.45,
+                      color: AppColors.text2Of(context),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  FilledButton.tonalIcon(
+                    onPressed: () async {
+                      final ok =
+                          await UpdateInstaller.launchDirectBrowserDownload(
+                        windowsShortUrl,
+                      );
+                      if (!ok && context.mounted) {
+                        showSnack(
+                          context,
+                          'تعذّر فتح رابط تنزيل نسخة الويندوز',
+                        );
+                      }
+                    },
+                    icon: const Icon(Icons.download_rounded, size: 18),
+                    label: const Text('تنزيل نسخة الويندوز (NexoraSetup.exe)'),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () => _copyShortLink(
+                            context,
+                            windowsShortUrl,
+                            'رابط نسخة الويندوز',
+                          ),
+                          icon: const Icon(Icons.copy_rounded, size: 16),
+                          label: const Text(
+                            'نسخ رابط الويندوز',
+                            style: TextStyle(fontSize: 11.5),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () => _shareShortLink(
+                            context,
+                            'رابط تنزيل نسخة الكمبيوتر (Windows) المباشر:\n$windowsShortUrl',
+                            windowsShortUrl,
+                          ),
+                          icon: const Icon(Icons.share_outlined, size: 16),
+                          label: const Text(
+                            'مشاركة للكمبيوتر',
+                            style: TextStyle(fontSize: 11.5),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ],
         ),
