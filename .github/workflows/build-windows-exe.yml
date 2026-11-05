@@ -252,20 +252,13 @@ jobs:
           tag_name: latest
           name: Nexora — الإصدار الرسمي الأحدث
           body: |
-            ## 📥 التحميل المباشر
+            ## 📥 التحميل المباشر السريع (روابط قصيرة بسطر واحد — صالحة للمشاركة المباشرة)
 
-            **هذا هو الإصدار الرسمي الأحدث من التطبيق.**
+            ### 📱 للأندرويد (64-بت):
+            - **رابط مباشر قصير:** https://${{ github.repository_owner }}.github.io/almohaseb-v2/Almohaseb-Plus-arm64.apk
 
-            ### 🖥️ لويندوز
-            - **الأسهل:** حمّل `NexoraSetup.exe` وثبّته كأي برنامج (قائمة ابدأ + سطح المكتب).
-            - أو النسخة المحمولة `nexora-windows.zip`: فك الضغط ثم شغّل `Run.bat`.
-            - أول تشغيل قد يحذّر SmartScreen: «مزيد من المعلومات» ثم «تشغيل على أي حال».
-
-            ### 📱 للأندرويد (APK)
-            - يُرفع ملف الأندرويد تلقائيًا هنا بعد انتهاء بناء APK (قد يتأخر بضع دقائق).
-            - ثبّت `nexora-universal.apk` على الجهاز (كل المعالجات).
-
-            > يتم تحديث هذه الصفحة تلقائيًا بعد كل بناء ناجح.
+            ### 🖥️ للكمبيوتر (ويندوز):
+            - **رابط مباشر قصير:** https://${{ github.repository_owner }}.github.io/almohaseb-v2/NexoraSetup.exe
           prerelease: false
           make_latest: true
         env:
@@ -277,12 +270,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # ❗ السبب الجذري لتكرار "Error saving asset": softprops/action-gh-release
-          # يحذف الأصل القديم أولاً ثم يرفع البديل، ورفع ملف 24MB ينتهي
-          # بالفشل بعد ~39 ثانية في كل مرة — فيُفقد الأصل بلا تعويض.
-          # actions/upload-artifact يرفع نفس الحجم في ثانيتين، فالمشكلة في
-          # مسار رفع أصول الإصدار لدى softprops تحديداً. gh الرسمي أنجح،
-          # ومع حلقة إعادة محاولة لا يبقى مجال لضياع أصل.
           files=()
           for f in NexoraSetup.exe nexora-windows.zip README-install.txt; do
             [ -s "$f" ] && files+=("$f")
@@ -290,13 +277,49 @@ jobs:
           if [ ${#files[@]} -eq 0 ]; then
             echo "::error::لا ملفات صالحة للرفع"; exit 1
           fi
+          uploaded=0
           for attempt in 1 2 3; do
             echo "محاولة رفع ${attempt}/3: ${files[*]}"
             if gh release upload latest "${files[@]}" --clobber --repo "${{ github.repository }}"; then
               echo "✔ تم رفع الأصول في المحاولة ${attempt} إلى ${{ github.repository }}"
-              exit 0
+              uploaded=1
+              break
             fi
             echo "⚠️ فشلت المحاولة ${attempt} — إعادة المحاولة بعد 20 ثانية"
             sleep 20
           done
-          echo "::error::تعذّر رفع أصول الإصدار بعد 3 محاولات"; exit 1
+          if [ "$uploaded" -ne 1 ]; then
+            echo "::error::تعذّر رفع أصول الإصدار بعد 3 محاولات"; exit 1
+          fi
+
+      - name: Push NexoraSetup.exe to releases branch (Fastly CDN)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ ! -s NexoraSetup.exe ]; then exit 0; fi
+          gh release download latest --repo "${{ github.repository }}" --pattern "version.json" --clobber || true
+          VER=""
+          if [ -s version.json ]; then
+            VER=$(python3 -c "import json;print(json.load(open('version.json',encoding='utf-8')).get('version',''))" 2>/dev/null || true)
+          fi
+          git config --global user.name  "nexora-mirror-bot"
+          git config --global user.email "actions@users.noreply.github.com"
+          git clone -q --depth 1 -b releases "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" mrepo || { git init -q mrepo && cd mrepo && git checkout -b releases && cd ..; }
+          cd mrepo
+          cp -f ../NexoraSetup.exe ./NexoraSetup.exe 2>/dev/null || true
+          if [ -n "$VER" ]; then
+            VDIR=$(printf '%s' "$VER" | sed 's/+/-/' | tr -cd 'A-Za-z0-9.-')
+            mkdir -p "releases/$VDIR"
+            cp -f ../NexoraSetup.exe "releases/$VDIR/NexoraSetup.exe" 2>/dev/null || true
+          fi
+          touch .nojekyll
+          git add -A
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -qm "mirror windows: ${VER:-latest}"
+            git pull -q --rebase "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" releases || true
+            git push -q "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:refs/heads/releases || true
+          fi
+          cd ..
+          rm -rf mrepo

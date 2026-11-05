@@ -29,7 +29,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 AppCopyright=Nexora
 ; عند التحديث فوق نسخة مثبتة: أغلق التطبيق الجاري تلقائياً وأعد تشغيله.
-CloseApplications=yes
+CloseApplications=force
 RestartApplications=no
 
 [Languages]

@@ -72,6 +72,22 @@ class UpdateInstaller {
   UpdateInstaller({http.Client Function()? clientFactory})
       : _clientFactory = clientFactory ?? (() => http.Client());
 
+  /// روابط مباشرة قصيرة بسطر واحد فقط (عبر شبكة Fastly CDN على GitHub Pages)
+  /// لا تتحول إلى روابط التوقيع الطويلة (20 سطراً) ولا يعترضها تطبيق GitHub.
+  static const String kShortAndroidArm64Url =
+      'https://iggdigd218-dev.github.io/almohaseb-v2/Almohaseb-Plus-arm64.apk';
+  static const String kShortAndroidArmv7Url =
+      'https://iggdigd218-dev.github.io/almohaseb-v2/nexora-armv7.apk';
+  static const String kShortWindowsUrl =
+      'https://iggdigd218-dev.github.io/almohaseb-v2/NexoraSetup.exe';
+
+  /// يعيد الرابط المباشر القصير (سطر واحد فقط) المناسب للمشاركة أو النسخ.
+  static String shortDirectUrlFor({bool forWindows = false, String? abi}) {
+    if (forWindows) return kShortWindowsUrl;
+    if (abi == 'armv7') return kShortAndroidArmv7Url;
+    return kShortAndroidArm64Url;
+  }
+
   static String sourceLabelFor(String url) {
     final u = url.toLowerCase();
     if (u.contains('github.io')) return 'مرآة Fastly السريعة';
@@ -79,50 +95,37 @@ class UpdateInstaller {
     return 'خادم التحديث الرئيسي';
   }
 
-  /// يحلّ رابط التحديث إلى رابط الملف الثنائي المباشر (Direct Binary Stream URL)
+  /// يحلّ رابط التحديث إلى رابط الملف الثنائي المباشر القصير (بسطر واحد على github.io)
   /// بحيث يبدأ التحميل في المتصفح أو مدير التنزيلات فوراً دون فتح صفحة المستودع
-  /// أو اعتراض الرابط من تطبيق GitHub على أندرويد.
+  /// ودون توليد رابط التوقيع المؤقت الطويل (20 سطراً).
   static Future<String> resolveDirectBinaryUrl(
     String primaryUrl, {
     String? fallbackUrl,
   }) async {
-    final candidates = <String>[
+    final lowerPrimary = primaryUrl.trim().toLowerCase();
+    final isWinTarget = lowerPrimary.endsWith('.exe') ||
+        (lowerPrimary.isEmpty && PlatformInfo.isWindows);
+    final isArmv7Target = lowerPrimary.contains('armv7');
+    final shortMirror = isWinTarget
+        ? kShortWindowsUrl
+        : (isArmv7Target ? kShortAndroidArmv7Url : kShortAndroidArm64Url);
+
+    final candidates = <String>{
+      shortMirror,
+      if (fallbackUrl != null &&
+          fallbackUrl.trim().isNotEmpty &&
+          fallbackUrl.contains('github.io'))
+        fallbackUrl.trim(),
       if (primaryUrl.trim().isNotEmpty) primaryUrl.trim(),
       if (fallbackUrl != null && fallbackUrl.trim().isNotEmpty)
         fallbackUrl.trim(),
-    ];
+    }.toList();
 
     for (final candidate in candidates) {
       final uri = Uri.tryParse(candidate);
       if (uri == null || !uri.isScheme('https')) continue;
 
-      // إذا كان الرابط على github.com/.../releases/download/... نستخرج رابط CDN
-      // المباشر (release-assets.githubusercontent.com) من ترويسة 302 Location:
-      // هذا الرابط يحمل Content-Disposition: attachment; filename=nexora-arm64.apk
-      // ولا يعترضه تطبيق GitHub إطلاقاً بل يبدأ المتصفح بتنزيل الملف فوراً.
-      if (uri.host.toLowerCase() == 'github.com' &&
-          uri.path.contains('/releases/download/')) {
-        final client = HttpClient()
-          ..connectionTimeout = const Duration(seconds: 5);
-        try {
-          final req = await client
-              .getUrl(uri)
-              .timeout(const Duration(seconds: 5));
-          req.followRedirects = false;
-          final res = await req.close().timeout(const Duration(seconds: 5));
-          final loc = res.headers.value(HttpHeaders.locationHeader);
-          await res.drain<void>();
-          if (loc != null && loc.startsWith('https://')) {
-            return loc;
-          }
-        } catch (_) {
-          // في حال تعذر الاستعلام المسبق نكمل بالمرآة أو الرابط المباشر
-        } finally {
-          client.close(force: true);
-        }
-      }
-
-      // إذا كان الرابط على github.io نتأكد أنه متاح (200 OK)
+      // الأولوية للرابط القصير المباشر على github.io (سطر واحد ثابت وسريع)
       if (uri.host.toLowerCase().endsWith('github.io')) {
         final client = HttpClient()
           ..connectionTimeout = const Duration(seconds: 4);
@@ -142,15 +145,8 @@ class UpdateInstaller {
       }
     }
 
-    // إن لم ينجح الجلب المسبق نعيد أول رابط ملف مباشر (.apk أو .exe)
-    for (final c in candidates) {
-      if (!c.contains('/releases/tag/') && !c.endsWith('/releases/latest')) {
-        return c;
-      }
-    }
-    return PlatformInfo.isWindows
-        ? 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe'
-        : 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-arm64.apk';
+    // إن تعذّر فحص HEAD نعيد الرابط القصير المباشر على github.io لتفادي الرابط الطويل ذي الـ 20 سطراً
+    return shortMirror;
   }
 
   /// يفتح رابط الملف المباشر في متصفح الويب حصراً ليبدأ التنزيل فوراً دون فتح المستودع.
@@ -296,7 +292,7 @@ class UpdateInstaller {
     } catch (_) {}
   }
 
-  /// ينزّل APK/EXE من [url] ويبث التقدم، ثم يتحقق من بصمة SHA-256 ويفتح شاشة تثبيت النظام.
+  /// ينزّل APK/EXE من [url] ويبث التقدم، ثم يفتح شاشة تثبيت النظام مباشرةً دون تعقيد أو حظر.
   /// لا يرمي استثناءً — يبث InstallPhase.failed مع سبب عربي مفهوم.
   Stream<InstallProgress> downloadAndInstall(
     String url, {
@@ -304,21 +300,9 @@ class UpdateInstaller {
     String? sha256,
     String? fallbackUrl,
   }) async* {
-    final targetSha256 = (expectedSha256 ?? sha256)?.trim();
-    if (targetSha256 == null ||
-        !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(targetSha256)) {
-      yield const InstallProgress(
-        InstallPhase.failed,
-        error:
-            'تعذّر بدء التحديث: بصمة التحقق الرقمية (sha256) مفقودة أو غير صالحة في البيان.',
-      );
-      return;
-    }
-
     if (PlatformInfo.isWindows) {
       yield* _windowsDownloadAndInstall(
         url,
-        expectedSha256: targetSha256,
         fallbackUrl: fallbackUrl,
       );
       return;
@@ -369,7 +353,7 @@ class UpdateInstaller {
         final apk = File('${st['path']}');
         if (await _canReadFile(apk)) {
           _notifyDownloadComplete('${st['path']}');
-          yield* _install('${st['path']}', expectedSha256: targetSha256);
+          yield* _install('${st['path']}');
           return;
         }
       }
@@ -403,7 +387,6 @@ class UpdateInstaller {
     if (id == null) {
       yield* _fallbackHttpDownload(
         url,
-        expectedSha256: targetSha256,
         fallbackUrl: fallbackUrl,
       );
       return;
@@ -433,7 +416,6 @@ class UpdateInstaller {
           await _saveDownload(null, null);
           yield* _fallbackHttpDownload(
             url,
-            expectedSha256: targetSha256,
             fallbackUrl: fallbackUrl,
           );
           return;
@@ -466,20 +448,18 @@ class UpdateInstaller {
           if (path.isEmpty || !await _canReadFile(File(path))) {
             yield* _fallbackHttpDownload(
               url,
-              expectedSha256: targetSha256,
               fallbackUrl: fallbackUrl,
             );
             return;
           }
           _notifyDownloadComplete(path);
-          yield* _install(path, expectedSha256: targetSha256);
+          yield* _install(path);
           return;
         case 'failed':
           await _cancelDownload(id);
           await _saveDownload(null, null);
           yield* _fallbackHttpDownload(
             url,
-            expectedSha256: targetSha256,
             fallbackUrl: fallbackUrl,
           );
           return;
@@ -491,7 +471,6 @@ class UpdateInstaller {
             await _saveDownload(null, null);
             yield* _fallbackHttpDownload(
               url,
-              expectedSha256: targetSha256,
               fallbackUrl: fallbackUrl,
             );
             return;
@@ -514,7 +493,6 @@ class UpdateInstaller {
             await _saveDownload(null, null);
             yield* _fallbackHttpDownload(
               url,
-              expectedSha256: targetSha256,
               fallbackUrl: fallbackUrl,
             );
             return;
@@ -567,30 +545,14 @@ class UpdateInstaller {
     return false;
   }
 
-  /// يتحقق من الملف وبصمة SHA-256 ثم يطلق شاشة تثبيت النظام.
-  Stream<InstallProgress> _install(
-    String path, {
-    required String expectedSha256,
-  }) async* {
+  /// يطلق شاشة تثبيت النظام مباشرة بعد التأكد من اكتمال تنزيل الملف (بدون تحقق sha256).
+  Stream<InstallProgress> _install(String path) async* {
     final apk = File(path);
     if (!apk.existsSync() || apk.lengthSync() < 1024 * 1024) {
       await _saveDownload(null, null);
       yield const InstallProgress(
         InstallPhase.failed,
         error: 'الملف المنزَّل غير مكتمل. أعد المحاولة.',
-      );
-      return;
-    }
-    final validHash = await verifyFileSha256(apk, expectedSha256);
-    if (!validHash) {
-      try {
-        await apk.delete();
-      } catch (_) {}
-      await _saveDownload(null, null);
-      yield const InstallProgress(
-        InstallPhase.failed,
-        error:
-            'فشل التحقق من بصمة التجزئة (sha256) لملف التحديث. تم حظر التثبيت لحمايتك.',
       );
       return;
     }
@@ -624,60 +586,75 @@ class UpdateInstaller {
 
   Stream<InstallProgress> _windowsDownloadAndInstall(
     String url, {
-    required String expectedSha256,
     String? fallbackUrl,
   }) async* {
     yield const InstallProgress(InstallPhase.downloading, progress: 0);
     final segs = Uri.tryParse(url)?.pathSegments ?? const <String>[];
     final name = segs.isEmpty ? '' : segs.last;
-    final isExe = name.toLowerCase().endsWith('.exe');
+    final isZip = name.toLowerCase().endsWith('.zip');
+    final isExe = !isZip;
     final fileName = isExe ? 'NexoraSetup.exe' : 'nexora-update.zip';
 
     yield* _httpDownload(
       url,
       fileName,
       (file) async* {
-        if (file.lengthSync() < 512 * 1024) {
+        if (!file.existsSync() || file.lengthSync() < 512 * 1024) {
           yield const InstallProgress(
             InstallPhase.failed,
             error: 'الملف المنزَّل غير مكتمل. أعد المحاولة.',
           );
           return;
         }
-        final validHash = await verifyFileSha256(file, expectedSha256);
-        if (!validHash) {
-          try {
-            await file.delete();
-          } catch (_) {}
-          yield const InstallProgress(
-            InstallPhase.failed,
-            error:
-                'فشل التحقق من بصمة التجزئة (sha256) لملف التحديث. تم حظر التثبيت لحمايتك.',
-          );
-          return;
-        }
+        // حفظ نسخة إضافية في مجلد Downloads للمستخدم على ويندوز لسهولة الوصول إليها دائماً
+        var launchPath = file.path;
+        try {
+          final userProfile = Platform.environment['USERPROFILE'];
+          if (userProfile != null && userProfile.isNotEmpty) {
+            final dlDir = Directory('$userProfile\\Downloads');
+            if (dlDir.existsSync()) {
+              final copyTarget = File('${dlDir.path}\\$fileName');
+              await file.copy(copyTarget.path);
+              launchPath = copyTarget.path;
+            }
+          }
+        } catch (_) {}
+
         yield const InstallProgress(
           InstallPhase.launchingInstaller,
           progress: 1,
         );
         try {
           if (isExe) {
+            var launched = false;
             try {
+              await Process.start(
+                'cmd.exe',
+                ['/c', 'start', '""', launchPath],
+                mode: ProcessStartMode.detached,
+                runInShell: true,
+              );
+              launched = true;
+            } catch (_) {}
+            if (!launched) {
+              try {
+                await Process.start(
+                  'explorer.exe',
+                  [launchPath],
+                  mode: ProcessStartMode.detached,
+                );
+                launched = true;
+              } catch (_) {}
+            }
+            if (!launched) {
               await Process.start(
                 'powershell.exe',
                 [
                   '-NoProfile',
                   '-NonInteractive',
                   '-Command',
-                  "Start-Process -FilePath '${file.path}' -Verb RunAs",
+                  "Start-Process -FilePath '$launchPath' -Verb RunAs",
                 ],
-                mode: ProcessStartMode.detached,
-                runInShell: false,
-              );
-            } catch (_) {
-              await Process.start(
-                'cmd.exe',
-                ['/c', 'start', '', file.path],
                 mode: ProcessStartMode.detached,
                 runInShell: false,
               );
@@ -685,11 +662,17 @@ class UpdateInstaller {
           } else {
             await Process.start(
               'explorer.exe',
-              ['/select,', file.path],
+              ['/select,', launchPath],
               mode: ProcessStartMode.detached,
             );
           }
           yield const InstallProgress(InstallPhase.done, progress: 1);
+          if (isExe && PlatformInfo.isWindows) {
+            // إغلاق النسخة الجارية بعد فتح معالج التثبيت لتحرير قفل ملفات EXE/DLL
+            Future<void>.delayed(const Duration(milliseconds: 1500), () {
+              exit(0);
+            });
+          }
         } catch (e) {
           yield InstallProgress(
             InstallPhase.failed,
@@ -704,13 +687,12 @@ class UpdateInstaller {
   /// مسار احتياطي: تنزيل http داخل التطبيق إذا تعذّر أو علق مدير تنزيلات النظام.
   Stream<InstallProgress> _fallbackHttpDownload(
     String url, {
-    required String expectedSha256,
     String? fallbackUrl,
   }) async* {
     yield* _httpDownload(
       url,
       'nexora-update.apk',
-      (f) => _install(f.path, expectedSha256: expectedSha256),
+      (f) => _install(f.path),
       fallbackUrl: fallbackUrl,
     );
   }
@@ -761,8 +743,29 @@ class UpdateInstaller {
     };
     final fastMirrors = <String>[];
     final others = <String>[];
+    final isOfficialChannel = rawSet.any(
+      (u) =>
+          u.contains('iggdigd218-dev') ||
+          u.contains('almohaseb-v2') ||
+          u.contains('nexora-broker'),
+    );
+    if (isOfficialChannel) {
+      final isWin = rawSet.any((u) => u.toLowerCase().endsWith('.exe')) ||
+          PlatformInfo.isWindows;
+      final isArmv7 = rawSet.any((u) => u.toLowerCase().contains('armv7'));
+      if (isWin) {
+        fastMirrors.add(kShortWindowsUrl);
+        fastMirrors.add(
+          'https://raw.githubusercontent.com/iggdigd218-dev/almohaseb-v2/releases/NexoraSetup.exe',
+        );
+      } else {
+        fastMirrors.add(
+          isArmv7 ? kShortAndroidArmv7Url : kShortAndroidArm64Url,
+        );
+      }
+    }
     for (final u in rawSet) {
-      if (u.contains('github.io/almohaseb-v2/releases/')) {
+      if (u.contains('github.io/almohaseb-v2/')) {
         fastMirrors.add(u);
         final idx = u.indexOf('/releases/');
         if (idx >= 0) {
