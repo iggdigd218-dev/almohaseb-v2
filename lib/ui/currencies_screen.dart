@@ -60,6 +60,8 @@ class CurrenciesScreen extends ConsumerWidget {
     final symbol = TextEditingController();
     final rate = TextEditingController(text: '1');
 
+    // (دفعة التدقيق) المتحكمات محلية للحوار — تُتلف فور إغلاقه دوماً
+    // (finally) مهما كان مسار الخروج، لا تُترك دون dispose.
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -111,20 +113,29 @@ class CurrenciesScreen extends ConsumerWidget {
       ),
     );
 
-    if (ok != true) return;
-    final cd = code.text.trim().toUpperCase();
-    if (cd.isEmpty || name.text.trim().isEmpty) return;
-    await ref.read(repoProvider).saveCurrency(
-          CurrencyDef(
-            cd,
-            name.text.trim(),
-            symbol.text.trim().isEmpty ? cd : symbol.text.trim(),
-            2,
-          ),
-          rate: Fmt.parseAmount(rate.text) ?? 1,
-        );
-    bump(ref);
-    if (context.mounted) showSnack(context, 'تمت إضافة العملة ✅');
+    try {
+      if (ok != true) return;
+      final cd = code.text.trim().toUpperCase();
+      if (cd.isEmpty || name.text.trim().isEmpty) return;
+      await ref.read(repoProvider).saveCurrency(
+            CurrencyDef(
+              cd,
+              name.text.trim(),
+              symbol.text.trim().isEmpty ? cd : symbol.text.trim(),
+              2,
+            ),
+            rate: Fmt.parseAmount(rate.text) ?? 1,
+          );
+      bump(ref);
+      if (context.mounted) showSnack(context, 'تمت إضافة العملة ✅');
+    } catch (e) {
+      if (context.mounted) showSnack(context, '$e', error: true);
+    } finally {
+      code.dispose();
+      name.dispose();
+      symbol.dispose();
+      rate.dispose();
+    }
   }
 }
 
@@ -148,9 +159,22 @@ class _CurrencyCardState extends ConsumerState<_CurrencyCard> {
   }
 
   Future<void> _loadRate() async {
-    final st = await ref.read(repoProvider).settings();
-    final v = st['rate_${widget.currency.code}'];
-    if (mounted && v != null) _rate.text = v;
+    // (دفعة التدقيق) المصدر الموحد لسعر الصرف: عمود rate في جدول
+    // currencies، مع سقوط احتياطي واحد لمفتاح الإعدادات القديم
+    // rate_$code حين يكون الجدول لا يزال على الافتراضي (كانت البطاقة
+    // تحفظ في الإعدادات فحسب فلا يصل الجدول إلى سعر معدّل أبداً).
+    var v = widget.currency.rate;
+    if (v == 1) {
+      final st = await ref.read(repoProvider).settings();
+      final legacy =
+          double.tryParse(st['rate_${widget.currency.code}'] ?? '');
+      if (legacy != null && legacy > 0 && legacy != 1) v = legacy;
+    }
+    if (mounted) {
+      _rate.text = v == v.truncateToDouble()
+          ? v.toInt().toString()
+          : v.toString();
+    }
   }
 
   @override
@@ -163,10 +187,11 @@ class _CurrencyCardState extends ConsumerState<_CurrencyCard> {
   Widget build(BuildContext context) {
     final c = widget.currency;
     final isBuiltIn = kDefaultCurrencies.any((d) => d.code == c.code);
-    // (2026-09-22) التحكم حسب صلاحية العضو: سعر الصرف والتعيين
-    // والحذف كلها إعدادات مالية تتطلب صلاحية تعديل العمليات.
+    // (دفعة التدقيق) التحكم حسب صلاحية إدارة العملات نفسها
+    // (manage_currencies) — هي ذاتها التي يفحصها saveCurrency/deleteCurrency
+    // في المستودع؛ edit_tx لا علاقة له بإدارة العملات.
     final me = ref.watch(currentUserProvider).valueOrNull;
-    final canEdit = me != null && me.can('edit_tx');
+    final canEdit = me != null && me.can('manage_currencies');
 
     return Card(
       child: Padding(
@@ -288,11 +313,20 @@ class _CurrencyCardState extends ConsumerState<_CurrencyCard> {
       showSnack(context, 'سعر صرف غير صالح', error: true);
       return;
     }
-    await ref
-        .read(repoProvider)
-        .setSetting('rate_${widget.currency.code}', '$n');
-    bump(ref);
-    if (mounted) showSnack(context, 'تم تحديث سعر الصرف ✅');
+    try {
+      // (دفعة التدقيق) الحفظ الموحد في جدول currencies عبر saveCurrency:
+      // فحص صلاحية manage_currencies + تعقيم السعر (موجب منتهٍ) + ختم
+      // المساحة — لا كتابة في مفتاح الإعدادات المتوازي.
+      final c = widget.currency;
+      await ref.read(repoProvider).saveCurrency(
+            CurrencyDef(c.code, c.name, c.symbol, c.decimal),
+            rate: n,
+          );
+      bump(ref);
+      if (mounted) showSnack(context, 'تم تحديث سعر الصرف ✅');
+    } catch (e) {
+      if (mounted) showSnack(context, '$e', error: true);
+    }
   }
 }
 
@@ -338,6 +372,17 @@ class _ConverterState extends ConsumerState<_Converter> {
 
   double _rateOf(String code) {
     if (code == widget.baseCode) return 1;
+    // (دفعة التدقيق) المصدر الموحد: عمود rate في جدول currencies مع
+    // سقوط احتياطي لمفتاح الإعدادات القديم عند بقاء الجدول على 1.
+    CurrencyDef? def;
+    for (final c in widget.currencies) {
+      if (c.code == code) {
+        def = c;
+        break;
+      }
+    }
+    final tableRate = def?.rate ?? 1;
+    if (tableRate != 1) return tableRate;
     return double.tryParse(_settings['rate_$code'] ?? '') ?? 1;
   }
 

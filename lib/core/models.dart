@@ -49,10 +49,19 @@ class Account {
 
   /// الرقم المستخدم للتواصل: واتساب إن وُجد وإلا الهاتف.
   String get contactNumber {
+    // (دفعة التدقيق) كل قنوات الواتساب (القديمة 'whatsapp' وauto_*) تعيد
+    // رقم الواتساب مع سقوط احتياطي للهاتف، وكل قنوات الرسائل النصية
+    // (sms وauto_sms) تعيد رقم الهاتف — كانت القيم auto_* تسقط في الفراغ.
     final ch = notifyChannel;
-    if (ch == 'sms') return phone.trim();
-    if (ch == 'whatsapp') {
-      return whatsapp.trim().isNotEmpty ? whatsapp : phone;
+    if (ch == 'whatsapp' ||
+        ch == 'auto_whatsapp' ||
+        ch == 'auto_w4b' ||
+        ch == 'auto_system') {
+      final wa = whatsapp.trim();
+      return wa.isNotEmpty ? wa : phone.trim();
+    }
+    if (ch == 'sms' || ch == 'auto_sms') {
+      return phone.trim();
     }
     return '';
   }
@@ -188,6 +197,9 @@ class Tx {
   final String syncState;
   final int? createdByUserId;
   final String cashierName;
+
+  /// معرّف الفاتورة الأصلية في حال كانت العملية مرتجع مبيعات (أضيف في v29).
+  final String? originalTxId;
   final DateTime date;
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -214,6 +226,7 @@ class Tx {
     this.syncState = 'synced',
     this.createdByUserId,
     this.cashierName = '',
+    this.originalTxId,
     required this.date,
     required this.createdAt,
     required this.updatedAt,
@@ -258,10 +271,12 @@ class Tx {
     String? syncState,
     int? createdByUserId,
     String? cashierName,
+    String? originalTxId,
     DateTime? date,
     bool clearAccountId = false,
     bool clearFromId = false,
     bool clearToId = false,
+    bool clearOriginalTxId = false,
   }) =>
       Tx(
         id: id ?? this.id,
@@ -285,6 +300,8 @@ class Tx {
         syncState: syncState ?? this.syncState,
         createdByUserId: createdByUserId ?? this.createdByUserId,
         cashierName: cashierName ?? this.cashierName,
+        originalTxId:
+            clearOriginalTxId ? null : (originalTxId ?? this.originalTxId),
         date: date ?? this.date,
         createdAt: createdAt,
         updatedAt: DateTime.now(),
@@ -312,6 +329,8 @@ class Tx {
         'sync_state': syncState,
         if (createdByUserId != null) 'created_by_user_id': createdByUserId,
         if (cashierName.isNotEmpty) 'cashier_name': cashierName,
+        if (originalTxId != null && originalTxId!.isNotEmpty)
+          'original_tx_id': originalTxId,
         'date': date.toIso8601String(),
         'created_at': createdAt.toIso8601String(),
         'updated_at': updatedAt.toIso8601String(),
@@ -341,6 +360,10 @@ class Tx {
         syncState: (m['sync_state'] ?? 'synced') as String,
         createdByUserId: m['created_by_user_id'] as int?,
         cashierName: (m['cashier_name'] ?? '') as String,
+        originalTxId: (m['original_tx_id'] == null ||
+                '${m['original_tx_id']}'.trim().isEmpty)
+            ? null
+            : '${m['original_tx_id']}'.trim(),
         date: DateTime.parse(m['date'] as String),
         createdAt: DateTime.parse(m['created_at'] as String),
         updatedAt: DateTime.parse(m['updated_at'] as String),
@@ -728,6 +751,7 @@ class AppUser {
   AppUser copyWith({
     int? id,
     String? name,
+    String? email,
     UserRole? role,
     String? pin,
     String? password,
@@ -740,6 +764,7 @@ class AppUser {
       AppUser(
         id: id ?? this.id,
         name: name ?? this.name,
+        email: email ?? this.email,
         role: role ?? this.role,
         pin: pin ?? this.pin,
         password: password ?? this.password,
@@ -754,6 +779,7 @@ class AppUser {
   Map<String, Object?> toMap() => {
         if (id != null) 'id': id,
         'name': name,
+        'email': email,
         'role': role.code,
         'pin': pin,
         'password': password,

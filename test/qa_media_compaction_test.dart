@@ -55,6 +55,38 @@ void main() {
       MediaPaths.docsDirForTesting = null;
       await tmp.delete(recursive: true);
     });
+
+    test('QA-MP-04 خط أنابيب صور المنتجات عالي الحدة (350px/80%، حفظ 320px، مزامنة 280px)',
+        () async {
+      final invSrc = File('lib/ui/inventory_screen.dart').readAsStringSync();
+      final mpSrc = File('lib/core/media_paths.dart').readAsStringSync();
+      final posGridSrc = File('lib/ui/pos_items_grid.dart').readAsStringSync();
+
+      expect(invSrc, contains('maxWidth: 350'));
+      expect(invSrc, contains('maxHeight: 350'));
+      expect(invSrc, contains('imageQuality: 80'));
+      expect(mpSrc, contains('int targetSize = 320'));
+      expect(mpSrc, contains('targetSize: 280'));
+      expect(posGridSrc, contains('crispCacheWidth(context, 280)'));
+      expect(posGridSrc, contains('FilterQuality.medium'));
+
+      final tmp = await Directory.systemTemp.createTemp('nexora_crisp_img_');
+      MediaPaths.docsDirForTesting = tmp.path;
+      // محاكاة ملف JPEG مضغوط من ImagePicker بحجم 12KB (يبدأ بـ FF D8 FF)
+      final fakeJpeg = List<int>.filled(12288, 0x42)
+        ..[0] = 0xFF
+        ..[1] = 0xD8
+        ..[2] = 0xFF;
+      final srcFile = File('${tmp.path}/picked.jpg')
+        ..writeAsBytesSync(fakeJpeg);
+      final relPath = await MediaPaths.saveCompressedItemImage(srcFile.path);
+      expect(relPath, startsWith('item_thumbs/item_'));
+      final b64 = await MediaPaths.encodeThumbBase64(relPath);
+      expect(b64, isNotEmpty);
+      expect(b64.length, lessThanOrEqualTo(MediaPaths.kMaxSyncedThumbBase64Chars));
+      MediaPaths.docsDirForTesting = null;
+      await tmp.delete(recursive: true);
+    });
   });
 
   group('حد حجم حمولة العملية', () {

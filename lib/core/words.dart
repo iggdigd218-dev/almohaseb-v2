@@ -51,6 +51,7 @@ const _hundreds = [
 ];
 
 const _thousands = {3: 'ألف', 6: 'مليون', 9: 'مليار'};
+const _thousandsPlural = {3: 'آلاف', 6: 'ملايين', 9: 'مليارات'};
 
 String _three(int n) {
   var s = '';
@@ -80,8 +81,20 @@ String _group(int n) {
       var w = _three(chunk);
       final th = _thousands[g];
       if (th != null) {
-        // «ألف» للمفرد، «ألفا» للمثنى، وإلا العدد متبوعًا بالوحدة.
-        w = chunk == 1 ? th : (chunk == 2 ? '$thا' : '$w $th');
+        final thPlural = _thousandsPlural[g] ?? th;
+        // «ألف» للمفرد، «ألفان» للمثنى، جمع التكسير (آلاف/ملايين/مليارات) للأعداد 3..10، والمفرد لما فوقها.
+        if (chunk == 1) {
+          w = th;
+        } else if (chunk == 2) {
+          // (نظافة) الحروف العربية ليست محارف معرّفات في Dart، فـ`$th` ينتهي
+          // عند أول حرف عربي — أي أن هذا التعبير مطابق تماماً لـ`${th}ان` لكنه
+          // يرضي فحصَي unnecessary_brace و prefer_interpolation معاً.
+          w = '$thان';
+        } else if (chunk >= 3 && chunk <= 10) {
+          w = '$w $thPlural';
+        } else {
+          w = '$w $th';
+        }
       }
       parts.insert(0, w);
     }

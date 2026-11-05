@@ -271,14 +271,11 @@ class MainActivity : FlutterFragmentActivity() {
                         result.success(pendingNotifyTap)
                         pendingNotifyTap = null
                     }
-                    // تشغيل/إيقاف خدمة اليقظة (foreground service + wake lock):
-                    // تُفعّل داخل المجموعة لتستمر المزامنة والإشعارات والشاشة مطفأة.
+                    // إيقاف ومسح الإشعار الدائم للخدمة الخلفية:
                     "keepAlive" -> {
-                        val on = call.argument<Boolean>("on") ?: false
                         getSharedPreferences("nexora_keepalive", MODE_PRIVATE)
-                            .edit().putBoolean("enabled", on).apply()
-                        if (on) KeepAliveService.start(this)
-                        else KeepAliveService.stop(this)
+                            .edit().putBoolean("enabled", false).apply()
+                        KeepAliveService.stop(this)
                         result.success(true)
                     }
                     // هل التطبيق معفى من تحسينات البطارية؟

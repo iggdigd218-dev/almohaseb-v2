@@ -804,7 +804,10 @@ class _WorkspaceManagerDialogState
     } catch (e) {
       if (!mounted) return;
       showSnack(context, 'خطأ أثناء حذف المنشأة: $e', error: true);
-      setState(() => _switching = false);
+    } finally {
+      // (دفعة التدقيق) إعادة الحالة في كل المسارات — النجاح كان يترك
+      // _switching محتجزاً إن لم تصفّره _load فتتعطل أزرار الحوار.
+      if (mounted) setState(() => _switching = false);
     }
   }
 

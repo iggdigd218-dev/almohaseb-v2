@@ -389,9 +389,13 @@ ReportTable buildReport(
         if (isSale) {
           tSales += t.amount;
         } else if (isRet) {
-          tSales = (tSales - t.amount).clamp(0.0, double.infinity);
+          // (دفعة الواجهات) المرتجعات تُجمع صافياً داخل الحلقة ويُحصر الناتج
+          // مرة واحدة بعدها — الحصر لكل خطوة كان يصفّر الإجمالي مبكراً
+          // ويضخّم المبيعات حين يسبق المرتجع فاتورته في الترتيب.
+          tSales -= t.amount;
         }
       }
+      tSales = tSales.clamp(0.0, double.infinity);
       return ReportTable(
         headers: const ['العملة', 'مستحق لنا', 'مستحق علينا', 'الصافي'],
         rows: rows,
@@ -452,10 +456,13 @@ ReportTable buildReport(
     case ReportTab.period:
       final buckets = <String, List<double>>{};
       for (final t in d.txs) {
+        // (دفعة الواجهات) التجميع على تاريخ تقويمي UTC: طرح الأيام من تاريخ
+        // محلي يزيح الساعة عند تغيير التوقيت الصيفي فيُسند الحدث لأسبوع آخر.
+        final day = DateTime.utc(t.date.year, t.date.month, t.date.day);
         final key = switch (unit) {
           PeriodUnit.day => Fmt.date(t.date),
           PeriodUnit.week => Fmt.date(
-              t.date.subtract(Duration(days: t.date.weekday % 7)),
+              day.subtract(Duration(days: day.weekday % 7)),
             ),
           PeriodUnit.month =>
             '${t.date.year}/${t.date.month.toString().padLeft(2, '0')}',
@@ -549,7 +556,9 @@ ReportTable buildReport(
         if (isSale) {
           totalSales += t.amount;
         } else if (isRet) {
-          totalSales = (totalSales - t.amount).clamp(0.0, double.infinity);
+          // (دفعة الواجهات) جمع صافٍ داخل الحلقة وحصر واحد بعدها — نفس علة
+          // كشف الحساب: الحصر المتكرر يخطئ مع مرتجع يسبق فاتورته.
+          totalSales -= t.amount;
         }
         switch (t.type) {
           case OpType.revenue || OpType.inflow:
@@ -564,6 +573,7 @@ ReportTable buildReport(
             break;
         }
       }
+      totalSales = totalSales.clamp(0.0, double.infinity);
       final profit = revenue - expense;
       return ReportTable(
         headers: const ['البند', 'المبلغ'],

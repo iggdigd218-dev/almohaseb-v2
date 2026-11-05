@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'core/db_init.dart';
 import 'core/desktop.dart';
@@ -86,15 +87,24 @@ Future<void> main() async {
     );
   }
 
-  var themeMode = ThemeMode.system;
+  var themeMode = ThemeMode.light;
   var hideBalances = false;
   Map<String, String> initialSettings = const {};
   try {
     initialSettings = await repo.settings().timeout(const Duration(seconds: 4));
-    themeMode = switch (initialSettings['theme']) {
-      'light' => ThemeMode.light,
+    String? savedTheme;
+    try {
+      final sp = await SharedPreferences.getInstance();
+      savedTheme = sp.getString('app_theme_mode');
+    } catch (_) {}
+    final effectiveThemeRaw =
+        (savedTheme != null && savedTheme.trim().isNotEmpty)
+            ? savedTheme.trim()
+            : (initialSettings['theme'] ?? 'light').trim();
+    themeMode = switch (effectiveThemeRaw) {
       'dark' => ThemeMode.dark,
-      _ => ThemeMode.system,
+      'system' => ThemeMode.system,
+      _ => ThemeMode.light,
     };
     hideBalances = initialSettings['hideBalances'] == '1';
     Sfx.applySettings(
@@ -148,6 +158,7 @@ class NexoraApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final activeThemeMode = ref.watch(themeModeProvider);
     return MaterialApp(
       navigatorKey: rootNavigatorKey,
       title: 'المحاسب',
@@ -163,8 +174,11 @@ class NexoraApp extends ConsumerWidget {
         },
       ),
       theme: AppTheme.light(),
-      darkTheme: AppTheme.dark(),
-      themeMode: ref.watch(themeModeProvider),
+      // إذا كان الوضع النهاري مفعّلاً، نعزله تماماً عن إعدادات الجهاز الليلية
+      darkTheme: activeThemeMode == ThemeMode.light
+          ? AppTheme.light()
+          : AppTheme.dark(),
+      themeMode: activeThemeMode,
       locale: const Locale('ar'),
       supportedLocales: const [Locale('ar'), Locale('en')],
       localizationsDelegates: const [
@@ -177,13 +191,22 @@ class NexoraApp extends ConsumerWidget {
           textDirection: TextDirection.rtl,
           child: child ?? const SizedBox.shrink(),
         );
-        // سطح المكتب/الشاشات الكبيرة: تكبير الخط الأساسي ~15% لراحة
-        // العين في الجداول المالية وبنود الفواتير وحقول الإدخال.
         final mq = MediaQuery.maybeOf(context);
-        if (mq != null &&
-            (isDesktopPlatform || mq.size.width > kDesktopBreakpoint)) {
+        if (mq != null) {
+          final forcedBrightness = switch (activeThemeMode) {
+            ThemeMode.light => Brightness.light,
+            ThemeMode.dark => Brightness.dark,
+            ThemeMode.system => mq.platformBrightness,
+          };
+          final scale =
+              (isDesktopPlatform || mq.size.width > kDesktopBreakpoint)
+                  ? const TextScaler.linear(1.15)
+                  : mq.textScaler;
           w = MediaQuery(
-            data: mq.copyWith(textScaler: const TextScaler.linear(1.15)),
+            data: mq.copyWith(
+              platformBrightness: forcedBrightness,
+              textScaler: scale,
+            ),
             child: w,
           );
         }

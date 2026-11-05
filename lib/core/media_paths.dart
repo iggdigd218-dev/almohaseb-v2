@@ -83,43 +83,59 @@ class MediaPaths {
     }
   }
 
-  /// ضغط وتصغير شديد جداً للصورة (Thumbnail Resizing) لتناسب بطاقات الأصناف
-  /// وشعار المنشأة مع تقليص استهلاك الإنترنت ومساحة السحابة لأدنى حد ممكن.
+  /// ضغط متوازن عالي الحدة للصورة (Crisp Thumbnail Resizing) ليناسب بطاقات الأصناف
+  /// وشاشات Retina الحديثة (320px محلياً / 280px للمزامنة) بحجم خفيف (10–15KB).
   static Future<Uint8List> compressThumbnailBytes(
     Uint8List input, {
-    int targetSize = 112,
-    int maxBytes = 18432,
+    int targetSize = 320,
+    int maxBytes = 24576,
   }) async {
     if (input.isEmpty) return input;
+    // إذا كانت الصورة مضغوطة مسبقاً بصيغة JPEG أو WebP من محرك النظام الأصلي (ImagePicker)
+    // وتقع ضمن السقف المسموح، نحتفظ بها مباشرةً دون إعادة تشفيرها إلى PNG لتجنب فقدان الحدة.
+    final isCompressedJpegOrWebp = (input.length >= 3 &&
+            input[0] == 0xFF &&
+            input[1] == 0xD8 &&
+            input[2] == 0xFF) ||
+        (input.length >= 12 &&
+            input[0] == 0x52 &&
+            input[1] == 0x49 &&
+            input[2] == 0x46 &&
+            input[3] == 0x46);
+    if (isCompressedJpegOrWebp && input.length <= maxBytes) {
+      return input;
+    }
     try {
       final resized = await _resizeAndQuantizePng(
         input,
         maxDimension: targetSize,
-        quantMask: 0xF8,
+        quantMask: 0xFC,
       );
       if (resized != null && resized.isNotEmpty) {
-        // إذا كانت الصورة الأصلية مضغوطة مسبقاً (JPEG صغير جداً) وأصغر من الـ PNG، نحتفظ بالأصغر
+        // إذا كانت الصورة الأصلية مضغوطة مسبقاً (JPEG صغير) وأصغر من الـ PNG، نحتفظ بالأصغر
         if (input.length <= maxBytes && input.length <= resized.length) {
           return input;
         }
         if (resized.length <= maxBytes) {
           return resized;
         }
-        // جولة ضغط ثانية أشد (80x80) إذا تجاوزت الحد المسموح
+        // جولة ضغط ثانية متوازنة عند تجاوز السقف المسموح مع الحفاظ على وضوح التفاصيل
+        final fallbackDim = (targetSize * 0.75).round().clamp(160, 280);
         final ultra = await _resizeAndQuantizePng(
           input,
-          maxDimension: 80,
-          quantMask: 0xF0,
+          maxDimension: fallbackDim,
+          quantMask: 0xF8,
         );
         if (ultra != null && ultra.isNotEmpty && ultra.length < resized.length) {
-          return ultra;
+          return (input.length <= maxBytes && input.length < ultra.length)
+              ? input
+              : ultra;
         }
-        return resized;
+        return (input.length < resized.length) ? input : resized;
       }
     } catch (_) {
       // في بيئة الاختبار الصامتة أو عند تعذر فك الصورة عبر dart:ui
     }
-    if (input.length <= maxBytes) return input;
     return input;
   }
 
@@ -165,14 +181,14 @@ class MediaPaths {
     }
   }
 
-  /// يحفظ صورة صنف مختارة بعد ضغطها وتصغيرها كملف محلي ويعيد المسار النسبي.
+  /// يحفظ صورة صنف مختارة بعد ضغطها بدقة عالية (320px) كملف محلي ويعيد المسار النسبي.
   static Future<String> saveCompressedItemImage(String sourcePath) async {
     final dir = await ensureDocsDir();
     if (dir == null || dir.isEmpty) return '';
     final srcFile = File(sourcePath);
     if (!await srcFile.exists()) return '';
     final raw = await srcFile.readAsBytes();
-    final compressed = await compressThumbnailBytes(raw, targetSize: 112);
+    final compressed = await compressThumbnailBytes(raw, targetSize: 320);
     final hash = sha256.convert(compressed).toString().substring(0, 16);
     final subDir = Directory('$dir/item_thumbs');
     if (!subDir.existsSync()) {
@@ -186,7 +202,7 @@ class MediaPaths {
     return toRelative(dest);
   }
 
-  /// يحوّل صورة صنف محلية إلى نص Base64 مضغوط جداً للمزامنة السحابية بين أجهزة المجموعة.
+  /// يحوّل صورة صنف محلية إلى نص Base64 مضغوط وواضح (280px) للمزامنة السحابية بين أجهزة المجموعة.
   static Future<String> encodeThumbBase64(String storedPath) async {
     if (storedPath.trim().isEmpty) return '';
     try {
@@ -194,10 +210,20 @@ class MediaPaths {
       if (!f.existsSync()) return '';
       final raw = await f.readAsBytes();
       if (raw.isEmpty) return '';
-      final compressed = await compressThumbnailBytes(raw, targetSize: 96);
+      final compressed = await compressThumbnailBytes(raw, targetSize: 280);
       final b64 = base64Encode(compressed);
       if (b64.length <= kMaxSyncedThumbBase64Chars) {
         return b64;
+      }
+      // في حال تجاوزت السقف نادراً، نضغط بجولة احتياطية تضمن بقاءها تحت 36000 محرف
+      final tighter = await compressThumbnailBytes(
+        raw,
+        targetSize: 200,
+        maxBytes: 18432,
+      );
+      final tighterB64 = base64Encode(tighter);
+      if (tighterB64.length <= kMaxSyncedThumbBase64Chars) {
+        return tighterB64;
       }
     } catch (_) {}
     return '';

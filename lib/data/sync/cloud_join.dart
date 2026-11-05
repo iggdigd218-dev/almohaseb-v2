@@ -3256,6 +3256,27 @@ class CloudJoin {
     required String workspaceId,
     required String deviceId,
     int? joinedAtMs,
+  }) async =>
+      await evictionKind(
+        backendUrl: backendUrl,
+        workspaceId: workspaceId,
+        deviceId: deviceId,
+        joinedAtMs: joinedAtMs,
+      ) !=
+      'none';
+
+  /// (دفعة التدقيق) تصنيف حالة الفصل عن المجموعة بدل الإجابة الثنائية —
+  /// مصدر الحقيقة الوحيد الذي تشتق منه checkLeaveOrEvicted:
+  ///  'none'     لا فصل.
+  ///  'revoked'  حظر مؤقت (revoked_at فقط أو فك اقتران) — يوقف المزامنة
+  ///             ويُبقي البيانات المحلية حتى «إعادة السماح».
+  ///  'expelled' طرد نهائي (expelled_at / status=expelled / شاهد إخلاء
+  ///             سحابي / مغادرة معتمدة) — يستوجب تصفير البيانات.
+  static Future<String> evictionKind({
+    required String backendUrl,
+    required String workspaceId,
+    required String deviceId,
+    int? joinedAtMs,
   }) async {
     try {
       final root = _root(backendUrl, workspaceId);
@@ -3269,7 +3290,7 @@ class CloudJoin {
         try {
           await _delete(requestPath(backendUrl, workspaceId, deviceId));
         } catch (_) {}
-        return true;
+        return 'expelled';
       }
       // 2) فحص عقدة الطرد الصريحة (evictions):
       // تبقى الشاهدة في السحابة ولا تُحذف إلا عند موافقة المدير على طلب انضمام جديد أو رفع الحظر.
@@ -3287,7 +3308,7 @@ class CloudJoin {
             await _delete('$root/ejected_devices/$enc.json');
           } catch (_) {}
         } else {
-          return true;
+          return 'expelled';
         }
       }
       // 3) فحص عقدة السجل (roster): إذا تم وسمه صراحة كمطرود أو محظور أو فُك اقترانه
@@ -3316,15 +3337,18 @@ class CloudJoin {
                 'last_seen': DateTime.now().millisecondsSinceEpoch,
               });
             } catch (_) {}
+          } else if (expelled) {
+            return 'expelled';
           } else {
-            return true;
+            // revoked_at فقط أو فك اقتران — حظر مؤقت لا يُدمِّر البيانات.
+            return 'revoked';
           }
         }
       }
       // غياب السجل أو تأخره لا يعني أبداً الطرد — لا طرد بالظن أو بالغياب المؤقت
-      return false;
+      return 'none';
     } catch (_) {
-      return false;
+      return 'none';
     }
   }
 

@@ -92,42 +92,76 @@ class FactoryReset {
 
   /// ينفّذ التصفير الكامل. يعيد قائمة بما حُذف (للتشخيص).
   /// الترتيب حاسم:
-  ///  1) إغلاق اتصال SQLite (وإلا يقفل ويندوز الملف ويمنع حذفه).
-  ///  2) حذف nexora.db و nexora.db-wal و nexora.db-shm.
-  ///  3) حذف وسائط الدردشة والمرفقات من مجلد المستندات.
+  ///  1) إغلاق اتصال SQLite وإعادة ضبط مؤشر المنشأة النشطة.
+  ///  2) حذف nexora.db وكافة قواعد بيانات المنشآت المعزولة (nexora_*.db) وملفاتها المؤقتة (-wal/-shm/-journal).
+  ///  3) حذف وسائط الدردشة والمرفقات ومجلدات المؤشرات من مجلد المستندات.
   /// بعدها يجب على المستدعي إعادة تشغيل حالة التطبيق (شاشة الترحيب).
   static Future<List<String>> wipeAllLocalData() async {
     final deleted = <String>[];
-    // 1) أغلق القاعدة أولاً — ويندوز يقفل الملفات المفتوحة.
+    // 1) أغلق القاعدة وأعد ضبط مؤشر المنشأة أولاً — ويندوز يقفل الملفات المفتوحة.
     try {
-      await AppDatabase.instance.close();
+      await AppDatabase.instance.closeAndResetWorkspace();
     } catch (e) {
-      debugPrint('FactoryReset: close db: $e');
+      debugPrint('FactoryReset: closeAndResetWorkspace: $e');
+      try {
+        await AppDatabase.instance.close();
+      } catch (_) {}
     }
-    // 2) احذف ملفات القاعدة الثلاثة.
+    // 2) احذف ملفات القاعدة الافتراضية وكافة قواعد المنشآت المعزولة (nexora*.db*).
     try {
-      final dir = await databaseDirectory();
+      final dirPath = await databaseDirectory();
       for (final name in const [
         'nexora.db',
         'nexora.db-wal',
         'nexora.db-shm',
         'nexora.db-journal',
       ]) {
-        final f = File(p.join(dir, name));
+        final f = File(p.join(dirPath, name));
         if (await f.exists()) {
           await f.delete();
           deleted.add(name);
+        }
+      }
+      final dbDir = Directory(dirPath);
+      if (await dbDir.exists()) {
+        await for (final entity in dbDir.list(followLinks: false)) {
+          if (entity is File) {
+            final base = p.basename(entity.path);
+            final isNexoraDbFile = base.startsWith('nexora') &&
+                (base.endsWith('.db') ||
+                    base.endsWith('.db-wal') ||
+                    base.endsWith('.db-shm') ||
+                    base.endsWith('.db-journal') ||
+                    base.endsWith('.db.tmp'));
+            if (isNexoraDbFile && !deleted.contains(base)) {
+              await entity.delete();
+              deleted.add(base);
+            }
+          } else if (entity is Directory) {
+            final base = p.basename(entity.path);
+            if (base.startsWith('nexora')) {
+              await entity.delete(recursive: true);
+              deleted.add('$base/');
+            }
+          }
         }
       }
     } catch (e) {
       debugPrint('FactoryReset: delete db files: $e');
       rethrow; // فشل حذف القاعدة = فشل التصفير — لا نتظاهر بالنجاح.
     }
-    // 3) وسائط الدردشة/المرفقات (أفضل جهد — غيابها لا يفشل التصفير).
+    // 3) وسائط الدردشة/المرفقات ومجلدات المؤشرات (أفضل جهد — غيابها لا يفشل التصفير).
     try {
       final docs = await MediaPaths.ensureDocsDir();
       if (docs != null) {
-        for (final sub in const ['chat_media', 'attachments', 'backups']) {
+        for (final sub in const [
+          'chat_media',
+          'attachments',
+          'backups',
+          'receipts',
+          'thumbs',
+          'indicators',
+        ]) {
           final d = Directory(p.join(docs, sub));
           if (await d.exists()) {
             await d.delete(recursive: true);

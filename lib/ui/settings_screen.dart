@@ -493,12 +493,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       children: [
                         // [بطاقة المظهر والمنشأة]
                         _tabPage([
+                          const ThemeModeSelectorCard(),
+                          const SizedBox(height: 12),
                           Card(
                             child: ListTile(
                               leading: const Icon(Icons.palette_outlined),
                               title: const Text('المظهر والأصوات'),
                               subtitle: const Text(
-                                  'حجم الخط، الأصوات والاهتزاز والتنبيهات'),
+                                  'الوضع الليلي/النهاري، حجم الخط، الأصوات والاهتزاز'),
                               trailing: const Icon(Icons.chevron_left),
                               onTap: () => Navigator.of(context).push(
                                 MaterialPageRoute(
@@ -2451,9 +2453,17 @@ class _LeavePendingDialogState extends State<_LeavePendingDialog> {
             final db = await widget.repo.database;
             await GoogleAuthService(db).signOut();
           } catch (_) {}
-          widget.ref.invalidate(repoProvider);
+          // (دفعة الواجهات) لا إبطال لمزوّد المستودع هنا: المزوّد مُتجاوَز
+          // بقيمة ثابتة في main.dart، فالإبطال بلا أثر — والأخطر أنه يُنفَّذ
+          // بعد pop الحوار (المرجع صار مفكوكاً) فيرمي داخل catch الصامت
+          // فيُبتلع معه التنقّل إلى شاشة البداية ويبقى المستخدم على شاشة
+          // بياناتها مُصفّرة. التنقّل أولاً وبلا شرط.
           rootNavigatorKey.currentState?.pushAndRemoveUntil(
-            MaterialPageRoute(builder: (_) => const OnboardingScreen()),
+            MaterialPageRoute(
+              builder: (_) => const OnboardingScreen(
+                initialNotice: 'تم إلغاء الوصول / ارتباطك ملغى من قِبل المنشأة',
+              ),
+            ),
             (route) => false,
           );
         }

@@ -49,8 +49,25 @@ final settingsProvider = FutureProvider<Map<String, String>>((ref) async {
       .timeout(const Duration(seconds: 8), onTimeout: () => <String, String>{});
 });
 
-/// وضع السمة.
-final themeModeProvider = StateProvider<ThemeMode>((ref) => ThemeMode.system);
+/// وضع السمة (الافتراضي: النهاري الثابت غير المتأثر بإعدادات الجهاز).
+final themeModeProvider = StateProvider<ThemeMode>((ref) => ThemeMode.light);
+
+/// حفظ وضع المظهر بشكل دائم في كل من SharedPreferences وقاعدة البيانات المحلية.
+Future<void> saveAppThemeMode(WidgetRef ref, ThemeMode mode) async {
+  ref.read(themeModeProvider.notifier).state = mode;
+  final raw = switch (mode) {
+    ThemeMode.dark => 'dark',
+    ThemeMode.system => 'system',
+    ThemeMode.light => 'light',
+  };
+  try {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setString('app_theme_mode', raw);
+  } catch (_) {}
+  try {
+    await ref.read(repoProvider).setSetting('theme', raw);
+  } catch (_) {}
+}
 
 /// إخفاء الأرصدة.
 final hideBalancesProvider = StateProvider<bool>((ref) => false);
@@ -155,7 +172,7 @@ final accountsProvider = FutureProvider<List<AccountWithBalance>>((ref) async {
       // بحث ذكي: الاستعلام الرقمي يستهدف الهاتف/المبالغ؛ والنصي يمر
       // بتطبيع عربي (تجاهل التشكيل، أ/إ/آ→ا، ة→ه، ى→ي).
       final hay = numericQ
-          ? '${a.phone} ${a.whatsapp} '
+          ? '${a.name} ${a.phone} ${a.whatsapp} ${a.notes} '
                 '${balances[a.id]?.abs().toStringAsFixed(0) ?? ''}'
           : '${a.name} ${a.phone} ${a.whatsapp} ${a.notes} '
                 '${a.tags.join(' ')}';
@@ -261,11 +278,14 @@ final summaryProvider = FutureProvider<Summary>((ref) async {
       salesByCur[t.currency] = (salesByCur[t.currency] ?? 0) + t.amount;
       totalSales += t.amount;
     } else if (isRet) {
-      salesByCur[t.currency] = ((salesByCur[t.currency] ?? 0) - t.amount)
-          .clamp(0.0, double.infinity);
-      totalSales = (totalSales - t.amount).clamp(0.0, double.infinity);
+      salesByCur[t.currency] = (salesByCur[t.currency] ?? 0) - t.amount;
+      totalSales -= t.amount;
     }
   }
+  for (final cur in salesByCur.keys.toList()) {
+    salesByCur[cur] = (salesByCur[cur] ?? 0.0).clamp(0.0, double.infinity);
+  }
+  totalSales = totalSales.clamp(0.0, double.infinity);
 
   return Summary(
     owedToUs: toUs,
@@ -471,9 +491,9 @@ final txPageProvider = FutureProvider<TxPage>((ref) async {
     final accName = t.type == OpType.transfer
         ? 'تحويل'
         : (byId[t.accountId]?.name ?? '');
-    // الاستعلام الرقمي يبحث في المرجع والمبلغ أيضاً؛ النصي بتطبيع عربي.
+    // الاستعلام الرقمي يبحث في المرجع والمبلغ والاسم والملاحظات أيضاً؛ النصي بتطبيع عربي.
     final hay = numericQ
-        ? '${t.reference} ${t.amount.toStringAsFixed(0)} ${t.description}'
+        ? '${t.reference} ${t.amount.toStringAsFixed(0)} ${t.description} $accName ${t.notes}'
         : '${t.description} ${t.reference} $accName ${t.notes}';
     return Fmt.smartContains(hay, q);
   }).toList();
@@ -518,9 +538,11 @@ final txPageProvider = FutureProvider<TxPage>((ref) async {
     if (isSale) {
       sales[t.currency] = (sales[t.currency] ?? 0) + t.amount;
     } else if (isRet) {
-      sales[t.currency] =
-          ((sales[t.currency] ?? 0) - t.amount).clamp(0.0, double.infinity);
+      sales[t.currency] = (sales[t.currency] ?? 0) - t.amount;
     }
+  }
+  for (final cur in sales.keys.toList()) {
+    sales[cur] = (sales[cur] ?? 0.0).clamp(0.0, double.infinity);
   }
 
   return TxPage(
@@ -1481,7 +1503,8 @@ String roleDisplayName({
       : switch (roleCode) {
           'admin' || 'manager' => 'المدير',
           'agent' => 'الشريك / الوكيل',
-          'accountant' => 'الكاشير',
+          'accountant' => 'المحاسب',
+          'cashier' => 'الكاشير',
           'dataentry' => 'مدخل البيانات',
           _ => '',
         };
@@ -1510,25 +1533,26 @@ final deviceSyncStatusProvider = FutureProvider<List<DeviceSyncStatus>>((
     [ourId],
   );
   if (peers.isEmpty) return const [];
+  // (دفعة 58) «الناقص» سحابياً = عملياتنا التي لم تُدفع للسحابة بعد —
+  // يُحسب مرة واحدة خارج الحلقة لأن الاستعلام يعتمد على ourId فقط.
+  final missing = await db.rawQuery(
+    '''
+    SELECT COUNT(*) c FROM operations o
+    WHERE o.device_id = ?
+      AND o.entity_type NOT IN ${SyncQueueOps.silentEntities}
+      AND COALESCE(o.synced, 0) = 0
+      AND NOT EXISTS (
+        -- العمليات التي ألغى المستخدم مزامنتها لا تُحسب ضد الجهاز.
+        SELECT 1 FROM sync_queue cq
+        WHERE cq.operation_id = o.id AND cq.status = 'cancelled'
+      )
+  ''',
+    [ourId],
+  );
+  final missingCount = (missing.first['c'] as int?) ?? 0;
   final out = <DeviceSyncStatus>[];
   for (final d in peers) {
     final id = d['id'] as String;
-    // (دفعة 58) «الناقص» سحابياً = عملياتنا التي لم تُدفع للسحابة بعد —
-    // ما إن تصل السحابة يسحبها كل قرين لحظياً عبر SSE.
-    final missing = await db.rawQuery(
-      '''
-      SELECT COUNT(*) c FROM operations o
-      WHERE o.device_id = ?
-        AND o.entity_type NOT IN ${SyncQueueOps.silentEntities}
-        AND COALESCE(o.synced, 0) = 0
-        AND NOT EXISTS (
-          -- العمليات التي ألغى المستخدم مزامنتها لا تُحسب ضد الجهاز.
-          SELECT 1 FROM sync_queue cq
-          WHERE cq.operation_id = o.id AND cq.status = 'cancelled'
-        )
-    ''',
-      [ourId],
-    );
     // حالة الاتصال: آخر ظهور/مزامنة سحابية خلال 5 دقائق = متصل.
     final seen = DateTime.tryParse((d['last_seen_at'] as String?) ?? '');
     final lastSyncAt = DateTime.tryParse((d['last_sync_at'] as String?) ?? '');
@@ -1547,7 +1571,7 @@ final deviceSyncStatusProvider = FutureProvider<List<DeviceSyncStatus>>((
         name: (d['name'] as String?) ?? 'جهاز',
         isOwner: (d['is_owner'] as int? ?? 0) == 1,
         online: online,
-        missingOps: (missing.first['c'] as int?) ?? 0,
+        missingOps: missingCount,
         roleCode: (d['peer_role'] as String?) ?? '',
         lastSyncAt: lastSync,
       ),

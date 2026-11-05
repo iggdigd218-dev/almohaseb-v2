@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/database.dart';
+import '../core/format.dart';
 import '../core/models.dart';
 
 /// سطر في سلة نقطة البيع.
@@ -139,8 +141,7 @@ class PosDraft {
 
   /// قيمة الخصم الفعلية وفق النمط: نسبة مئوية من المجموع أو مبلغ مقطوع.
   double get discountValue {
-    final raw =
-        double.tryParse(discountText.replaceAll(',', '').trim()) ?? 0.0;
+    final raw = Fmt.parseAmount(discountText) ?? 0.0;
     if (raw <= 0) return 0.0;
     if (discountIsPercent) {
       final pct = raw.clamp(0.0, 100.0);
@@ -156,15 +157,25 @@ class PosDraft {
     return (net * 100).roundToDouble() / 100.0;
   }
 
+  /// إجمالي الكميات الفعلية شاملة الأوزان والكسور العشرية بدقة.
+  double get totalQuantity => cart.values.fold<double>(
+        0.0,
+        (sum, e) => sum + (e.quantity > 0 ? e.quantity : 0.0),
+      );
+
+  /// عداد الوحدات/الأصناف في السلة: يجبر الكسور والأوزان للأعلى (`ceil`)
+  /// لضمان عدم تقريب كمية مثل `1.2` كجم إلى `1` أو `0.4` كجم إلى `0`.
   int get itemCount => cart.values.fold<int>(
         0,
-        (sum, e) => sum + (e.quantity > 0 && e.quantity < 1 ? 1 : e.quantity.round()),
+        (sum, e) => sum + (e.quantity <= 0 ? 0 : e.quantity.ceil()),
       );
 }
 
 class PosDraftNotifier extends StateNotifier<PosDraft> {
   final Ref? _ref;
   List<PosDraft> _heldDrafts = [];
+  Future<void> _storageChain = Future<void>.value();
+  bool _hasLocalHeldMutation = false;
 
   PosDraftNotifier([this._ref]) : super(const PosDraft()) {
     _loadHeldFromStorage();
@@ -172,44 +183,61 @@ class PosDraftNotifier extends StateNotifier<PosDraft> {
 
   static const String _kHeldDraftsPrefsKey = 'pos_held_invoices_v1';
 
-  Future<void> _loadHeldFromStorage() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_kHeldDraftsPrefsKey);
-      if (raw != null && raw.trim().isNotEmpty) {
-        final list = jsonDecode(raw) as List;
-        _heldDrafts = list
-            .whereType<Map>()
-            .map((m) => PosDraft.fromJson(Map<String, dynamic>.from(m)))
-            .toList();
-        _syncHeldState(saveToPrefs: false);
-      }
-    } catch (_) {
-      // Ignored in unit tests or non-shared_preferences environments
-    }
+  static String get _activePrefsKey {
+    final ws = AppDatabase.activeWorkspaceId.trim();
+    if (ws.isEmpty || ws == 'default') return _kHeldDraftsPrefsKey;
+    return '${_kHeldDraftsPrefsKey}_$ws';
   }
 
-  Future<void> _saveHeldToStorage() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      if (_heldDrafts.isEmpty) {
-        await prefs.remove(_kHeldDraftsPrefsKey);
-      } else {
-        final list = _heldDrafts.map((d) => d.toJson()).toList();
-        await prefs.setString(_kHeldDraftsPrefsKey, jsonEncode(list));
+  Future<void> _loadHeldFromStorage() {
+    final prefsKey = _activePrefsKey;
+    _storageChain = _storageChain.then((_) async {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final raw = prefs.getString(prefsKey);
+        if (_hasLocalHeldMutation) return;
+        if (raw != null && raw.trim().isNotEmpty) {
+          final list = jsonDecode(raw) as List;
+          _heldDrafts = list
+              .whereType<Map>()
+              .map((m) => PosDraft.fromJson(Map<String, dynamic>.from(m)))
+              .toList();
+          _syncHeldState(saveToPrefs: false);
+        }
+      } catch (_) {
+        // Ignored in unit tests or non-shared_preferences environments
       }
-    } catch (_) {
-      // Ignored in unit tests or non-shared_preferences environments
-    }
+    });
+    return _storageChain;
+  }
+
+  Future<void> _saveHeldToStorage([List<PosDraft>? snapshot]) {
+    final target = List<PosDraft>.unmodifiable(snapshot ?? _heldDrafts);
+    final prefsKey = _activePrefsKey;
+    _storageChain = _storageChain.then((_) async {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        if (target.isEmpty) {
+          await prefs.remove(prefsKey);
+        } else {
+          final list = target.map((d) => d.toJson()).toList();
+          await prefs.setString(prefsKey, jsonEncode(list));
+        }
+      } catch (_) {
+        // Ignored in unit tests or non-shared_preferences environments
+      }
+    });
+    return _storageChain;
   }
 
   void _syncHeldState({bool saveToPrefs = true}) {
+    final snapshot = List<PosDraft>.unmodifiable(_heldDrafts);
     if (saveToPrefs) {
-      _saveHeldToStorage();
+      _hasLocalHeldMutation = true;
+      _saveHeldToStorage(snapshot);
     }
     if (_ref != null) {
-      _ref.read(heldInvoicesProvider.notifier).state =
-          List.unmodifiable(_heldDrafts);
+      _ref.read(heldInvoicesProvider.notifier).state = snapshot;
     }
   }
 

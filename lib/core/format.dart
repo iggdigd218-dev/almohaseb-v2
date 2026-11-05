@@ -138,10 +138,17 @@ class Fmt {
 
   /// أرقام الهاتف: تُترك الأرقام فقط مع علامة + البادئة.
 
-  /// وقت نسبي بالعربية — نقل حرفي لـ `relTime` في نسخة الويب.
+  /// وقت نسبي بالعربية — يعالج أيضاً التواريخ المستقبلية الناتجة عن انحراف ساعة الجهاز.
   static String relative(DateTime d) {
     final diff = DateTime.now().difference(d);
     final s = diff.inSeconds;
+    if (s < 0) {
+      final futureSec = -s;
+      if (futureSec < 60) return 'الآن';
+      if (futureSec < 3600) return 'بعد ${(-diff.inMinutes)} دقيقة';
+      if (futureSec < 86400) return 'بعد ${(-diff.inHours)} ساعة';
+      return date(d);
+    }
     if (s < 60) return 'الآن';
     if (s < 3600) return 'قبل ${diff.inMinutes} دقيقة';
     if (s < 86400) return 'قبل ${diff.inHours} ساعة';
@@ -195,7 +202,7 @@ class Fmt {
     return tokens.every((token) => h.contains(token));
   }
 
-  /// رقم دولي لواتساب: يمني بلا صفر بادئ ← 967…
+  /// رقم دولي لواتساب: يمني (9 أرقام تبدأ بـ 7) بلا صفر بادئ ← 967…
   static String waNumber(String s) {
     const ar = '٠١٢٣٤٥٦٧٨٩';
     var clean = s;
@@ -206,7 +213,7 @@ class Fmt {
     if (d.startsWith('00')) d = d.substring(2);
     if (d.startsWith('967')) return d;
     if (d.startsWith('0')) d = d.replaceFirst(RegExp(r'^0+'), '');
-    if (d.length == 9) return '967$d';
+    if (d.length == 9 && d.startsWith('7')) return '967$d';
     return d;
   }
 }
@@ -239,8 +246,20 @@ class ThousandsFormatter extends TextInputFormatter {
     final dot = raw.indexOf('.');
     final intPart = dot < 0 ? raw : raw.substring(0, dot);
     final decPart = dot < 0 ? '' : raw.substring(dot);
-    final groupedInt =
-        intPart.isEmpty ? '' : _grouper.format(int.parse(intPart));
+    String groupedInt = '';
+    if (intPart.isNotEmpty) {
+      final parsedInt = int.tryParse(intPart);
+      if (parsedInt != null) {
+        groupedInt = _grouper.format(parsedInt);
+      } else {
+        final bigInt = BigInt.tryParse(intPart);
+        if (bigInt == null) return oldValue;
+        groupedInt = bigInt.toString().replaceAllMapped(
+              RegExp(r'\B(?=(\d{3})+(?!\d))'),
+              (_) => ',',
+            );
+      }
+    }
     final out = '$groupedInt$decPart';
     return TextEditingValue(
       text: out,

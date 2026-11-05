@@ -154,6 +154,9 @@ class _CloudInviteDialogState extends ConsumerState<_CloudInviteDialog> {
   JoinRequestWatcher? _watcher;
   bool _openingApproval = false;
 
+  /// (دفعة الواجهات) حراسة تزامن لمنع تراكب الاستطلاعات.
+  bool _checking = false;
+
   @override
   void initState() {
     super.initState();
@@ -177,13 +180,17 @@ class _CloudInviteDialogState extends ConsumerState<_CloudInviteDialog> {
   }
 
   void _startJoinPolling() {
-    _joinPoll = Timer.periodic(const Duration(milliseconds: 1500), (_) async {
+    _joinPoll = Timer.periodic(const Duration(milliseconds: 1500), (_) {
+      // الاستطلاع الواحد قد يتجاوز 1.5 ثانية (استعلام أساسي + احتياطي)، وكان
+      // كل نبضة تُطلق طلباً جديداً فوق الذي لم ينتهِ بعد.
+      if (!mounted || _checking || _openingApproval) return;
       _checkRequests();
     });
   }
 
   Future<void> _checkRequests() async {
-    if (!mounted || _openingApproval) return;
+    if (!mounted || _openingApproval || _checking) return;
+    _checking = true;
     try {
       final repo = ref.read(repoProvider);
       final inv = widget.invite;
@@ -224,14 +231,23 @@ class _CloudInviteDialogState extends ConsumerState<_CloudInviteDialog> {
           );
         }
       }
-    } catch (_) {}
+    } catch (_) {
+      // تجاهل أخطاء الشبكة العابرة — النبضة التالية تعيد المحاولة.
+    } finally {
+      _checking = false;
+    }
   }
 
   @override
   void dispose() {
+    // (دفعة الواجهات) تفكيك صريح وكامل: إلغاء المؤقتين وإيقاف مراقب SSE
+    // وتحرير المراجع، فلا تبقى أي نبضة حيّة بعد إغلاق حوار الدعوة.
     _tick?.cancel();
+    _tick = null;
     _joinPoll?.cancel();
+    _joinPoll = null;
     _watcher?.stop();
+    _watcher = null;
     super.dispose();
   }
 

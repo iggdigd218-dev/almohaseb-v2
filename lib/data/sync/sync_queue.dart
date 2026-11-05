@@ -238,6 +238,30 @@ class SyncQueueOps {
   }
 
   /// Only scheduled pending rows with `is_synced == 0` are automatic retries; failed is terminal.
+  /// (دفعة التدقيق) هل في الطابور عمليات معلّقة غير رسائل الدردشة
+  /// ومحادثاتها؟ يميّز به processQueue دفعة الدردشة الخالصة عن الدفعة
+  /// المالية — رسائل المجموعة لا تُحجب بصلاحيات العمليات المالية.
+  Future<bool> hasPendingNonChatOps({String? target}) async {
+    final targetSql = target != null ? ' AND q.target = ?' : '';
+    final args = <Object?>[
+      SyncStatus.pending.name,
+      if (target != null) target,
+    ];
+    try {
+      final rows = await db.rawQuery(
+        'SELECT 1 FROM sync_queue q '
+        'LEFT JOIN operations o ON o.id = q.operation_id '
+        "WHERE q.status = ?$targetSql "
+        "AND COALESCE(o.entity_type,'') NOT IN ('message','conversation') "
+        'LIMIT 1',
+        args,
+      );
+      return rows.isNotEmpty;
+    } catch (_) {
+      return true; // فشل الفحص = نعاملها كدفعة مالية (إغلاق)
+    }
+  }
+
   Future<List<Map<String, Object?>>> pickPending({
     int limit = 20,
     String? target,
@@ -423,6 +447,7 @@ class SyncQueueOps {
     required List<String>? userPermissions,
     required bool isExpelledOrRevoked,
     bool isPushOperation = false,
+    bool isChatOnly = false,
   }) async {
     // 1. التحقق الصارم من تطابق مساحة العمل (Multi-Tenant Isolation)
     if (activeWorkspaceId.isEmpty ||
@@ -461,16 +486,24 @@ class SyncQueueOps {
       return {'allowed': true, 'reason': 'granted'};
     }
 
-    // للموظف العادي في عمليات الدفع: التأكد من امتلاكه لصلاحية نشطة
-    if (isPushOperation) {
+    // للموظف العادي في عمليات الدفع: التأكد من امتلاكه لصلاحية نشطة.
+    // (دفعة التدقيق) «add_tx» هي مفتاح الصلاحية الفعلي لإضافة العمليات
+    // في المخطط، وأدوار agent/dataentry أدوار فعلية في المنشأة — كانت
+    // كلها غائبة فيرفض الموظف الشرعي دفع عمله.
+    // دفعة الدرددة الخالصة (رسائل المجموعة فقط) لا تُحجب بصلاحيات
+    // العمليات المالية إطلاقاً — الدردشة ليست عملية مالية.
+    if (isPushOperation && !isChatOnly) {
       final perms = userPermissions ?? const [];
-      final canCreateOrEdit = perms.contains('create_tx') ||
+      final canCreateOrEdit = perms.contains('add_tx') ||
+          perms.contains('create_tx') ||
           perms.contains('edit_tx') ||
           perms.contains('sales') ||
           perms.contains('pos') ||
           role == 'cashier' ||
           role == 'accountant' ||
-          role == 'member';
+          role == 'member' ||
+          role == 'agent' ||
+          role == 'dataentry';
       // (W-2) الدور الفارغ لم يعد يتجاوز الفحص: جهاز بلا دور معيَّن
       // (عضو لم يعيّنه المدير بعد) يُرفض صراحة — الفشل مغلق دائماً
       // ولا يبقى المسار المفتوح الوحيد في السلسلة.

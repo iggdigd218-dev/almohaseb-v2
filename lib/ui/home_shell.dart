@@ -61,6 +61,8 @@ import 'trial_ui.dart';
 import 'dialogs/sync_resolution_dialog.dart';
 import 'widgets.dart' show showSnack;
 import '../core/cloud_config.dart';
+import '../core/format.dart';
+import '../core/license_model.dart';
 
 /// كل شاشات التطبيق الاثنتي عشرة.
 enum AppScreen {
@@ -110,7 +112,8 @@ class _HomeShellState extends ConsumerState<HomeShell>
   Timer? _syncTimer;
   bool _updatePrompted = false;
 
-  Timer? _greetingTimer;
+  final List<CloudAlert> _pendingAdminAlerts = <CloudAlert>[];
+  Timer? _adminAlertRetryTimer;
 
   // (دفعة 58 — متطلب 20) مستمع سحابي عالمي لطلبات الانضمام على جهاز
   // المدير: يعمل من إقلاع التطبيق وعلى أي شاشة — حوار الموافقة/الرفض
@@ -210,11 +213,6 @@ class _HomeShellState extends ConsumerState<HomeShell>
     );
     _checkForUpdateOnStart();
     _wireSyncNotices();
-    _scheduleGreeting();
-    _greetingTimer = Timer.periodic(
-      const Duration(minutes: 20),
-      (_) => _scheduleGreeting(),
-    );
     // فُتح التطبيق بالضغط على إشعار خارجي أو بدء مسار الإقلاع التلقائي
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _applyStartupRouting();
@@ -316,35 +314,17 @@ class _HomeShellState extends ConsumerState<HomeShell>
     } catch (_) {}
   }
 
-  /// يطلب إذن الإشعارات الرسمي للنظام عند الحاجة، ويشغّل خدمة اليقظة
-  /// والإعفاء من تحسينات البطارية داخل المجموعة.
+  /// يطلب إذن الإشعارات الرسمي للنظام عند الحاجة، ويوقف أي إشعار دائم في شريط النظام.
   Future<void> _ensureGroupKeepAlive() async {
     try {
+      // إيقاف الإشعار الدائم في شريط إشعارات النظام نهائياً.
+      await NexKeepAlive.setEnabled(false);
       // إذن الإشعارات (أندرويد 13+): يُطلب بنافذة النظام الرسمية ليتمكن
       // التطبيق من إظهار إشعارات العمليات والتنبيهات والتحديثات.
       if (!await NexKeepAlive.hasPermission(NexKeepAlive.permNotifications)) {
         await NexKeepAlive.requestPermission(NexKeepAlive.permNotifications);
       }
-      final repo0 = ref.read(repoProvider);
-      final mode = await repo0.workspaceMode();
-      final st0 = await repo0.settings();
-      // إعداد المستخدم «المزامنة في الخلفية وأثناء السكون» (افتراضي: مفعّل).
-      final wantBg = (st0['bgKeepAlive'] ?? '1') != '0';
-      final inGroup = mode != 'standalone';
-      await NexKeepAlive.setEnabled(inGroup && wantBg);
-      if (!inGroup || !wantBg) return;
-      // الإعفاء من تحسينات البطارية: نافذة النظام الرسمية، مرة واحدة فقط
-      // (إن رفض لا نلاحقه في كل إقلاع).
-      final repo = ref.read(repoProvider);
-      final st = await repo.settings();
-      if (!await NexKeepAlive.isBatteryExempt() &&
-          st['batteryExemptAsked'] != '1') {
-        await repo.setSetting('batteryExemptAsked', '1');
-        await NexKeepAlive.requestBatteryExempt();
-      }
-    } catch (_) {
-      // اليقظة كمالية — لا تعطل الإقلاع.
-    }
+    } catch (_) {}
   }
 
   @override
@@ -611,7 +591,8 @@ class _HomeShellState extends ConsumerState<HomeShell>
         );
       }
     };
-    // وصول تنبيه سحابي أو إداري جديد (Broadcast / In-App Alert)
+    // وصول تنبيه سحابي أو إداري جديد (Broadcast / In-App Alert / Scheduled Alert)
+    // يظهر فوراً في نافذة منبثقة أنيقة (showAppNotice) لحظة وصوله أو عند فتح التطبيق.
     CloudControlService.instance.onNewAlertReceived = (alert) {
       if (!mounted) return;
       Sfx.systemNotify(
@@ -620,44 +601,10 @@ class _HomeShellState extends ConsumerState<HomeShell>
         entityType: 'cloud_alert',
         entityId: alert.id,
       );
-      if (alert.isModal) {
-        if (_isAnotherModalOpen) {
-          _showTappableNotice(
-            alert.title,
-            alert.body,
-            entityType: 'cloud_alert',
-            entityId: alert.id,
-          );
-          return;
-        }
-        _modalBusy = true;
-        showDialog<void>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: Row(
-              children: [
-                const Icon(Icons.campaign_rounded, color: Color(0xFF7C3AED)),
-                const SizedBox(width: 8),
-                Expanded(child: Text(alert.title)),
-              ],
-            ),
-            content: Text(alert.body),
-            actions: [
-              FilledButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('حسناً، فهمت'),
-              ),
-            ],
-          ),
-        ).whenComplete(() => _modalBusy = false);
-      } else {
-        _showTappableNotice(
-          alert.title,
-          alert.body,
-          entityType: 'cloud_alert',
-          entityId: alert.id,
-        );
+      if (!_pendingAdminAlerts.any((a) => a.id == alert.id)) {
+        _pendingAdminAlerts.add(alert);
       }
+      _drainAdminAlertQueue();
     };
     // تغيير أجراه المدير على هذا العضو (اسم/دور/صلاحيات): حدث إداري
     // مهم → إشعار داخلي (الجرس) + خارجي + بانر.
@@ -670,44 +617,48 @@ class _HomeShellState extends ConsumerState<HomeShell>
     };
   }
 
-  /// تحية داخلية موقوتة: «صباح الخير» (5-11:59) و«مساء الخير» (16-21:59)
-  /// مرة واحدة لكل فترة يومياً، بصوت هادئ ونافذة منبثقة أنيقة.
-  Future<void> _scheduleGreeting() async {
+  /// يعرض الإشعارات الإدارية المعلقة تباعاً في النافذة المنبثقة (showAppNotice)
+  /// فور وصولها أو فور فتح التطبيق.
+  Future<void> _drainAdminAlertQueue() async {
+    _adminAlertRetryTimer?.cancel();
+    if (!mounted || _pendingAdminAlerts.isEmpty) return;
+    if (_isAnotherModalOpen) {
+      _adminAlertRetryTimer = Timer(
+        const Duration(milliseconds: 700),
+        _drainAdminAlertQueue,
+      );
+      return;
+    }
+    final alert = _pendingAdminAlerts.removeAt(0);
+    _modalBusy = true;
     try {
-      // وضع الاختبار الصامت: لا نوافذ تحية تحجب الشاشة وتكسر اختبارات E2E
-      // (كانت نافذة «مساء الخير» تفتح فوق الشاشة فتحجب كل النقرات).
-      if (Sfx.muted) return;
-      final now = DateTime.now();
-      final isMorning = now.hour >= 5 && now.hour < 12;
-      final isEvening = now.hour >= 16 && now.hour < 22;
-      if (!isMorning && !isEvening) return;
-      final repo = ref.read(repoProvider);
-      final st = await repo.settings();
-      final key = isMorning ? 'lastMorningGreeting' : 'lastEveningGreeting';
-      final today = '${now.year}-${now.month}-${now.day}';
-      if (st[key] == today) return;
-      await repo.setSetting(key, today);
-      final title = isMorning ? 'صباح الخير' : 'مساء الخير';
-      final msg = isMorning
-          ? 'صباح الخير! نتمنى لك يوماً موفقاً مليئاً بالمبيعات الطيبة.'
-          : 'مساء الخير! نتمنى لك أمسية هادئة وحسابات رابحة.';
-      // صوت هادئ عبر إشعار النظام + نافذة داخلية أنيقة (بشرط عدم وجود نافذة أخرى مفتوحة).
-      Sfx.systemNotify(title: title, body: msg, peaceful: true);
-      if (!mounted || _isAnotherModalOpen) return;
-      _modalBusy = true;
+      final created = alert.createdAt > 0
+          ? DateTime.fromMillisecondsSinceEpoch(alert.createdAt)
+          : DateTime.now();
+      final when = '\n\n🕓 ${Fmt.dateTime(created)}';
+      await showAppNotice(
+        context,
+        title: alert.title,
+        message: '${alert.body}$when'.trim(),
+        kind: AppNoticeKind.info,
+        playSound: true,
+      );
       try {
-        await showAppNotice(
-          context,
-          title: title,
-          message: msg,
-          kind: AppNoticeKind.info,
-          playSound: false,
-        );
-      } finally {
-        _modalBusy = false;
-      }
-    } catch (_) {
-      // التحية كمالية — لا تعطل شيئاً.
+        final repo = ref.read(repoProvider);
+        final st = await repo.settings();
+        final backendUrl = effectiveBackendUrl(st['cloudBackendUrl']);
+        final wsId = await SubscriptionGuard.workspaceIdFor(repo);
+        await CloudControlService.instance
+            .markAlertAsRead(backendUrl, wsId, alert.id);
+      } catch (_) {}
+    } finally {
+      _modalBusy = false;
+    }
+    if (mounted && _pendingAdminAlerts.isNotEmpty) {
+      _adminAlertRetryTimer = Timer(
+        const Duration(milliseconds: 350),
+        _drainAdminAlertQueue,
+      );
     }
   }
 
@@ -1050,7 +1001,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _syncTimer?.cancel();
-    _greetingTimer?.cancel();
+    _adminAlertRetryTimer?.cancel();
     _globalJoinWatcher?.stop();
     _activityBus?.cancel();
     _activityDebounce?.cancel();
@@ -1897,15 +1848,12 @@ class _HomeShellState extends ConsumerState<HomeShell>
                 );
               },
             ),
-            // قائمة الخيارات الإضافية (⋮) في الزاوية
+            // قائمة الخيارات الإضافية (⋮) في الزاوية (تم نقل إعدادات المظهر إلى شاشة الإعدادات)
             Padding(
               padding: const EdgeInsetsDirectional.only(end: 6),
               child: Consumer(
                 builder: (ctx, rref, _) {
                   final isDark = Theme.of(ctx).brightness == Brightness.dark;
-                  final currentTheme = rref.watch(themeModeProvider);
-                  final darkActive = currentTheme == ThemeMode.dark ||
-                      (currentTheme == ThemeMode.system && isDark);
                   final hidden = rref.watch(hideBalancesProvider);
 
                   return PopupMenuButton<String>(
@@ -1925,13 +1873,18 @@ class _HomeShellState extends ConsumerState<HomeShell>
                     ),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                     onSelected: (val) {
-                      if (val == 'theme') {
+                      if (val == 'balances') {
                         Sfx.tap();
-                        rref.read(themeModeProvider.notifier).state =
-                            darkActive ? ThemeMode.light : ThemeMode.dark;
-                      } else if (val == 'balances') {
-                        Sfx.tap();
-                        rref.read(hideBalancesProvider.notifier).state = !hidden;
+                        final next = !hidden;
+                        rref.read(hideBalancesProvider.notifier).state = next;
+                        unawaited(() async {
+                          try {
+                            await rref.read(repoProvider).setSetting(
+                                  'hideBalances',
+                                  next ? '1' : '0',
+                                );
+                          } catch (_) {}
+                        }());
                       } else if (val == 'refresh') {
                         bump(ref);
                         _refreshSync();
@@ -1942,20 +1895,6 @@ class _HomeShellState extends ConsumerState<HomeShell>
                       }
                     },
                     itemBuilder: (c) => [
-                      PopupMenuItem(
-                        value: 'theme',
-                        child: Row(
-                          children: [
-                            Icon(
-                              darkActive ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-                              size: 19,
-                              color: darkActive ? const Color(0xFFFBBF24) : const Color(0xFFD97706),
-                            ),
-                            const SizedBox(width: 10),
-                            Text(darkActive ? 'التبديل إلى الوضع النهاري' : 'التبديل إلى الوضع الليلي'),
-                          ],
-                        ),
-                      ),
                       PopupMenuItem(
                         value: 'balances',
                         child: Row(

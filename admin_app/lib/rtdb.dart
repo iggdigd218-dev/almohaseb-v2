@@ -2268,7 +2268,7 @@ class Rtdb {
     String wsId, {
     required String title,
     required String body,
-    bool isModal = false,
+    bool isModal = true,
   }) async {
     final enc = Uri.encodeComponent(wsId);
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -2277,7 +2277,9 @@ class Rtdb {
       'title': title,
       'body': body,
       'is_modal': isModal,
+      'isModal': isModal,
       'created_at': now,
+      'createdAt': now,
       'read': false,
     });
   }
@@ -2665,7 +2667,7 @@ class Rtdb {
     await _patch('support_chats/$enc/meta', patch);
   }
 
-  /// 1. إرسال تنبيه جماعي شامل (Broadcast Alert)
+  /// 1. إرسال تنبيه جماعي شامل (Broadcast Alert) — يظهر بنافذة منبثقة فوراً
   Future<void> sendBroadcastNotification({
     required String title,
     required String body,
@@ -2675,14 +2677,70 @@ class Rtdb {
       'id': '$now',
       'title': title,
       'body': body,
-      'is_modal': false,
-      'isModal': false,
+      'is_modal': true,
+      'isModal': true,
       'created_at': now,
       'createdAt': now,
       'timestamp': {'.sv': 'timestamp'},
     };
     await _put('system/broadcast_notifications/$now', payload);
     await _put('system/broadcast_alerts/$now', payload);
+  }
+
+  /// 1.ب جلب الإشعارات التلقائية المجدولة حسب الوقت
+  Future<List<Map<String, dynamic>>> getScheduledNotifications() async {
+    final res = await _get('system/broadcast_notifications/_scheduled_rules');
+    if (res is! Map) return [];
+    final list = <Map<String, dynamic>>[];
+    for (final e in res.entries) {
+      if (e.value is Map) {
+        final m = Map<String, dynamic>.from(e.value as Map);
+        m['id'] = '${m['id'] ?? e.key}';
+        list.add(m);
+      }
+    }
+    list.sort((a, b) {
+      final ha = (a['hour'] as num?)?.toInt() ?? 0;
+      final hb = (b['hour'] as num?)?.toInt() ?? 0;
+      if (ha != hb) return ha.compareTo(hb);
+      final ma = (a['minute'] as num?)?.toInt() ?? 0;
+      final mb = (b['minute'] as num?)?.toInt() ?? 0;
+      return ma.compareTo(mb);
+    });
+    return list;
+  }
+
+  /// 1.ج حفظ أو تعديل إشعار تلقائي مجدول حسب الوقت ونص الإشعار
+  Future<void> saveScheduledNotification({
+    String? id,
+    required String title,
+    required String body,
+    required int hour,
+    required int minute,
+    bool enabled = true,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final ruleId = (id != null && id.trim().isNotEmpty) ? id.trim() : 's_$now';
+    final payload = {
+      'id': ruleId,
+      'title': title.trim(),
+      'body': body.trim(),
+      'hour': hour.clamp(0, 23),
+      'minute': minute.clamp(0, 59),
+      'enabled': enabled,
+      'updated_at': now,
+    };
+    await _put(
+        'system/broadcast_notifications/_scheduled_rules/$ruleId', payload);
+    await _put('system/broadcast_alerts/_scheduled_rules/$ruleId', payload);
+  }
+
+  /// 1.د حذف إشعار تلقائي مجدول
+  Future<void> deleteScheduledNotification(String id) async {
+    final ruleId = id.trim();
+    if (ruleId.isEmpty) return;
+    await _delete('system/broadcast_notifications/_scheduled_rules/$ruleId');
+    await _delete('system/broadcast_alerts/_scheduled_rules/$ruleId');
   }
 
   /// 2. وضع الصيانة السحابي (Cloud Maintenance Mode)

@@ -413,18 +413,6 @@ class _UpdateBody extends ConsumerWidget {
             UpdateStatus.unknown => info.error ?? 'سبب غير معروف.',
           },
         ),
-        if (info.notes.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: AppColors.surface2Of(context),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: _ReleaseNotesList(notes: info.notes),
-          ),
-        ],
         if (info.hasUpdate) ...[
           const SizedBox(height: 10),
           FilledButton.icon(
@@ -508,10 +496,6 @@ Future<void> showUpdateDialog(
                 style: TextStyle(fontWeight: FontWeight.w600),
               ),
             ],
-            if (info.notes.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              _ReleaseNotesList(notes: info.notes),
-            ],
           ],
         ),
         actions: [
@@ -545,7 +529,7 @@ Future<void> showUpdateDialog(
   );
 }
 
-/// حوار «الجديد في هذا التحديث» الديناميكي.
+/// حوار «الجديد في هذا التحديث» الديناميكي (يظهر في نافذة منبثقة عند أول فتح للتطبيق بعد تحديثه فقط).
 Future<void> showWhatsNewDialog(
   BuildContext context,
   String version,
@@ -572,27 +556,7 @@ Future<void> showWhatsNewDialog(
                 ),
               ),
               const SizedBox(height: 10),
-              for (final it in items)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(
-                        Icons.check_circle_outline,
-                        size: 16,
-                        color: AppColors.greenOf(ctx),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          it,
-                          style: const TextStyle(fontSize: 12.5, height: 1.6),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+              if (items.isNotEmpty) _ReleaseNotesList(notes: notes),
             ],
           ),
         ),

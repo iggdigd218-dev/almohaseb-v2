@@ -60,6 +60,18 @@ void main() {
           store[p] = jsonDecode(req.body);
           return http.Response.bytes(utf8.encode(req.body), 200);
         }
+        if (req.method == 'PATCH') {
+          // (تدقيق 2026-11-04) PATCH يدمج الحقول في العقدة القائمة — كما يفعل
+          // Firebase RTDB فعلياً — لا يستبدلها.
+          final incoming = jsonDecode(req.body);
+          final current = store[p];
+          if (incoming is Map && current is Map) {
+            current.addAll(incoming);
+          } else {
+            store[p] = incoming;
+          }
+          return http.Response.bytes(utf8.encode(jsonEncode(store[p])), 200);
+        }
         if (req.method == 'DELETE') {
           store.remove(p);
           return http.Response.bytes(utf8.encode('null'), 200);

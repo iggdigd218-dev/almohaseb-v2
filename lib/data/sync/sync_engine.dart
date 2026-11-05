@@ -12,6 +12,7 @@ import 'package:http/http.dart' as http;
 import 'package:sqflite/sqflite.dart';
 
 import '../../core/database.dart';
+import '../../core/desktop_net.dart';
 import '../../core/token_cipher.dart';
 import 'account_workspace.dart';
 import 'auto_backup.dart';
@@ -53,7 +54,16 @@ class SyncEngine {
   bool _running = false;
   bool _started = false;
   bool get hasStarted => _started;
-  bool get isCloudSyncActive => _started && _cloudTransport != null;
+  bool get isCloudSyncActive {
+    if (!_started || _cloudTransport == null) return false;
+    final diag = SyncDiagnostics.instance.snapshot;
+    if (DesktopNet.netErrorNotifier.value != null ||
+        diag.lastPullFault == SyncFaultSource.network ||
+        diag.lastPushFault == SyncFaultSource.network) {
+      return false;
+    }
+    return true;
+  }
 
   /// «نافذة الخطر»: تُستدعى عندما يكتشف المحرك عرقلة حقيقية تمنع المزامنة
   /// (مثل رفض الصلاحيات/القواعد أو تعارض البيانات أو خطأ برمجي/بنيوي)،
@@ -549,6 +559,37 @@ class SyncEngine {
   /// (3.71.0) بصمة صلاحيات العضو المنتدب — أي تغيّر فيها يُخطر فوراً.
   String? _memberPermsSig;
 
+  /// (دفعة التدقيق) تصنيف حالة الفصل المحلية:
+  /// 'none' لا فصل • 'revoked' حظر مؤقت (revoked_at فقط أو فك اقتران)
+  /// يوقف المزامنة ويُبقي البيانات • 'expelled' طرد نهائي
+  /// (selfRevoked أو expelled_at) يستوجب التصفير.
+  Future<String> _localEvictionKind() async {
+    try {
+      if ((await repo.workspaceMode()) != 'member') return 'none';
+      final db = await repo.database;
+      final meta = await db.query('sync_meta',
+          where: "key = 'selfRevoked'", limit: 1);
+      if (meta.isNotEmpty &&
+          '${meta.first['value'] ?? ''}'.trim() == '1') {
+        return 'expelled';
+      }
+      final ourId = await ensureDeviceId(repo);
+      if (ourId.isEmpty) return 'none';
+      final rows = await db.query('devices',
+          where: 'id = ?', whereArgs: [ourId], limit: 1);
+      if (rows.isEmpty) return 'none';
+      final me = rows.first;
+      if ((me['is_owner'] ?? 0) == 1) return 'none';
+      if ('${me['expelled_at'] ?? ''}'.trim().isNotEmpty) {
+        return 'expelled';
+      }
+      final revoked = '${me['revoked_at'] ?? ''}'.trim().isNotEmpty;
+      final unpaired = ((me['is_paired'] as int?) ?? 1) == 0;
+      if (revoked || unpaired) return 'revoked';
+    } catch (_) {}
+    return 'none';
+  }
+
   Future<void> _checkMemberPermissions() async {
     try {
       final mode = await repo.workspaceMode();
@@ -577,19 +618,33 @@ class SyncEngine {
         final url = effectiveBackendUrl(st['cloudBackendUrl']);
         final t = _cloudTransport;
         final ourId = await ensureDeviceId(repo);
-        final isExpelledLocally = await repo.amIExpelled();
         final wsToCheck = t?.workspaceId ?? (await repo.activeWorkspaceId());
-        final approved = isExpelledLocally ||
-            (url.isNotEmpty &&
-                wsToCheck.isNotEmpty &&
-                await CloudJoin.checkLeaveOrEvicted(
-                  backendUrl: url,
-                  workspaceId: wsToCheck,
-                  deviceId: ourId,
-                  // (PR-5) لا تُنفَّذ التصفية إلا بشاهد طرد أحدث من آخر
-                  // انضمام ناجح — الأثر الأقدم يُتجاهل ويُمسح ذاتياً.
-                  joinedAtMs: int.tryParse(st['sync.joinedAtMs'] ?? ''),
-                ));
+        // (دفعة التدقيق) تمييز الفصل النهائي عن الحظر المؤقت:
+        //  - الطرد النهائي (expelled_at / شاهد إخلاء سحابي / مغادرة معتمدة)
+        //    ⇒ التدمير الكامل للقاعدة المحلية كما كان.
+        //  - الحظر المؤقت (revoked_at فقط أو فك اقتران) ⇒ إيقاف المزامنة
+        //    مع إبقاء البيانات المحلية كما هي — البوابات تحجب السحب والدفع
+        //    أصلاً عبر amIExpelled، وعند «إعادة السماح» تُستأنف المزامنة
+        //    تلقائياً دون أي فقدان.
+        var kind = await _localEvictionKind();
+        if (kind == 'none' && url.isNotEmpty && wsToCheck.isNotEmpty) {
+          kind = await CloudJoin.evictionKind(
+            backendUrl: url,
+            workspaceId: wsToCheck,
+            deviceId: ourId,
+            // (PR-5) لا تُنفَّذ التصفية إلا بشاهد طرد أحدث من آخر
+            // انضمام ناجح — الأثر الأقدم يُتجاهل ويُمسح ذاتياً.
+            joinedAtMs: int.tryParse(st['sync.joinedAtMs'] ?? ''),
+          );
+        }
+        if (kind == 'revoked') {
+          SyncDiagnostics.instance.recordPushError(
+            'تم إيقاف مزامنة هذا الجهاز مؤقتاً من قِبل المدير (حظر دون طرد). بياناتك المحلية محفوظة، وستُستأنف المزامنة تلقائياً عند إعادة السماح.',
+            context: '_checkMemberPermissions → revoked (مؤقت)',
+          );
+          return;
+        }
+        final approved = kind == 'expelled';
         if (approved) {
           final oldWs = await repo.activeWorkspaceId();
           stop();
@@ -668,7 +723,11 @@ class SyncEngine {
       final activeWs = await repo.activeWorkspaceId();
       final t = _cloudTransport!;
       final isExpelled = await repo.amIExpelled();
-      final user = await repo.deviceAssignedUser();
+      // (دفعة التدقيق) سقوط احتياطي إلى currentUser(): جهاز بلا مستخدم
+      // معيَّن في سجل الجهاز (deviceAssignedUser == null) لا يُرفض بلا
+      // دور — هوية is_me وصلاحياتها المحلية معتمدة حتى يحدد المدير دوره.
+      final user =
+          await repo.deviceAssignedUser() ?? await repo.currentUser();
       final access = await q.verifyMemberAccess(
         activeWorkspaceId: activeWs,
         expectedWorkspaceId: t.workspaceId,
@@ -1361,8 +1420,14 @@ class SyncEngine {
       // 🔒 التحقق الصارم من صلاحيات العضو ومساحة العمل قبل دفع أي بيانات
       final activeWs = await repo.activeWorkspaceId();
       final isExpelled = await repo.amIExpelled();
-      final user = await repo.deviceAssignedUser();
+      // (دفعة التدقيق) نفس السقوط الاحتياطي: هوية is_me المحلية عند غياب
+      // مستخدم سجل الجهاز — لا رفض بلا دور لجهاز معتمد في المنشأة.
+      final user =
+          await repo.deviceAssignedUser() ?? await repo.currentUser();
       final targetWs = _cloudTransport?.workspaceId ?? activeWs;
+      // (دفعة التدقيق) دفعة الدردشة الخالصة (رسائل ومحادثات فقط) لا
+      // تُحجب بصلاحيات العمليات المالية — الدردشة حق لكل أعضاء المجموعة.
+      final chatOnlyBatch = !(await q.hasPendingNonChatOps());
       final access = await q.verifyMemberAccess(
         activeWorkspaceId: activeWs,
         expectedWorkspaceId: targetWs,
@@ -1373,6 +1438,7 @@ class SyncEngine {
             .toList(),
         isExpelledOrRevoked: isExpelled,
         isPushOperation: true,
+        isChatOnly: chatOnlyBatch,
       );
       if (access['allowed'] != true) {
         if (isExpelled) {

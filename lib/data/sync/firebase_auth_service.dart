@@ -147,6 +147,13 @@ class FirebaseAuthRest {
       _accountIdToken = null;
       _accountRefreshToken = null;
       _accountExpiryMs = 0;
+      // (دفعة التدقيق) الخروج الكامل يمسح الهوية المجهولة أيضاً — لا
+      // تُورَّث هوية الجهاز السحابية للجلسة التالية.
+      _anonUid = null;
+      _anonIdToken = null;
+      _anonRefreshToken = null;
+      _anonExpiryMs = 0;
+      _anonStarted = false;
       _activeTokenUid = null;
       await purgeAllSessionPrefs();
       try {
@@ -353,18 +360,20 @@ class FirebaseAuthRest {
           _anonUid!.isNotEmpty &&
           _anonIdToken != null &&
           _anonIdToken!.isNotEmpty) {
-        final resolvedUid = (googleId != null && googleId.trim().isNotEmpty)
-            ? googleId.trim()
-            : _anonUid!;
+        // (دفعة التدقيق) التوكن هنا مجهول فعلياً: localId لدى Firebase هو
+        // _anonUid — إسناد uid/googleId يفصل الهوية عن توكنها، فتنكسر
+        // قواعد /members وتُوقَّع الكتابات بهوية لا يمنحها التوكن
+        // صلاحيتها. الهوية الصادقة (المُعادة والمُثبَّتة) هي هوية التوكن،
+        // والبريد يبقى في السجل لمطابقة ملكية المنشأة.
         final acc = FirebaseAccount(
-          uid: resolvedUid,
+          uid: _anonUid!,
           email: cleanEmail,
           displayName: (displayName ?? '').trim(),
           idToken: _anonIdToken!,
           refreshToken: _anonRefreshToken ?? '',
           expiresInSeconds: 3600,
         );
-        _accountUid = resolvedUid;
+        _accountUid = _anonUid;
         _accountIdToken = _anonIdToken;
         _accountRefreshToken = _anonRefreshToken;
         _accountExpiryMs = _anonExpiryMs;
@@ -517,18 +526,33 @@ class FirebaseAuthRest {
     } else if (a.uid.isNotEmpty && !hasValidToken) {
       _accountUid = a.uid;
     }
-    // تثبيت هوية وصفة المدير والمالك محلياً فوراً دون انتظار الشبكة
-    await repo.checkAndAutoPromoteManager();
-    await repo.ensureSelfPermissionRow(roleCode: 'admin');
-    try {
-      final st = await repo.settings();
-      await saveWorkspaceSessionPrefs(
-        workspaceId: repo.requireWorkspaceId,
-        ownerEmail: a.email,
-        businessName: (st['businessName'] ?? '').trim(),
-        userRole: 'admin',
-      );
-    } catch (_) {}
+    // تثبيت هوية وصفة المدير والمالك محلياً فوراً دون انتظار الشبكة —
+    // (دفعة التدقيق) إلا على جهاز عضو في مساحة مالك آخر: تسجيل الدخول
+    // بأي حساب لا يرقّي العضو إلى مدير ولا يثبّت رتبة admin في تفضيلات
+    // الجلسة؛ تُحفظ التفضيلات برتبة العضو الفعلية.
+    if ((await repo.workspaceMode()) != 'member') {
+      await repo.checkAndAutoPromoteManager();
+      await repo.ensureSelfPermissionRow(roleCode: 'admin');
+      try {
+        final st = await repo.settings();
+        await saveWorkspaceSessionPrefs(
+          workspaceId: repo.requireWorkspaceId,
+          ownerEmail: a.email,
+          businessName: (st['businessName'] ?? '').trim(),
+          userRole: 'admin',
+        );
+      } catch (_) {}
+    } else {
+      try {
+        final st = await repo.settings();
+        await saveWorkspaceSessionPrefs(
+          workspaceId: repo.requireWorkspaceId,
+          ownerEmail: (st['ownerEmail'] ?? a.email).trim(),
+          businessName: (st['businessName'] ?? '').trim(),
+          userRole: 'member',
+        );
+      } catch (_) {}
+    }
   }
 
   /// uid المحفوظ محلياً ('' إن لم يسجل الدخول بعد).
@@ -574,7 +598,11 @@ class FirebaseAuthRest {
     _accountIdToken = null;
     _accountRefreshToken = null;
     _accountExpiryMs = 0;
-    _activeTokenUid = _anonUid;
+    // (دفعة التدقيق) الخروج يستدعي resetAnonymousSession كاملة: مسح
+    // الهوية المجهولة من الذاكرة والتخزين معاً — بقاء uid الجهاز القديم
+    // بعد الخروج يورّث الجلسة التالية هوية سحابية مستعملة (عضوية
+    // /members ونطاق القواعد) بدل هوية جديدة مستقلة عن السابقة.
+    await resetAnonymousSession(repo);
     await purgeAllSessionPrefs();
     if (!keepDatabaseOpen) {
       repo.debugSetWorkspaceId(defaultWorkspaceIdConst);

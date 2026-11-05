@@ -91,7 +91,11 @@ class _GeminiAssistantSheetState extends ConsumerState<_GeminiAssistantSheet> {
   final ScrollController _scrollCtl = ScrollController();
 
   String _selectedRole = 'accountant';
-  String _selectedModel = 'gemini-3.8-flash';
+
+  /// (دفعة الواجهات) الافتراضي يُشتق من خريطة النماذج الحقيقية نفسها —
+  /// كان مثبتاً على معرّف وهمي (`gemini-3.8-flash`) لا وجود له في `_models`
+  /// ولا عند المزوّد، فيُرسَل في كل طلب أول تشغيل ويفشل بلا أي مؤشر واجهة.
+  String _selectedModel = _models.keys.first;
   bool _showConfig = false;
   bool _sending = false;
   List<GeminiChatTurn> _messages = [];
@@ -120,18 +124,21 @@ class _GeminiAssistantSheetState extends ConsumerState<_GeminiAssistantSheet> {
     ),
   };
 
+  // (دفعة التدقيق) أسماء النماذج الحقيقية المتاحة فعلياً من Gemini —
+  // كانت المعرفات السابقة وهمية لا تطابق أي إصدار منشور فتفشل الطلبات
+  // أو تُخدَم بنموذج احتياطي غير مقصود.
   static const _models = <String, ({String label, String sub, IconData icon})>{
-    'gemini-3.8-flash': (
+    'gemini-2.5-flash': (
       label: 'متوازن (Flash)',
       sub: 'للمهام العامة',
       icon: Icons.auto_awesome_rounded,
     ),
-    'gemini-3.1-flash-lite': (
+    'gemini-2.5-flash-lite': (
       label: 'سريع (Lite)',
       sub: 'ردود فورية',
       icon: Icons.bolt_rounded,
     ),
-    'gemini-3.1-pro-preview': (
+    'gemini-2.5-pro': (
       label: 'معمّق (Pro)',
       sub: 'للتحليل المعقّد',
       icon: Icons.psychology_rounded,
@@ -244,33 +251,30 @@ class _GeminiAssistantSheetState extends ConsumerState<_GeminiAssistantSheet> {
 
   Future<String> _buildLocalFinancialContext(Repo repo) async {
     try {
+      final accounts = await repo.accounts();
       final db = await repo.database;
-      final accCountRow = await db.rawQuery(
-        "SELECT COUNT(*) AS c FROM accounts WHERE COALESCE(deleted_at,'') = ''",
-      );
-      final accCount = (accCountRow.firstOrNull?['c'] as num?)?.toInt() ?? 0;
+      final accCount = accounts.length;
 
-      final debitRow = await db.rawQuery(
-        "SELECT COALESCE(SUM(amount),0) AS s FROM transactions WHERE type = 'debit' AND COALESCE(deleted_at,'') = ''",
-      );
-      final creditRow = await db.rawQuery(
-        "SELECT COALESCE(SUM(amount),0) AS s FROM transactions WHERE type = 'credit' AND COALESCE(deleted_at,'') = ''",
-      );
-      final totalDebit = (debitRow.firstOrNull?['s'] as num?)?.toDouble() ?? 0;
-      final totalCredit =
-          (creditRow.firstOrNull?['s'] as num?)?.toDouble() ?? 0;
-
-      final topDebtors = await db.rawQuery('''
-        SELECT a.name, a.currency,
-               COALESCE(SUM(CASE WHEN t.type='debit' THEN t.amount WHEN t.type='credit' THEN -t.amount ELSE 0 END), 0) + COALESCE(a.opening_balance, 0) AS bal
-        FROM accounts a
-        LEFT JOIN transactions t ON t.account_id = a.id AND COALESCE(t.deleted_at,'') = ''
-        WHERE COALESCE(a.deleted_at,'') = ''
-        GROUP BY a.id
-        HAVING bal > 0
-        ORDER BY bal DESC
-        LIMIT 6
-      ''');
+      // (دفعة التدقيق) الأرصدة من دوال المستودع المعتمدة (allBalances:
+      // الافتتاحي + كل التأثيرات بما فيها القبض/الصرف والتحويلات بسعرها)
+      // مجمّعة لكل عملة على حدة — كان السياق يجمع مبالغ debit/credit
+      // خاماً عبر كل العملات معاً فتختلط العملات وتُهمل عمليات القبض
+      // والصرف كلياً.
+      final balances = await repo.allBalances(accounts);
+      final receivableByCur = <String, double>{};
+      final payableByCur = <String, double>{};
+      final debtors = <({String name, String cur, double bal})>[];
+      for (final a in accounts) {
+        final bal = balances[a.id] ?? 0.0;
+        final cur = a.currency.trim().toUpperCase();
+        if (bal > 0) {
+          receivableByCur[cur] = (receivableByCur[cur] ?? 0) + bal;
+          debtors.add((name: a.name, cur: cur, bal: bal));
+        } else if (bal < 0) {
+          payableByCur[cur] = (payableByCur[cur] ?? 0) + bal.abs();
+        }
+      }
+      debtors.sort((a, b) => b.bal.compareTo(a.bal));
 
       final lowStock = await db.rawQuery('''
         SELECT name, quantity, min_quantity
@@ -281,26 +285,30 @@ class _GeminiAssistantSheetState extends ConsumerState<_GeminiAssistantSheet> {
         LIMIT 8
       ''');
 
-      final debtorsStr = topDebtors.isEmpty
-          ? 'لا توجد مديونيات مرتفعة حالياً'
-          : topDebtors
-              .map((r) => '${r['name']} (${r['bal']} ${r['currency'] ?? ''})')
-              .join('، ');
-
       final lowStockStr = lowStock.isEmpty
           ? 'لا توجد نواقص حرجة في المخزون'
           : lowStock
               .map((r) => '${r['name']} (المتبقي: ${r['quantity']})')
               .join('، ');
 
-      return [
-        'عدد الحسابات النشطة: $accCount',
-        'إجمالي المدين (لنا): ${totalDebit.toStringAsFixed(0)}',
-        'إجمالي الدائن (علينا/المدفوعات): ${totalCredit.toStringAsFixed(0)}',
-        'صافي الرصيد: ${(totalDebit - totalCredit).toStringAsFixed(0)}',
-        'أعلى الحسابات المدينة: $debtorsStr',
-        'أصناف أوشكت على النفاد: $lowStockStr',
-      ].join('\n');
+      final lines = <String>['عدد الحسابات النشطة: $accCount'];
+      final allCurs = <String>{...receivableByCur.keys, ...payableByCur.keys}
+          .toList()
+        ..sort();
+      for (final cur in allCurs) {
+        final r = receivableByCur[cur] ?? 0;
+        final p = payableByCur[cur] ?? 0;
+        lines.add('[$cur] المدين (لنا): ${r.toStringAsFixed(0)} • '
+            'الدائن (علينا): ${p.toStringAsFixed(0)} • '
+            'الصافي: ${(r - p).toStringAsFixed(0)}');
+      }
+      lines.add(
+        debtors.isEmpty
+            ? 'لا توجد مديونيات مرتفعة حالياً'
+            : 'أعلى الحسابات المدينة: ${debtors.take(6).map((d) => '${d.name} (${d.bal.toStringAsFixed(0)} ${d.cur})').join('، ')}',
+      );
+      lines.add('أصناف أوشكت على النفاد: $lowStockStr');
+      return lines.join('\n');
     } catch (_) {
       return 'بيانات المنشأة المحلية جاهزة.';
     }

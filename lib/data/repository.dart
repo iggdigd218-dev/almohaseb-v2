@@ -20,6 +20,7 @@ import '../core/workspace_mode.dart';
 import 'sync/cloud_join.dart';
 import 'sync/device_id.dart';
 import 'sync/device_registry.dart';
+import 'sync/firebase_auth_service.dart';
 import 'sync/google_auth_service.dart';
 import 'sync/operation.dart';
 // (PR-2) استيراد دائري مقصود ومسموح في Dart: امتداد ApplyRemoteOp يوسّع
@@ -89,6 +90,11 @@ class Repo {
     File sourceDbFile, {
     String? workspaceId,
   }) async {
+    if (!await canAccessBackupAndRestore()) {
+      throw const BackupImportException(
+        'عملية استبدال قاعدة البيانات محصورة بمدير المنشأة فقط.',
+      );
+    }
     if (!await sourceDbFile.exists()) {
       throw const BackupImportException('ملف قاعدة البيانات المستخرج غير موجود.');
     }
@@ -1175,6 +1181,7 @@ class Repo {
         'conversations',
         'messages',
         'users',
+        'user_permissions',
         'notifications',
         'templates',
         'trash',
@@ -1320,11 +1327,14 @@ class Repo {
         'currencies',
         'categories',
         'item_categories',
+        'sections',
         'items',
         'stock_moves',
         'conversations',
         'messages',
         'users',
+        'user_permissions',
+        'notifications',
         'trash',
         'activity',
         'operations',
@@ -1428,11 +1438,16 @@ class Repo {
     final r = await db.query('accounts', where: 'id = ?', whereArgs: [customerId]);
     if (r.isEmpty) return 0.0;
     final acc = Account.fromMap(r.first);
+    final accCur = acc.currency.trim().toUpperCase();
     final txs = await transactions(accountId: customerId);
     double creditSalesAndDebits = 0.0;
     double receiptsAndCredits = 0.0;
     for (final t in txs) {
+      final tCur = t.currency.trim().toUpperCase();
+      final sameCur = tCur.isEmpty || accCur.isEmpty || tCur == accCur;
       if (t.accountId == customerId) {
+        // منع خلط العملات المختلفة جبرياً في رصيد العميل
+        if (!sameCur) continue;
         // استبعاد الفواتير النقدية تماماً (OpType.revenue / OpType.expense)
         if (t.type == OpType.revenue || t.type == OpType.expense) {
           continue;
@@ -1450,11 +1465,21 @@ class Repo {
         }
       }
       if (t.type == OpType.transfer) {
-        if (t.fromId == customerId) receiptsAndCredits += t.amount;
-        if (t.toId == customerId) creditSalesAndDebits += t.amount * t.rate;
+        if (t.fromId == customerId && sameCur) {
+          receiptsAndCredits += t.amount;
+        }
+        if (t.toId == customerId) {
+          if (sameCur) {
+            creditSalesAndDebits += t.amount;
+          } else if (t.rate > 0 && t.rate != 1.0) {
+            creditSalesAndDebits += t.amount * t.rate;
+          }
+        }
       }
     }
-    return acc.openingBalance + creditSalesAndDebits - receiptsAndCredits;
+    final rawBalance =
+        acc.openingBalance + creditSalesAndDebits - receiptsAndCredits;
+    return Fmt.roundMoney(rawBalance, await _decimalsOf(acc.currency));
   }
 
   /// تصحيح شامل لأرصدة جميع العملاء واستبعاد أي أثر للفواتير النقدية السابقة.
@@ -2176,10 +2201,15 @@ class Repo {
       if (retTxId == null) continue;
       final lines = await transactionItems(retTxId);
       for (final line in lines) {
-        final key = line.itemId != null
-            ? 'id:${line.itemId}'
-            : 'name:${line.name.trim().toLowerCase()}';
-        result[key] = (result[key] ?? 0) + line.quantity;
+        if (line.itemId != null) {
+          final idKey = 'id:${line.itemId}';
+          result[idKey] = (result[idKey] ?? 0) + line.quantity;
+        }
+        final nameNorm = line.name.trim().toLowerCase();
+        if (nameNorm.isNotEmpty) {
+          final nameKey = 'name:$nameNorm';
+          result[nameKey] = (result[nameKey] ?? 0) + line.quantity;
+        }
       }
     }
     return result;
@@ -2238,6 +2268,108 @@ class Repo {
         workspaceId: requireWorkspaceId,
         userId: _currentUserId,
       );
+
+      // 0. فحص صارم لسقف المرتجعات لمنع إرجاع كميات تفوق الكمية المباعة المتبقية في الفاتورة الأصلية
+      final origItemRows = await txn.query(
+        'transaction_items',
+        where: 'tx_id = ?',
+        whereArgs: [originalTx.id],
+      );
+      final prevReturnTxs = await txn.query(
+        'transactions',
+        columns: ['id', 'amount'],
+        where:
+            "(deleted_at IS NULL OR deleted_at = '') AND (original_tx_id = ? OR notes LIKE ?)",
+        whereArgs: ['${originalTx.id}', '%[ORIG_TX:${originalTx.id}]%'],
+      );
+      if (origItemRows.isNotEmpty) {
+        final soldById = <int, double>{};
+        final soldByName = <String, double>{};
+        for (final r in origItemRows) {
+          final l = InvoiceLine.fromMap(r);
+          final nameKey = l.name.trim().toLowerCase();
+          if (l.itemId != null) {
+            soldById[l.itemId!] = (soldById[l.itemId!] ?? 0.0) + l.quantity;
+          }
+          if (nameKey.isNotEmpty) {
+            soldByName[nameKey] = (soldByName[nameKey] ?? 0.0) + l.quantity;
+          }
+        }
+
+        final returnedById = <int, double>{};
+        final returnedByName = <String, double>{};
+        if (prevReturnTxs.isNotEmpty) {
+          final retIds =
+              prevReturnTxs.map((r) => r['id']).whereType<int>().toList();
+          if (retIds.isNotEmpty) {
+            final placeholders = List.filled(retIds.length, '?').join(',');
+            final prevLines = await txn.query(
+              'transaction_items',
+              where: 'tx_id IN ($placeholders)',
+              whereArgs: retIds,
+            );
+            for (final r in prevLines) {
+              final l = InvoiceLine.fromMap(r);
+              final nameKey = l.name.trim().toLowerCase();
+              if (l.itemId != null) {
+                returnedById[l.itemId!] =
+                    (returnedById[l.itemId!] ?? 0.0) + l.quantity;
+              }
+              if (nameKey.isNotEmpty) {
+                returnedByName[nameKey] =
+                    (returnedByName[nameKey] ?? 0.0) + l.quantity;
+              }
+            }
+          }
+        }
+
+        final reqById = <int, double>{};
+        final reqByName = <String, double>{};
+        for (final line in validLines) {
+          final nameKey = line.name.trim().toLowerCase();
+          final hasIdMatch =
+              line.itemId != null && soldById.containsKey(line.itemId!);
+          final hasNameMatch =
+              nameKey.isNotEmpty && soldByName.containsKey(nameKey);
+          if (!hasIdMatch && !hasNameMatch) {
+            throw StateError(
+              'الصنف "${line.name}" غير مدرج ضمن أصناف الفاتورة الأصلية #$origRef.',
+            );
+          }
+          if (hasIdMatch) {
+            final itemId = line.itemId!;
+            final nextReq = (reqById[itemId] ?? 0.0) + line.quantity;
+            reqById[itemId] = nextReq;
+            final remaining =
+                (soldById[itemId] ?? 0.0) - (returnedById[itemId] ?? 0.0);
+            if (nextReq > remaining + 1e-6) {
+              throw StateError(
+                'الكمية المرتجعة للصنف "${line.name}" (${Fmt.qty(nextReq)}) تتجاوز الكمية المتبقية القابلة للإرجاع (${Fmt.qty(remaining < 0 ? 0 : remaining)}).',
+              );
+            }
+          } else {
+            final nextReq = (reqByName[nameKey] ?? 0.0) + line.quantity;
+            reqByName[nameKey] = nextReq;
+            final remaining =
+                (soldByName[nameKey] ?? 0.0) - (returnedByName[nameKey] ?? 0.0);
+            if (nextReq > remaining + 1e-6) {
+              throw StateError(
+                'الكمية المرتجعة للصنف "${line.name}" (${Fmt.qty(nextReq)}) تتجاوز الكمية المتبقية القابلة للإرجاع (${Fmt.qty(remaining < 0 ? 0 : remaining)}).',
+              );
+            }
+          }
+        }
+      } else {
+        final prevReturnedAmount = prevReturnTxs.fold<double>(
+          0.0,
+          (sum, r) => sum + ((r['amount'] as num?)?.toDouble() ?? 0.0),
+        );
+        if (prevReturnedAmount + returnAmount > originalTx.amount + 1e-6) {
+          throw StateError(
+            'إجمالي قيمة المرتجعات يتجاوز قيمة الفاتورة الأصلية #$origRef.',
+          );
+        }
+      }
 
       // 1. إعادة الأصناف المرتجعة إلى المخزون والمبيعات
       final resolvedLines = <InvoiceLine>[];
@@ -2548,9 +2680,20 @@ class Repo {
   /// يُحسب دائمًا من السجل ولا يُخزَّن أبدًا، فلا يمكن أن يتعارض.
   Future<double> balanceOf(Account a) async {
     if (a.id == null) return a.openingBalance;
+    final accCur = a.currency.trim().toUpperCase();
     final txs = await transactions(accountId: a.id);
     var bal = a.openingBalance;
     for (final t in txs) {
+      final tCur = t.currency.trim().toUpperCase();
+      final sameCur = tCur.isEmpty || accCur.isEmpty || tCur == accCur;
+      if (t.type != OpType.transfer) {
+        if (!sameCur) continue;
+      } else {
+        if (t.fromId == a.id && !sameCur) continue;
+        if (t.toId == a.id && !sameCur && (t.rate <= 0 || t.rate == 1.0)) {
+          continue;
+        }
+      }
       final e = t.effectOn(a.id!);
       if (e != null) bal += e;
     }
@@ -2568,7 +2711,7 @@ class Repo {
   ///  ٢) مسار واحد: لكل عملية يُفحص مرشحوها الثلاثة (الحساب/من/إلى)
   ///     بدل المرور على كل الحسابات — نفس دالة `effectOn`، بلا أي
   ///     تكرار لمنطقها في SQL، فلا خطر انحراف الأرصدة.
-  ///  ٣) تقريب نهائي حسب منازل عملة كل حساب.
+  ///  ٣) تقريب نهائي حسب منازل عملة كل حساب، مع عزل صارم للعملات.
   Future<Map<int, double>> allBalances(List<Account> accounts) async {
     final db = await _db;
     final rows = await db.query(
@@ -2595,14 +2738,29 @@ class Repo {
       for (final a in accounts)
         if (a.id != null) a.id!,
     };
+    final curById = <int, String>{
+      for (final a in accounts)
+        if (a.id != null) a.id!: a.currency.trim().toUpperCase(),
+    };
     final out = <int, double>{
       for (final a in accounts)
         if (a.id != null) a.id!: a.openingBalance,
     };
     for (final t in txs) {
+      final tCur = t.currency.trim().toUpperCase();
       // مرشّحو هذه العملية فقط (ثلاثة على الأكثر) لا كل الحسابات.
       for (final id in <int?>{t.accountId, t.fromId, t.toId}) {
         if (id == null || !wanted.contains(id)) continue;
+        final accCur = curById[id] ?? '';
+        final sameCur = tCur.isEmpty || accCur.isEmpty || tCur == accCur;
+        if (t.type != OpType.transfer) {
+          if (!sameCur) continue;
+        } else {
+          if (t.fromId == id && !sameCur) continue;
+          if (t.toId == id && !sameCur && (t.rate <= 0 || t.rate == 1.0)) {
+            continue;
+          }
+        }
         final e = t.effectOn(id);
         if (e != null) out[id] = (out[id] ?? 0) + e;
       }
@@ -3293,9 +3451,72 @@ class Repo {
           VoucherKind.payment => OpType.outflow,
           VoucherKind.debit => OpType.debit,
           VoucherKind.credit => OpType.credit,
-          VoucherKind.transfer => OpType.inflow,
+          VoucherKind.transfer => OpType.transfer,
         };
-        if (v.accountId != null || _allowsAnonymousAccount(txType)) {
+        if (txType == OpType.transfer) {
+          // سند التحويل لا يُحوّل أبداً إلى OpType.inflow صامت؛
+          // يتطلب إما عملية تحويل مرتبطة مسبقاً بحسابين (from_id / to_id) أو وسوم تحويل صريحة.
+          final desc = v.statement.trim().isNotEmpty
+              ? '${v.kind.label} #${v.number}: ${v.statement.trim()}'
+              : '${v.kind.label} رقم #${v.number}';
+          final txNotes = v.notes.trim().isNotEmpty
+              ? 'مرتبط بالسند #${v.number}\n${v.notes.trim()}'
+              : 'مرتبط بالسند #${v.number}';
+          var updatedExisting = false;
+          if (linkedTxId != null) {
+            final existingTx = await txn.query(
+              'transactions',
+              where: 'id = ?',
+              whereArgs: [linkedTxId],
+              limit: 1,
+            );
+            if (existingTx.isNotEmpty) {
+              final existingFromId =
+                  (existingTx.first['from_id'] as int?) ?? v.accountId;
+              final existingToId = existingTx.first['to_id'] as int?;
+              if (existingFromId == null ||
+                  existingToId == null ||
+                  existingFromId == existingToId) {
+                throw StateError(
+                  'لا يمكن اعتماد سند التحويل بدون تحديد حسابي التحويل (المصدر والوجهة).',
+                );
+              }
+              final patch = <String, Object?>{
+                'from_id': existingFromId,
+                'to_id': existingToId,
+                'type': OpType.transfer.code,
+                'amount': v.amount,
+                'currency': v.currency,
+                'description': desc,
+                'reference': v.number,
+                'notes': txNotes,
+                'status': 'done',
+                'sync_state': newSync,
+                'deleted_at': '',
+                'date': v.date.toIso8601String(),
+                'updated_at': nowIso,
+              };
+              await txn.update(
+                'transactions',
+                patch,
+                where: 'id = ?',
+                whereArgs: [linkedTxId],
+              );
+              await rec.record(
+                entityType: EntityKind.tx,
+                entityId: '$linkedTxId',
+                opType: OpKind.update,
+                payload: {...existingTx.first, ...patch, 'id': linkedTxId},
+              );
+              updatedExisting = true;
+            }
+          }
+          if (!updatedExisting) {
+            throw StateError(
+              'لا يمكن اعتماد سند التحويل بدون عملية تحويل مرتبطة تحدد حسابي المصدر والوجهة.',
+            );
+          }
+        } else if (v.accountId != null || _allowsAnonymousAccount(txType)) {
           var accKind = v.kind == VoucherKind.payment
               ? AccountKind.supplier
               : AccountKind.customer;
@@ -5183,44 +5404,45 @@ class Repo {
     }
     final db = await _db;
     final inGroup = mode != 'standalone';
-    // 1) بث عمليات حذف للأعضاء قبل مسح السجلات محلياً (داخل مجموعة فقط):
-    //    delete_ لكل كيان أعمال حتى تنتقل دفاتر الأعضاء إلى سلاتهم ثم تُفرغ.
-    if (inGroup) {
-      final rec = SyncRecorder(
-        db: db,
-        deviceId: requireDeviceId,
-        workspaceId: requireWorkspaceId,
-        userId: _currentUserId,
-      );
-      const wipeTables = <(String, EntityKind)>[
-        ('transactions', EntityKind.tx),
-        ('vouchers', EntityKind.voucher),
-        ('stock_moves', EntityKind.stockMove),
-        ('items', EntityKind.item),
-        ('item_categories', EntityKind.itemCategory),
-        ('accounts', EntityKind.account),
-      ];
-      for (final (table, kind) in wipeTables) {
-        final rows = await db.query(table, columns: ['id']);
-        for (final r in rows) {
-          await rec.record(
-            entityType: kind,
-            entityId: '${r['id']}',
-            opType: OpKind.delete_,
-            payload: {'id': r['id'], '__wipe': 1},
-          );
+    // 1) بث عمليات حذف للأعضاء + 2) المسح المحلي الكامل لبيانات الأعمال ذرياً داخل db.transaction
+    await db.transaction((txn) async {
+      if (inGroup) {
+        final rec = SyncRecorder(
+          db: txn,
+          deviceId: requireDeviceId,
+          workspaceId: requireWorkspaceId,
+          userId: _currentUserId,
+        );
+        const wipeTables = <(String, EntityKind)>[
+          ('transactions', EntityKind.tx),
+          ('vouchers', EntityKind.voucher),
+          ('stock_moves', EntityKind.stockMove),
+          ('items', EntityKind.item),
+          ('item_categories', EntityKind.itemCategory),
+          ('sections', EntityKind.section),
+          ('categories', EntityKind.category),
+          ('accounts', EntityKind.account),
+        ];
+        for (final (table, kind) in wipeTables) {
+          final rows = await txn.query(table, columns: ['id']);
+          for (final r in rows) {
+            await rec.record(
+              entityType: kind,
+              entityId: '${r['id']}',
+              opType: OpKind.delete_,
+              payload: {'id': r['id'], '__wipe': 1},
+            );
+          }
         }
       }
-    }
-    // 2) المسح المحلي الكامل لبيانات الأعمال — الإعدادات والمستخدمون
-    //    والأجهزة والصلاحيات تبقى كما هي.
-    await db.transaction((txn) async {
       const tables = [
         'transaction_items',
         'transactions',
         'stock_moves',
         'items',
         'item_categories',
+        'sections',
+        'categories',
         'vouchers',
         'accounts',
         'messages',
@@ -5808,18 +6030,79 @@ class Repo {
     Map<String, Object?> row,
   ) async {
     for (final col in _parentAccountColumns) {
+      if (!row.containsKey(col)) continue;
       final v = row[col];
       if (v == null) continue;
       final id = v is int ? v : int.tryParse('$v');
-      if (id == null || id <= 0) continue;
+      if (id == null || id <= 0) {
+        row[col] = null;
+        continue;
+      }
       final found = await ex.query(
         'accounts',
+        columns: const ['id'],
+        where: "id = ? AND COALESCE(deleted_at, '') = ''",
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (found.isEmpty) throw ParentAccountNotFoundException(id, col);
+      row[col] = id;
+    }
+  }
+
+  /// يتحقق من المراجع الأجنبية الاختيارية (مثل category_id، section_id، item_id، parent_id)
+  /// ويصفرها إلى `null` إن كان السجل الأب محذوفاً نهائياً لمنع فشل `PRAGMA foreign_keys = ON`.
+  Future<void> _sanitizeOptionalForeignKeys(
+    DatabaseExecutor ex,
+    String store,
+    Map<String, Object?> row,
+  ) async {
+    Future<void> checkOptionalFk(String col, String parentTable) async {
+      if (!row.containsKey(col)) return;
+      final v = row[col];
+      if (v == null) return;
+      final id = v is int ? v : int.tryParse('$v');
+      if (id == null || id <= 0) {
+        row[col] = null;
+        return;
+      }
+      final found = await ex.query(
+        parentTable,
         columns: const ['id'],
         where: 'id = ?',
         whereArgs: [id],
         limit: 1,
       );
-      if (found.isEmpty) throw ParentAccountNotFoundException(id, col);
+      row[col] = found.isEmpty ? null : id;
+    }
+
+    if (store == 'transaction_items') {
+      await checkOptionalFk('item_id', 'items');
+    } else if (store == 'items') {
+      await checkOptionalFk('category_id', 'item_categories');
+      await checkOptionalFk('section_id', 'inventory_sections');
+    } else if (store == 'item_categories') {
+      await checkOptionalFk('parent_id', 'item_categories');
+      await checkOptionalFk('section_id', 'inventory_sections');
+    } else if (store == 'stock_moves') {
+      final v = row['item_id'];
+      final id = v is int ? v : int.tryParse('$v');
+      if (id == null || id <= 0) {
+        throw StateError('لا يمكن استرجاع حركة مخزون بدون صنف صالح.');
+      }
+      final found = await ex.query(
+        'items',
+        columns: const ['id'],
+        where: "id = ? AND COALESCE(deleted_at, '') = '' AND COALESCE(is_deleted, 0) = 0",
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (found.isEmpty) {
+        throw StateError(
+          'لا يمكن استرجاع حركة المخزون لأن الصنف المرتبط بها (#$id) محذوف أو غير موجود.',
+        );
+      }
+      row['item_id'] = id;
     }
   }
 
@@ -5861,7 +6144,7 @@ class Repo {
         final tx = Map<String, Object?>.from(decodedMap['transaction'] as Map);
         // وسوم المزامنة الداخلية (مثل __sync_entity) ليست أعمدة حقيقية.
         tx.removeWhere((k, _) => k.startsWith('__'));
-        // (سلامة السلة) لا استرجاع قبل التأكد من وجود الحساب الأب.
+        // (سلامة السلة) لا استرجاع قبل التأكد من وجود الحساب الأب ونشاطه.
         await _ensureParentAccounts(txn, tx);
         tx['deleted_at'] = '';
         tx['updated_at'] = now;
@@ -5889,6 +6172,7 @@ class Repo {
                 lm['tx_id'] = txId;
                 lm['workspace_id'] = requireWorkspaceId;
                 lm['id'] ??= newGlobalId();
+                await _sanitizeOptionalForeignKeys(txn, 'transaction_items', lm);
                 await txn.insert(
                   'transaction_items',
                   lm,
@@ -5971,6 +6255,7 @@ class Repo {
         if (store != 'accounts') {
           await _ensureParentAccounts(txn, payload);
         }
+        await _sanitizeOptionalForeignKeys(txn, store, payload);
         // إن كان السجل الأصلي ما زال موجودًا (soft delete)، نُلغِ deleted_at.
         final id = payload['id'];
         final exists = await txn.query(
@@ -5988,6 +6273,11 @@ class Repo {
           if (store == 'items') {
             upd['is_deleted'] = 0;
             upd['is_active'] = 1;
+            upd['category_id'] = payload['category_id'];
+            upd['section_id'] = payload['section_id'];
+          } else if (store == 'item_categories') {
+            upd['parent_id'] = payload['parent_id'];
+            upd['section_id'] = payload['section_id'];
           }
           await txn.update(
             store,
@@ -6580,44 +6870,51 @@ class Repo {
     if (mode == 'standalone') return 0;
     if (!await isWorkspaceOwner()) return 0;
     final db = await _db;
-    final rec = SyncRecorder(
-      db: db,
-      deviceId: requireDeviceId,
-      workspaceId: requireWorkspaceId,
-      userId: _currentUserId,
-    );
     // (جدول، كيان) بترتيب يحترم الاعتمادية عند التطبيق على الطرف الآخر.
     const tables = <(String, EntityKind)>[
       ('categories', EntityKind.category),
       ('currencies', EntityKind.currency),
       ('accounts', EntityKind.account),
+      ('sections', EntityKind.section),
       ('item_categories', EntityKind.itemCategory),
       ('items', EntityKind.item),
       ('transactions', EntityKind.tx),
       ('stock_moves', EntityKind.stockMove),
       ('vouchers', EntityKind.voucher),
       ('users', EntityKind.user),
+      ('user_permissions', EntityKind.userPermission),
     ];
     var queued = 0;
-    for (final (table, kind) in tables) {
-      final rows = await db.query(table);
-      for (final row in rows) {
-        final payload = Map<String, Object?>.from(row);
-        // سطور الفاتورة تُرحّل داخل حمولة العملية المالية نفسها.
-        if (kind == EntityKind.tx) {
-          payload['items'] = await _lineMaps(db, row['id'] as int);
+    await db.transaction((txn) async {
+      final rec = SyncRecorder(
+        db: txn,
+        deviceId: requireDeviceId,
+        workspaceId: requireWorkspaceId,
+        userId: _currentUserId,
+      );
+      for (final (table, kind) in tables) {
+        final rows = await txn.query(table);
+        for (final row in rows) {
+          final payload = Map<String, Object?>.from(row);
+          // سطور الفاتورة تُرحّل داخل حمولة العملية المالية نفسها.
+          if (kind == EntityKind.tx) {
+            payload['items'] = await _lineMaps(txn, row['id'] as int);
+          }
+          final entityId = switch (kind) {
+            EntityKind.currency => '${row['code']}',
+            EntityKind.userPermission => '${row['user_email'] ?? row['id']}',
+            _ => '${row['id']}',
+          };
+          await rec.record(
+            entityType: kind,
+            entityId: entityId,
+            opType: OpKind.update, // upsert على الطرف المستقبل
+            payload: payload,
+          );
+          queued++;
         }
-        final entityId =
-            kind == EntityKind.currency ? '${row['code']}' : '${row['id']}';
-        await rec.record(
-          entityType: kind,
-          entityId: entityId,
-          opType: OpKind.update, // upsert على الطرف المستقبل
-          payload: payload,
-        );
-        queued++;
       }
-    }
+    });
     return queued;
   }
 
@@ -6860,19 +7157,34 @@ class Repo {
   /// قسم «عام»: يُنشأ مرة واحدة ليكون ملاذ الفئات بلا قسم.
   Future<int> ensureGeneralSection() async {
     final db = await _db;
-    final existing = await db.query('sections',
-        where: 'name = ?', whereArgs: [generalSectionName], limit: 1);
+    final wsId = requireWorkspaceId;
+    final existing = await db.query(
+      'sections',
+      where:
+          "name = ? AND workspace_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
+      whereArgs: [generalSectionName, wsId],
+      limit: 1,
+    );
     if (existing.isNotEmpty) return existing.first['id'] as int;
-    final now = DateTime.now();
+    final nowIso = DateTime.now().toIso8601String();
     return await db.transaction((txn) async {
+      final inTxn = await txn.query(
+        'sections',
+        where:
+            "name = ? AND workspace_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
+        whereArgs: [generalSectionName, wsId],
+        limit: 1,
+      );
+      if (inTxn.isNotEmpty) return inTxn.first['id'] as int;
       final id = await txn.insert('sections', {
         'id': newGlobalId(),
+        'workspace_id': wsId,
         'name': generalSectionName,
         'icon': 'apps',
         'sort_order': 0,
         'deleted_at': '',
-        'created_at': now.toIso8601String(),
-        'updated_at': now.toIso8601String(),
+        'created_at': nowIso,
+        'updated_at': nowIso,
       });
       await queueOperation(
         entityType: EntityKind.section,
@@ -6880,9 +7192,11 @@ class Repo {
         opType: OpKind.create,
         payload: {
           'id': id,
+          'workspace_id': wsId,
           'name': generalSectionName,
           'icon': 'apps',
           'sort_order': 0,
+          'deleted_at': '',
         },
         executor: txn,
       );
@@ -7474,7 +7788,9 @@ class Repo {
     if (isCreate && itemToSave.plu == null) {
       // (2026-09-24) رقم الترقيم السريع: يُعيَّن مرة واحدة عند الإضافة
       // من أعلى رقم موجود + 1، ثم يثبت للأبد (لا إعادة ترتيب ولا تدوير).
-      itemToSave = itemToSave.copyWith(plu: await AppDatabase.nextPlu(db));
+      itemToSave = itemToSave.copyWith(
+        plu: await AppDatabase.nextPlu(db, workspaceId: _workspaceId),
+      );
     }
     late final int id;
     ({int itemId, String name, double qty, double minQty})? lowStock;
@@ -8237,6 +8553,14 @@ class Repo {
               final takeoverSig = Hmac(sha256, sigKey)
                   .convert(utf8.encode(sigPayload))
                   .toString();
+              // (دفعة التدقيق) توكن المصادقة الحقيقي: المستقبِلات المحصّنة
+              // لا تقبل email_takeover إلا عبر تحقق Firebase الفعلي
+              // (accounts:lookup). بقي takeover_signature للتوافق مع
+              // الأجهزة التي لم تُحدَّث بعد فقط.
+              String takeoverToken = '';
+              try {
+                takeoverToken = await FirebaseAuthRest.cloudIdToken() ?? '';
+              } catch (_) {}
               await queueOperation(
                 entityType: EntityKind.setting,
                 entityId: 'ownershipTransfer',
@@ -8251,6 +8575,7 @@ class Repo {
                     'owner_email': ownerEmail,
                     'owner_uid': ownerUid,
                     'takeover_signature': takeoverSig,
+                    'verified_claim': takeoverToken,
                     'demote_previous_to': 'agent',
                     'at': now,
                   }),

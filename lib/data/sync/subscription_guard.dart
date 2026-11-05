@@ -175,6 +175,9 @@ class SubscriptionState {
 
   /// هل انتهت التجربة؟ المقارنة بوقت الخادم حصراً.
   bool get expired =>
+      // (دفعة التدقيق) «unactivated» منشأة حديثة بانتظار الترخيص — ليست
+      // اشتراكاً منتهياً ولا تُحسب كذلك في أي بوابة.
+      status != 'unactivated' &&
       !isFrozen &&
       status != 'active' &&
       expiresAtMs > 0 &&
@@ -256,7 +259,10 @@ class FeatureAccessGuard {
 
   /// هل الحساب مقيد؟
   static bool isRestricted(SubscriptionState sub) =>
-      sub.status == 'none' || (sub.expired && !sub.isSubscribed);
+      sub.status == 'none' ||
+      // (دفعة التدقيق) «unactivated» ليست تقويماً — تُستثنى صراحة من
+      // التقييم فلا تُوسم مخرجات منشأة لم تُرخَّص بعد.
+      (sub.status != 'unactivated' && sub.expired && !sub.isSubscribed);
 
   /// مستوى الوصول إلى [feature]: كامل أو موسوم.
   ///
@@ -1091,8 +1097,15 @@ class SubscriptionGuard {
   /// آخر حالة مع تقديم وقت الخادم المرجعي بعمر الكاش (monotonic).
   static SubscriptionState _advanced() {
     if (!_everChecked || _last.serverNowMs <= 0) return _last;
+    // (دفعة التدقيق) إسقاط الحقول كان يعيد الحالة المستنبطة إلى
+    // الافتراضات (فردي/مقعد واحد/غير مجمّد/كل المزايا) بين الفحوص —
+    // تُمرَّر كاملة كما قُرأت آخر مرة.
     return SubscriptionState(
       status: _last.status,
+      planType: _last.planType,
+      maxDevices: _last.maxDevices,
+      isFrozen: _last.isFrozen,
+      features: _last.features,
       createdAtMs: _last.createdAtMs,
       expiresAtMs: _last.expiresAtMs,
       isActive: _last.isActive,
@@ -1219,6 +1232,11 @@ class SubscriptionGuard {
     if (st.isFrozen) return true; // مجمّد عن بعد عبر مفتاح القفل الفوري
     if (st.status == 'active') return false; // اشتراك مدفوع فعّال.
     if (st.status == 'none') return false; // لا سحابة — لا حظر.
+    if (st.status == 'unactivated') {
+      // (دفعة التدقيق) المنشأة غير المفعلة بعد لا تُحجب عن المزامنة —
+      // ترخيصها يُحسم لاحقاً بحالتها الرسمية لا بحجب الخدمة عنها.
+      return false;
+    }
     return st.expired;
   }
 

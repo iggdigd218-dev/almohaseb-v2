@@ -66,20 +66,20 @@ class PosItemTile extends StatelessWidget {
   }
 
   Widget _buildThumb(BuildContext context) {
-    // (PR-8) حدة Retina: نكاش الصورة بكثافة بكسل الشاشة الفيزيائية
-    // (منع البكسلة والتمدد) + جودة معالجة عالية داخل ClipRRect بقص
-    // متناسق — بلا أي غباش.
-    final thumbCacheWidth = crispCacheWidth(context, 160);
+    // (PR-8) حدة Retina: نكاش الصورة بكثافة بكسل الشاشة الفيزيائية (280px منطقي)
+    // مع ملء كامل لصدر البطاقة (Full-Bleed Top Image) لإبراز صورة الصنف بوضوح.
+    final thumbCacheWidth = crispCacheWidth(context, 280);
     if (item.image.isEmpty) return _fallback(context);
     if (item.image.startsWith('http')) {
       return ClipRRect(
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(13)),
         child: SizedBox.expand(
           child: Image.network(
             item.image,
             fit: BoxFit.cover,
             cacheWidth: thumbCacheWidth,
             filterQuality: FilterQuality.medium,
+            gaplessPlayback: true,
             errorBuilder: (_, __, ___) => _fallback(context),
           ),
         ),
@@ -87,13 +87,14 @@ class PosItemTile extends StatelessWidget {
     }
     if (MediaPaths.exists(item.image)) {
       return ClipRRect(
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(13)),
         child: SizedBox.expand(
           child: Image.file(
             File(MediaPaths.toAbsolute(item.image)),
             fit: BoxFit.cover,
             cacheWidth: thumbCacheWidth,
             filterQuality: FilterQuality.medium,
+            gaplessPlayback: true,
             errorBuilder: (_, __, ___) => _fallback(context),
           ),
         ),
@@ -148,84 +149,81 @@ class PosItemTile extends StatelessWidget {
           onLongPress: onLongPress,
           child: Stack(
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(5, 5, 5, 5),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    // 1) منطقة الصورة أو الأيقونة الملونة ممتدة رأسياً بعد دمج الكمية في الشارة السفلية.
-                    Expanded(
-                      flex: 7,
-                      child: _buildThumb(context),
-                    ),
-                    const SizedBox(height: 4),
-                    // 2) اسم الصنف يظهر على سطرين لتمكين قراءة الاسم كاملاً والتفريق بين الأصناف.
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(minHeight: 26),
-                      child: Center(
-                        child: Text(
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // 1) منطقة الصورة أو الأيقونة الملونة تملأ صدر البطاقة بالكامل (حجم كبير وواضح).
+                  Expanded(
+                    flex: 8,
+                    child: _buildThumb(context),
+                  ),
+                  // 2) تفاصيل الصنف المدمجة أسفل الصورة مباشرة دون فراغات مهدرة.
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(5, 4, 5, 4),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
                           item.name,
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           textAlign: TextAlign.center,
                           style: TextStyle(
-                            // (PR-8) اسم الصنف: فحم نقي (0F172A في الفاتح)
-                            // بوزن واضح حاد — ويتكيف تلقائياً في الداكن.
                             fontWeight: FontWeight.w700,
                             fontSize: 10.5,
                             height: 1.15,
                             color: AppColors.textOf(context),
                           ),
                         ),
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    // 3) الصف السفلي: شارة التوفر مع العدد كرقم مجرد يميناً + السعر بخط عريض يساراً.
-                    SizedBox(
-                      height: 18,
-                      child: Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 5, vertical: 1.5),
-                            decoration: BoxDecoration(
-                              color: statusBg,
-                              borderRadius: BorderRadius.circular(999),
-                            ),
-                            child: Text(
-                              statusLabel,
-                              style: TextStyle(
-                                fontSize: 8.0,
-                                fontWeight: FontWeight.w800,
-                                color: statusFg,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 3),
-                          Expanded(
-                            child: FittedBox(
-                              fit: BoxFit.scaleDown,
-                              alignment: AlignmentDirectional.centerEnd,
-                              child: Text(
-                                '${Fmt.money(price)} $symbol',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w900,
-                                  fontSize: 11.0,
-                                  // (PR-8) سعر زمردي نضر للصنف المتاح.
-                                  color: isOut
-                                      ? AppColors.dangerOf(context)
-                                      : const Color(0xFF059669),
+                        const SizedBox(height: 3),
+                        // 3) الصف السفلي: شارة التوفر مع العدد يميناً + السعر بخط عريض يساراً.
+                        SizedBox(
+                          height: 17,
+                          child: Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 4.5, vertical: 1),
+                                decoration: BoxDecoration(
+                                  color: statusBg,
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Text(
+                                  statusLabel,
+                                  style: TextStyle(
+                                    fontSize: 8.0,
+                                    fontWeight: FontWeight.w800,
+                                    color: statusFg,
+                                  ),
                                 ),
                               ),
-                            ),
+                              const SizedBox(width: 3),
+                              Expanded(
+                                child: FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  alignment: AlignmentDirectional.centerEnd,
+                                  child: Text(
+                                    '${Fmt.money(price)} $symbol',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w900,
+                                      fontSize: 11.0,
+                                      color: isOut
+                                          ? AppColors.dangerOf(context)
+                                          : const Color(0xFF059669),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-              // شارة الزاوية العلوية اليسرى: تعرض (+) قبل الإضافة، وعند الإضافة تختفي (+) ويظهر العدد فقط بحجم مدمج لا يغطي الصورة.
+              // شارة الزاوية العلوية اليسرى: تعرض (+) قبل الإضافة، وعند الإضافة يظهر العدد.
               PositionedDirectional(
                 top: 4,
                 end: 4,
@@ -285,19 +283,19 @@ class PosItemTile extends StatelessWidget {
       height: double.infinity,
       decoration: BoxDecoration(
         color: t.foreground.withValues(alpha: 0.13),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(13)),
       ),
       alignment: Alignment.center,
       child: Icon(
         _resolvedIcon,
-        size: 28,
+        size: 32,
         color: t.foreground,
       ),
     );
   }
 }
 
-/// شبكة الأصناف المتجاوبة: 4 على الجوال · 6 على التابلت · 8 على الحاسوب.
+/// شبكة الأصناف المتجاوبة: 4 على الجوال · 6 على التابلت/لابتوب · 8 على الشاشات العريضة.
 class PosItemsGrid extends StatelessWidget {
   const PosItemsGrid({
     super.key,
@@ -327,34 +325,42 @@ class PosItemsGrid extends StatelessWidget {
   final AppTone Function(Item item)? toneFor;
   final IconData Function(Item item)? iconFor;
 
-  /// عدد الأعمدة حسب عرض الشاشة: 4 · 6 · 8.
+  /// عدد الأعمدة حسب العرض المتاح: 4 · 6 · 8.
   static int crossAxisCountFor(double width) =>
-      width >= 1000 ? 8 : (width >= 600 ? 6 : 4);
+      width >= 1100 ? 8 : (width >= 600 ? 6 : 4);
 
   @override
   Widget build(BuildContext context) {
-    final cross = crossAxisCountFor(MediaQuery.sizeOf(context).width);
-    return GridView.builder(
-      padding: const EdgeInsets.fromLTRB(10, 4, 10, 96),
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: cross,
-        childAspectRatio: .72,
-        crossAxisSpacing: 8,
-        mainAxisSpacing: 8,
-      ),
-      itemCount: items.length,
-      itemBuilder: (context, i) {
-        final it = items[i];
-        return PosItemTile(
-          item: it,
-          symbol: symbol,
-          inCart: quantityInCart(it),
-          enabled: canAdd(it),
-          onAdd: () => onAdd(it),
-          onLongPress: onLongPress == null ? null : () => onLongPress!(it),
-          isFavorite: isFavorite?.call(it) ?? false,
-          tone: toneFor?.call(it),
-          fallbackIcon: iconFor?.call(it),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final availWidth =
+            constraints.maxWidth.isFinite && constraints.maxWidth > 0
+                ? constraints.maxWidth
+                : MediaQuery.sizeOf(context).width;
+        final cross = crossAxisCountFor(availWidth);
+        return GridView.builder(
+          padding: const EdgeInsets.fromLTRB(10, 4, 10, 96),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: cross,
+            childAspectRatio: cross >= 6 ? .84 : .76,
+            crossAxisSpacing: 8,
+            mainAxisSpacing: 8,
+          ),
+          itemCount: items.length,
+          itemBuilder: (context, i) {
+            final it = items[i];
+            return PosItemTile(
+              item: it,
+              symbol: symbol,
+              inCart: quantityInCart(it),
+              enabled: canAdd(it),
+              onAdd: () => onAdd(it),
+              onLongPress: onLongPress == null ? null : () => onLongPress!(it),
+              isFavorite: isFavorite?.call(it) ?? false,
+              tone: toneFor?.call(it),
+              fallbackIcon: iconFor?.call(it),
+            );
+          },
         );
       },
     );

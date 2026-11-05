@@ -102,17 +102,24 @@ class DesktopHttpOverrides extends HttpOverrides {
       }
       ..badCertificateCallback = (cert, host, port) {
         final cleanHost = host.toLowerCase().trim();
-        // التسامح التلقائي مع فرق توقيت ساعة الهاتف (Clock Skew) لخوادم فايربيس وجوجل المعتمدة
-        final isGoogleOrFirebase = cleanHost.endsWith('.firebasedatabase.app') ||
-            cleanHost.endsWith('.googleapis.com') ||
-            cleanHost.contains('identitytoolkit') ||
-            cleanHost.contains('firebase');
-        if (isGoogleOrFirebase) {
-          final issuer = cert.issuer.toLowerCase();
-          if (issuer.contains('google') ||
-              issuer.contains('gts') ||
-              issuer.contains('global') ||
-              issuer.contains('pki')) {
+        final isTrustedEndpoint = DesktopNet.shouldTrustBadCert(cleanHost) ||
+            cleanHost.endsWith('.firebasedatabase.app') ||
+            cleanHost.endsWith('.firebaseio.com') ||
+            cleanHost.endsWith('.googleapis.com');
+        if (isTrustedEndpoint) {
+          final now = DateTime.now().toUtc();
+          final start = cert.startValidity.toUtc();
+          final end = cert.endValidity.toUtc();
+          final certLifespan = end.difference(start);
+          final isClockSkewOnly = cert.subject.trim().isNotEmpty &&
+              cert.issuer.trim().isNotEmpty &&
+              certLifespan.inDays > 0 &&
+              certLifespan.inDays <= 400 &&
+              ((now.isBefore(start) &&
+                      start.difference(now) <= const Duration(days: 7)) ||
+                  (now.isAfter(end) &&
+                      now.difference(end) <= const Duration(days: 7)));
+          if (isClockSkewOnly) {
             return true;
           }
         }

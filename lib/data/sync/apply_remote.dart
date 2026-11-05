@@ -1,10 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
+import '../../core/auth_config.dart';
 import '../../core/database.dart';
 import '../../core/media_paths.dart';
 import '../../core/models.dart';
@@ -346,7 +346,7 @@ Future<void> _healAccountConflict(
 
   final dups = await txn.query(
     'accounts',
-    columns: ['id', 'deleted_at', 'name'],
+    columns: ['id', 'deleted_at', 'name', 'kind', 'currency', 'opening_balance'],
     where: 'name = ? COLLATE NOCASE AND id != ?',
     whereArgs: [cleanName, newEntityId],
   );
@@ -369,6 +369,46 @@ Future<void> _healAccountConflict(
       continue;
     }
 
+    // (دفعة التدقيق) لا دمج أعمى على تشابه الاسم وحده: المكرر النشط
+    // الذي يختلف عن الوافد في النوع أو العملة — أو يحمل أيٌّ من الطرفين
+    // رصيداً افتتاحياً غير صفري — كيان مالي مستقل ودمجه يخلط الأرصدة.
+    // نكتفي بلاحقة تميّز تحفظ الحسابين كيانين منفصلين.
+    final dupKind = '${d['kind'] ?? ''}'.trim();
+    final dupCurrency = '${d['currency'] ?? ''}'.trim();
+    final dupOpening = ((d['opening_balance'] as num?) ?? 0).toDouble();
+    var newKind = '';
+    var newCurrency = '';
+    var newOpening = 0.0;
+    try {
+      final newRows = await txn.query(
+        'accounts',
+        columns: ['kind', 'currency', 'opening_balance'],
+        where: 'id = ?',
+        whereArgs: [newEntityId],
+        limit: 1,
+      );
+      if (newRows.isNotEmpty) {
+        newKind = '${newRows.first['kind'] ?? ''}'.trim();
+        newCurrency = '${newRows.first['currency'] ?? ''}'.trim();
+        newOpening =
+            ((newRows.first['opening_balance'] as num?) ?? 0).toDouble();
+      }
+    } catch (_) {}
+    final kindsDiffer =
+        newKind.isNotEmpty && dupKind.isNotEmpty && newKind != dupKind;
+    final currenciesDiffer = newCurrency.isNotEmpty &&
+        dupCurrency.isNotEmpty &&
+        newCurrency != dupCurrency;
+    if (kindsDiffer || currenciesDiffer || dupOpening != 0 || newOpening != 0) {
+      await txn.update(
+        'accounts',
+        {'name': '$cleanName (مستقل $dupId)'},
+        where: 'id = ?',
+        whereArgs: [dupId],
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      continue;
+    }
     try {
       await txn.update(
         'transactions',
@@ -666,8 +706,9 @@ extension ApplyRemoteOp on Repo {
   Future<bool> applyRemoteOperation(
     DatabaseExecutor txn,
     SyncOperation op,
-    ConflictResolver resolver,
-  ) async {
+    ConflictResolver resolver, {
+    Map<String, Map<String, String>?>? preverifiedTakeoverIdentities,
+  }) async {
     final table = _tableFor(op.entityType);
     final primaryKey = switch (op.entityType) {
       EntityKind.setting => 'key',
@@ -1299,10 +1340,15 @@ extension ApplyRemoteOp on Repo {
               if (itRows.isNotEmpty) {
                 final curQty =
                     (itRows.first['quantity'] as num?)?.toDouble() ?? 0.0;
-                final sign =
-                    (kindStr == 'purchase' || kindStr == 'returnIn')
-                        ? 1.0
-                        : -1.0;
+                // (دفعة التدقيق) «return» (مرتجع بيع) إشارته موجبة كالشراء
+                // وفق StockKind.qtySign — إنشاؤه يزيد المخزون فحذفه يجب أن
+                // يخصم. كانت الإشارة السالبة تجعل حذف المرتجع الوارد من
+                // جهاز آخر يزيد الكمية بدل تخفيضها.
+                final sign = (kindStr == 'purchase' ||
+                        kindStr == 'return' ||
+                        kindStr == 'returnIn')
+                    ? 1.0
+                    : -1.0;
                 final newQty = curQty - sign * moveQty;
                 await txn.update(
                   'items',
@@ -1393,11 +1439,17 @@ extension ApplyRemoteOp on Repo {
         break;
       case OpKind.restore:
         if (columns.contains('deleted_at')) {
+          // (دفعة التدقيق) تصفير deleted_at وحده لا يكفي: الجداول ذات
+          // العمودين (مثل items) تظل تعتبر السجل محذوفاً/معطلاً — يجب
+          // رفع is_deleted وإعادة is_active معاً ليظهر الصنف المسترجع
+          // فعلاً في الشاشات والاستعلامات.
           await txn.update(
               table,
               {
                 'deleted_at': '',
                 if (columns.contains('restore_op_id')) 'restore_op_id': op.id,
+                if (columns.contains('is_deleted')) 'is_deleted': 0,
+                if (columns.contains('is_active')) 'is_active': 1,
                 if (columns.contains('updated_at')) 'updated_at': now,
                 if (columns.contains('sync_state')) 'sync_state': 'synced',
               },
@@ -1414,7 +1466,8 @@ extension ApplyRemoteOp on Repo {
     // الملكية عن المدير السابق.
     if (op.entityType == EntityKind.setting &&
         op.entityId == 'ownershipTransfer') {
-      await _applyOwnershipTransfer(txn, op);
+      await _applyOwnershipTransfer(txn, op,
+          preverifiedTakeoverIdentities: preverifiedTakeoverIdentities);
     } else if (op.entityType == EntityKind.setting &&
         (op.entityId.startsWith('deviceExpelled:') ||
             op.entityId.startsWith('deviceRevoked:'))) {
@@ -1525,8 +1578,8 @@ extension ApplyRemoteOp on Repo {
 
   /// تطبيق نقل الملكية الوارد: تحقق سيادي (المرسل هو المالك المعروف
   /// محلياً) ثم قلب الأعلام ذرياً داخل نفس المعاملة.
-  Future<void> _applyOwnershipTransfer(
-      DatabaseExecutor txn, SyncOperation op) async {
+  Future<void> _applyOwnershipTransfer(DatabaseExecutor txn, SyncOperation op,
+      {Map<String, Map<String, String>?>? preverifiedTakeoverIdentities}) async {
     try {
       final decoded = jsonDecode('${op.payload['value'] ?? '{}'}');
       if (decoded is! Map) return;
@@ -1551,6 +1604,7 @@ extension ApplyRemoteOp on Repo {
             op: op,
             decoded: decoded,
             newOwnerDev: newOwnerDev,
+            preverifiedTakeoverIdentities: preverifiedTakeoverIdentities,
           );
           if (!allowed) {
             await _logRejectedEmailTakeover(
@@ -1749,13 +1803,17 @@ extension ApplyRemoteOp on Repo {
   /// التحقق التشفيري والسلطوي لعملية `email_takeover`:
   /// لا نكتفي أبداً بمجرد تطابق `op.deviceId == newOwnerDev`، بل نشترط:
   /// 1) تطابق هوية المالك المسجّلة في المنشأة (`owner_email` / `owner_google_id`).
-  /// 2) وجود توقيع تشفيري صحيح (`takeover_signature` عبر HMAC-SHA256) أو
-  ///    توكن مصادقة موقّع (`verified_claim` / `auth_token`) يثبت ملكية الحساب.
+  /// 2) توكن مصادقة صادر فعلاً من Firebase لهوية المالك، يُتحقق منه عبر
+  ///    `accounts:lookup` — تحقق تشفيري حقيقي عند المصدر لا يستطيع أي
+  ///    عضو تزويره. (دفعة التدقيق: مسار HMAC السابق كان مفتاحه مشتقاً
+  ///    بالكامل من معطيات عامة يعرفها كل عضو، ومسار التوكن السابق لم
+  ///    يتحقق من التوقيع أصلاً — كلاهما كان قابلاً للتزوير وقُطعا.)
   Future<bool> _verifyEmailTakeoverAuthorization(
     DatabaseExecutor txn, {
     required SyncOperation op,
     required Map<dynamic, dynamic> decoded,
     required String newOwnerDev,
+    Map<String, Map<String, String>?>? preverifiedTakeoverIdentities,
   }) async {
     if (op.deviceId != newOwnerDev || newOwnerDev.isEmpty) return false;
     try {
@@ -1809,8 +1867,6 @@ extension ApplyRemoteOp on Repo {
       final claimedEmail =
           '${decoded['owner_email'] ?? ''}'.trim().toLowerCase();
       final claimedUid = '${decoded['owner_uid'] ?? ''}'.trim();
-      final prevOwnerId = '${decoded['previous_owner_device_id'] ?? ''}'.trim();
-      final signature = '${decoded['takeover_signature'] ?? ''}'.trim();
       final verifiedClaim =
           '${decoded['verified_claim'] ?? decoded['auth_token'] ?? ''}'.trim();
 
@@ -1825,42 +1881,35 @@ extension ApplyRemoteOp on Repo {
         return false;
       }
 
-      // 1) التحقق من التوقيع التشفيري المعتمد (HMAC-SHA256)
-      final effectiveEmail =
-          expectedEmail.isNotEmpty ? expectedEmail : claimedEmail;
-      final effectiveUid = expectedUid.isNotEmpty ? expectedUid : claimedUid;
-      if (signature.length == 64 && effectiveEmail.isNotEmpty) {
-        final sigPayload =
-            '$wsId|$newOwnerDev|$prevOwnerId|$effectiveEmail|$effectiveUid';
-        final sigKey = utf8.encode(
-            'nexora-sovereign-takeover-v1:$wsId:$effectiveEmail:$effectiveUid');
-        final expectedSig =
-            Hmac(sha256, sigKey).convert(utf8.encode(sigPayload)).toString();
-        if (_constantTimeEquals(signature, expectedSig)) {
-          return true;
-        }
-      }
-
-      // 2) التحقق من مطالبة التوكن الموقّع (JWT Claim) إن وُجدت
+      // (دفعة التدقيق) المسار الوحيد المقبول: توكن مصادقة صادر فعلاً من
+      // Firebase (`verified_claim` / `auth_token`) يُتحقق منه لدى Firebase
+      // عبر accounts:lookup — لا يستطيع أي عضو إصدار توكن يحمل هوية
+      // المالك، وأي فشل في التحقق (توكن منتهٍ/مزوّر/شبكة معطلة) يُرفض
+      // إغلاقاً كاملاً للباب.
+      //
+      // (تصويب معماري) هذا الاستدعاء يجري داخل db.transaction: طلب الشبكة
+      // هنا كان يحتجز قفل قاعدة البيانات طوال مهلة lookup (حتى 12ث).
+      // pull الحديث يمرر النتائج الموثقة محضّرة سلفاً من خارج المعاملة
+      // فتُستهلك فوراً وبصورة متزامنة؛ غياب المفتاح = رفض دون أي شبكة.
       if (verifiedClaim.isNotEmpty && verifiedClaim.split('.').length == 3) {
-        final parts = verifiedClaim.split('.');
-        final seg = base64Url.normalize(parts[1]);
-        final claimMap = jsonDecode(utf8.decode(base64Url.decode(seg)));
-        if (claimMap is Map && parts[2].trim().isNotEmpty) {
-          final tokenEmail =
-              '${claimMap['email'] ?? ''}'.trim().toLowerCase();
-          final tokenUid =
-              '${claimMap['user_id'] ?? claimMap['sub'] ?? ''}'.trim();
-          final exp = int.tryParse('${claimMap['exp'] ?? '0'}') ?? 0;
-          final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-          final notExpired = exp <= 0 || exp >= (nowSec - 300);
+        final Map<String, String>? identity;
+        if (preverifiedTakeoverIdentities != null) {
+          identity = preverifiedTakeoverIdentities[op.id];
+        } else {
+          // مسار الاستدعاء المباشر (بلا تحضير مسبق): يبقى التحقق الشبكي
+          // كما هو — لا يُفتح باب قبول صامت لمجرد غياب التحضير.
+          identity = await lookupFirebaseIdentity(verifiedClaim);
+        }
+        if (identity != null) {
+          final tokenEmail = (identity['email'] ?? '').trim().toLowerCase();
+          final tokenUid = (identity['uid'] ?? '').trim();
           final emailMatches = expectedEmail.isNotEmpty &&
               tokenEmail.isNotEmpty &&
               tokenEmail == expectedEmail;
           final uidMatches = expectedUid.isNotEmpty &&
               tokenUid.isNotEmpty &&
               tokenUid == expectedUid;
-          if (notExpired && (emailMatches || uidMatches)) {
+          if (emailMatches || uidMatches) {
             return true;
           }
         }
@@ -1869,14 +1918,9 @@ extension ApplyRemoteOp on Repo {
     return false;
   }
 
-  bool _constantTimeEquals(String a, String b) {
-    if (a.length != b.length) return false;
-    var diff = 0;
-    for (var i = 0; i < a.length; i++) {
-      diff |= a.codeUnitAt(i) ^ b.codeUnitAt(i);
-    }
-    return diff == 0;
-  }
+  // (تصويب معماري) lookupFirebaseIdentity نُقلت إلى دالة عليا عامة أسفل
+  // الملف ليستدعيها الناقل خارج معاملة SQLite قبل فتحها.
+
 
   /// تسجيل حدث أمني مهيكل في سجل التدقيق عند رفض محاولة `email_takeover` غير موثقة.
   Future<void> _logRejectedEmailTakeover(
@@ -2233,5 +2277,42 @@ extension ApplyRemoteOp on Repo {
   Future<int> autoHealOrphanItems({int? sectionId, int? categoryId}) async {
     final db = await database;
     return _autoHealOrphanItems(db, sectionId: sectionId, categoryId: categoryId);
+  }
+}
+
+/// التحقق الفعلي من توكن Firebase عبر Identity Toolkit (accounts:lookup):
+/// لا يُقبل التوكن إلا إن كان صادراً حقيقةً من Firebase وغير منتهٍ، وتُعاد
+/// هويته (البريد + uid) للمقارنة مع المالك المسجّل محلياً. أي فشل
+/// (شبكة/توكن تالف أو منتهٍ) يعيد null — إغلاق كامل للباب.
+///
+/// (تصويب معماري) دالة عليا عامة كي يستدعيها الناقل قبل فتح
+/// db.transaction ويمرر النتائج جاهزة — فلا يُحتجز قفل قاعدة البيانات
+/// بانتظار الشبكة إطلاقاً.
+Future<Map<String, String>?> lookupFirebaseIdentity(String idToken) async {
+  HttpClient? client;
+  try {
+    client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    final uri = Uri.parse(
+        'https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=$effectiveFirebaseApiKey');
+    final req = await client.postUrl(uri);
+    req.headers.contentType = ContentType.json;
+    req.write(jsonEncode({'idToken': idToken}));
+    final res = await req.close().timeout(const Duration(seconds: 12));
+    if (res.statusCode != 200) return null;
+    final body = await res.transform(utf8.decoder).join();
+    final data = jsonDecode(body);
+    if (data is! Map) return null;
+    final users = data['users'];
+    if (users is! List || users.isEmpty) return null;
+    final u = users.first;
+    if (u is! Map) return null;
+    return {
+      'email': '${u['email'] ?? ''}'.trim().toLowerCase(),
+      'uid': '${u['localId'] ?? ''}'.trim(),
+    };
+  } catch (_) {
+    return null;
+  } finally {
+    client?.close();
   }
 }

@@ -35,7 +35,12 @@ void main() {
       );
       expect(
         roleDisplayName(
-            roleCode: 'accountant', isOwner: false, deviceName: 'كاشير 1'),
+            roleCode: 'accountant', isOwner: false, deviceName: 'محاسب 1'),
+        'المحاسب (محاسب 1)',
+      );
+      expect(
+        roleDisplayName(
+            roleCode: 'cashier', isOwner: false, deviceName: 'كاشير 1'),
         'الكاشير (كاشير 1)',
       );
       expect(
