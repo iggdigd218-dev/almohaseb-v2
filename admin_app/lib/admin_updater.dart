@@ -19,10 +19,10 @@ import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
 /// إصدار تطبيق مدير التراخيص الحالي (يطابق admin_app/pubspec.yaml).
-const String kAdminAppVersion = '1.8.7';
+const String kAdminAppVersion = '1.8.10';
 
 /// رقم بناء تطبيق مدير التراخيص (ما بعد + في admin_app/pubspec.yaml).
-const int kAdminAppBuild = 57;
+const int kAdminAppBuild = 60;
 
 String get adminFullVersion => '$kAdminAppVersion+$kAdminAppBuild';
 
@@ -34,7 +34,7 @@ class AdminSemVer implements Comparable<AdminSemVer> {
 
   const AdminSemVer(this.major, this.minor, this.patch, [this.build = 0]);
 
-  static const AdminSemVer current = AdminSemVer(1, 8, 7, kAdminAppBuild);
+  static const AdminSemVer current = AdminSemVer(1, 8, 10, kAdminAppBuild);
 
   static AdminSemVer? tryParse(String? raw) {
     if (raw == null) return null;

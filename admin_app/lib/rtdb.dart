@@ -52,6 +52,11 @@ const String kSubscribersSummaryPath = 'workspaces/_registry/subscribers_summary
 const int kSubscribersSummaryMaxAgeMs = 10 * 60 * 1000;
 
 const String kOfficialAdminUid = 'mTMmR6MDBMZH8nKEbvCntRemkq73';
+const Set<String> kOfficialAdminUids = <String>{
+  'mTMmR6MDBMZH8nKEbvCntRemkq73',
+  'WXUwZHEtp6VsNPaFRuUAD0RPp0U2',
+  'pMg61gJrMWYf97kr3Q7qVGXLnK72',
+};
 
 /// هوية خدمة الأدمن المستخدمة في مسار `accounts:signInWithPassword` عند تعطيل
 /// الدخول المجهول في Firebase. تُمرَّر **وقت البناء فقط** عبر `--dart-define`:
@@ -73,6 +78,17 @@ bool get isAdminServiceIdentityConfigured =>
 const String kAdminRefreshTokenDefault = String.fromEnvironment(
   'ADMIN_REFRESH_TOKEN',
 );
+
+/// متغير بديل متوافق مع أسرار المستودع (ADMIN_RTDB_REFRESH_TOKEN) يُقرأ وقت البناء فقط.
+const String kAdminRtdbRefreshTokenDefault = String.fromEnvironment(
+  'ADMIN_RTDB_REFRESH_TOKEN',
+);
+
+String get _effectiveDefaultAdminRefreshToken {
+  final primary = kAdminRefreshTokenDefault.trim();
+  if (primary.isNotEmpty) return primary;
+  return kAdminRtdbRefreshTokenDefault.trim();
+}
 
 /// رسالة خطأ واضحة عند تشغيل تطبيق الإدارة محلياً دون تمرير متغير البناء ADMIN_REFRESH_TOKEN.
 const String kMissingAdminRefreshTokenError =
@@ -148,7 +164,8 @@ class Rtdb {
 
   bool get isAdminTokenMissing =>
       adminRefreshToken.trim().isEmpty &&
-      kAdminRefreshTokenDefault.trim().isEmpty &&
+      _effectiveDefaultAdminRefreshToken.isEmpty &&
+      !isAdminServiceIdentityConfigured &&
       authToken.trim().isEmpty;
 
   Future<void> load() async {
@@ -161,9 +178,11 @@ class Rtdb {
     authToken = (sp.getString(_kAuth) ?? '').trim();
     adminRefreshToken = (sp.getString(_kAdminRt) ?? '').trim();
     if (adminRefreshToken.isEmpty || adminRefreshToken.startsWith('GUEST-')) {
-      adminRefreshToken = kAdminRefreshTokenDefault.trim();
+      adminRefreshToken = _effectiveDefaultAdminRefreshToken;
     }
-    if (adminRefreshToken.isEmpty && authToken.isEmpty) {
+    if (adminRefreshToken.isEmpty &&
+        authToken.isEmpty &&
+        !isAdminServiceIdentityConfigured) {
       lastAuthError = kMissingAdminRefreshTokenError;
     } else {
       lastAuthError = '';
@@ -199,7 +218,7 @@ class Rtdb {
     );
 
     // تنظيف أي جلسة زائر/مجهولة سابقة حتى لا يُرسل توكن زائر بدلاً من توكن المشرف الرسمي
-    if (adminUid.isNotEmpty && adminUid != kOfficialAdminUid) {
+    if (adminUid.isNotEmpty && !kOfficialAdminUids.contains(adminUid)) {
       _idToken = '';
       _expiryMs = 0;
       adminUid = '';
@@ -326,20 +345,65 @@ class Rtdb {
     if (authToken.trim().isNotEmpty) return authToken.trim();
 
     if (adminRefreshToken.isEmpty || adminRefreshToken.startsWith('GUEST-')) {
-      adminRefreshToken = kAdminRefreshTokenDefault.trim();
+      adminRefreshToken = _effectiveDefaultAdminRefreshToken;
     }
 
     // 2. إذا وُجد رمز المشرف: الأولوية المطلقة لهوية المشرف الرسمية
     if (adminRefreshToken.isNotEmpty && !_adminAuthFailed) {
-      if (!force && _tokenAlive && adminUid == kOfficialAdminUid) {
+      if (!force && _tokenAlive && kOfficialAdminUids.contains(adminUid)) {
         return _idToken;
       }
       final adminTok = await _signInAsAdmin();
       if (adminTok.isNotEmpty) return adminTok;
     }
 
-    // 3. التراجع للهوية المجهولة فقط عند غياب رمز المشرف تماماً
+    // 2.ب إذا كانت هوية خدمة الأدمن مهيّأة عبر --dart-define من GitHub Secrets:
+    // نُفضّلها قبل محاولة الدخول المجهول حتى لا نحصل على UID زائر بلا صلاحيات.
     if (!force && _tokenAlive) return _idToken;
+    if (clientOverride == null &&
+        isAdminServiceIdentityConfigured &&
+        !_anonAuthFailed) {
+      for (final ep in const [
+        '/v1/accounts:signInWithPassword',
+        '/v1/accounts:signUp',
+      ]) {
+        try {
+          final r2 = await _http
+              .post(
+                Uri.https(
+                    'identitytoolkit.googleapis.com', ep, {'key': kFirebaseApiKey}),
+                headers: {'Content-Type': 'application/json'},
+                body: jsonEncode({
+                  'email': kAdminServiceEmail.trim(),
+                  'password': kAdminServicePassword,
+                  'returnSecureToken': true,
+                }),
+              )
+              .timeout(const Duration(seconds: 15));
+          if (r2.statusCode == 200) {
+            final m2 = jsonDecode(utf8.decode(r2.bodyBytes));
+            if (m2 is Map) {
+              final tok2 = '${m2['idToken'] ?? m2['id_token'] ?? ''}';
+              if (tok2.isNotEmpty) {
+                _idToken = tok2;
+                _refreshToken =
+                    '${m2['refreshToken'] ?? m2['refresh_token'] ?? ''}';
+                final uid2 = '${m2['localId'] ?? m2['user_id'] ?? ''}';
+                if (uid2.isNotEmpty) adminUid = uid2;
+                final exp2 = '${m2['expiresIn'] ?? m2['expires_in'] ?? '3600'}';
+                _expiryMs = DateTime.now().millisecondsSinceEpoch +
+                    (int.tryParse(exp2) ?? 3600) * 1000;
+                lastAuthError = '';
+                await _persistSession();
+                return _idToken;
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    // 3. التراجع للهوية المجهولة فقط عند غياب رمز المشرف وهوية الخدمة
     if (_anonAuthFailed && clientOverride == null) return _idToken;
     final refresh = force && _refreshToken.isNotEmpty;
     try {
@@ -363,54 +427,17 @@ class Rtdb {
           _expiryMs = 0;
           return await _ensureAuth(force: true, retried: true);
         }
-        // إذا كان Anonymous Auth معطلاً في Firebase (ADMIN_ONLY_OPERATION)،
-        // نسجل دخول هوية خدمة الأدمن عبر البريد/كلمة المرور للحصول على idToken صالح.
-        if (clientOverride == null && isAdminServiceIdentityConfigured) {
-          for (final ep in const [
-            '/v1/accounts:signInWithPassword',
-            '/v1/accounts:signUp',
-          ]) {
-            try {
-              final r2 = await _http
-                  .post(
-                    Uri.https(
-                        'identitytoolkit.googleapis.com', ep, {'key': kFirebaseApiKey}),
-                    headers: {'Content-Type': 'application/json'},
-                    body: jsonEncode({
-                      'email': kAdminServiceEmail.trim(),
-                      'password': kAdminServicePassword,
-                      'returnSecureToken': true,
-                    }),
-                  )
-                  .timeout(const Duration(seconds: 15));
-              if (r2.statusCode == 200) {
-                final m2 = jsonDecode(utf8.decode(r2.bodyBytes));
-                if (m2 is Map) {
-                  final tok2 = '${m2['idToken'] ?? m2['id_token'] ?? ''}';
-                  if (tok2.isNotEmpty) {
-                    _idToken = tok2;
-                    _refreshToken =
-                        '${m2['refreshToken'] ?? m2['refresh_token'] ?? ''}';
-                    final exp2 = '${m2['expiresIn'] ?? m2['expires_in'] ?? '3600'}';
-                    _expiryMs = DateTime.now().millisecondsSinceEpoch +
-                        (int.tryParse(exp2) ?? 3600) * 1000;
-                    lastAuthError = '';
-                    await _persistSession();
-                    return _idToken;
-                  }
-                }
-              }
-            } catch (_) {}
-          }
+        if (clientOverride == null) {
           _anonAuthFailed = true;
-        } else if (clientOverride == null &&
-            !isAdminServiceIdentityConfigured) {
-          lastAuthError =
-              'هوية خدمة الأدمن غير مهيّأة في هذا البناء '
-              '(ADMIN_SERVICE_EMAIL / ADMIN_SERVICE_PASSWORD).';
+          if (!isAdminServiceIdentityConfigured) {
+            lastAuthError =
+                'هوية خدمة الأدمن غير مهيّأة في هذا البناء '
+                '(ADMIN_SERVICE_EMAIL / ADMIN_SERVICE_PASSWORD).';
+          } else {
+            lastAuthError =
+                'تعذّر إنشاء هوية الدخول (${res.statusCode}) — تحقق من الاتصال.';
+          }
         }
-        lastAuthError =
-            'تعذّر إنشاء هوية الدخول (${res.statusCode}) — تحقق من الاتصال.';
         return _idToken;
       }
       final m = jsonDecode(utf8.decode(res.bodyBytes));
@@ -433,7 +460,7 @@ class Rtdb {
       var tokenToUse =
           adminRefreshToken.trim().replaceAll(RegExp(r'\s+'), '');
       if (tokenToUse.isEmpty || tokenToUse.startsWith('GUEST-')) {
-        tokenToUse = kAdminRefreshTokenDefault.trim();
+        tokenToUse = _effectiveDefaultAdminRefreshToken;
       }
       if (tokenToUse.isEmpty) return _idToken;
 
