@@ -18,6 +18,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'license_model.dart';
+import 'recovery_packet.dart';
 
 export 'license_model.dart';
 
@@ -36,6 +37,14 @@ const String kFirebaseApiKey = String.fromEnvironment(
 
 const int kMaxWorkspaceScan = 250;
 const int kMaxSubscriberScan = 250;
+
+/// فهرس الملخص الخفيف لبطاقات المشتركين، بديل سحب شجرة المساحات بالكامل.
+/// يحتوي الحقول النصية الأساسية فقط: الاسم، الهاتف، البريد، كود الترخيص،
+/// حالة الباقة، وعدد الأجهزة النشطة.
+const String kSubscribersSummaryPath = 'workspaces/_registry/subscribers_summary';
+
+/// أقصى عمر مقبول للفهرس قبل إعادة بنائه تلقائياً (10 دقائق).
+const int kSubscribersSummaryMaxAgeMs = 10 * 60 * 1000;
 
 const String kOfficialAdminUid = 'mTMmR6MDBMZH8nKEbvCntRemkq73';
 
@@ -1529,16 +1538,12 @@ class Rtdb {
     int limit = 100,
     bool includeAbandoned = false,
   }) async {
-    dynamic rootData;
-    if (includeAbandoned) {
-      try {
-        rootData = await _get('workspaces');
-      } catch (_) {
-        rootData = await _get('workspaces', {'shallow': 'true'});
-      }
-    } else {
-      rootData = await _get('workspaces', {'shallow': 'true'});
-    }
+    // ممنوع سحب شجرة المساحات الكاملة (Full Tree Dump):
+    // قراءة `/workspaces` بلا قيود تُنزّل `/data` لكل منشأة (الفواتير، الأصناف،
+    // صور Base64، النسخ الاحتياطية) فتحوّل تحديث قائمة المشتركين إلى عشرات
+    // الميجابايتات. نقرأ مفاتيح المساحات فقط عبر shallow=true (كيلوبايتات)
+    // ثم نقرأ العقود الخفيفة (subscription / roster) لكل منشأة على حدة.
+    final rootData = await _get('workspaces', {'shallow': 'true'});
     if (rootData is! Map || rootData.isEmpty) return const [];
     final wsKeys = rootData.keys
         .map((k) => '$k')
@@ -1655,6 +1660,139 @@ class Rtdb {
     }
 
     return out.take(limit).toList();
+  }
+
+  // ==================== فهرس الملخص الخفيف (subscribers_summary) ====================
+
+  /// فتح شاشة المشتركين في أجزاء من الثانية: قراءة واحدة صغيرة من
+  /// [kSubscribersSummaryPath] بدل مسح كل المساحات.
+  /// الفهرس موجود وحديث: يُعاد فوراً. مفقود أو فارغ أو متقادم: يُعاد بناؤه.
+  Future<List<SubscriberEntry>> subscribersSummary({
+    bool forceRefresh = false,
+    int maxAgeMs = kSubscribersSummaryMaxAgeMs,
+  }) async {
+    if (!forceRefresh) {
+      try {
+        final node = await _get(kSubscribersSummaryPath);
+        final cached = _parseSubscribersSummary(node);
+        final cutoff = DateTime.now().millisecondsSinceEpoch - maxAgeMs;
+        if (cached.rows.isNotEmpty && cached.newestUpdatedAtMs >= cutoff) {
+          return cached.rows;
+        }
+      } catch (_) {}
+    }
+    return rebuildSubscribersSummary();
+  }
+
+  /// إعادة بناء الفهرس من قراءات خفيفة فقط: مفاتيح المساحات (shallow) مع عقود
+  /// الاشتراك والأجهزة، بلا أي بيانات محاسبية أو صور.
+  Future<List<SubscriberEntry>> rebuildSubscribersSummary() async {
+    final rows = await recentSubscribers(includeAbandoned: true, limit: 500);
+    if (rows.isEmpty) return rows;
+    final payload = <String, dynamic>{};
+    for (final e in rows) {
+      final key = e.workspaceId.trim().isNotEmpty
+          ? e.workspaceId.trim()
+          : e.deviceId.trim();
+      if (key.isEmpty) continue;
+      payload[key] = _subscriberSummaryJson(e);
+    }
+    try {
+      await _put(kSubscribersSummaryPath, payload);
+    } catch (_) {}
+    return rows;
+  }
+
+  /// تحديث صف واحد في الفهرس بعد أي إجراء إداري (تجميد/تفعيل/تمديد) دون إعادة
+  /// بناء كامل، فتبقى القائمة فورية ومطابقة للواقع.
+  Future<void> touchSubscriberSummary(
+    String wsId, {
+    Map<String, dynamic>? patch,
+  }) async {
+    final key = wsId.trim();
+    if (key.isEmpty) return;
+    try {
+      await _patch(
+        '$kSubscribersSummaryPath/${Uri.encodeComponent(key)}',
+        <String, dynamic>{
+          ...?patch,
+          'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        },
+      );
+    } catch (_) {}
+  }
+
+  /// حذف صف من الفهرس بعد حذف المنشأة نهائياً.
+  Future<void> dropSubscriberSummary(String wsId) async {
+    final key = wsId.trim();
+    if (key.isEmpty) return;
+    try {
+      await _delete('$kSubscribersSummaryPath/${Uri.encodeComponent(key)}');
+    } catch (_) {}
+  }
+
+  Map<String, dynamic> _subscriberSummaryJson(SubscriberEntry e) => {
+        'workspaceId': e.workspaceId,
+        'storeName': e.storeName,
+        'clientName': e.clientName,
+        'phone': e.phone,
+        'ownerEmail': e.ownerEmail,
+        'licenseKey': e.licenseKey,
+        'planType': e.planType,
+        'status': e.status,
+        'isFrozen': e.isFrozen,
+        'maxDevices': e.maxDevices,
+        'activeDevices': e.activeDevices,
+        'expiresAtMs': e.expiresAtMs,
+        'activatedAtMs': e.activatedAtMs,
+        'lastSeenAtMs': e.lastSeenAtMs,
+        'deviceId': e.deviceId,
+        'deviceRef': e.deviceRef,
+        'hasSubscriptionNode': e.hasSubscriptionNode,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      };
+
+  ({List<SubscriberEntry> rows, int newestUpdatedAtMs})
+      _parseSubscribersSummary(dynamic node) {
+    if (node is! Map) {
+      return (rows: const <SubscriberEntry>[], newestUpdatedAtMs: 0);
+    }
+    final rows = <SubscriberEntry>[];
+    var newest = 0;
+    for (final e in node.entries) {
+      final key = '${e.key}'.trim();
+      final m = e.value;
+      if (key.isEmpty || key.startsWith('_') || m is! Map) continue;
+      final updated = asInt(m['updatedAt'] ?? m['updated_at']);
+      if (updated > newest) newest = updated;
+      final wsFromNode = asStr(m['workspaceId']);
+      rows.add(SubscriberEntry(
+        workspaceId: wsFromNode.isNotEmpty ? wsFromNode : key,
+        planType: asStr(m['planType']),
+        status: asStr(m['status']),
+        maxDevices: asInt(m['maxDevices']),
+        activeDevices: asInt(m['activeDevices']),
+        expiresAtMs: asInt(m['expiresAtMs']),
+        activatedAtMs: asInt(m['activatedAtMs']),
+        lastSeenAtMs: asInt(m['lastSeenAtMs']),
+        deviceRef: asStr(m['deviceRef']),
+        clientName: asStr(m['clientName']),
+        storeName: asStr(m['storeName']),
+        phone: asStr(m['phone']),
+        deviceId: asStr(m['deviceId']),
+        licenseKey: asStr(m['licenseKey']),
+        isFrozen: m['isFrozen'] == true,
+        hasSubscriptionNode: m['hasSubscriptionNode'] != false,
+        ownerEmail: asStr(m['ownerEmail']),
+      ));
+    }
+    rows.sort((a, b) {
+      final at = a.activatedAtMs > 0 ? a.activatedAtMs : a.lastSeenAtMs;
+      final bt = b.activatedAtMs > 0 ? b.activatedAtMs : b.lastSeenAtMs;
+      final cmp = bt.compareTo(at);
+      return cmp != 0 ? cmp : b.expiresAtMs.compareTo(a.expiresAtMs);
+    });
+    return (rows: rows, newestUpdatedAtMs: newest);
   }
 
   Future<List<SubscriberEntry>> _readWorkspaceEntries(
@@ -2029,6 +2167,264 @@ class Rtdb {
         ownerEmail: resolvedEmail,
       ),
     ];
+  }
+
+  // ==================== إدارة كلمات المرور والتحقق من حزم الاستعادة ====================
+  // منقولة من almohaseb-plus/admin_app لتوحيد قدرات الأدمن في v2.
+
+  static const List<int> _sha256K = <int>[
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+
+  static int _rotr32(int x, int n) => ((x & 0xffffffff) >>> n) | ((x << (32 - n)) & 0xffffffff);
+
+
+  static List<int> _sha256Bytes(List<int> input) {
+    final msg = List<int>.from(input);
+    final bitLen = msg.length * 8;
+    msg.add(0x80);
+    while ((msg.length % 64) != 56) {
+      msg.add(0x00);
+    }
+    for (var i = 7; i >= 0; i--) {
+      msg.add((bitLen >> (i * 8)) & 0xff);
+    }
+
+    var h0 = 0x6a09e667;
+    var h1 = 0xbb67ae85;
+    var h2 = 0x3c6ef372;
+    var h3 = 0xa54ff53a;
+    var h4 = 0x510e527f;
+    var h5 = 0x9b05688c;
+    var h6 = 0x1f83d9ab;
+    var h7 = 0x5be0cd19;
+
+    final w = List<int>.filled(64, 0);
+    for (var offset = 0; offset < msg.length; offset += 64) {
+      for (var i = 0; i < 16; i++) {
+        final j = offset + (i * 4);
+        w[i] = ((msg[j] & 0xff) << 24) |
+            ((msg[j + 1] & 0xff) << 16) |
+            ((msg[j + 2] & 0xff) << 8) |
+            (msg[j + 3] & 0xff);
+      }
+      for (var i = 16; i < 64; i++) {
+        final s0 = _rotr32(w[i - 15], 7) ^ _rotr32(w[i - 15], 18) ^ ((w[i - 15] & 0xffffffff) >>> 3);
+        final s1 = _rotr32(w[i - 2], 17) ^ _rotr32(w[i - 2], 19) ^ ((w[i - 2] & 0xffffffff) >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & 0xffffffff;
+      }
+
+      var a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+      for (var i = 0; i < 64; i++) {
+        final s1 = _rotr32(e, 6) ^ _rotr32(e, 11) ^ _rotr32(e, 25);
+        final ch = (e & f) ^ ((~e & 0xffffffff) & g);
+        final temp1 = (h + s1 + ch + _sha256K[i] + w[i]) & 0xffffffff;
+        final s0 = _rotr32(a, 2) ^ _rotr32(a, 13) ^ _rotr32(a, 22);
+        final maj = (a & b) ^ (a & c) ^ (b & c);
+        final temp2 = (s0 + maj) & 0xffffffff;
+
+        h = g;
+        g = f;
+        f = e;
+        e = (d + temp1) & 0xffffffff;
+        d = c;
+        c = b;
+        b = a;
+        a = (temp1 + temp2) & 0xffffffff;
+      }
+
+      h0 = (h0 + a) & 0xffffffff;
+      h1 = (h1 + b) & 0xffffffff;
+      h2 = (h2 + c) & 0xffffffff;
+      h3 = (h3 + d) & 0xffffffff;
+      h4 = (h4 + e) & 0xffffffff;
+      h5 = (h5 + f) & 0xffffffff;
+      h6 = (h6 + g) & 0xffffffff;
+      h7 = (h7 + h) & 0xffffffff;
+    }
+
+    final out = <int>[];
+    for (final v in <int>[h0, h1, h2, h3, h4, h5, h6, h7]) {
+      out.add((v >> 24) & 0xff);
+      out.add((v >> 16) & 0xff);
+      out.add((v >> 8) & 0xff);
+      out.add(v & 0xff);
+    }
+    return out;
+  }
+
+  static String _hexBytes(List<int> bytes) =>
+      bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+  static String hashWorkspacePassword(String password) {
+    final clean = password.trim();
+    if (clean.isEmpty) return '';
+    final rnd = Random.secure();
+    final salt = List<int>.generate(16, (_) => rnd.nextInt(256));
+    var digest = _sha256Bytes(<int>[...salt, ...utf8.encode(clean)]);
+    for (var i = 1; i < 10000; i++) {
+      digest = _sha256Bytes(<int>[...salt, ...digest]);
+    }
+    return 'v2\$${base64Encode(salt)}\$${_hexBytes(digest)}';
+  }
+
+  static String _emailIndexKey(String email) {
+    final e = email.trim().toLowerCase();
+    if (e.isEmpty) return '';
+    return e.replaceAll(RegExp(r'[.#$\[\]/]'), ',');
+  }
+
+  static String _phoneIndexKey(String phone) {
+    var digits = phone.replaceAll(RegExp(r'[^0-9]'), '');
+    if (digits.startsWith('00') && digits.length > 9) {
+      digits = digits.substring(2);
+    }
+    if (digits.startsWith('0') && digits.length >= 10) {
+      digits = digits.substring(1);
+    }
+    return digits;
+  }
+
+
+  /// تحديث حقل `password_hash` في عقدة المنشأة المستهدفة (`/workspaces/{ws}/meta/password_hash`)
+  /// بشكل مباشر وآمن باستخدام صلاحيات الأدمن، مع تحديث فهارس الحسابات المرتبطة إن وجدت.
+  Future<String> adminUpdateWorkspacePassword({
+    required String workspaceId,
+    required String newPassword,
+    String ownerEmail = '',
+    String phone = '',
+  }) async {
+    final ws = workspaceId.trim();
+    final cleanPwd = newPassword.trim();
+    if (ws.isEmpty) {
+      throw Exception('معرّف المنشأة فارغ.');
+    }
+    if (cleanPwd.length < 4) {
+      throw Exception('يجب ألا تقل كلمة المرور الجديدة عن 4 محارف.');
+    }
+
+    final passwordHash = hashWorkspacePassword(cleanPwd);
+    final enc = Uri.encodeComponent(ws);
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    // 1. قراءة بيانات المنشأة الحالية لاكتشاف البريد والهاتف المرتبطين بالفهارس
+    String effectiveEmail = ownerEmail.trim().toLowerCase();
+    String effectivePhone = phone.trim();
+    try {
+      final meta = await _get('workspaces/$enc/meta');
+      if (meta is Map) {
+        if (effectiveEmail.isEmpty) {
+          effectiveEmail = asStr(meta['owner_email']).trim().toLowerCase();
+        }
+        if (effectivePhone.isEmpty) {
+          effectivePhone =
+              _pick(meta['phone'], meta['phone_number'], '').trim();
+        }
+      }
+      if (effectivePhone.isEmpty || effectiveEmail.isEmpty) {
+        final sub = await _get('workspaces/$enc/subscription');
+        if (sub is Map) {
+          if (effectiveEmail.isEmpty) {
+            effectiveEmail = asStr(sub['owner_email']).trim().toLowerCase();
+          }
+          if (effectivePhone.isEmpty) {
+            effectivePhone =
+                _pick(sub['phone'], sub['phone_number'], '').trim();
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 2. التحديث المباشر والآمن لعقدة `/workspaces/{ws}/meta/password_hash`
+    await _patch('workspaces/$enc/meta', <String, Object?>{
+      'password_hash': passwordHash,
+      'password_updated_at': now,
+      'password_updated_by': 'admin_app',
+    });
+
+    // 3. تحديث فهارس الحسابات المرتبطة (`emails_index` و `phones_index`) إن وجدت
+    final emailKey = _emailIndexKey(effectiveEmail);
+    if (emailKey.isNotEmpty) {
+      try {
+        final existingEmailIdx = await _get(
+            'workspaces/_registry/emails_index/${Uri.encodeComponent(emailKey)}');
+        if (existingEmailIdx is Map) {
+          await _patch(
+            'workspaces/_registry/emails_index/${Uri.encodeComponent(emailKey)}',
+            <String, Object?>{
+              'password_hash': passwordHash,
+              'updated_at': now,
+            },
+          );
+        }
+      } catch (_) {}
+    }
+
+    final phoneKey = _phoneIndexKey(effectivePhone);
+    if (phoneKey.isNotEmpty) {
+      try {
+        final existingPhoneIdx = await _get(
+            'workspaces/_registry/phones_index/${Uri.encodeComponent(phoneKey)}');
+        if (existingPhoneIdx is Map) {
+          await _patch(
+            'workspaces/_registry/phones_index/${Uri.encodeComponent(phoneKey)}',
+            <String, Object?>{
+              'password_hash': passwordHash,
+              'updated_at': now,
+            },
+          );
+        }
+      } catch (_) {}
+    }
+
+    // 4. توثيق العملية في سجل الإدارة للمنشأة
+    try {
+      await _put('workspaces/$enc/admin_log/$now', <String, Object?>{
+        'action': 'admin_change_password',
+        'workspace_id': ws,
+        'updated_at': now,
+      });
+    } catch (_) {}
+
+    return passwordHash;
+  }
+
+
+  /// فك تشفير والتحقق من حزمة `nexora-ai-rpc` البرمجية المشفرة المرسلة من العميل.
+  /// (R-01/R-02) التحقق من حزمة الاستعادة — موحّد مع العميل عبر
+  /// `RecoveryPacket`: نفس مفاتيح المظروف ونفس توقيع HMAC-SHA256.
+  /// أي حزمة لا تجتاز التوقيع تُرفض قبل تفسير أي حقل.
+  static Map<String, dynamic>? decodeAndVerifyAiRecoveryPacket(
+      String rawMessage) {
+    final packet = RecoveryPacket.decode(rawMessage);
+    if (packet == null) return null;
+    return <String, dynamic>{
+      'verified_signature': true,
+      'phone_key': packet.phoneKey,
+      'phone_raw': packet.phone,
+      'workspace_hint': packet.workspaceId,
+      'store_name': packet.storeName,
+      'owner_email': packet.email,
+      'device_id': packet.deviceId,
+      'device_fingerprint': packet.deviceFingerprint,
+      'timestamp': packet.timestampMs,
+      'is_fresh': packet.isFresh,
+    };
   }
 
   // ==================== أفعال التحكم عن بعد (Remote Actions) ====================
@@ -2631,6 +3027,8 @@ class Rtdb {
         await _delete('workspaces/_registry/phones_index/$phoneKey');
       } catch (_) {}
     }
+    // إزالة صف المنشأة من فهرس الملخص كي لا تظهر في قائمة المشتركين.
+    await dropSubscriberSummary(cleanWs);
   }
 
   /// حذف دفعة من المنشآت المحددة بشكل متتابع ومتماثل مع مؤشر تقدم.
