@@ -7,16 +7,12 @@
 //   2. إتاحة بناء المستند للاختبار الآلي (بند «اختبار إنشاء المعاينة»).
 library;
 
-import 'dart:convert';
-import 'dart:io';
-
-import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
 import 'accounting.dart';
 import 'format.dart';
-import 'media_paths.dart';
 import 'models.dart';
 import 'pdf_fonts.dart';
 import '../data/sync/subscription_guard.dart' show kWatermarkText;
@@ -31,10 +27,50 @@ class ThermalInvoiceDoc {
   final Uint8List bytes;
 }
 
+/// يرسم إشارة السهم الصاعد المنحني/المتعرج المستوحى من أيقونة التطبيق
+/// باللون الأسود الصافي (`PdfColors.black`) بدون خلفية أو إطار، لتوافق
+/// الطابعات الحرارية أحادية اللون (Monochrome Thermal Printers).
+pw.Widget buildThermalArrowLogo({double size = 44}) {
+  return pw.CustomPaint(
+    size: PdfPoint(size, size),
+    painter: (PdfGraphics canvas, PdfPoint s) {
+      final w = s.x;
+      final h = s.y;
+
+      canvas
+        ..setFillColor(PdfColors.black)
+        ..setStrokeColor(PdfColors.black);
+
+      // مسار جذع السهم الصاعد المنحني/المتعرج (أسفل اليسار ← قمة أولى ← انحناءة ← عنق رأس السهم)
+      canvas
+        ..moveTo(w * 0.14, h * 0.14)
+        ..lineTo(w * 0.40, h * 0.56)
+        ..lineTo(w * 0.52, h * 0.45)
+        ..lineTo(w * 0.70, h * 0.73)
+        ..lineTo(w * 0.79, h * 0.65)
+        ..lineTo(w * 0.54, h * 0.29)
+        ..lineTo(w * 0.43, h * 0.40)
+        ..lineTo(w * 0.27, h * 0.14)
+        ..closePath()
+        ..fillPath();
+
+      // رأس السهم المثلثي المفرغ من الوسط (مطابق لهوية أيقونة التطبيق) باللون الأسود الصافي
+      canvas
+        ..setLineWidth(w * 0.085)
+        ..setLineJoin(PdfLineJoin.miter)
+        ..moveTo(w * 0.63, h * 0.75)
+        ..lineTo(w * 0.87, h * 0.87)
+        ..lineTo(w * 0.86, h * 0.59)
+        ..closePath()
+        ..strokePath();
+    },
+  );
+}
+
 /// يبني فاتورة حرارية 80مم بخط عربي مدمج واتجاه من اليمين إلى اليسار.
 ///
 /// * [orgName] اسم المتجر — يظهر بالخط العريض في رأس الفاتورة.
-/// * [lines] سطور الأصنام (الاسم والكمية وسعر الوحدة والإجمالي).
+/// * [lines] سطور الأصناف (الاسم والكمية وسعر الوحدة والإجمالي).
 /// * [stamp] يضيف سطر الختم الصغير أسفل التذييل للحساب المقيد.
 Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
   required Tx tx,
@@ -52,30 +88,18 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
   // (بند 2) تحميل الخط العربي قبل إنشاء المستند — مرة واحدة ومخبّأة.
   final fonts = await PdfFonts.load();
 
-  pw.MemoryImage? logoImg;
-  if (logoBase64.trim().isNotEmpty) {
-    try {
-      final bytes = base64Decode(logoBase64.trim());
-      if (bytes.isNotEmpty) logoImg = pw.MemoryImage(bytes);
-    } catch (_) {}
-  }
-  if (logoImg == null &&
-      logoPath.trim().isNotEmpty &&
-      !logoPath.trim().startsWith('http')) {
-    try {
-      final f = File(MediaPaths.toAbsolute(logoPath.trim()));
-      if (await f.exists()) {
-        logoImg = pw.MemoryImage(await f.readAsBytes());
-      }
-    } catch (_) {}
-  }
-  if (logoImg == null) {
-    try {
-      final assetData = await rootBundle.load('assets/images/logo.png');
-      final bytes = assetData.buffer.asUint8List();
-      if (bytes.isNotEmpty) logoImg = pw.MemoryImage(bytes);
-    } catch (_) {}
-  }
+  // تطهير كافة الحقول النصية من محارف التحكم وعلامات الاتجاه غير المرئية
+  final cleanOrgName = PdfFonts.sanitize(orgName.trim());
+  final cleanOrgAddress = PdfFonts.sanitize(orgAddress.trim());
+  final cleanOrgPhone = PdfFonts.sanitize(orgPhone.trim());
+  final cleanRef = PdfFonts.sanitize(tx.reference.trim());
+  final cleanCurrency = PdfFonts.sanitize(tx.currency.trim());
+  final cleanAccountName =
+      account != null ? PdfFonts.sanitize(account.name.trim()) : '';
+  final cleanAccountPhone =
+      account != null ? PdfFonts.sanitize(account.phone.trim()) : '';
+  final cleanSeller = PdfFonts.sanitize(sellerOrDevice.trim());
+  final cleanFooter = PdfFonts.sanitize(footer.trim());
 
   // استخراج تفاصيل البيع الجزئي إن وُجدت في ملاحظات الفاتورة
   String? paidVal;
@@ -83,9 +107,11 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
   for (final l in tx.notes.split('\n')) {
     final t = l.trim();
     if (t.startsWith('المبلغ المدفوع:')) {
-      paidVal = t.substring('المبلغ المدفوع:'.length).trim();
+      paidVal = PdfFonts.sanitize(
+          t.substring('المبلغ المدفوع:'.length).trim());
     } else if (t.startsWith('المبلغ المتبقي:')) {
-      remainVal = t.substring('المبلغ المتبقي:'.length).trim();
+      remainVal = PdfFonts.sanitize(
+          t.substring('المبلغ المتبقي:'.length).trim());
     }
   }
 
@@ -114,21 +140,11 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
           child: pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.center,
             children: [
-              if (logoImg != null) ...[
-                pw.Container(
-                  width: 52,
-                  height: 52,
-                  padding: const pw.EdgeInsets.all(3),
-                  decoration: pw.BoxDecoration(
-                    border: pw.Border.all(color: PdfColors.grey400, width: 0.6),
-                    borderRadius: pw.BorderRadius.circular(8),
-                  ),
-                  child: pw.Image(logoImg, fit: pw.BoxFit.contain),
-                ),
-                pw.SizedBox(height: 6),
-              ],
+              // إشارة السهم الصاعد باللون الأسود الصافي بدلاً من شعار المنشأة الملون
+              buildThermalArrowLogo(size: 42),
+              pw.SizedBox(height: 6),
               pw.Text(
-                orgName,
+                cleanOrgName,
                 textAlign: pw.TextAlign.center,
                 style: pw.TextStyle(
                   fontSize: 16,
@@ -136,15 +152,15 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                   fontWeight: pw.FontWeight.bold,
                 ),
               ),
-              if (orgAddress.trim().isNotEmpty)
+              if (cleanOrgAddress.isNotEmpty)
                 pw.Text(
-                  orgAddress.trim(),
+                  cleanOrgAddress,
                   textAlign: pw.TextAlign.center,
                   style: const pw.TextStyle(fontSize: 9.5),
                 ),
-              if (orgPhone.isNotEmpty)
+              if (cleanOrgPhone.isNotEmpty)
                 pw.Text(
-                  'هاتف: $orgPhone',
+                  'هاتف: $cleanOrgPhone',
                   textAlign: pw.TextAlign.center,
                   style: const pw.TextStyle(fontSize: 10),
                 ),
@@ -153,21 +169,23 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                 mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                 children: [
                   pw.Text(
-                    tx.type == OpType.revenue
-                        ? 'فاتورة نقدية مدفوعة (مدفوع نقداً)'
-                        : 'فاتورة مبيعات',
+                    PdfFonts.sanitize(
+                      tx.type == OpType.revenue
+                          ? 'فاتورة نقدية مدفوعة (مدفوع نقداً)'
+                          : 'فاتورة مبيعات',
+                    ),
                     style: pw.TextStyle(
                       font: fonts.bold,
                       fontWeight: pw.FontWeight.bold,
                     ),
                   ),
-                  pw.Text('#${tx.reference}'),
+                  pw.Text('#$cleanRef'),
                 ],
               ),
-              if (account != null)
+              if (cleanAccountName.isNotEmpty)
                 pw.Align(
                   alignment: pw.Alignment.centerRight,
-                  child: pw.Text('العميل: ${account.name}'),
+                  child: pw.Text('العميل: $cleanAccountName'),
                 ),
               pw.Divider(thickness: 1),
               for (final item in lines) ...[
@@ -176,7 +194,7 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                   children: [
                     pw.Expanded(
                       child: pw.Text(
-                        item.name,
+                        PdfFonts.sanitize(item.name),
                         style: const pw.TextStyle(fontSize: 10),
                       ),
                     ),
@@ -199,7 +217,7 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                     ),
                   ),
                   pw.Text(
-                    '${Fmt.money(tx.amount)} ${tx.currency}',
+                    '${Fmt.money(tx.amount)} $cleanCurrency',
                     style: pw.TextStyle(
                       font: fonts.bold,
                       fontWeight: pw.FontWeight.bold,
@@ -214,7 +232,7 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                   mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                   children: [
                     pw.Text(
-                      'المبلغ المدفوع مقدماً:',
+                      PdfFonts.sanitize('المبلغ المدفوع مقدماً:'),
                       style: pw.TextStyle(
                         font: fonts.bold,
                         fontWeight: pw.FontWeight.bold,
@@ -269,7 +287,7 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                       ),
                     ),
                     pw.Text(
-                      '0.00 ${tx.currency}',
+                      '0.00 $cleanCurrency',
                       style: pw.TextStyle(
                         font: fonts.bold,
                         fontWeight: pw.FontWeight.bold,
@@ -281,9 +299,9 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
               ],
               pw.SizedBox(height: 6),
               pw.Divider(thickness: 0.6),
-              if (sellerOrDevice.trim().isNotEmpty) ...[
+              if (cleanSeller.isNotEmpty) ...[
                 pw.Text(
-                  'الموظف: ${sellerOrDevice.trim()}',
+                  'الموظف: $cleanSeller',
                   style: pw.TextStyle(
                     fontSize: 9,
                     font: fonts.bold,
@@ -301,17 +319,16 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                     'التاريخ: ${Fmt.date(tx.date)} ${tx.date.hour.toString().padLeft(2, '0')}:${tx.date.minute.toString().padLeft(2, '0')}',
                     style: const pw.TextStyle(fontSize: 8.5),
                   ),
-                  if (orgPhone.trim().isNotEmpty ||
-                      (account?.phone.trim().isNotEmpty ?? false))
+                  if (cleanOrgPhone.isNotEmpty || cleanAccountPhone.isNotEmpty)
                     pw.Text(
-                      'هاتف: ${orgPhone.trim().isNotEmpty ? orgPhone.trim() : account!.phone.trim()}',
+                      'هاتف: ${cleanOrgPhone.isNotEmpty ? cleanOrgPhone : cleanAccountPhone}',
                       style: const pw.TextStyle(fontSize: 8.5),
                     ),
                 ],
               ),
               pw.SizedBox(height: 3),
               pw.Text(
-                footer,
+                cleanFooter,
                 style: const pw.TextStyle(fontSize: 9),
                 textAlign: pw.TextAlign.center,
               ),
@@ -320,7 +337,7 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
               if (stamp) ...[
                 pw.SizedBox(height: 4),
                 pw.Text(
-                  kWatermarkText,
+                  PdfFonts.sanitize(kWatermarkText),
                   style: const pw.TextStyle(
                     fontSize: 7,
                     color: PdfColors.grey600,
