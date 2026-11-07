@@ -1,9 +1,9 @@
 {
-  "version": "1.8.6+56",
-  "sha256": "6eb57f7b1227712f2bc04e80d39207026a4e7e456a60f619f3b0a4ee0e11deba",
+  "version": "1.8.9+59",
+  "sha256": "cbb04b7642de94311c774364696e2f130cac3b412a7891be5142d8578506a575",
   "sha256Variants": {
-    "arm64": "6eb57f7b1227712f2bc04e80d39207026a4e7e456a60f619f3b0a4ee0e11deba",
-    "armv7": "f4174f995e1995ba27ee00134a7ee4af3e6badd98543f407df3258cc4acf937f"
+    "arm64": "cbb04b7642de94311c774364696e2f130cac3b412a7891be5142d8578506a575",
+    "armv7": "cb0060ea19ba5e7f4ca0dcadfb1ace89b56ccde55c2ea566f4ce7484e7afa615"
   },
   "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/admin-latest",
   "downloads": {
@@ -20,6 +20,6 @@
       "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin-armv7.apk"
     }
   },
-  "publishedAt": "2026-11-05T23:06:43Z",
+  "publishedAt": "2026-11-07T18:19:58Z",
   "notes": "• إصلاح التحديث المباشر داخل تطبيق الإدارة (In-App Update) دون التحويل القسري للمتصفح.\n• استعادة بناء --split-per-abi ورفع versionCode (2055) لحل خطأ «الحزمة تبدو غير صالحة» عند التثبيت فوق النسخة السابقة.\n• توحيد تطبيق الإدارة وقناة تحديثه وسياسة التحديث الإجباري لكلا المستودعين (المحاسب v2 + المحاسب بلاس)."
 }
