@@ -171,7 +171,7 @@ jobs:
           NAME="${VER%%+*}"; BUILD="${VER##*+}"
           VDIR="${NAME}-${BUILD}"
           GH_REL_BASE="https://github.com/${{ github.repository }}/releases/download/latest"
-          PAGES_BASE="https://${{ github.repository_owner }}.github.io/almohaseb-v2/releases/${VDIR}"
+          PAGES_BASE="https://${{ github.repository_owner }}.github.io/almohaseb-plus/releases/${VDIR}"
           SHA_ARM64=$(sha256sum Almohaseb-Plus-arm64.apk | awk '{print $1}')
           SHA_ARMV7=$(sha256sum nexora-armv7.apk | awk '{print $1}')
           NOTES=$(python3 -c "import json; lines=[l.strip() for l in open('release_notes.txt',encoding='utf-8').read().splitlines() if l.strip()]; lines=lines[:3]; lines=[(l[:219].rstrip()+'…') if len(l)>220 else l for l in lines]; t='\\n'.join(lines); print(json.dumps(t,ensure_ascii=False)[1:-1])")
@@ -270,15 +270,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: المحاسب — الإصدار الرسمي الأحدث
+          name: المحاسب بلاس — الإصدار الرسمي الأحدث
           body: |
             ## 📥 التحميل المباشر السريع (روابط قصيرة بسطر واحد — صالحة للمشاركة المباشرة)
 
             ### 📱 للأندرويد (64-بت):
-            - **رابط مباشر قصير:** https://${{ github.repository_owner }}.github.io/almohaseb-v2/Almohaseb-Plus-arm64.apk
+            - **رابط مباشر قصير:** https://${{ github.repository_owner }}.github.io/almohaseb-plus/Almohaseb-Plus-arm64.apk
 
             ### 🖥️ للكمبيوتر (ويندوز):
-            - **رابط مباشر قصير:** https://${{ github.repository_owner }}.github.io/almohaseb-v2/NexoraSetup.exe
+            - **رابط مباشر قصير:** https://${{ github.repository_owner }}.github.io/almohaseb-plus/NexoraSetup.exe
           prerelease: false
           make_latest: true
         env:
@@ -338,7 +338,7 @@ jobs:
           cd ..
           rm -rf mrepo
 
-          PAGES_URL="https://${{ github.repository_owner }}.github.io/almohaseb-v2/releases/$VDIR/Almohaseb-Plus-arm64.apk"
+          PAGES_URL="https://${{ github.repository_owner }}.github.io/almohaseb-plus/releases/$VDIR/Almohaseb-Plus-arm64.apk"
           echo "التحقق من جهوزية رابط Fastly قبل نشر البيان إلى RTDB: $PAGES_URL"
           for i in $(seq 1 24); do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -r 0-0 -L "$PAGES_URL")
@@ -372,6 +372,6 @@ jobs:
             fi
           }
           # (2026-10-29) مسار بلاس المستقل — فصل بيان التحديث عن تطبيق v2.
-          publish_manifest PUT "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/version_manifest.json"
-          publish_manifest PATCH "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/force_update.json"
+          publish_manifest PUT "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/plus/version_manifest.json"
+          publish_manifest PATCH "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/plus/force_update.json"
           echo "✔ تم نشر بيان التحديث إلى RTDB بعد اكتمال رفع الحزم وجهوزية مرآة Fastly."

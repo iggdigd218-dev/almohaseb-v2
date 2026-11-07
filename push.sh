@@ -4,9 +4,9 @@
 CLEAN_TOKEN="${GITHUB_TOKEN%%GITHUB_REPO_URL*}"
 
 if [ -n "$CLEAN_TOKEN" ]; then
-  REPO_URL="https://x-access-token:${CLEAN_TOKEN}@github.com/iggdigd218-dev/almohaseb-v2.git"
+  REPO_URL="https://x-access-token:${CLEAN_TOKEN}@github.com/iggdigd218-dev/almohaseb-plus.git"
 else
-  REPO_URL="${GITHUB_REPO_URL:-https://github.com/iggdigd218-dev/almohaseb-v2.git}"
+  REPO_URL="${GITHUB_REPO_URL:-https://github.com/iggdigd218-dev/almohaseb-plus.git}"
 fi
 
 if [ ! -d ".git" ]; then

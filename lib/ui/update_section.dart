@@ -354,8 +354,8 @@ class UpdateSection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(updateCheckProvider);
-    final androidShortUrl = UpdateInstaller.kShortAndroidArm64Url;
-    final windowsShortUrl = UpdateInstaller.kShortWindowsUrl;
+    const androidShortUrl = UpdateInstaller.kShortAndroidArm64Url;
+    const windowsShortUrl = UpdateInstaller.kShortWindowsUrl;
 
     return Card(
       child: Padding(

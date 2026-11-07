@@ -42,18 +42,18 @@ class SyncArrowsIndicator extends ConsumerWidget {
       valueListenable: SyncDiagnostics.instance.notifier,
       builder: (context, s, _) {
         final isDark = Theme.of(context).brightness == Brightness.dark;
-        final disabled = isDark ? Colors.white38 : Colors.black38;
+        final darkBase = isDark ? const Color(0xFFE2E8F0) : const Color(0xFF0F172A);
         final hydrated = s.lastPullAt != null || s.lastPullApplied > 0;
         final upColor = s.uploadFaulted
             ? const Color(0xFFEF4444)
             : (s.pushing || (hydrated && (s.lastPushOk || (!s.uploadFaulted && s.failedCount == 0))))
-                ? const Color(0xFF10B981)
-                : disabled;
+                ? (isDark ? const Color(0xFF10B981) : const Color(0xFF065F46))
+                : darkBase;
         final downColor = s.downloadFaulted
             ? const Color(0xFFEF4444)
             : (s.pulling || (hydrated && (s.lastPullOk || !s.downloadFaulted)))
-                ? const Color(0xFF0EA5E9)
-                : disabled;
+                ? (isDark ? const Color(0xFF38BDF8) : const Color(0xFF075985))
+                : darkBase;
         final tooltipMsg = s.catalogMismatch
             ? (s.catalogMismatchDetails ??
                 '⚠️ تحذير: عدم تطابق في الحسابات أو الأصناف أو الأقسام بين الأجهزة')
@@ -93,9 +93,22 @@ class SyncArrowsIndicator extends ConsumerWidget {
               }
             },
             child: Container(
-              width: 38,
-              height: 38,
+              width: 36,
+              height: 36,
+              margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 8),
               padding: const EdgeInsets.all(4),
+              decoration: BoxDecoration(
+                color: isDark
+                    ? const Color(0xFF1E293B)
+                    : const Color(0xFFE2E8F0),
+                borderRadius: BorderRadius.circular(11),
+                border: Border.all(
+                  color: isDark
+                      ? const Color(0xFF475569)
+                      : const Color(0xFF94A3B8),
+                  width: 1.1,
+                ),
+              ),
               child: _BoldAnimatedSyncArrows(
                 upColor: upColor,
                 downColor: downColor,

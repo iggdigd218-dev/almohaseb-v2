@@ -24,6 +24,7 @@ import '../core/theme.dart';
 import '../data/providers.dart';
 import '../data/sync/account_workspace.dart';
 import '../data/sync/device_id.dart';
+import '../data/sync/firebase_auth_service.dart';
 import '../data/sync/subscription_guard.dart';
 import 'home_shell.dart';
 import 'lock_gate.dart';
@@ -35,6 +36,7 @@ class CreateWorkspaceScreen extends ConsumerStatefulWidget {
   final String ownerEmail;
   final String ownerUid;
   final String ownerDisplayName;
+  final String initialPassword;
   final bool isAdditionalWorkspace;
 
   const CreateWorkspaceScreen({
@@ -42,6 +44,7 @@ class CreateWorkspaceScreen extends ConsumerStatefulWidget {
     required this.ownerEmail,
     this.ownerUid = '',
     this.ownerDisplayName = '',
+    this.initialPassword = '',
     this.isAdditionalWorkspace = false,
   });
 
@@ -53,6 +56,7 @@ class CreateWorkspaceScreen extends ConsumerStatefulWidget {
 class _CreateWorkspaceScreenState extends ConsumerState<CreateWorkspaceScreen> {
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _emailCtrl;
+  late final TextEditingController _passwordCtrl;
   final _storeNameCtrl = TextEditingController();
   final _phoneCtrl = TextEditingController();
   final _activityCtrl = TextEditingController();
@@ -60,6 +64,7 @@ class _CreateWorkspaceScreenState extends ConsumerState<CreateWorkspaceScreen> {
 
   String _countryDialCode = '+967';
   String _currency = 'YER';
+  bool _obscurePassword = true;
   bool _busy = false;
   String? _errorMsg;
 
@@ -92,11 +97,13 @@ class _CreateWorkspaceScreenState extends ConsumerState<CreateWorkspaceScreen> {
   void initState() {
     super.initState();
     _emailCtrl = TextEditingController(text: widget.ownerEmail.trim());
+    _passwordCtrl = TextEditingController(text: widget.initialPassword);
   }
 
   @override
   void dispose() {
     _emailCtrl.dispose();
+    _passwordCtrl.dispose();
     _storeNameCtrl.dispose();
     _phoneCtrl.dispose();
     _activityCtrl.dispose();
@@ -112,7 +119,12 @@ class _CreateWorkspaceScreenState extends ConsumerState<CreateWorkspaceScreen> {
       return;
     }
 
-    final email = _emailCtrl.text.trim().toLowerCase();
+    final rawIdentifier = _emailCtrl.text.trim();
+    // (هوية الهاتف) إذا أدخل رقمًا بدل البريد، نولّد بريدًا داخليًا معياريًا
+    // لمصادقة Firebase ونحفظ الرقم في بيانات المنشأة وفهرس phones_index.
+    final email = AccountWorkspace.authEmailForIdentifier(rawIdentifier);
+    final isPhoneIdentity = !AccountWorkspace.looksLikeEmail(rawIdentifier);
+    final password = _passwordCtrl.text.trim();
     final storeName = _storeNameCtrl.text.trim();
     final rawPhone = _phoneCtrl.text.trim().replaceAll(RegExp(r'[^\d]'), '');
     final localDigits =
@@ -127,9 +139,22 @@ class _CreateWorkspaceScreenState extends ConsumerState<CreateWorkspaceScreen> {
       final st = await repo.settings();
       final url = effectiveBackendUrl(st['cloudBackendUrl']);
 
-      final effectiveUid = widget.ownerUid.trim().isNotEmpty
+      var effectiveUid = widget.ownerUid.trim().isNotEmpty
           ? widget.ownerUid.trim()
           : 'email:${AccountWorkspace.emailToKey(email)}';
+
+      if (password.length >= 6 && widget.ownerUid.trim().isEmpty) {
+        try {
+          final authAcc = await FirebaseAuthRest.signUpWithEmailPassword(
+            email: email,
+            password: password,
+            displayName: storeName,
+          );
+          if (authAcc.uid.trim().isNotEmpty) {
+            effectiveUid = authAcc.uid.trim();
+          }
+        } catch (_) {}
+      }
 
       if (!widget.isAdditionalWorkspace) {
         final localMatches = await AccountWorkspace.findLocalWorkspacesOnDevice(
@@ -300,8 +325,22 @@ class _CreateWorkspaceScreenState extends ConsumerState<CreateWorkspaceScreen> {
         emailOverride: email,
         uidOverride: effectiveUid,
         displayNameOverride: widget.ownerDisplayName,
+        password: password,
         isAdditionalWorkspace: widget.isAdditionalWorkspace,
       );
+
+      // (هوية الهاتف) ربط الرقم بفهرس المنشأة السحابي بعد الإنشاء.
+      if (isPhoneIdentity && url.isNotEmpty) {
+        try {
+          await AccountWorkspace.bindPhoneWorkspace(
+            backendUrl: url,
+            phone: fullPhone,
+            workspaceId:
+                await ref.read(repoProvider).activeWorkspaceId(),
+            email: email,
+          );
+        } catch (_) {}
+      }
 
       // إعادة تشغيل محرك المزامنة وتحديث كافة الـ Providers للمنشأة الجديدة المعزولة
       try {
@@ -448,20 +487,70 @@ class _CreateWorkspaceScreenState extends ConsumerState<CreateWorkspaceScreen> {
                       textDirection: TextDirection.ltr,
                       textInputAction: TextInputAction.next,
                       decoration: const InputDecoration(
-                        labelText: 'البريد الإلكتروني للمالك *',
-                        hintText: 'name@example.com',
-                        prefixIcon: Icon(Icons.email_outlined),
+                        labelText: 'البريد الإلكتروني أو رقم الهاتف *',
+                        hintText: 'name@example.com أو 77xxxxxxx',
+                        prefixIcon: Icon(Icons.alternate_email),
                         border: OutlineInputBorder(),
                       ),
                       validator: (v) {
                         final s = (v ?? '').trim();
-                        if (s.isEmpty || !s.contains('@') || !s.contains('.')) {
-                          return 'يرجى إدخال بريد إلكتروني صحيح للمالك';
+                        if (s.isEmpty) {
+                          return 'أدخل البريد الإلكتروني أو رقم الهاتف';
+                        }
+                        if (s.contains('@')) {
+                          if (!s.contains('.')) {
+                            return 'يرجى إدخال بريد إلكتروني صحيح';
+                          }
+                          return null;
+                        }
+                        final d = s.replaceAll(RegExp(r'[^0-9]'), '');
+                        if (d.length < 7) {
+                          return 'رقم الهاتف قصير — أدخل 7 أرقام على الأقل';
                         }
                         return null;
                       },
                     ),
                     const SizedBox(height: 16),
+
+                    // 0.1) كلمة المرور للحساب والمنشأة
+                    if (!widget.isAdditionalWorkspace) ...[
+                      TextFormField(
+                        controller: _passwordCtrl,
+                        enabled: !_busy,
+                        obscureText: _obscurePassword,
+                        textDirection: TextDirection.ltr,
+                        textInputAction: TextInputAction.next,
+                        decoration: InputDecoration(
+                          labelText: widget.ownerUid.trim().isEmpty
+                              ? 'كلمة المرور للحساب * (6 أحرف على الأقل)'
+                              : 'كلمة مرور احتياطية للمنشأة (اختياري)',
+                          hintText: 'لاستعادة المنشأة والدخول من أي جهاز',
+                          prefixIcon: const Icon(Icons.lock_outline_rounded),
+                          border: const OutlineInputBorder(),
+                          suffixIcon: IconButton(
+                            onPressed: () => setState(
+                                () => _obscurePassword = !_obscurePassword),
+                            icon: Icon(
+                              _obscurePassword
+                                  ? Icons.visibility_outlined
+                                  : Icons.visibility_off_outlined,
+                              size: 20,
+                            ),
+                          ),
+                        ),
+                        validator: (v) {
+                          final s = (v ?? '').trim();
+                          if (widget.ownerUid.trim().isEmpty && s.length < 6) {
+                            return 'يرجى إدخال كلمة مرور لا تقل عن 6 أحرف لحماية حسابك ومنشأتك';
+                          }
+                          if (s.isNotEmpty && s.length < 6) {
+                            return 'كلمة المرور يجب أن تكون 6 أحرف على الأقل';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                    ],
 
                     // 1) اسم المنشأة التجاري (إجباري)
                     TextFormField(

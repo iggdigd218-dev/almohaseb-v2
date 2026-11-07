@@ -16,9 +16,6 @@ import '../data/providers.dart';
 import '../data/repository.dart';
 import 'widgets.dart';
 
-String _quantity(double value) =>
-    value == value.roundToDouble() ? Fmt.money(value) : Fmt.money(value, 2);
-
 /// توليد صورة إيصال العملية وإرسالها عبر واتساب.
 ///
 /// المسار كاملًا بلا نافذة مشاركة: تُولَّد الصورة، تُحفظ في العملية، ثم
@@ -68,6 +65,8 @@ class TxShare {
   }
 
   /// نص الرسالة المرافقة للسند أو الإشعار النصي المباشر.
+  /// (الملاحظة 1) يقتصر نص الإشعار على عرض البيانات الأساسية فقط (رقم الفاتورة واسم الموظف/المستخدم)
+  /// مع وضع التاريخ ورقم الهاتف قبل العنصر الأخير مباشرة.
   static Future<String> caption({
     required Repo repo,
     required Tx tx,
@@ -75,11 +74,6 @@ class TxShare {
   }) async {
     final st = await repo.settings();
     final org = (st['businessName'] ?? '').trim();
-    final currencies = await repo.currencies();
-    final cur = currencies.firstWhere(
-      (c) => c.code == tx.currency,
-      orElse: () => kDefaultCurrencies.first,
-    );
     final items = tx.id == null
         ? const <InvoiceLine>[]
         : await repo.transactionItems(tx.id!);
@@ -122,138 +116,27 @@ class TxShare {
         ? Fmt.date(tx.date)
         : Fmt.dateTime(tx.date);
 
-    final lines = <String>[
-      if (org.isNotEmpty) '🏪 *$org*',
-      '━━━━━━━━━━━━━',
-      title,
-      '📅 التاريخ: $dateStr',
-      '👤 العميل: ${account?.name ?? 'عميل نقدي'}',
-      if (!isPosInvoice && desc.isNotEmpty) '📝 البيان: $desc',
-    ];
-
-    if (items.isNotEmpty) {
-      lines.add('━━━━━━━━━━━━━');
-      lines.add('🛒 *الأصناف:*');
-      for (var i = 0; i < items.length; i++) {
-        final line = items[i];
-        lines.add(
-          '${i + 1}. ${line.name} × ${_quantity(line.quantity)} ${line.unit} = '
-          '${Fmt.money(line.total, cur.decimal)} ${cur.symbol}',
-        );
-      }
-      final total = items.fold<double>(0, (sum, line) => sum + line.total);
-      lines.add('━━━━━━━━━━━━━');
-      lines.add(
-        '💰 إجمالي الفاتورة: ${Fmt.money(total, cur.decimal)} ${cur.symbol}',
-      );
-      if (tx.type == OpType.revenue) {
-        lines.add(
-          '✅ المدفوع: ${Fmt.money(tx.amount, cur.decimal)} ${cur.symbol}',
-        );
-        lines.add(
-          '🔴 المتبقي: ${Fmt.money(0, cur.decimal)} ${cur.symbol}',
-        );
-      } else {
-        final noteLines = tx.notes
-            .split('\n')
-            .map((s) => s.trim())
-            .where((s) => s.isNotEmpty)
-            .toList();
-        final hasPaidNote =
-            noteLines.any((nl) => nl.startsWith('المبلغ المدفوع'));
-        final hasRemNote = noteLines.any(
-          (nl) => nl.startsWith('المبلغ المتبقي') || nl.startsWith('المتبقي'),
-        );
-        if (!hasPaidNote) {
-          lines.add(
-            '✅ المدفوع: ${Fmt.money(0, cur.decimal)} ${cur.symbol}',
-          );
-        }
-        if (!hasRemNote) {
-          lines.add(
-            '🔴 المتبقي: ${Fmt.money(tx.amount, cur.decimal)} ${cur.symbol}',
-          );
-        }
-        for (final nl in noteLines) {
-          if (nl.startsWith('المبلغ المدفوع')) {
-            lines.add('✅ $nl');
-          } else if (nl.startsWith('المبلغ المتبقي') ||
-              nl.startsWith('المتبقي')) {
-            lines.add('🔴 $nl');
-          } else {
-            lines.add('📝 $nl');
-          }
-        }
-      }
-    } else {
-      lines.add('━━━━━━━━━━━━━');
-      switch (tx.type) {
-        case OpType.revenue:
-          lines.add(
-            '✅ المدفوع: ${Fmt.money(tx.amount, cur.decimal)} ${cur.symbol}',
-          );
-          lines.add(
-            '🔴 المتبقي: ${Fmt.money(0, cur.decimal)} ${cur.symbol}',
-          );
-          break;
-        case OpType.inflow:
-        case OpType.credit:
-          lines.add(
-            '✅ المبلغ المستلَم (له): ${Fmt.money(tx.amount, cur.decimal)} ${cur.symbol}',
-          );
-          break;
-        case OpType.outflow:
-        case OpType.expense:
-        case OpType.debit:
-          lines.add(
-            '🔴 المبلغ المطلوب (عليه): ${Fmt.money(tx.amount, cur.decimal)} ${cur.symbol}',
-          );
-          break;
-        default:
-          lines.add(
-            '💵 المبلغ: ${Fmt.money(tx.amount, cur.decimal)} ${cur.symbol}',
-          );
-      }
-      if (tx.notes.trim().isNotEmpty) {
-        for (final nl in tx.notes
-            .split('\n')
-            .map((s) => s.trim())
-            .where((s) => s.isNotEmpty)) {
-          if (nl.startsWith('المبلغ المدفوع')) {
-            lines.add('✅ $nl');
-          } else if (nl.startsWith('المبلغ المتبقي') ||
-              nl.startsWith('المتبقي')) {
-            lines.add('🔴 $nl');
-          } else {
-            lines.add('📝 $nl');
-          }
-        }
-      }
-    }
-
-    // رصيد العميل الحالي بعد العملية (وضوح كامل للمطلوب).
-    if (account != null && account.id != null) {
+    var sellerOrDevice = tx.cashierName.trim();
+    if (sellerOrDevice.isEmpty) {
       try {
-        final bal = await repo.balanceOf(account);
-        if (!Fmt.isZeroMoney(bal)) {
-          final statusLabel = bal > 0 ? 'عليه' : 'له';
-          lines.add(
-            '📊 الرصيد الحالي للعميل: ${Fmt.money(bal.abs(), cur.decimal)} ${cur.symbol} ($statusLabel)',
-          );
-        } else {
-          lines.add(
-            '📊 الرصيد الحالي للعميل: ${Fmt.money(0, cur.decimal)} ${cur.symbol} (مسدد بالكامل ✅)',
-          );
+        final devRow = await repo.ownDeviceRow();
+        final rosterName = '${devRow?['name'] ?? ''}'.trim();
+        if (rosterName.isNotEmpty &&
+            rosterName != 'جهاز المحاسب' &&
+            rosterName != 'جهاز مدير الحسابات' &&
+            rosterName != 'جهاز عضو') {
+          sellerOrDevice = rosterName;
         }
       } catch (_) {}
     }
-
-    var sellerOrDevice = (st['user.name'] ??
-            st['currentUserName'] ??
-            st['cashierName'] ??
-            st['ownerName'] ??
-            '')
-        .trim();
+    if (sellerOrDevice.isEmpty) {
+      sellerOrDevice = (st['sync.deviceName'] ??
+              st['user.name'] ??
+              st['currentUserName'] ??
+              st['cashierName'] ??
+              '')
+          .trim();
+    }
     if (sellerOrDevice.isEmpty) {
       try {
         final u = await repo.currentUser();
@@ -268,15 +151,19 @@ class TxShare {
       sellerOrDevice = '$sellerOrDevice ($devicePrefix)';
     } else if (sellerOrDevice.isEmpty) {
       sellerOrDevice =
-          devicePrefix.isNotEmpty ? 'المدير ($devicePrefix)' : 'المدير';
+          devicePrefix.isNotEmpty ? 'الموظف ($devicePrefix)' : 'الموظف';
     }
 
-    lines.add('━━━━━━━━━━━━━');
-    lines.add('👨‍💼 المستخدم: $sellerOrDevice');
-    final orgPhone = (st['phone'] ?? '').trim();
-    if (orgPhone.isNotEmpty) lines.add('📞 للتواصل: $orgPhone');
+    final orgPhone = (st['phone'] ?? account?.phone ?? '').trim();
     final footer = (st['voucherFooter'] ?? '').trim();
-    lines.add('🌿 ${footer.isNotEmpty ? footer : 'شكراً لتعاملكم معنا'}');
+
+    final lines = <String>[
+      if (org.isNotEmpty) '🏪 *$org*',
+      title,
+      '👨‍💼 الموظف: $sellerOrDevice',
+      '📅 التاريخ: $dateStr${orgPhone.isNotEmpty ? '  •  📞 الهاتف: $orgPhone' : ''}',
+      '🌿 ${footer.isNotEmpty ? footer : 'شكراً لتعاملكم معنا'}',
+    ];
     return lines.join('\n');
   }
 

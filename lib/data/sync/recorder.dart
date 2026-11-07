@@ -7,6 +7,7 @@ import 'operation.dart';
 import 'sync_queue.dart';
 import 'workspace_service.dart';
 import '../../core/cloud_config.dart';
+import '../../core/database.dart';
 
 typedef SyncNotifyFn = void Function();
 
@@ -46,14 +47,40 @@ class SyncRecorder {
     );
   }
 
+  /// تعافٍ ذاتي فوري (Auto-Heal): ينشئ جداول المزامنة الأساسية في حال
+  /// واجَه الحفظ قاعدة ناقصة الجداول، دون إفشال عملية المستخدم.
+  ///
+  /// (تنظيف المخطط) لا نُكرّر جمل `CREATE TABLE` هنا: المصدر الوحيد هو
+  /// `AppDatabase.ensureSyncTablesForExecutor` — تُرقّي الأعمدة القديمة
+  /// (`is_synced`) أيضًا، فأي تعديل مستقبلي في المخطط يقع في مكان واحد.
+  Future<void> _autoHealMissingSyncTables() async {
+    await AppDatabase.ensureSyncTablesForExecutor(db);
+  }
+
+  static bool _isMissingTableError(Object e) =>
+      '$e'.toLowerCase().contains('no such table');
+
   /// آخر version معروف للكيان (للبدء من 1 إن لم يوجد).
   Future<int> nextVersion(EntityKind entity, String entityId) async {
-    final r = await db.rawQuery(
-      'SELECT MAX(version) AS v FROM operations WHERE entity_type = ? AND entity_id = ?',
-      [entity.name, entityId],
-    );
-    final cur = (r.first['v'] as int?) ?? 0;
-    return cur + 1;
+    try {
+      final r = await db.rawQuery(
+        'SELECT MAX(version) AS v FROM operations WHERE entity_type = ? AND entity_id = ?',
+        [entity.name, entityId],
+      );
+      final cur = (r.first['v'] as int?) ?? 0;
+      return cur + 1;
+    } on DatabaseException catch (e) {
+      if (_isMissingTableError(e)) {
+        await _autoHealMissingSyncTables();
+        final r = await db.rawQuery(
+          'SELECT MAX(version) AS v FROM operations WHERE entity_type = ? AND entity_id = ?',
+          [entity.name, entityId],
+        );
+        final cur = (r.isNotEmpty ? r.first['v'] as int? : null) ?? 0;
+        return cur + 1;
+      }
+      rethrow;
+    }
   }
 
   /// يسجّل عملية في جدول operations + صفوف في sync_queue.
@@ -114,7 +141,10 @@ class SyncRecorder {
     try {
       await db.insert('operations', opMap);
     } on DatabaseException catch (e) {
-      if ('$e'.contains('is_synced')) {
+      if (_isMissingTableError(e)) {
+        await _autoHealMissingSyncTables();
+        await db.insert('operations', opMap);
+      } else if ('$e'.contains('is_synced')) {
         await db.insert('operations', op.toMap(includeIsSynced: false));
       } else {
         rethrow;
@@ -125,10 +155,23 @@ class SyncRecorder {
     // لا نضيف هدف Cloud إلا إذا كان خادم سحابي مهيأ فعلاً — إضافته دائماً
     // كانت تترك صفوفاً «بانتظار الإرسال» للأبد (لا ناقل يلتقطها) فتظهر
     // للمستخدم كمزامنات عالقة وتزاحم الطابور.
-    final st = await db.query('settings',
-        columns: ['key', 'value'],
-        where: 'key IN (?, ?, ?)',
-        whereArgs: ['cloudBackendUrl', 'cloudAutoSync', 'account.type']);
+    List<Map<String, Object?>> st;
+    try {
+      st = await db.query('settings',
+          columns: ['key', 'value'],
+          where: 'key IN (?, ?, ?)',
+          whereArgs: ['cloudBackendUrl', 'cloudAutoSync', 'account.type']);
+    } on DatabaseException catch (e) {
+      if (_isMissingTableError(e)) {
+        await _autoHealMissingSyncTables();
+        st = await db.query('settings',
+            columns: ['key', 'value'],
+            where: 'key IN (?, ?, ?)',
+            whereArgs: ['cloudBackendUrl', 'cloudAutoSync', 'account.type']);
+      } else {
+        rethrow;
+      }
+    }
     final map = {for (final r in st) r['key'] as String: r['value'] as String?};
     final cloudOn =
         effectiveBackendUrl(map['cloudBackendUrl']).isNotEmpty &&
@@ -145,19 +188,28 @@ class SyncRecorder {
             ...extraTargets,
           };
     for (final t in targets) {
-      await db.insert(
-          'sync_queue',
-          {
-            'operation_id': id,
-            'status': SyncStatus.pending.name,
-            'target': t,
-            'attempts': 0,
-            'last_error': '',
-            'next_try_at': '',
-            'created_at': qnow,
-            'updated_at': qnow,
-          },
-          conflictAlgorithm: ConflictAlgorithm.ignore);
+      final qRow = {
+        'operation_id': id,
+        'status': SyncStatus.pending.name,
+        'target': t,
+        'attempts': 0,
+        'last_error': '',
+        'next_try_at': '',
+        'created_at': qnow,
+        'updated_at': qnow,
+      };
+      try {
+        await db.insert('sync_queue', qRow,
+            conflictAlgorithm: ConflictAlgorithm.ignore);
+      } on DatabaseException catch (e) {
+        if (_isMissingTableError(e)) {
+          await _autoHealMissingSyncTables();
+          await db.insert('sync_queue', qRow,
+              conflictAlgorithm: ConflictAlgorithm.ignore);
+        } else {
+          rethrow;
+        }
+      }
     }
     // إشعار بمحاولة push فورية بعد الانتهاء من المعاملة (جدولة خارج الـ txn).
     try {

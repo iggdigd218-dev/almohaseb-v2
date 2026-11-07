@@ -60,6 +60,7 @@ import '../data/sync/cloud_control_service.dart';
 import 'trial_ui.dart';
 import 'dialogs/sync_resolution_dialog.dart';
 import 'widgets.dart' show showSnack;
+import 'create_workspace_screen.dart' show showWorkspaceManagerDialog;
 import '../core/cloud_config.dart';
 import '../core/format.dart';
 import '../core/license_model.dart';
@@ -1686,39 +1687,52 @@ class _HomeShellState extends ConsumerState<HomeShell>
                   titleText = const Text('المحاسب');
                 }
               }
-              if (orgPhoto.isEmpty) return titleText;
-              return Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 28,
-                    height: 28,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: AppColors.primaryOf(ctx).withValues(alpha: .35),
-                        width: 1.2,
-                      ),
-                    ),
-                    child: ClipOval(
-                      child: Image.file(
-                        File(orgPhoto),
-                        width: 28,
-                        height: 28,
-                        fit: BoxFit.cover,
-                        // (PR-8) حدة Retina للشعار المصغر.
-                        cacheWidth: crispCacheWidth(context, 28),
-                        filterQuality: FilterQuality.medium,
-                        errorBuilder: (_, __, ___) => const Icon(
-                          Icons.business_rounded,
-                          size: 16,
+              final defaultAppLogo = Image.asset(
+                'assets/images/logo.png',
+                width: 28,
+                height: 28,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => const Icon(
+                  Icons.business_rounded,
+                  size: 16,
+                  color: Color(0xFF1E293B),
+                ),
+              );
+              return InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: () => showWorkspaceManagerDialog(ctx, rref),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 28,
+                      height: 28,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color:
+                              AppColors.primaryOf(ctx).withValues(alpha: .35),
+                          width: 1.2,
                         ),
                       ),
+                      child: ClipOval(
+                        child: orgPhoto.isNotEmpty
+                            ? Image.file(
+                                File(orgPhoto),
+                                width: 28,
+                                height: 28,
+                                fit: BoxFit.cover,
+                                cacheWidth: crispCacheWidth(context, 28),
+                                filterQuality: FilterQuality.high,
+                                errorBuilder: (_, __, ___) => defaultAppLogo,
+                              )
+                            : defaultAppLogo,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Flexible(child: titleText),
-                ],
+                    const SizedBox(width: 8),
+                    Flexible(child: titleText),
+                  ],
+                ),
               );
             },
           ),
@@ -2563,22 +2577,17 @@ class _Drawer extends ConsumerWidget {
         if (context.mounted) showSnack(context, 'حُذفت أيقونة المؤسسة');
         return;
       }
+      // (الملاحظة 3) مزامنة شعار المنشأة بأعلى دقة دون ضغط مخل
       final picked = await ImagePicker().pickImage(
         source: ImageSource.gallery,
-        maxWidth: 160,
-        maxHeight: 160,
-        imageQuality: 55,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        imageQuality: 100,
       );
       if (picked == null) return;
       final rawBytes = await picked.readAsBytes();
-      final bytes = await MediaPaths.compressThumbnailBytes(
-        rawBytes,
-        targetSize: 120,
-        maxBytes: 22000,
-      );
-      final b64 = base64Encode(bytes);
-      // حد عملي: العملية تمر عبر السحابة — مصغرة مضغوطة لتصل كل أجهزة المجموعة فوراً.
-      if (b64.length > MediaPaths.kMaxSyncedThumbBase64Chars) {
+      final b64 = base64Encode(rawBytes);
+      if (b64.length > MediaPaths.kMaxSyncedLogoBase64Chars) {
         if (context.mounted) {
           showSnack(context, 'الصورة أكبر من اللازم — اختر صورة أصغر',
               error: true);
@@ -2590,7 +2599,7 @@ class _Drawer extends ConsumerWidget {
       bump(ref);
       Sfx.pop();
       if (context.mounted) {
-        showSnack(context, '✅ حُدّثت أيقونة المؤسسة لكل المجموعة');
+        showSnack(context, '✅ حُدّثت أيقونة المؤسسة بأعلى دقة لكل المجموعة');
       }
     } catch (e) {
       if (context.mounted) {
@@ -2727,10 +2736,16 @@ class _Drawer extends ConsumerWidget {
                         builder: (ctx, rref, _) {
                           final photo =
                               rref.watch(drawerPhotoProvider).valueOrNull ?? '';
-                          const fallback = Icon(
-                            Icons.person,
-                            color: Colors.white,
-                            size: 30,
+                          final Widget fallback = Image.asset(
+                            'assets/images/logo.png',
+                            width: 54,
+                            height: 54,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => const Icon(
+                              Icons.person,
+                              color: Color(0xFF1E293B),
+                              size: 30,
+                            ),
                           );
                           // (PR-8) حدة Retina للصورة الشخصية بالدرج.
                           final faceCacheWidth = crispCacheWidth(ctx, 54);
@@ -2741,7 +2756,7 @@ class _Drawer extends ConsumerWidget {
                                   height: 54,
                                   fit: BoxFit.cover,
                                   cacheWidth: faceCacheWidth,
-                                  filterQuality: FilterQuality.medium,
+                                  filterQuality: FilterQuality.high,
                                   errorBuilder: (_, __, ___) => fallback,
                                 )
                               : (photo.isNotEmpty
@@ -2751,7 +2766,7 @@ class _Drawer extends ConsumerWidget {
                                       height: 54,
                                       fit: BoxFit.cover,
                                       cacheWidth: faceCacheWidth,
-                                      filterQuality: FilterQuality.medium,
+                                      filterQuality: FilterQuality.high,
                                       errorBuilder: (_, __, ___) => fallback,
                                     )
                                   : fallback);
@@ -2781,18 +2796,28 @@ class _Drawer extends ConsumerWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            // اسم المستخدم / الجهاز المحدد
+                            // اسم المستخدم / الجهاز المحدد (موحّد من جدول الروستر)
                             Consumer(
                               builder: (ctx, rref, _) {
                                 final devName = rref
                                     .watch(ownDeviceNameProvider)
                                     .valueOrNull
                                     ?.trim();
-                                final label = (user?.name != null && user!.name.isNotEmpty)
-                                    ? user.name
-                                    : ((devName != null && devName.isNotEmpty)
+                                final wsMode = rref
+                                        .watch(workspaceModeProvider)
+                                        .valueOrNull ??
+                                    'standalone';
+                                final rawUserName = (user?.name ?? '').trim();
+                                final safeUserName =
+                                    (wsMode == 'member' && rawUserName == 'المدير')
+                                        ? ''
+                                        : rawUserName;
+                                final label =
+                                    (devName != null && devName.isNotEmpty)
                                         ? devName
-                                        : 'المحاسب');
+                                        : (safeUserName.isNotEmpty
+                                            ? safeUserName
+                                            : 'المحاسب');
                                 return Row(
                                   children: [
                                     Flexible(

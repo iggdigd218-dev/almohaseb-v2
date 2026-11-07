@@ -11,6 +11,7 @@ import '../core/accounting.dart';
 import '../core/app_version.dart';
 import '../core/ids.dart';
 import '../core/database.dart';
+import '../core/device_names.dart';
 import '../core/format.dart';
 import '../core/secret_store.dart';
 import '../core/media_paths.dart';
@@ -817,13 +818,28 @@ class Repo {
   }
 
   /// دور المستخدم الموكّل لهذا الجهاز، أو null إذا لم يُعيَّن بعد (عضو جديد بلا صلاحيات).
+  /// (الملاحظة 2) توحيد أسماء الأعضاء في جميع الشاشات عبر جدول الروستر (devices) لمنع تضارب الأسماء.
   Future<AppUser?> deviceAssignedUser() async {
     final row = await ownDeviceRow();
     if (row != null) {
+      final rawRosterName = '${row['name'] ?? ''}'.trim();
+      // (توحيد الثوابت) القائمة مشتركة في core/device_names.dart
+      final validRosterName =
+          isCustomDeviceName(rawRosterName) ? rawRosterName : '';
       final uid = row['user_id'] as int?;
       if (uid != null) {
         final u = await userById(uid);
-        if (u != null) return u;
+        if (u != null) {
+          if (validRosterName.isNotEmpty && u.name.trim() != validRosterName) {
+            return u.copyWith(name: validRosterName);
+          }
+          if (u.name.trim() == 'المدير') {
+            return u.copyWith(
+              name: validRosterName.isNotEmpty ? validRosterName : 'عضو',
+            );
+          }
+          return u;
+        }
       }
       // ══ (2026-09-22) العضو بلا مستخدم مُعيَّن لا يُقفل بالكامل ══
       // الدور المحفوظ في سجل الجهاز (user_role/role) يمنح الصلاحيات
@@ -837,7 +853,7 @@ class Repo {
         );
         return AppUser(
           id: uid,
-          name: '${row['name'] ?? 'عضو'}',
+          name: validRosterName.isNotEmpty ? validRosterName : 'عضو',
           role: role,
           permissions: defaultPerms(role),
           active: true,
@@ -7725,7 +7741,16 @@ class Repo {
     }
   }
 
-  Future<int> saveItem(Item it) async {
+  /// الرقم التسلسلي التالي المتوقع للصنف الجديد (يبدأ من 1 فصاعداً ولا ينقص عند الحذف).
+  Future<int> nextItemPlu() async {
+    final db = await _db;
+    return AppDatabase.nextPlu(db, workspaceId: _workspaceId);
+  }
+
+  Future<int> saveItem(
+    Item it, {
+    bool enforceMinBarcodeLength = false,
+  }) async {
     await _ensureCan(it.id == null ? 'add_tx' : 'edit_tx');
     final db = await _db;
     // (سلامة المخزون) الكمية السالبة أو غير الصالحة تُرفض من البوابة نفسها —
@@ -7733,9 +7758,17 @@ class Repo {
     if (!it.quantity.isFinite || it.quantity < 0) {
       throw StateError('كمية الصنف لا يمكن أن تكون سالبة أو غير صالحة.');
     }
-    // فرادة الباركود/SKU: صنفان بنفس الباركود يفسدان مسح نقطة البيع.
+    // فرادة الباركود/SKU ومنع الباركود اليدوي القصير (< 5 خانات / < 10000):
     final sku = it.sku.trim();
     if (sku.isNotEmpty) {
+      if (enforceMinBarcodeLength) {
+        final numericVal = int.tryParse(sku);
+        if (sku.length < 5 || (numericVal != null && numericVal < 10000)) {
+          throw StateError(
+            'الباركود اليدوي يجب ألا يقل عن 5 خانات (يبدأ من 10000 فما فوق) لمنع التداخل مع الرقم التسلسلي للصنف.',
+          );
+        }
+      }
       final dup = await db.query('items',
           columns: ['id', 'name'],
           where: "sku = ? AND COALESCE(deleted_at,'') = ''"
@@ -7800,6 +7833,18 @@ class Repo {
         final newId = newGlobalId();
         id = await txn.insert(
             'items', itemToSave.toMap()..['id'] = newId);
+        if (itemToSave.plu != null) {
+          try {
+            final effectiveWs = (_workspaceId ?? '').trim().isEmpty
+                ? 'default'
+                : _workspaceId!.trim();
+            await txn.insert(
+              'sync_meta',
+              {'key': 'last_plu:$effectiveWs', 'value': '${itemToSave.plu}'},
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+          } catch (_) {}
+        }
         final payload = itemToSave.toMap()..['id'] = id;
         if (thumbB64.isNotEmpty) payload['thumb_b64'] = thumbB64;
         await rec.record(
