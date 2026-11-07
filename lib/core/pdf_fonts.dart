@@ -90,6 +90,22 @@ class PdfFonts {
         child: child,
       );
 
+  /// يطهّر النص قبل رسمه في PDF من:
+  /// 1. محارف التحكم غير المرئية وعلامات الاتجاه الثنائية (LRM/RLM/LRE/RLE/PDF/LRI/PDI/ZWSP/BOM)
+  ///    التي تُنسخ غالباً مع أرقام الهواتف وتظهر كمربعات «☒» لعدم وجود glyph لها.
+  /// 2. الحركات التشكيلية الاختيارية (التنوين والفتحة والضمة والكسرة والشدة والسكون)
+  ///    لأن محرك `package:pdf` لا يدعم جداول التموضع OpenType GPOS فيرسم الحركة فوق المسافة.
+  static String sanitize(String text) {
+    if (text.isEmpty) return text;
+    return text
+        .replaceAll(
+          RegExp(r'[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F'
+              r'\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]'),
+          '',
+        )
+        .replaceAll(RegExp(r'[\u064B-\u0652\u0670]'), '');
+  }
+
   /// تفريغ الذاكرة المؤقتة (للاختبارات فقط).
   static void resetCacheForTest() => _cache = null;
 }

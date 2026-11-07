@@ -31,13 +31,21 @@ void main() {
     await initializeDateFormatting('ar');
   });
 
-  // نصوص فاتورة حقيقية: اسم متجر، عميل، صنف، إجمالي، تذييل، أرقام وترقيم.
+  // نصوص فاتورة حقيقية: اسم متجر، عميل، صنف، إجمالي، تذييل، أرقام، عملات ورموز إنجليزية.
   const invoiceTexts = <String>[
     'متجر النخبة للتجارة',
+    'مركز عثمان الوصابي',
     'فاتورة مبيعات',
+    'فاتورة نقدية مدفوعة (مدفوع نقداً)',
     'العميل: عبدالله محمد حسين',
+    'هاتف: +967774190040',
+    '#A-0001',
     'زيت نباتي 1 لتر',
+    'القوة البركانية A1',
+    '1.0 × 1,500 = 1,500',
     'الإجمالي المطلوب: 12,500 ريال يمني',
+    '1,500 YER / SAR / USD',
+    'شكراً لتعاملكم معنا',
     'شكراً لزيارتكم!',
     'التاريخ: 24/09/2026',
   ];
@@ -49,7 +57,7 @@ void main() {
         amount: 12500,
         currency: 'YER',
         date: DateTime(2026, 9, 24, 10, 30),
-        reference: '1024',
+        reference: 'A-1024',
         description: 'فاتورة مبيعات',
         createdAt: DateTime(2026, 9, 24),
         updatedAt: DateTime(2026, 9, 24),
@@ -108,11 +116,21 @@ void main() {
     expect(theme, isNotNull);
   });
 
-  test('ARF-03 PdfFonts.rtl يغلّف المحتوى باتجاه RTL', () async {
+  test('ARF-03 PdfFonts.rtl يغلّف المحتوى باتجاه RTL وPdfFonts.sanitize يطهّر النص',
+      () async {
     final widget = PdfFonts.rtl(child: pw.Text('مرحباً'));
     expect(widget, isA<pw.Directionality>());
     expect((widget as pw.Directionality).textDirection,
         pw.TextDirection.rtl);
+
+    expect(
+      PdfFonts.sanitize('\u202A+967774190040\u202C'),
+      '+967774190040',
+    );
+    expect(
+      PdfFonts.sanitize('شكراً لتعاملكم معنا'),
+      'شكرا لتعاملكم معنا',
+    );
   });
 
   // ============ 3) لا حروف مفقودة (جوهر «لا مربعات») ============
@@ -132,9 +150,10 @@ void main() {
           }
         }
       }
-      // الأرقام العربية وأهم علامات الترقيم المستعملة في الفواتير.
-      for (final unit in '٠١٢٣٤٥٦٧٨٩٪:×/-.,'.codeUnits) {
-        if (parser.charToGlyphIndexMap[unit] == null) {
+      // الأرقام العربية وأهم علامات الترقيم والحروف الإنجليزية المستعملة في الفواتير.
+      for (final unit in '٠١٢٣٤٥٦٧٨٩٪:×/-.,+#=()*%ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'.codeUnits) {
+        final glyph = parser.charToGlyphIndexMap[unit];
+        if (glyph == null || glyph == 0) {
           missing.add(String.fromCharCode(unit));
         }
       }
@@ -146,7 +165,7 @@ void main() {
   });
 
   // ============ 4) مستند فاتورة نقطة البيع ============
-  test('ARF-05 فاتورة نقطة البيع: خط عربي مدمج ولا خط لاتيني افتراضي',
+  test('ARF-05 فاتورة نقطة البيع: خط عربي مدمج وسهم أسود بدون شعار ملون',
       () async {
     PdfFonts.resetCacheForTest();
     final doc = await buildThermalInvoiceDocument(
@@ -154,8 +173,9 @@ void main() {
       account: sampleAccount(),
       lines: sampleLines(),
       orgName: 'متجر النخبة للتجارة',
-      orgPhone: '777123456',
+      orgPhone: '+967774190040',
       footer: 'شكراً لزيارتكم!',
+      logoPath: 'assets/images/logo.png',
     );
 
     // الخط الذي تحمّله الخدمة هو نفسه المدمج في المستند — نتحقق من هويته
@@ -182,6 +202,9 @@ void main() {
     expect(raw, contains('Identity-H'),
         reason: 'الخط ليس بترميز Identity-H (نص يونيكود ثنائي البايت)');
     expect(raw, contains('FontFile2'), reason: 'ملف الخط غير مضمّن في PDF');
+    // لا يتم تضمين صورة نقطية ملونة لشعار المنشأة في الطباعة الحرارية، بل يُرسم السهم المتجه بالأسود
+    expect(raw, isNot(contains('/Subtype /Image')),
+        reason: 'الفاتورة الحرارية لا يجب أن تضمّن صورة شعار ملونة');
     // الخط مُضمَّن كمجموعة فرعية مضغوطة (FontFile2) فالملف يبقى صغيراً؛
     // ملف بلا خط مدمج يقلّ عن 3KB عادةً.
     expect(doc.bytes.length, greaterThan(8 * 1024),
