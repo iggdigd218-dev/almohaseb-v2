@@ -1,0 +1,25 @@
+{
+  "version": "1.8.10+60",
+  "sha256": "c4836ba86c0d048f3211b68c5926a7de7520a28b640dc0ec420a1fd96639fdab",
+  "sha256Variants": {
+    "arm64": "c4836ba86c0d048f3211b68c5926a7de7520a28b640dc0ec420a1fd96639fdab",
+    "armv7": "146079429e29b32bb3bd87cd8fbed4a0d6a26e0ec8d907edc2348e6a8803e7ac"
+  },
+  "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/admin-latest",
+  "downloads": {
+    "android": "https://iggdigd218-dev.github.io/almohaseb-v2/license-admin.apk",
+    "androidVariants": {
+      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/license-admin.apk",
+      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/license-admin-armv7.apk"
+    }
+  },
+  "downloadsFallbackGithub": {
+    "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk",
+    "androidVariants": {
+      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk",
+      "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin-armv7.apk"
+    }
+  },
+  "publishedAt": "2026-11-07T23:06:12Z",
+  "notes": "• إصلاح التحديث المباشر داخل تطبيق الإدارة (In-App Update) دون التحويل القسري للمتصفح.\n• استعادة بناء --split-per-abi ورفع versionCode (2055) لحل خطأ «الحزمة تبدو غير صالحة» عند التثبيت فوق النسخة السابقة.\n• توحيد تطبيق الإدارة وقناة تحديثه وسياسة التحديث الإجباري لكلا المستودعين (المحاسب v2 + المحاسب بلاس)."
+}
