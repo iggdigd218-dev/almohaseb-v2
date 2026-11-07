@@ -446,10 +446,27 @@ class AppDatabase {
         await _migrate(db, from, to);
       },
       onOpen: (db) async {
-        // إذا لم تُنفَّذ الهجرة للتو في onCreate/onUpgrade، نتحقق مما إذا كان
-        // المخطط الكامل قد فُحص مسبقاً لهذا الإصدار لتفادي تشغيل ~180 استعلام
-        // DDL في كل إقلاع مما يبطئ فتح الحسابات محلياً.
-        if (!schemaJustMigrated) {
+        // تحقق فعلياً من وجود جدولي operations و sync_queue في sqlite_master
+        // قبل الوثوق بمفتاح schema_ensured_v (لأن sqflite على أندرويد يتجاهل
+        // الجمل المتعددة في db.execute إن لم تقسم منفصلة).
+        var coreSyncTablesExist = false;
+        try {
+          final tblRows = await db.rawQuery(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('operations', 'sync_queue')",
+          );
+          final foundNames =
+              tblRows.map((r) => '${r['name'] ?? ''}'.trim()).toSet();
+          coreSyncTablesExist =
+              foundNames.contains('operations') &&
+              foundNames.contains('sync_queue');
+        } catch (_) {
+          coreSyncTablesExist = false;
+        }
+
+        if (!coreSyncTablesExist) {
+          await _ensureCoreSyncTables(db);
+          await ensureFullSchema(db);
+        } else if (!schemaJustMigrated) {
           var alreadyEnsured = false;
           try {
             final rows = await db.query(
@@ -465,6 +482,7 @@ class AppDatabase {
             alreadyEnsured = false;
           }
           if (!alreadyEnsured) {
+            await _ensureCoreSyncTables(db);
             await ensureFullSchema(db);
           }
         }
@@ -1483,19 +1501,11 @@ class AppDatabase {
   }
 
   /// ينفّذ نصًا قد يحتوي عدة جُمل CREATE (سكربت مخطط) بشكل متين:
-  /// - يقسّمه على الفواصل المنقوطة وينفّذ كل جملة على حدة.
-  /// - إذا فشلت جملة لأن الجدول/الفهرس موجود مسبقًا (خطأ حصل في بناءات
-  ///   ويندوز القديمة التي استخدمت CREATE TABLE بدون IF NOT EXISTS) يتجاوزها
-  ///   بدل أن تنهار الهجرة بالكامل وتُظهر "table workspaces already exists".
+  /// - يقسّمه دائماً عبر `_splitStatements` على الفواصل المنقوطة وينفّذ كل جملة
+  ///   `CREATE` على حدة (لأن محرك sqflite على أندرويد ينفذ الجملة الأولى فقط
+  ///   ويتجاهل بقية السكربت بصمت إذا مُرّر دفعة واحدة).
+  /// - إذا فشلت جملة لأن الجدول/الفهرس موجود مسبقًا يتجاوزها بأمان.
   static Future<void> execSchemaScript(Database db, String script) async {
-    // أولاً جرّب التنفيذ المباشر (الأسرع، يدعم المحرك الجُمل المتعددة).
-    try {
-      await db.execute(script);
-      return;
-    } catch (e) {
-      if (!_isAlreadyExistsError('$e')) rethrow;
-    }
-    // مسار التحوّط: نفّذ كل جملة مفردة وتجاوز "already exists".
     final statements = _splitStatements(script);
     for (final stmt in statements) {
       final trimmed = stmt.trim();
@@ -2043,19 +2053,102 @@ class AppDatabase {
                (c.name IS NULL), c.name,
                i.name, i.id
     ''');
-    if (rows.isEmpty) return;
-    final nextByWs = <String, int>{};
-    final batch = db.batch();
-    for (final r in rows) {
-      final wsId = ('${r['ws_id'] ?? defaultWorkspaceIdConst}').trim();
-      final effectiveWs = wsId.isEmpty ? defaultWorkspaceIdConst : wsId;
-      final next = nextByWs[effectiveWs] ??
-          await nextPlu(db, workspaceId: effectiveWs);
-      batch.update('items', {'plu': next},
-          where: 'id = ?', whereArgs: [r['id']]);
-      nextByWs[effectiveWs] = next + 1;
+    if (rows.isNotEmpty) {
+      final nextByWs = <String, int>{};
+      final batch = db.batch();
+      for (final r in rows) {
+        final wsId = ('${r['ws_id'] ?? defaultWorkspaceIdConst}').trim();
+        final effectiveWs = wsId.isEmpty ? defaultWorkspaceIdConst : wsId;
+        final next = nextByWs[effectiveWs] ??
+            await nextPlu(db, workspaceId: effectiveWs);
+        batch.update('items', {'plu': next},
+            where: 'id = ?', whereArgs: [r['id']]);
+        nextByWs[effectiveWs] = next + 1;
+      }
+      await batch.commit(noResult: true);
+      for (final entry in nextByWs.entries) {
+        try {
+          await db.insert(
+            'sync_meta',
+            {'key': 'last_plu:${entry.key}', 'value': '${entry.value - 1}'},
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        } catch (_) {}
+      }
     }
-    await batch.commit(noResult: true);
+
+    // معالجة الباركودات القديمة القصيرة (< 5 خانات) تلقائياً في الخلفية
+    await upgradeLegacyShortBarcodes(db);
+  }
+
+  /// معالجة الباركودات القديمة القصيرة (أقل من 5 خانات) تلقائياً في الخلفية
+  /// عبر تكرار الأرقام أو إكمالها لتصل إلى 5 خانات فأكثر دون تدخل المستخدم،
+  /// لمنع التداخل مع الأرقام التسلسلية للأصناف (1 .. 9999).
+  static String expandShortBarcode(String rawSku, {Set<String>? usedSkus}) {
+    final clean = rawSku.trim();
+    if (clean.isEmpty || clean.length >= 5) return clean;
+    final buf = StringBuffer(clean);
+    var idx = 0;
+    while (buf.length < 5) {
+      buf.write(clean[idx % clean.length]);
+      idx++;
+    }
+    var candidate = buf.toString();
+    final asInt = int.tryParse(candidate);
+    if (asInt != null && asInt < 10000) {
+      candidate = '${10000 + asInt}';
+    }
+    if (usedSkus != null) {
+      var suffix = 1;
+      final base = candidate;
+      while (usedSkus.contains(candidate)) {
+        candidate = '$base$suffix';
+        suffix++;
+      }
+      usedSkus.add(candidate);
+    }
+    return candidate;
+  }
+
+  /// ترقية كافة الباركودات القصيرة القديمة (< 5 خانات) في جدول الأصناف تلقائياً بالخلفية.
+  static Future<int> upgradeLegacyShortBarcodes(Database db) async {
+    try {
+      final shortRows = await db.rawQuery(
+        "SELECT id, sku FROM items WHERE sku IS NOT NULL AND TRIM(sku) != '' AND LENGTH(TRIM(sku)) < 5",
+      );
+      if (shortRows.isEmpty) return 0;
+
+      final allSkuRows = await db.rawQuery(
+        "SELECT sku FROM items WHERE sku IS NOT NULL AND TRIM(sku) != ''",
+      );
+      final usedSkus = <String>{
+        for (final r in allSkuRows) '${r['sku'] ?? ''}'.trim(),
+      };
+
+      final batch = db.batch();
+      var upgraded = 0;
+      for (final r in shortRows) {
+        final id = r['id'];
+        final oldSku = '${r['sku'] ?? ''}'.trim();
+        if (id == null || oldSku.isEmpty || oldSku.length >= 5) continue;
+        final newSku = expandShortBarcode(oldSku, usedSkus: usedSkus);
+        if (newSku != oldSku) {
+          batch.update(
+            'items',
+            {'sku': newSku},
+            where: 'id = ?',
+            whereArgs: [id],
+          );
+          upgraded++;
+        }
+      }
+      if (upgraded > 0) {
+        await batch.commit(noResult: true);
+      }
+      return upgraded;
+    } catch (_) {
+      return 0;
+    }
   }
 
   /// أول رقم PLU متاح (MAX الحالي + 1) مقيداً بـ workspace_id الفعّال — لا يُعاد استخدام رقم محذوف أبداً.
@@ -2068,7 +2161,20 @@ class AppDatabase {
         "WHERE COALESCE(workspace_id, 'default') IN (?, ?)",
         [effectiveWs, defaultWorkspaceIdConst],
       );
-      return ((rows.first['m'] ?? 0) as num).toInt() + 1;
+      var maxPlu = ((rows.first['m'] ?? 0) as num).toInt();
+      try {
+        final metaRows = await db.query(
+          'sync_meta',
+          columns: ['value'],
+          where: 'key IN (?, ?)',
+          whereArgs: ['last_plu:$effectiveWs', 'last_plu:default'],
+        );
+        for (final mr in metaRows) {
+          final v = int.tryParse('${mr['value'] ?? ''}') ?? 0;
+          if (v > maxPlu) maxPlu = v;
+        }
+      } catch (_) {}
+      return maxPlu + 1;
     } catch (_) {
       return 1;
     }
@@ -2392,5 +2498,49 @@ class AppDatabase {
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
     } catch (_) {}
+  }
+
+  /// فحص مباشر في `sqlite_master` لتأكيد وجود جدولي `operations` و `sync_queue` فعلياً
+  static Future<bool> hasCoreSyncTables(Database db) async {
+    try {
+      final rows = await db.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name IN ('operations', 'sync_queue')",
+      );
+      final names = {for (final r in rows) '${r['name']}'};
+      return names.contains('operations') && names.contains('sync_queue');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// (تعافي ذاتي) ينشئ جداول المزامنة الأساسية على أي منفّذ — `Database` أو
+  /// `Transaction`. يستدعيه `SyncRecorder` داخل المعاملة نفسها عند ظهور
+  /// «no such table»، فيُكمل الحفظ بدل إفشاله أمام المستخدم.
+  static Future<void> ensureSyncTablesForExecutor(DatabaseExecutor ex) async {
+    const ddlOps = '''CREATE TABLE IF NOT EXISTS operations (
+        id TEXT PRIMARY KEY, device_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+        user_id INTEGER, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+        op_type TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
+        parent_op_id TEXT DEFAULT '', payload TEXT NOT NULL,
+        device_time TEXT NOT NULL, server_time TEXT DEFAULT '',
+        timestamp TEXT NOT NULL, synced INTEGER NOT NULL DEFAULT 0,
+        is_synced INTEGER NOT NULL DEFAULT 0
+      )''';
+    const ddlSyncQ = '''CREATE TABLE IF NOT EXISTS sync_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', target TEXT NOT NULL DEFAULT 'cloud',
+        attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT DEFAULT '',
+        next_try_at TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(operation_id, target)
+      )''';
+    await ex.execute(ddlOps);
+    final cols = await ex.rawQuery('PRAGMA table_info(operations)');
+    if (!cols.any((c) => c['name'] == 'is_synced')) {
+      await ex.execute(
+        'ALTER TABLE operations ADD COLUMN is_synced INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+    await ex.execute(ddlSyncQ);
   }
 }

@@ -75,11 +75,11 @@ class UpdateInstaller {
   /// روابط مباشرة قصيرة بسطر واحد فقط (عبر شبكة Fastly CDN على GitHub Pages)
   /// لا تتحول إلى روابط التوقيع الطويلة (20 سطراً) ولا يعترضها تطبيق GitHub.
   static const String kShortAndroidArm64Url =
-      'https://iggdigd218-dev.github.io/almohaseb-v2/Almohaseb-Plus-arm64.apk';
+      'https://iggdigd218-dev.github.io/almohaseb-plus/Almohaseb-Plus-arm64.apk';
   static const String kShortAndroidArmv7Url =
-      'https://iggdigd218-dev.github.io/almohaseb-v2/nexora-armv7.apk';
+      'https://iggdigd218-dev.github.io/almohaseb-plus/nexora-armv7.apk';
   static const String kShortWindowsUrl =
-      'https://iggdigd218-dev.github.io/almohaseb-v2/NexoraSetup.exe';
+      'https://iggdigd218-dev.github.io/almohaseb-plus/NexoraSetup.exe';
 
   /// يعيد الرابط المباشر القصير (سطر واحد فقط) المناسب للمشاركة أو النسخ.
   static String shortDirectUrlFor({bool forWindows = false, String? abi}) {
@@ -746,7 +746,7 @@ class UpdateInstaller {
     final isOfficialChannel = rawSet.any(
       (u) =>
           u.contains('iggdigd218-dev') ||
-          u.contains('almohaseb-v2') ||
+          u.contains('almohaseb-plus') ||
           u.contains('nexora-broker'),
     );
     if (isOfficialChannel) {
@@ -756,7 +756,7 @@ class UpdateInstaller {
       if (isWin) {
         fastMirrors.add(kShortWindowsUrl);
         fastMirrors.add(
-          'https://raw.githubusercontent.com/iggdigd218-dev/almohaseb-v2/releases/NexoraSetup.exe',
+          'https://raw.githubusercontent.com/iggdigd218-dev/almohaseb-plus/releases/NexoraSetup.exe',
         );
       } else {
         fastMirrors.add(
@@ -765,13 +765,13 @@ class UpdateInstaller {
       }
     }
     for (final u in rawSet) {
-      if (u.contains('github.io/almohaseb-v2/')) {
+      if (u.contains('github.io/almohaseb-plus/')) {
         fastMirrors.add(u);
         final idx = u.indexOf('/releases/');
         if (idx >= 0) {
           final tail = u.substring(idx + 1).split('?').first;
           fastMirrors.add(
-            'https://raw.githubusercontent.com/iggdigd218-dev/almohaseb-v2/releases/$tail',
+            'https://raw.githubusercontent.com/iggdigd218-dev/almohaseb-plus/releases/$tail',
           );
         }
       } else {

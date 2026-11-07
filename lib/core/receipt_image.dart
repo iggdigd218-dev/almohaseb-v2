@@ -1,9 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'theme.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -79,8 +79,8 @@ class ReceiptData {
           ? '$devName ($devCode)'
           : devName;
     }
-    if (devCode.isNotEmpty) return 'المدير ($devCode)';
-    return 'المدير';
+    if (devCode.isNotEmpty) return 'الموظف ($devCode)';
+    return 'الموظف';
   }
 
   factory ReceiptData.fromTx({
@@ -216,6 +216,12 @@ Future<String> buildReceiptImage(ReceiptData d) async {
       }
     } catch (_) {}
   }
+  if (logoBytes == null || logoBytes.isEmpty) {
+    try {
+      final assetData = await rootBundle.load('assets/images/logo.png');
+      logoBytes = assetData.buffer.asUint8List();
+    } catch (_) {}
+  }
   if (logoBytes != null && logoBytes.isNotEmpty) {
     ui.Codec? codec;
     try {
@@ -252,6 +258,7 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   const tableHeaderH = 46.0;
   const tableRowH = 48.0;
   const tableFooterH = 52.0;
+  const datePhoneBarH = 52.0;
   const footerH = 74.0;
 
   final hasPartialBar =
@@ -275,7 +282,9 @@ Future<String> buildReceiptImage(ReceiptData d) async {
       20.0 + // مسافة أعلى قسم البيان / جدول الأصناف
       statementSectionH +
       (hasPartialBar ? (14.0 + partialBarH) : 0.0) +
-      24.0 + // مسافة أعلى الخط المنقط والتذييل
+      14.0 + // مسافة أعلى شريط التاريخ ورقم الهاتف (قبل العنصر الأخير مباشرة)
+      datePhoneBarH +
+      20.0 + // مسافة أعلى الخط المنقط والتذييل
       footerH;
 
   final height = cardH + outerPad * 2;
@@ -1046,7 +1055,46 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     y += partialBarH;
   }
 
-  y += 24.0;
+  // ===== شريط التاريخ ورقم الهاتف قبل العنصر الأخير مباشرة =====
+  y += 14.0;
+  final dpBox = RRect.fromRectAndRadius(
+    Rect.fromLTWH(pad, y, w - pad * 2, datePhoneBarH),
+    const Radius.circular(12),
+  );
+  canvas.drawRRect(dpBox, Paint()..color = const Color(0xFFF8FAFC));
+  canvas.drawRRect(
+    dpBox,
+    Paint()
+      ..color = line
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2,
+  );
+  _text(
+    canvas,
+    '📅 التاريخ: $dtFormatted',
+    w - pad - 20,
+    y + 12,
+    19,
+    ink,
+    bold: true,
+    alignEnd: true,
+  );
+  final effectivePhone = d.orgPhone.trim().isNotEmpty
+      ? d.orgPhone.trim()
+      : (d.accountPhone.trim().isNotEmpty ? d.accountPhone.trim() : '—');
+  _text(
+    canvas,
+    '📞 رقم الهاتف: $effectivePhone',
+    pad + 20,
+    y + 12,
+    19,
+    skyDark,
+    bold: true,
+    alignStart: true,
+  );
+  y += datePhoneBarH;
+
+  y += 20.0;
 
   // ===== 5) الخط المنقط وشريط التذييل السفلي (Footer Bar) مطابق للصورة المرجعية =====
   final dashPaint = Paint()
@@ -1063,10 +1111,10 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   }
 
   final sellerIdentity =
-      d.sellerOrDevice.trim().isEmpty ? 'المدير' : d.sellerOrDevice.trim();
-  final userLabel = 'المستخدم: $sellerIdentity';
+      d.sellerOrDevice.trim().isEmpty ? 'الموظف' : d.sellerOrDevice.trim();
+  final userLabel = 'الموظف: $sellerIdentity';
 
-  // كبسولة اسم المستخدم في أقصى اليمين كما في الصورة المرجعية
+  // كبسولة اسم الموظف في أقصى اليمين كما في الصورة المرجعية
   final userTp = TextPainter(
     text: TextSpan(
       text: userLabel,

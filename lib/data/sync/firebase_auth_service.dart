@@ -498,6 +498,46 @@ class FirebaseAuthRest {
     return acc;
   }
 
+  /// إرسال رابط إعادة تعيين كلمة المرور إلى البريد الإلكتروني عبر Firebase Identity Toolkit REST.
+  static Future<void> sendPasswordResetEmail(String email) async {
+    final key = effectiveFirebaseApiKey;
+    final cleanEmail = email.trim().toLowerCase();
+    if (cleanEmail.isEmpty || !cleanEmail.contains('@')) {
+      throw StateError('INVALID_EMAIL');
+    }
+    if (key.isEmpty) {
+      throw Exception('مفتاح مصادقة السحابة غير مهيأ.');
+    }
+    final uri = Uri.parse(
+      'https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=$key',
+    );
+    final res = await http
+        .post(
+          uri,
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'requestType': 'PASSWORD_RESET',
+            'email': cleanEmail,
+          }),
+        )
+        .timeout(const Duration(seconds: 15));
+
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      String errMsg = res.body;
+      try {
+        final decoded = jsonDecode(utf8.decode(res.bodyBytes));
+        if (decoded is Map && decoded['error'] is Map) {
+          errMsg = '${decoded['error']['message'] ?? ''}';
+        }
+      } catch (_) {}
+      if (errMsg.contains('EMAIL_NOT_FOUND') ||
+          errMsg.contains('USER_NOT_FOUND')) {
+        throw StateError('EMAIL_NOT_FOUND');
+      }
+      throw Exception('تعذّر إرسال رابط استعادة كلمة المرور ($errMsg)');
+    }
+  }
+
   /// حفظ الجلسة محلياً — تبقى صالحة بلا إنترنت (لا انتهاء محلي).
   static Future<void> saveSession(Repo repo, FirebaseAccount a) async {
     _repo ??= repo;

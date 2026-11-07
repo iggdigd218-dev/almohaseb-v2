@@ -9,8 +9,8 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
@@ -67,6 +67,13 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
       if (await f.exists()) {
         logoImg = pw.MemoryImage(await f.readAsBytes());
       }
+    } catch (_) {}
+  }
+  if (logoImg == null) {
+    try {
+      final assetData = await rootBundle.load('assets/images/logo.png');
+      final bytes = assetData.buffer.asUint8List();
+      if (bytes.isNotEmpty) logoImg = pw.MemoryImage(bytes);
     } catch (_) {}
   }
 
@@ -155,13 +162,6 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                     ),
                   ),
                   pw.Text('#${tx.reference}'),
-                ],
-              ),
-              pw.Row(
-                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                children: [
-                  pw.Text('التاريخ: ${Fmt.date(tx.date)}'),
-                  pw.Text('الوقت: ${tx.date.hour}:${tx.date.minute}'),
                 ],
               ),
               if (account != null)
@@ -283,7 +283,7 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
               pw.Divider(thickness: 0.6),
               if (sellerOrDevice.trim().isNotEmpty) ...[
                 pw.Text(
-                  'المستخدم: ${sellerOrDevice.trim()}',
+                  'الموظف: ${sellerOrDevice.trim()}',
                   style: pw.TextStyle(
                     fontSize: 9,
                     font: fonts.bold,
@@ -293,6 +293,23 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                 ),
                 pw.SizedBox(height: 3),
               ],
+              // التاريخ ورقم الهاتف قبل العنصر الأخير مباشرة
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Text(
+                    'التاريخ: ${Fmt.date(tx.date)} ${tx.date.hour.toString().padLeft(2, '0')}:${tx.date.minute.toString().padLeft(2, '0')}',
+                    style: const pw.TextStyle(fontSize: 8.5),
+                  ),
+                  if (orgPhone.trim().isNotEmpty ||
+                      (account?.phone.trim().isNotEmpty ?? false))
+                    pw.Text(
+                      'هاتف: ${orgPhone.trim().isNotEmpty ? orgPhone.trim() : account!.phone.trim()}',
+                      style: const pw.TextStyle(fontSize: 8.5),
+                    ),
+                ],
+              ),
+              pw.SizedBox(height: 3),
               pw.Text(
                 footer,
                 style: const pw.TextStyle(fontSize: 9),

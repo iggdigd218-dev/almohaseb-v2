@@ -1,7 +1,7 @@
 name: nexora_app
-description: مدير الحسابات — سجل المبيعات والديون
+description: المحاسب بلاس — المنظومة المحاسبية المتقدمة لإدارة المستودعات المركزية وكبار الموردين
 publish_to: 'none'
-version: 3.98.27+342
+version: 3.98.31+346
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

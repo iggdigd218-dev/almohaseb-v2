@@ -22,6 +22,7 @@ import 'package:http/http.dart' as http;
 import 'package:sqflite/sqflite.dart';
 
 import '../../core/database.dart';
+import '../../core/device_names.dart';
 import '../../core/factory_reset.dart';
 import '../../core/ids.dart';
 import '../../core/media_paths.dart';
@@ -2101,12 +2102,20 @@ class CloudJoin {
           // بالكتابة العكسية فوق جدول users لدى المدير وإلغاء تعديلاته قبل رفعها.
           final curRole = '${existing.first['role'] ?? ''}';
           final curUpd = '${existing.first['updated_at'] ?? ''}';
+          final curName = '${existing.first['name'] ?? ''}'.trim();
+          final shouldSyncName = isCustomDeviceName(devName) &&
+              (curName.isEmpty ||
+                  curName == 'عضو' ||
+                  curName == 'المدير' ||
+                  upd.compareTo(curUpd) > 0);
           if (upd.compareTo(curUpd) > 0 ||
               curRole != role.code ||
-              '${existing.first['permissions'] ?? ''}' != permStr) {
+              '${existing.first['permissions'] ?? ''}' != permStr ||
+              shouldSyncName) {
             final patch = <String, Object?>{
               'role': role.code,
               'permissions': permStr,
+              if (shouldSyncName) 'name': devName,
               'active': 1,
               'deleted_at': '',
               'updated_at': upd,
@@ -2229,7 +2238,23 @@ class CloudJoin {
             'updated_at': remoteUpd.isEmpty ? nowIso : remoteUpd,
           };
           if (!isOwner && !remoteRevokedOrExpelled) {
-            patch['name'] = r['name'] ?? local['name'];
+            // (الملاحظة 2) منع الكتابة الفوقية لاسم الجهاز المحلي بالبيانات السحابية الدورية القديمة
+            final localName = '${local['name'] ?? ''}'.trim();
+            final remoteName = '${r['name'] ?? ''}'.trim();
+            final hasCustomLocalName = isCustomDeviceName(localName);
+            final isValidRemoteName = isCustomDeviceName(remoteName);
+            // (قبول إعادة التسمية من المدير) مصدر الحقيقة لاسم الجهاز هو
+            // الروستر الذي يكتبه المدير، فنقبل الاسم السحابي عند تساوي
+            // الطابع الزمني أيضًا — كان الشرط `>` فقط فيسقط الاسم حين
+            // يكتبه المدير في نفس الميلي ثانية.
+            if (isValidRemoteName && remoteUpd.compareTo(localUpd) >= 0) {
+              patch['name'] = remoteName;
+              await repo.setSetting('sync.deviceName', remoteName);
+            } else if (hasCustomLocalName) {
+              patch['name'] = localName;
+            } else {
+              patch['name'] = isValidRemoteName ? remoteName : localName;
+            }
             final rawUid = r['user_id'];
             final uid = rawUid is int ? rawUid : int.tryParse('${rawUid ?? ''}');
             if (uid != null) {

@@ -5,6 +5,7 @@
 library;
 
 import 'dart:async';
+import '../../core/device_names.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -67,16 +68,21 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
     super.initState();
     final user = ref.read(currentUserProvider).valueOrNull;
     final devName = ref.read(ownDeviceNameProvider).valueOrNull?.trim() ?? '';
+    final wsMode = ref.read(workspaceModeProvider).valueOrNull ?? 'standalone';
+    final isMember = wsMode == 'member';
     final st = ref.read(settingsProvider).valueOrNull ?? const {};
-    final syncedOwnerName = (st['profile.owner_name'] ?? '').trim();
+    final syncedOwnerName =
+        isMember ? '' : (st['profile.owner_name'] ?? '').trim();
+    final rawUserName = (user?.name ?? '').trim();
+    final safeUserName = (isMember && rawUserName == 'المدير') ? '' : rawUserName;
 
     _userNameCtrl = TextEditingController(
-      text: syncedOwnerName.isNotEmpty
-          ? syncedOwnerName
-          : (devName.isNotEmpty ? devName : (user?.name ?? '')),
+      text: devName.isNotEmpty
+          ? devName
+          : (syncedOwnerName.isNotEmpty ? syncedOwnerName : safeUserName),
     );
     _emailCtrl = TextEditingController(
-      text: (st['account.email'] ?? '').trim(),
+      text: (st['account.email'] ?? st['email'] ?? '').trim(),
     );
     _phoneCtrl = TextEditingController(
       text: (st['phone'] ?? st['whatsapp'] ?? '').trim(),
@@ -236,8 +242,7 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
               '')
           .trim();
       final hasCustomSavedName = customSavedName.isNotEmpty &&
-          customSavedName != 'جهاز المحاسب' &&
-          customSavedName != 'جهاز مدير الحسابات';
+          isCustomDeviceName(customSavedName);
       if (hasCustomSavedName && _userNameCtrl.text.trim().isEmpty) {
         _userNameCtrl.text = customSavedName;
       } else if (!hasCustomSavedName &&
@@ -486,21 +491,17 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
     }
     setState(() => _logoBusy = true);
     try {
+      // (الملاحظة 3) مزامنة شعار المنشأة بأعلى دقة دون ضغط مخل
       final picked = await ImagePicker().pickImage(
         source: ImageSource.gallery,
-        maxWidth: 160,
-        maxHeight: 160,
-        imageQuality: 55,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        imageQuality: 100,
       );
       if (picked == null) return;
       final rawBytes = await picked.readAsBytes();
-      final bytes = await MediaPaths.compressThumbnailBytes(
-        rawBytes,
-        targetSize: 120,
-        maxBytes: 22000,
-      );
-      final b64 = base64Encode(bytes);
-      if (b64.length > MediaPaths.kMaxSyncedThumbBase64Chars) {
+      final b64 = base64Encode(rawBytes);
+      if (b64.length > MediaPaths.kMaxSyncedLogoBase64Chars) {
         if (mounted) {
           showSnack(context, 'الصورة أكبر من اللازم — اختر صورة أصغر',
               error: true);
@@ -513,7 +514,7 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
       ref.invalidate(drawerPhotoProvider);
       bump(ref);
       Sfx.pop();
-      showSnack(context, '✅ تم تحديث الشعار بنجاح');
+      showSnack(context, '✅ تم تحديث الشعار بأعلى دقة بنجاح');
     } catch (e) {
       if (mounted) showSnack(context, 'تعذّر رفع الشعار: $e', error: true);
     } finally {
@@ -560,49 +561,13 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
       }
 
       if (isOwner) {
-        final emailVal = _emailCtrl.text.trim();
         final phoneVal = _phoneCtrl.text.trim();
         final st = await repo.settings();
         final url = effectiveBackendUrl(st['cloudBackendUrl']);
-        final wsId = repo.requireWorkspaceId;
-        final currentSavedEmail =
-            (st['account.email'] ?? st['email'] ?? _linkedEmail)
-                .trim()
-                .toLowerCase();
+        // (الملاحظة 3) قفل تعديل البريد الإلكتروني برمجياً من ملف تعريف المنشأة
+        final lockedEmail =
+            (st['account.email'] ?? st['email'] ?? _linkedEmail).trim();
 
-        if (url.isNotEmpty && emailVal.isNotEmpty) {
-          final existingEmailWs = await AccountWorkspace.lookupByEmail(
-            backendUrl: url,
-            email: emailVal,
-          );
-          if (existingEmailWs.isNotEmpty && existingEmailWs != wsId) {
-            // إذا كان البريد هو نفس البريد المسجل به المستخدم حالياً وله منشأة سابقة على السحابة،
-            // ننتقل إليها ونسترجعها بدلاً من إظهار رسالة فشل!
-            if (currentSavedEmail.isNotEmpty &&
-                emailVal.toLowerCase() == currentSavedEmail) {
-              await AccountWorkspace.switchToExistingWorkspace(
-                repo,
-                backendUrl: url,
-                targetWorkspaceId: existingEmailWs,
-              );
-            } else {
-              if (mounted) {
-                setState(() => _saving = false);
-                showSnack(
-                  context,
-                  'هذا البريد الإلكتروني مرتبط بمساحة منشأة أخرى على السحابة ولا يمكن تكراره.',
-                  error: true,
-                );
-              }
-              return;
-            }
-          }
-        }
-
-        if (emailVal.isNotEmpty) {
-          await repo.setSetting('account.email', emailVal);
-          await repo.setSetting('email', emailVal);
-        }
         await repo.setSyncedSetting('phone', phoneVal);
         await repo.setSyncedSetting('whatsapp', phoneVal);
         await repo.setSyncedSetting('businessName', _bizNameCtrl.text.trim());
@@ -612,7 +577,7 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
         if ((st['defaultCurrency'] ?? '').trim().isEmpty) {
           await repo.setSetting('defaultCurrency', 'YER');
         }
-        if (emailVal.isNotEmpty) {
+        if (lockedEmail.isNotEmpty) {
           await repo.checkAndAutoPromoteManager();
         }
         if (url.isNotEmpty) {
@@ -662,7 +627,17 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
     final canDirectLogout = isOwner || isIndividual || canManageGroup;
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    const fallback = Icon(Icons.person, color: Colors.white, size: 34);
+    final Widget fallback = Image.asset(
+      'assets/images/logo.png',
+      width: 72,
+      height: 72,
+      fit: BoxFit.cover,
+      errorBuilder: (_, __, ___) => const Icon(
+        Icons.person,
+        color: Color(0xFF1E293B),
+        size: 34,
+      ),
+    );
     // (PR-8) صورة شخصية حادة: كاش بكثافة البكسل الفيزيائية + جودة عالية.
     final faceCacheWidth = crispCacheWidth(context, 72);
     final Widget face = photo.startsWith('http')
@@ -672,7 +647,7 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
             height: 72,
             fit: BoxFit.cover,
             cacheWidth: faceCacheWidth,
-            filterQuality: FilterQuality.medium,
+            filterQuality: FilterQuality.high,
             errorBuilder: (_, __, ___) => fallback,
           )
         : (photo.isNotEmpty
@@ -682,7 +657,7 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
                 height: 72,
                 fit: BoxFit.cover,
                 cacheWidth: faceCacheWidth,
-                filterQuality: FilterQuality.medium,
+                filterQuality: FilterQuality.high,
                 errorBuilder: (_, __, ___) => fallback,
               )
             : fallback);
@@ -1032,23 +1007,21 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
                   ),
                 ),
               const SizedBox(height: 10),
-              // الحقول
+              // الحقول (تم قفل تعديل البريد الإلكتروني برمجياً — الملاحظة 3)
               _field(
                 controller: _userNameCtrl,
                 label: 'اسم المستخدم / هذا الجهاز',
                 icon: Icons.person_outline,
                 enabled: true,
               ),
-              if (isOwner) ...[
-                const SizedBox(height: 10),
-                _field(
-                  controller: _emailCtrl,
-                  label: 'البريد الإلكتروني',
-                  icon: Icons.email_outlined,
-                  keyboard: TextInputType.emailAddress,
-                  enabled: true,
-                ),
-              ],
+              const SizedBox(height: 10),
+              _field(
+                controller: _emailCtrl,
+                label: 'البريد الإلكتروني',
+                icon: Icons.alternate_email,
+                keyboard: TextInputType.emailAddress,
+                enabled: false,
+              ),
               const SizedBox(height: 10),
               _field(
                 controller: _phoneCtrl,

@@ -6,6 +6,7 @@ import 'package:sqflite/sqflite.dart';
 
 import '../../core/auth_config.dart';
 import '../../core/database.dart';
+import '../../core/device_names.dart';
 import '../../core/media_paths.dart';
 import '../../core/models.dart';
 import '../repository.dart';
@@ -1519,29 +1520,60 @@ extension ApplyRemoteOp on Repo {
             try {
               ourId = requireDeviceId;
             } catch (_) {}
-            await txn.insert(
-              'settings',
-              {'key': 'sync.deviceName', 'value': syncedName},
-              conflictAlgorithm: ConflictAlgorithm.replace,
-            );
-            await txn.insert(
-              'settings',
-              {'key': 'account.name', 'value': syncedName},
-              conflictAlgorithm: ConflictAlgorithm.replace,
-            );
+            var isNewerThanLocal = true;
             if (ourId.isNotEmpty) {
-              await txn.update(
+              final devRows = await txn.query(
                 'devices',
-                {'name': syncedName, 'updated_at': now},
+                columns: ['name', 'updated_at', 'is_owner'],
                 where: 'id = ?',
                 whereArgs: [ourId],
+                limit: 1,
+              );
+              if (devRows.isNotEmpty) {
+                final isDevOwner =
+                    ((devRows.first['is_owner'] as num?)?.toInt() ?? 0) == 1;
+                if (!isDevOwner) {
+                  isNewerThanLocal = false;
+                } else {
+                  final localUpd = '${devRows.first['updated_at'] ?? ''}'.trim();
+                  final localName = '${devRows.first['name'] ?? ''}'.trim();
+                  final opTime = op.timestamp.isNotEmpty
+                      ? op.timestamp
+                      : op.deviceTime;
+                  if (isCustomDeviceName(localName) &&
+                      localUpd.isNotEmpty &&
+                      opTime.isNotEmpty &&
+                      localUpd.compareTo(opTime) > 0) {
+                    isNewerThanLocal = false;
+                  }
+                }
+              }
+            }
+            if (isNewerThanLocal) {
+              await txn.insert(
+                'settings',
+                {'key': 'sync.deviceName', 'value': syncedName},
+                conflictAlgorithm: ConflictAlgorithm.replace,
+              );
+              await txn.insert(
+                'settings',
+                {'key': 'account.name', 'value': syncedName},
+                conflictAlgorithm: ConflictAlgorithm.replace,
+              );
+              if (ourId.isNotEmpty) {
+                await txn.update(
+                  'devices',
+                  {'name': syncedName, 'updated_at': now},
+                  where: 'id = ?',
+                  whereArgs: [ourId],
+                );
+              }
+              await txn.update(
+                'users',
+                {'name': syncedName, 'updated_at': now},
+                where: 'is_me = 1',
               );
             }
-            await txn.update(
-              'users',
-              {'name': syncedName, 'updated_at': now},
-              where: 'is_me = 1',
-            );
           }
         }
       } catch (_) {}

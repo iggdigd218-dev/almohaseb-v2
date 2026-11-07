@@ -19,6 +19,9 @@ class MediaPaths {
   /// الحد الأقصى لطول السلسلة النصية (Base64) للمصغّرة المتزامنة سحابياً (~26KB).
   static const int kMaxSyncedThumbBase64Chars = 36000;
 
+  /// الحد الأقصى لطول السلسلة النصية (Base64) لشعار المنشأة عالي الدقة بدون ضغط مخل (~1.5MB).
+  static const int kMaxSyncedLogoBase64Chars = 2000000;
+
   /// يهيئ جذر documents مرة واحدة (تُستدعى مبكراً؛ آمنة التكرار).
   static Future<String?> ensureDocsDir() async {
     if (_docsDir != null) return _docsDir;

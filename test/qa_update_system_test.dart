@@ -217,10 +217,10 @@ void main() {
       expect(badSha.status, UpdateStatus.available);
     });
 
-    test('R2: مسار البيان الافتراضي يشير إلى العقدة السيادية المستقلة /system/version_manifest', () {
+    test('R2: مسار البيان الافتراضي يشير إلى العقدة السيادية المستقلة /system/plus/version_manifest', () {
       expect(
         UpdateService.kDefaultManifestUrl,
-        endsWith('/system/version_manifest.json'),
+        endsWith('/system/plus/version_manifest.json'),
       );
       expect(
         UpdateService.kDefaultManifestUrl,
@@ -233,7 +233,7 @@ void main() {
       expect(UpdateService.kMirrorManifestUrl, contains('github.io'));
       expect(
         UpdateService.kMirrorManifestUrl,
-        endsWith('/almohaseb-v2/version.json'),
+        endsWith('/almohaseb-plus/version.json'),
       );
       expect(
         UpdateService.kMirrorManifestUrl,
@@ -242,7 +242,7 @@ void main() {
     });
 
     test('المرآة تُنقذ القناة حين تُغلق Firebase ويُحجب github.com', () async {
-      // الواقع المقيس: /system/version_manifest.json يعيد 401،
+      // الواقع المقيس: /system/plus/version_manifest.json يعيد 401،
       // وgithub.com محجوب في شبكات اليمن — فلا بد أن يصل البيان من المرآة.
       final asked = <String>[];
       final svc = UpdateService(

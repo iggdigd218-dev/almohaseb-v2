@@ -199,27 +199,27 @@ List<String> releaseNoteLines(String notes, {int maxLines = 3}) =>
         .toList();
 
 class UpdateService {
-  /// الرابط الافتراضي لبيان الإصدار (يُقرأ من العقدة السيادية المحصنة `/system/version_manifest`
+  /// الرابط الافتراضي لبيان الإصدار (يُقرأ من العقدة السيادية المحصنة `/system/plus/version_manifest`
   /// في قاعدة Firebase RTDB والتي تقتصر كتابتها على حساب المشرف فقط).
-  /// (2026-10-29) مسار مستقل لتطبيق «المحاسب»: تطبيق v2 يقرأ `/system/version_manifest`
+  /// (2026-10-29) مسار مستقل لتطبيق «المحاسب بلاس»: تطبيق v2 يقرأ `/system/version_manifest`
   /// — الفصل يمنع أن يعرض كل تطبيق تحديثات الآخر ويُركّبها فوق مستخدميه.
   static const String kDefaultManifestUrl =
-      'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/version_manifest.json';
+      'https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/plus/version_manifest.json';
 
   /// رابط احتياطي على GitHub Releases للمستودع العام.
   static const String kFallbackManifestUrl =
-      'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/version.json';
+      'https://github.com/iggdigd218-dev/almohaseb-plus/releases/download/latest/version.json';
 
   /// (دفعة التحديث) مرآة الثقة الوسيطة على GitHub Pages: نفس محتوى بيان
   /// إصدار `latest` (يُنشر آلياً مع كل بناء) لكن على نطاق لا يحجب github.com
   /// — وهو النطاق الذي تُقرأ منه التنزيلات أصلاً في الشبكات المحجوبة.
   /// الترتيب: العقدة السيادية ← هذه المرآة ← GitHub Releases.
   static const String kMirrorManifestUrl =
-      'https://iggdigd218-dev.github.io/almohaseb-v2/version.json';
+      'https://iggdigd218-dev.github.io/almohaseb-plus/version.json';
 
   /// صفحة الإصدار الرسمية (احتياطي إذا لم يذكر البيان رابطًا).
   static const String kFallbackReleaseUrl =
-      'https://github.com/iggdigd218-dev/almohaseb-v2/releases/latest';
+      'https://github.com/iggdigd218-dev/almohaseb-plus/releases/latest';
 
   final String manifestUrl;
   final http.Client Function() _clientFactory;
@@ -434,14 +434,14 @@ class UpdateService {
       if (platform == UpdatePlatform.windows ||
           downloadUrl.endsWith('NexoraSetup.exe')) {
         downloadUrl =
-            'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe';
+            'https://github.com/iggdigd218-dev/almohaseb-plus/releases/download/latest/NexoraSetup.exe';
       } else {
         final apkName = downloadUrl.endsWith('nexora-armv7.apk') ||
                 abiKey == 'armv7'
             ? 'nexora-armv7.apk'
             : 'Almohaseb-Plus-arm64.apk';
         downloadUrl =
-            'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/$apkName';
+            'https://github.com/iggdigd218-dev/almohaseb-plus/releases/download/latest/$apkName';
       }
       fallbackDownloadUrl = previousMirror;
     }
@@ -452,24 +452,24 @@ class UpdateService {
           abiKey == 'armv7' ? 'nexora-armv7.apk' : 'Almohaseb-Plus-arm64.apk';
       if (downloadUrl.contains('github.io/')) {
         fallbackDownloadUrl =
-            'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/$apkName';
+            'https://github.com/iggdigd218-dev/almohaseb-plus/releases/download/latest/$apkName';
       } else if (downloadUrl.contains('github.com/')) {
         final vdir =
             '${latest.major}.${latest.minor}.${latest.patch}-${latest.build}';
         fallbackDownloadUrl =
-            'https://iggdigd218-dev.github.io/almohaseb-v2/releases/$vdir/$apkName';
+            'https://iggdigd218-dev.github.io/almohaseb-plus/releases/$vdir/$apkName';
       }
     }
     // احتياطي لويندوز: إذا كان البيان بلا رابط مباشر أو مرآة لويندوز
     if (platform == UpdatePlatform.windows) {
       downloadUrl ??=
-          'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe';
+          'https://github.com/iggdigd218-dev/almohaseb-plus/releases/download/latest/NexoraSetup.exe';
       if (fallbackDownloadUrl == null ||
           fallbackDownloadUrl == downloadUrl) {
         final vdir =
             '${latest.major}.${latest.minor}.${latest.patch}-${latest.build}';
         fallbackDownloadUrl =
-            'https://iggdigd218-dev.github.io/almohaseb-v2/releases/$vdir/NexoraSetup.exe';
+            'https://iggdigd218-dev.github.io/almohaseb-plus/releases/$vdir/NexoraSetup.exe';
       }
     }
     final release = map['releaseUrl'];
