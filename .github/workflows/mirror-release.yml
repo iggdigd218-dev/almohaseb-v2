@@ -133,7 +133,8 @@ jobs:
           set -uo pipefail
           git config --global user.name  "nexora-mirror-bot"
           git config --global user.email "actions@users.noreply.github.com"
-          git init -q mrepo && cd mrepo
+          git clone -q --depth 1 -b releases "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" mrepo || { git init -q mrepo && cd mrepo && git checkout -b releases && cd ..; }
+          cd mrepo
           mkdir -p "releases/$VDIR"
           cp -f ../assets/Almohaseb-Plus-arm64.apk ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk \
                 ../assets/NexoraSetup.exe ../assets/version.json "releases/$VDIR/" 2>/dev/null || true
@@ -142,8 +143,12 @@ jobs:
           touch .nojekyll
           echo "محتويات الفرع:"; ls -lh "releases/$VDIR/"
           git add -A
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"; echo "لا تغييرات على المرآة"; exit 0
+          fi
           git commit -qm "mirror: $VER"
-          if git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/releases; then
+          git pull -q --rebase "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" releases || true
+          if git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/releases; then
             echo "pushed=true" >> "$GITHUB_OUTPUT"
             echo "✔ دُفع فرع releases — GitHub Pages سيبنيه تلقائياً."
           else
