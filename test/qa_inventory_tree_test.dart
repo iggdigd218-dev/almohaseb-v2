@@ -254,4 +254,118 @@ void main() {
     expect(finalSections.any((s) => s.name == 'الكترونيات'), isTrue);
     expect(finalSections.where((s) => s.name == 'الكترونيات').length, 1);
   });
+
+  test('MOVE-01 نقل فئة رئيسية إلى قسم آخر ينقل فئاتها الفرعية وأصنافها تلقائياً', () async {
+    final secA = await repo.saveSection(sec('قسم أ'));
+    final secB = await repo.saveSection(sec('قسم ب'));
+    final rootId = await repo.saveItemCategory(catOf('مشروبات', sectionId: secA));
+    final subId = await repo.saveItemCategory(
+      ItemCategory(
+        name: 'عصائر طبيعية',
+        parentId: rootId,
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+    );
+    final now = DateTime.now();
+    final itemInSub = await repo.saveItem(Item(
+      name: 'عصير برتقال',
+      categoryId: subId,
+      category: 'عصائر طبيعية',
+      buyPrice: 200,
+      sellPrice: 300,
+      quantity: 10,
+      createdAt: now,
+      updatedAt: now,
+    ));
+
+    // الفئة الفرعية ورثت تلقائياً قسم الفئة الأب (secA)
+    expect((await repo.itemCategory(subId))?.sectionId, secA);
+    expect((await repo.item(itemInSub))?.sectionId, secA);
+
+    // نقل الفئة الرئيسية إلى secB
+    await repo.moveCategory(categoryId: rootId, targetSectionId: secB);
+
+    expect((await repo.itemCategory(rootId))?.sectionId, secB);
+    expect((await repo.itemCategory(subId))?.sectionId, secB,
+        reason: 'الفئة الفرعية تتبع قسم الفئة الرئيسية بعد النقل');
+    expect((await repo.item(itemInSub))?.sectionId, secB,
+        reason: 'أصناف الفئة الفرعية تتبع قسم الفئة الرئيسية بعد النقل');
+  });
+
+  test('MOVE-02 نقل فئة فرعية بين الفئات الرئيسية أو ترقيتها لفئة رئيسية', () async {
+    final secA = await repo.saveSection(sec('أغذية'));
+    final secB = await repo.saveSection(sec('منظفات'));
+    final root1 = await repo.saveItemCategory(catOf('معلبات', sectionId: secA));
+    final root2 = await repo.saveItemCategory(catOf('سوائل', sectionId: secB));
+    final subId = await repo.saveItemCategory(
+      ItemCategory(
+        name: 'فرع منقول',
+        parentId: root1,
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+    );
+
+    // نقل الفئة الفرعية من root1 إلى root2
+    await repo.moveCategory(categoryId: subId, targetParentId: root2);
+    final movedSub = await repo.itemCategory(subId);
+    expect(movedSub?.parentId, root2);
+    expect(movedSub?.sectionId, secB);
+
+    // ترقية الفئة الفرعية إلى فئة رئيسية في secA
+    await repo.moveCategory(
+      categoryId: subId,
+      clearParent: true,
+      targetSectionId: secA,
+    );
+    final promoted = await repo.itemCategory(subId);
+    expect(promoted?.parentId, isNull);
+    expect(promoted?.sectionId, secA);
+  });
+
+  test('MOVE-03 نقل الأصناف (مفردة ومتعددة) إلى قسم أو فئة رئيسية أو فرعية', () async {
+    final secTarget = await repo.saveSection(sec('مستودع الأجهزة'));
+    final rootCat = await repo.saveItemCategory(catOf('حواسيب', sectionId: secTarget));
+    final subCat = await repo.saveItemCategory(
+      ItemCategory(
+        name: 'محمول',
+        parentId: rootCat,
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ),
+    );
+    final now = DateTime.now();
+    final id1 = await repo.saveItem(Item(
+      name: 'جهاز 1',
+      buyPrice: 1000,
+      sellPrice: 1200,
+      quantity: 3,
+      createdAt: now,
+      updatedAt: now,
+    ));
+    final id2 = await repo.saveItem(Item(
+      name: 'جهاز 2',
+      buyPrice: 2000,
+      sellPrice: 2500,
+      quantity: 2,
+      createdAt: now,
+      updatedAt: now,
+    ));
+
+    final movedCount = await repo.moveItemsToHierarchy(
+      itemIds: [id1, id2],
+      sectionId: secTarget,
+      categoryId: subCat,
+    );
+    expect(movedCount, 2);
+
+    final after1 = await repo.item(id1);
+    final after2 = await repo.item(id2);
+    expect(after1?.sectionId, secTarget);
+    expect(after1?.categoryId, subCat);
+    expect(after1?.category, 'محمول');
+    expect(after2?.sectionId, secTarget);
+    expect(after2?.categoryId, subCat);
+  });
 }

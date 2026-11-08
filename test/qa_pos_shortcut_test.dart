@@ -91,8 +91,8 @@ void main() {
             () => Future<void>.delayed(const Duration(milliseconds: 60)));
         await tester.pump(const Duration(milliseconds: 100));
       }
-      // النوع الافتراضي «عليه (دين)» يُظهر اختصار الفاتورة.
-      final tile = find.text('فتح شاشة المبيعات لإضافة الفاتورة');
+      // النوع الافتراضي «عليه (دين)» يُظهر أيقونة اختصار الفاتورة في الشريط العلوي.
+      final tile = find.byTooltip('فتح شاشة المبيعات لإضافة الفاتورة');
       expect(tile, findsOneWidget);
       await tester.ensureVisible(tile);
       await tester.pump();

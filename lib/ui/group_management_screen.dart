@@ -10,6 +10,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/device_names.dart';
 import '../core/models.dart';
 import '../core/theme.dart';
 import '../core/sfx.dart';
@@ -111,7 +112,17 @@ class _State extends ConsumerState<GroupManagementScreen> {
         }
         final actionRow = [
           const Center(child: SeatUsageBadge()),
-          const SizedBox(width: 8),
+          // (3.98.34) «ربط جهاز جديد» انتقل من الزر العائم إلى شريط العنوان.
+          IconButton(
+            tooltip: 'ربط جهاز جديد',
+            icon: const Icon(Icons.qr_code_2),
+            onPressed: () async {
+              if (await _ensureGoogleLinked(context) && context.mounted) {
+                _showPairHub(context);
+              }
+            },
+          ),
+          const SizedBox(width: 4),
         ];
         return Scaffold(
           appBar: widget.embedded
@@ -157,15 +168,6 @@ class _State extends ConsumerState<GroupManagementScreen> {
                   ],
                 )
               : const _DevicesTab(),
-          floatingActionButton: FloatingActionButton.extended(
-            onPressed: () async {
-              if (await _ensureGoogleLinked(context) && context.mounted) {
-                _showPairHub(context);
-              }
-            },
-            icon: const Icon(Icons.qr_code_2),
-            label: const Text('ربط جهاز جديد'),
-          ),
         );
       },
     );
@@ -317,6 +319,9 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
     final canManageAsync = ref.watch(canManageGroupProvider);
     final currentUser = ref.watch(currentUserProvider).valueOrNull;
     final devRole = ref.watch(deviceRoleProvider).valueOrNull?.role;
+    // (3.98.39 / الملاحظة 1) الاسم المخصّص للمالك من هوية المنشأة —
+    // يظهر في بطاقة المالك ولا يرتد إلى «المدير 🫡».
+    final ownerNameAsync = ref.watch(ownerDisplayNameProvider);
 
     return devicesAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
@@ -414,12 +419,21 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
                               children: [
                                 LayoutBuilder(
                                   builder: (context, constraints) {
-                                    final name =
-                                        (own?['name'] as String?)?.isNotEmpty == true
-                                            ? own!['name'] as String
-                                            : (amITheOwner
-                                                ? 'جهاز المدير الأساسي'
-                                                : 'جهاز وكيل المدير');
+                                    final rawOwn =
+                                        (own?['name'] as String?)?.trim() ?? '';
+                                    final syncedOwner =
+                                        (ownerNameAsync.valueOrNull ?? '').trim();
+                                    final name = rawOwn.isNotEmpty &&
+                                            isCustomDeviceName(rawOwn)
+                                        ? rawOwn
+                                        : (amITheOwner &&
+                                                syncedOwner.isNotEmpty
+                                            ? syncedOwner
+                                            : (rawOwn.isNotEmpty
+                                                ? rawOwn
+                                                : (amITheOwner
+                                                    ? 'جهاز المدير الأساسي'
+                                                    : 'جهاز وكيل المدير')));
                                     final badge = Container(
                                       padding: const EdgeInsets.symmetric(
                                           horizontal: 8, vertical: 2),
@@ -641,28 +655,36 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
                           }
                         },
                         onRename: () async {
+                          final currentUnified = resolveMemberUnifiedName(
+                            deviceName: d['name'] as String?,
+                            userName: d['user_name'] as String?,
+                            isOwner: d['id'] == hostId,
+                            fallback: '',
+                          );
                           final name = await promptDialog(
                             context,
-                            title: 'إعادة تسمية الجهاز',
-                            initial: (d['name'] ?? '') as String,
-                            label: 'اسم الجهاز',
+                            title: 'تعديل اسم العضو',
+                            initial: currentUnified,
+                            label: 'اسم العضو',
                           );
                           if (name == null || name.trim().isEmpty) return;
                           try {
-                            await repo.renameDevice(
-                                d['id'] as String, name.trim());
+                            final trimmed = name.trim();
+                            if (d['id'] == ownId) {
+                              await repo.renameSelfDevice(trimmed);
+                            } else {
+                              await repo.renameDevice(
+                                  d['id'] as String, trimmed);
+                            }
                             await engine.broadcastRosterChange();
-                            // (PR-6) دفع الاسم إلى عقدة جهاز العضو في فهرس
-                            // الأجهزة السحابي — ليستقبله المستمع اللحظي
-                            // على جهازه خلال دورة النبض (30 ثانية).
                             await engine.pushMemberDeviceName(
-                                d['id'] as String, name.trim());
+                                d['id'] as String, trimmed);
                             Sfx.success();
                             safeBump();
                             if (context.mounted) {
                               showSnack(
                                 context,
-                                '✅ تم تحديث اسم الجهاز وبث التغيير.',
+                                '✅ تم تحديث اسم العضو ومزامنته.',
                               );
                             }
                           } catch (e) {
@@ -671,7 +693,7 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
                             if (context.mounted) {
                               showSnack(
                                 context,
-                                'تعذّر إعادة تسمية الجهاز: $e',
+                                'تعذّر تعديل اسم العضو: $e',
                                 error: true,
                               );
                             }
@@ -983,9 +1005,8 @@ Future<void> showJoinApprovalSheet(
         ? workspaceId.trim()
         : repo.requireWorkspaceId;
     final deviceId = '${request['deviceId'] ?? ''}';
-    final deviceName = '${request['deviceName'] ?? 'جهاز جديد'}';
+    final deviceName = '${request['deviceName'] ?? 'مستخدم جديد'}';
     final fp = '${request['fingerprint'] ?? ''}';
-    final platform = '${request['platform'] ?? ''}';
     var role = UserRole.cashier;
     // (دفعة 65) قفل الموافقة: يمنع النقر المتكرر ويُظهر تقدماً واضحاً.
     var approving = false;
@@ -1034,19 +1055,12 @@ Future<void> showJoinApprovalSheet(
                   ],
                 ),
                 const SizedBox(height: 10),
-                Text(
-                  // (دفعة 56) وسم منصة نظيف بدل القيمة الخام.
-                  'الجهاز: ${switch (platform) {
-                    'android' => 'Android',
-                    'ios' => 'iPhone',
-                    'windows' => 'Windows',
-                    'linux' => 'Linux',
-                    'macos' => 'Mac',
-                    _ => 'جهاز',
-                  }}${fp.isEmpty ? '' : '  ·  بصمة العتاد: $fp'}',
-                  style:
-                      TextStyle(fontSize: 11.5, color: AppColors.text3Of(ctx)),
-                ),
+                if (fp.isNotEmpty)
+                  Text(
+                    'البصمة: $fp',
+                    style: TextStyle(
+                        fontSize: 11.5, color: AppColors.text3Of(ctx)),
+                  ),
                 const SizedBox(height: 14),
                 DropdownButtonFormField<UserRole>(
                   initialValue: role,

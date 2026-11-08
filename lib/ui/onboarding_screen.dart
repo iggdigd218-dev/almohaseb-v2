@@ -18,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../core/accounting.dart';
 import '../core/app_error_mapper.dart';
 import '../core/cloud_config.dart';
+import '../core/device_names.dart';
 import '../core/factory_reset.dart';
 import '../core/security.dart';
 import '../core/sfx.dart';
@@ -1523,9 +1524,14 @@ class _JoinMemberDialogState extends ConsumerState<_JoinMemberDialog> {
   Future<void> _submitJoin({PairingData? qrData}) async {
     if (_busy) return;
     final repo = ref.read(repoProvider);
-    final devName = _deviceNameCtrl.text.trim().isNotEmpty
-        ? _deviceNameCtrl.text.trim()
-        : 'جهاز عضو';
+    final devName = _deviceNameCtrl.text.trim();
+    if (!isCustomDeviceName(devName) || devName.length < 2) {
+      if (mounted) {
+        showSnack(context, 'يرجى إدخال اسم العضو الصريح أولاً للانضمام إلى المنشأة',
+            error: true);
+      }
+      return;
+    }
 
     String tokenOrPin = _pinCtrl.text.trim();
     String targetWs = '';
@@ -1727,8 +1733,8 @@ class _JoinMemberDialogState extends ConsumerState<_JoinMemberDialog> {
                 controller: _deviceNameCtrl,
                 enabled: !_busy,
                 decoration: const InputDecoration(
-                  labelText: 'اسم الموظف / هذا الجهاز',
-                  hintText: 'مثال: كاشير الفرع الرئيسي',
+                  labelText: 'اسم العضو *',
+                  hintText: 'مثال: محمد حمود',
                   prefixIcon: Icon(Icons.badge_outlined),
                   border: OutlineInputBorder(),
                 ),

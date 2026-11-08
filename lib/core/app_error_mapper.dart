@@ -151,16 +151,55 @@ class AppErrorMapper {
       return serverErrorMessage;
     }
 
-    // 6. أخطاء قواعد البيانات والقيود (SQLite / Database Constraints)
+    // 6. أخطاء قواعد البيانات — تصنيف صريح بدل الرسالة المبهمة الواحدة
+    //    (3.98.39 / D7): كل سبب يظهر للمستخدم بلغته الحقيقية.
+    final missingCol = RegExp(r'no column named ([A-Za-z0-9_]+)')
+        .firstMatch(raw)
+        ?.group(1);
+    if (lower.contains('no such column') ||
+        lower.contains('no column named') ||
+        lower.contains('no such table') ||
+        lower.contains('has no column named')) {
+      return missingCol != null
+          ? 'تعذّر إتمام العملية لأن بنية قاعدة البيانات أقدم من التطبيق '
+              '(الحقل الناقص: $missingCol). حدّث التطبيق أو أعد تشغيله '
+              'لتحديث قاعدة البيانات تلقائياً، ثم أعد المحاولة.'
+          : 'تعذّر إتمام العملية لأن بنية قاعدة البيانات تحتاج تحديثاً. '
+              'أعد تشغيل التطبيق لتحديث قاعدة البيانات تلقائياً ثم أعد المحاولة.';
+    }
+    if (lower.contains('database is locked') ||
+        lower.contains('database is busy')) {
+      return 'قاعدة البيانات مشغولة بعملية أخرى الآن. انتظر ثانيتين وأعد المحاولة.';
+    }
+    if (lower.contains('unique constraint')) {
+      if (lower.contains('items.sku') || lower.contains('items.sku')) {
+        return 'الباركود مستخدم مسبقاً لصنف آخر. استخدم باركوداً مختلفاً.';
+      }
+      if (lower.contains('item_categories')) {
+        return 'توجد فئة بهذا الاسم مسبقاً في نفس المستوى. اختر اسماً آخر.';
+      }
+      return 'هذه القيمة مسجّلة مسبقاً ولا يمكن تكرارها. عدّل القيمة ثم أعد المحاولة.';
+    }
+    if (lower.contains('foreign key constraint')) {
+      return 'تعذّر الحفظ لأن أحد العناصر المرتبطة (القسم أو الفئة أو الحساب) '
+          'لم يعد موجوداً. أعد اختياره ثم احفظ.';
+    }
+    if (lower.contains('not null constraint') ||
+        lower.contains('check constraint')) {
+      return 'حقل إلزامي تُرك فارغاً أو قيمته غير صالحة. أكمل الحقول الإجبارية ثم احفظ.';
+    }
+    if (lower.contains('constraint failed')) {
+      return 'تعذّر الحفظ بسبب قاعدة تحقق في البيانات (قيمة غير مسموحة). '
+          'راجع القيم المدخلة ثم أعد المحاولة.';
+    }
+    if (lower.contains('disk') && lower.contains('full')) {
+      return 'مساحة التخزين على الجهاز ممتلئة. فرّغ مساحة ثم أعد المحاولة.';
+    }
     if (lower.contains('sqliteexception') ||
-        lower.contains('databaseexception') ||
-        lower.contains('unique constraint') ||
-        lower.contains('foreign key constraint') ||
-        lower.contains('not null constraint') ||
-        lower.contains('check constraint') ||
-        lower.contains('constraint failed') ||
-        lower.contains('database is locked')) {
-      return dbConstraintMessage;
+        lower.contains('databaseexception')) {
+      // خطأ قاعدة بيانات غير مصنّف: رسالة صريحة وقابلة للتنفيذ بدل «تعارض بيانات».
+      return 'تعذّر تنفيذ العملية على قاعدة البيانات. أعد المحاولة، وإن تكرّر '
+          'أعد تشغيل التطبيق وأبلغ الدعم الفني مع وقت حدوث المشكلة.';
     }
 
     // 7. تمرير لمحرّك ترجمة أخطاء المزامنة إن كانت رسالة تقنية معروفة

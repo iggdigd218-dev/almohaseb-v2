@@ -76,7 +76,7 @@ class DashboardScreen extends ConsumerWidget {
     return RefreshIndicator(
       onRefresh: () async => bump(ref),
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 10, 14, 96),
+        padding: const EdgeInsets.fromLTRB(14, 4, 14, 96),
         children: [
           summary.when(
             skipLoadingOnReload: true,
@@ -213,7 +213,7 @@ class _CurrencyCardState extends State<_CurrencyCard> {
     return Column(
       children: [
         SizedBox(
-          height: 192,
+          height: 156,
           child: PageView.builder(
             controller: _controller,
             onPageChanged: (i) => setState(() => _page = i),
@@ -227,7 +227,7 @@ class _CurrencyCardState extends State<_CurrencyCard> {
               return Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 2),
                 child: Container(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+                  padding: const EdgeInsets.fromLTRB(13, 9, 13, 7),
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
                       begin: Alignment.topRight,
@@ -243,8 +243,8 @@ class _CurrencyCardState extends State<_CurrencyCard> {
                       Row(
                         children: [
                           Container(
-                            width: 38,
-                            height: 38,
+                            width: 30,
+                            height: 30,
                             decoration: BoxDecoration(
                               color: badgeBg,
                               borderRadius: BorderRadius.circular(12),
@@ -252,7 +252,7 @@ class _CurrencyCardState extends State<_CurrencyCard> {
                             child: Icon(
                               Icons.account_balance_wallet_rounded,
                               color: fg,
-                              size: 20,
+                              size: 16,
                             ),
                           ),
                           const SizedBox(width: 8),
@@ -264,14 +264,14 @@ class _CurrencyCardState extends State<_CurrencyCard> {
                               style: TextStyle(
                                 color: fg,
                                 fontWeight: FontWeight.w800,
-                                fontSize: 14.5,
+                                fontSize: 13,
                                 fontFamily: uiFontFamily,
                               ),
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 6),
+                      const SizedBox(height: 3),
                       // المبلغ البارز (صافي الرصيد لهذه العملة).
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.baseline,
@@ -282,7 +282,7 @@ class _CurrencyCardState extends State<_CurrencyCard> {
                                 ? '••••••'
                                 : Fmt.money(netV, c.decimal),
                             style: TextStyle(
-                              fontSize: 32,
+                              fontSize: 24,
                               fontWeight: FontWeight.w900,
                               color: AppColors.textOf(context),
                               letterSpacing: .5,
@@ -292,14 +292,14 @@ class _CurrencyCardState extends State<_CurrencyCard> {
                           Text(
                             c.symbol,
                             style: TextStyle(
-                              fontSize: 17,
+                              fontSize: 13,
                               fontWeight: FontWeight.w800,
                               color: fg,
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 5),
                       Row(
                         children: [
                           Expanded(
@@ -332,7 +332,7 @@ class _CurrencyCardState extends State<_CurrencyCard> {
             },
           ),
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 6),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -351,7 +351,7 @@ class _CurrencyCardState extends State<_CurrencyCard> {
               ),
           ],
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: 2),
         Text(
           'اسحب البطاقة يميناً أو يساراً للتنقل بين العملات',
           style: TextStyle(fontSize: 11, color: AppColors.text3Of(context)),
@@ -383,7 +383,7 @@ class _AmountPill extends StatelessWidget {
         ? AppColors.greenOf(context)
         : AppColors.dangerOf(context);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
         color: AppColors.surfaceOf(context),
         borderRadius: BorderRadius.circular(13),
@@ -398,13 +398,13 @@ class _AmountPill extends StatelessWidget {
       child: Row(
         children: [
           Container(
-            width: 26,
-            height: 26,
+            width: 21,
+            height: 21,
             decoration: BoxDecoration(
               color: color.withValues(alpha: .14),
               borderRadius: BorderRadius.circular(9),
             ),
-            child: Icon(arrow, size: 15, color: color),
+            child: Icon(arrow, size: 13, color: color),
           ),
           const SizedBox(width: 8),
           // (الهوية البصرية) العمود يتمدد داخل الحبّة فيُقيَّد عرض النص
@@ -420,7 +420,7 @@ class _AmountPill extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 11,
+                    fontSize: 10,
                     color: AppColors.text3Of(context),
                     fontWeight: FontWeight.w700,
                   ),
@@ -432,7 +432,7 @@ class _AmountPill extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 13.5,
+                    fontSize: 12,
                     fontWeight: FontWeight.w800,
                     color: AppColors.textOf(context),
                   ),

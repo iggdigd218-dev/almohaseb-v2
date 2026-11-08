@@ -301,13 +301,20 @@ class AppTheme {
           side: BorderSide(color: border, width: 1),
         ),
       ),
+      // (3.98.34) حقول مدمجة موحّدة في كل الشاشات والنوافذ: حشو أقل،
+      // خط تسمية أصغر، وأيقونات مضبوطة — فلا تُقتطع عناوين الحقول بعلامة (...).
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: dark ? AppColors.dSurface2 : AppColors.surface2,
+        isDense: true,
         contentPadding: const EdgeInsets.symmetric(
-          horizontal: 14,
-          vertical: 14,
+          horizontal: 12,
+          vertical: 11,
         ),
+        prefixIconConstraints:
+            const BoxConstraints(minWidth: 36, minHeight: 36),
+        suffixIconConstraints:
+            const BoxConstraints(minWidth: 36, minHeight: 36),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppRadius.field),
           borderSide: BorderSide(color: border),
@@ -324,10 +331,11 @@ class AppTheme {
           borderRadius: BorderRadius.circular(AppRadius.field),
           borderSide: BorderSide(color: danger),
         ),
-        labelStyle: TextStyle(color: text2),
+        labelStyle: TextStyle(color: text2, fontSize: 12.5),
+        floatingLabelStyle: TextStyle(color: primary, fontSize: 11.5),
         hintStyle: TextStyle(
           color: dark ? AppColors.dText3 : AppColors.text3,
-          fontSize: 14,
+          fontSize: 13,
         ),
       ),
       filledButtonTheme: FilledButtonThemeData(
@@ -420,6 +428,17 @@ class AppTheme {
       dialogTheme: DialogThemeData(
         backgroundColor: surface,
         surfaceTintColor: Colors.transparent,
+        // (3.98.34) قالب موحّد لكل نوافذ الإدخال: هوامش مدمجة، عنوان أصغر،
+        // ونص محتوى مضبوط — نفس هوية نافذة «إضافة صنف».
+        insetPadding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+        titleTextStyle: TextStyle(
+          color: primary,
+          fontSize: 15,
+          fontWeight: FontWeight.w900,
+        ),
+        contentTextStyle: TextStyle(color: text2, fontSize: 12.5),
+        actionsPadding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
         // (PR-8) حوارات بيضاء ناصعة بحدود ناعمة متباينة — بلا أي بهتان.
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppRadius.sheet),

@@ -18,6 +18,7 @@ import '../core/media_paths.dart';
 import '../core/models.dart';
 import '../core/rbac.dart';
 import '../core/workspace_mode.dart';
+import 'sync/account_workspace.dart';
 import 'sync/cloud_join.dart';
 import 'sync/device_id.dart';
 import 'sync/device_registry.dart';
@@ -4475,8 +4476,24 @@ class Repo {
     } catch (_) {}
   }
 
+  /// هل جهازنا الحالي هو جهاز مالك المساحة (`devices.is_owner = 1`)؟
+  Future<bool> _isOwnerDevice(DatabaseExecutor db) async {
+    try {
+      final id = requireDeviceId;
+      final rows = await db.query('devices',
+          columns: ['is_owner'], where: 'id = ?', whereArgs: [id], limit: 1);
+      return rows.isNotEmpty &&
+          ((rows.first['is_owner'] as num?)?.toInt() ?? 0) == 1;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// إعادة تسمية هذا الجهاز نفسه — متاحة للمستخدم دائماً بلا صلاحيات
   /// (يحدد اسمه الظاهر أعلى القائمة الجانبية والرئيسية).
+  /// (3.98.39 / الملاحظة 1) إن كان جهاز المالك: يُرفع الاسم فوراً إلى
+  /// هوية المنشأة السحابية (`owner_name`) وطابور مزامنة `profile.owner_name`
+  /// حتى لا يعود الاسم القديم من السحابة.
   Future<void> renameSelfDevice(String name) async {
     final n = name.trim();
     if (n.isEmpty) return;
@@ -4492,6 +4509,16 @@ class Repo {
     // نحفظه أيضاً في الإعدادات ليبقى الاسم بعد إعادة التسجيل الذاتي.
     await setSetting('sync.deviceName', n);
 
+    // (3.98.39 / الملاحظة 1) مزامنة اسم المالك/المدير مع هوية المنشأة:
+    // الاسم المخصّص لم يكن يُرفع سحابياً عند تعديله من أيقونة ✎ في الدرج
+    // (كان يُرفع من ملف التعريف فقط)، فيعود «المدير 🫡» من ميتاداتا
+    // المنشأة عند أول مزامنة. الآن: حفظ محلي + طابور مزامنة + رفع فوري.
+    final isOwnerDevice = await _isOwnerDevice(db);
+    try {
+      await setSyncedSetting('profile.owner_name', n);
+      await setSyncedSetting('account.name', n);
+    } catch (_) {}
+
     // تحديث اسم المستخدم الفعلي في جدول users
     final myUser = await currentUser();
     if (myUser != null && myUser.id != null) {
@@ -4499,19 +4526,94 @@ class Repo {
         'name': n,
         'updated_at': now,
       }, where: 'id = ?', whereArgs: [myUser.id]);
+      final urow = await db.query('users',
+          where: 'id = ?', whereArgs: [myUser.id], limit: 1);
+      if (urow.isNotEmpty) {
+        try {
+          await queueOperation(
+            entityType: EntityKind.user,
+            entityId: '${myUser.id}',
+            opType: OpKind.update,
+            payload: Map<String, Object?>.from(urow.first),
+          );
+        } catch (_) {}
+      }
     }
+    try {
+      final stCloud = await settings();
+      final cUrl = effectiveBackendUrl(stCloud['cloudBackendUrl']);
+      final cWs = requireWorkspaceId;
+      if (cUrl.isNotEmpty && cWs.isNotEmpty && cWs != 'default') {
+        if (isOwnerDevice) {
+          // رفع ميتاداتا المنشأة (owner_name) فوراً — وإلا بقيت النسخة
+          // السحابية القديمة تُعيد الاسم السابق عند أي استرجاع/مزامنة.
+          unawaited(() async {
+            try {
+              await AccountWorkspace.syncWorkspaceMetaToCloud(this,
+                  backendUrl: cUrl);
+            } catch (_) {}
+          }());
+        }
+        unawaited(
+            CloudJoin.syncRoster(this, db, backendUrl: cUrl, workspaceId: cWs));
+      }
+    } catch (_) {}
   }
 
-  /// تحديث اسم جهاز (ليتعرّف المدير عليه).
+  /// تحديث اسم عضو/جهاز موحّد في جدولَي devices وusers ومزامنته.
   Future<void> renameDevice(String deviceId, String name) async {
     await _ensureCan('manage_users');
+    final n = name.trim();
+    if (n.isEmpty) return;
+    if (_deviceId != null && deviceId == _deviceId) {
+      await renameSelfDevice(n);
+      return;
+    }
     final db = await _db;
+    final now = DateTime.now().toIso8601String();
     await db.update(
       'devices',
-      {'name': name.trim(), 'updated_at': DateTime.now().toIso8601String()},
+      {'name': n, 'updated_at': now},
       where: 'id = ?',
       whereArgs: [deviceId],
     );
+    final devRows = await db.query(
+      'devices',
+      columns: ['user_id'],
+      where: 'id = ?',
+      whereArgs: [deviceId],
+      limit: 1,
+    );
+    final uid = devRows.isNotEmpty ? devRows.first['user_id'] as int? : null;
+    if (uid != null) {
+      await db.update(
+        'users',
+        {'name': n, 'updated_at': now},
+        where: 'id = ? AND COALESCE(is_me, 0) = 0',
+        whereArgs: [uid],
+      );
+      final urow =
+          await db.query('users', where: 'id = ?', whereArgs: [uid], limit: 1);
+      if (urow.isNotEmpty) {
+        try {
+          await queueOperation(
+            entityType: EntityKind.user,
+            entityId: '$uid',
+            opType: OpKind.update,
+            payload: Map<String, Object?>.from(urow.first),
+          );
+        } catch (_) {}
+      }
+    }
+    try {
+      final stCloud = await settings();
+      final cUrl = effectiveBackendUrl(stCloud['cloudBackendUrl']);
+      final cWs = requireWorkspaceId;
+      if (cUrl.isNotEmpty && cWs.isNotEmpty && cWs != 'default') {
+        unawaited(
+            CloudJoin.syncRoster(this, db, backendUrl: cUrl, workspaceId: cWs));
+      }
+    } catch (_) {}
   }
 
   /// إلغاء اقتران/حظر جهاز — يمنعه من المزامنة حتى يُعاد اقترانه.
@@ -6518,6 +6620,7 @@ class Repo {
     'buyPrice': 'buy_price',
     'sellPrice': 'sell_price',
     'minQuantity': 'min_quantity',
+    'excludeFromShortages': 'exclude_from_shortages',
     'categoryId': 'category_id',
     'conversationId': 'conversation_id',
     'createdAt': 'created_at',
@@ -7508,25 +7611,46 @@ class Repo {
     if (name.isEmpty) throw ArgumentError('اسم الفئة مطلوب');
 
     final db = await _db;
+    // (3.98.39 / D4) الفرادة داخل نطاق الأب نفسه فقط: يمكن أن تحمل فئتان
+    // فرعيتان تحت أبوين مختلفين الاسم ذاته («أخرى» مثلاً) بلا تعارض.
+    final parentScope = category.parentId ?? 0;
     final duplicate = await db.query(
       'item_categories',
       columns: ['id'],
-      where:
-          "name = ? COLLATE NOCASE AND id != ? AND (deleted_at IS NULL OR deleted_at = '')",
-      whereArgs: [name, category.id ?? -1],
+      where: 'name = ? COLLATE NOCASE AND id != ? AND COALESCE(parent_id, 0) = ? '
+          "AND (deleted_at IS NULL OR deleted_at = '')",
+      whereArgs: [name, category.id ?? -1, parentScope],
       limit: 1,
     );
     if (duplicate.isNotEmpty) {
-      throw StateError('توجد فئة بهذا الاسم مسبقًا');
+      throw StateError(category.parentId == null
+          ? 'توجد فئة رئيسية بهذا الاسم مسبقًا'
+          : 'توجد فئة فرعية بهذا الاسم مسبقًا تحت نفس الفئة الأب');
     }
 
-    // تنظيف أي فئات محذوفة سابقة بنفس الاسم
+    // تنظيف أي فئات محذوفة سابقة بنفس الاسم داخل نفس نطاق الأب
     await db.delete(
       'item_categories',
-      where:
-          "name = ? COLLATE NOCASE AND id != ? AND deleted_at IS NOT NULL AND deleted_at != ''",
-      whereArgs: [name, category.id ?? -1],
+      where: 'name = ? COLLATE NOCASE AND id != ? AND COALESCE(parent_id, 0) = ? '
+          "AND deleted_at IS NOT NULL AND deleted_at != ''",
+      whereArgs: [name, category.id ?? -1, parentScope],
     );
+
+    // إذا كانت الفئة فرعية (لها parentId)، ترث تلقائياً قسم الفئة الأب لضمان اتساق الشجرة.
+    int? effectiveSectionId = category.sectionId;
+    if (category.parentId != null) {
+      final parentRows = await db.query(
+        'item_categories',
+        columns: ['section_id'],
+        where: 'id = ?',
+        whereArgs: [category.parentId],
+        limit: 1,
+      );
+      if (parentRows.isNotEmpty) {
+        effectiveSectionId =
+            (parentRows.first['section_id'] as int?) ?? effectiveSectionId;
+      }
+    }
 
     late final int id;
     if (category.id == null) {
@@ -7535,7 +7659,7 @@ class Repo {
         'id': newGlobalId(),
         'name': name,
         if (category.parentId != null) 'parent_id': category.parentId,
-        if (category.sectionId != null) 'section_id': category.sectionId,
+        if (effectiveSectionId != null) 'section_id': effectiveSectionId,
         'icon_key': category.iconKey,
         'color_hex': category.colorHex,
         'image_path': category.imagePath,
@@ -7550,7 +7674,7 @@ class Repo {
           'id': id,
           'name': name,
           if (category.parentId != null) 'parent_id': category.parentId,
-          if (category.sectionId != null) 'section_id': category.sectionId,
+          if (effectiveSectionId != null) 'section_id': effectiveSectionId,
           'icon_key': category.iconKey,
           'color_hex': category.colorHex,
           'image_path': category.imagePath,
@@ -7599,7 +7723,7 @@ class Repo {
         {
           'name': name,
           'parent_id': parentId,
-          'section_id': category.sectionId,
+          'section_id': effectiveSectionId,
           'icon_key': category.iconKey,
           'color_hex': category.colorHex,
           'image_path': category.imagePath,
@@ -7608,13 +7732,14 @@ class Repo {
         where: 'id = ?',
         whereArgs: [id],
       );
-      // (2026-09-24) نقل الفئة إلى قسم جديد ⇒ أصنافها تتبعها.
+      // (2026-09-24) نقل الفئة إلى قسم جديد ⇒ أصنافها وفئاتها الفرعية تتبعها.
       await txn.update(
         'items',
         <String, Object?>{
           'category': name,
           'updated_at': now,
-          if (prevSection != category.sectionId) 'section_id': category.sectionId,
+          if (prevSection != effectiveSectionId)
+            'section_id': effectiveSectionId,
         },
         where: 'category_id = ?',
         whereArgs: [id],
@@ -7628,16 +7753,186 @@ class Repo {
           'id': id,
           'name': name,
           'parent_id': parentId,
-          'section_id': category.sectionId,
+          'section_id': effectiveSectionId,
           'icon_key': category.iconKey,
           'color_hex': category.colorHex,
           'image_path': category.imagePath,
           'updated_at': now,
         },
       );
+
+      // إذا تغيّر قسم فئة رئيسية، تتبعها جميع فئاتها الفرعية وأصناف تلك الفئات الفرعية تلقائياً.
+      if (prevSection != effectiveSectionId) {
+        final childRows = await txn.query(
+          'item_categories',
+          where: "parent_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
+          whereArgs: [id],
+        );
+        for (final child in childRows) {
+          final childId = child['id'] as int;
+          await txn.update(
+            'item_categories',
+            {
+              'section_id': effectiveSectionId,
+              'updated_at': now,
+            },
+            where: 'id = ?',
+            whereArgs: [childId],
+          );
+          await txn.update(
+            'items',
+            {
+              'section_id': effectiveSectionId,
+              'updated_at': now,
+            },
+            where: 'category_id = ?',
+            whereArgs: [childId],
+          );
+          await rec.record(
+            entityType: EntityKind.itemCategory,
+            entityId: '$childId',
+            opType: OpKind.update,
+            payload: {
+              'id': childId,
+              'name': child['name'],
+              'parent_id': id,
+              'section_id': effectiveSectionId,
+              'icon_key': child['icon_key'],
+              'color_hex': child['color_hex'],
+              'image_path': child['image_path'],
+              'updated_at': now,
+            },
+          );
+        }
+      }
     });
     await logActivity('تعديل فئة أصناف: $name', 'item_category', '$id');
     return id;
+  }
+
+  /// جلب فئة واحدة بمعرّفها (رئيسية أو فرعية).
+  Future<ItemCategory?> itemCategory(int id) async {
+    final all = await itemCategories();
+    for (final c in all) {
+      if (c.id == id) return c;
+    }
+    return null;
+  }
+
+  /// نقل فئة رئيسية إلى قسم آخر، أو نقل فئة فرعية إلى فئة رئيسية أخرى،
+  /// أو ترقية فئة فرعية إلى فئة رئيسية، أو تحويل فئة رئيسية إلى فئة فرعية.
+  Future<void> moveCategory({
+    required int categoryId,
+    int? targetSectionId,
+    int? targetParentId,
+    bool clearParent = false,
+    bool clearSection = false,
+  }) async {
+    final existing = await itemCategory(categoryId);
+    if (existing == null) return;
+    final int? nextParentId =
+        clearParent ? null : (targetParentId ?? existing.parentId);
+    int? nextSectionId =
+        clearSection ? null : (targetSectionId ?? existing.sectionId);
+    if (nextParentId != null) {
+      final parentCat = await itemCategory(nextParentId);
+      if (parentCat != null) {
+        nextSectionId = parentCat.sectionId;
+      }
+    }
+    await saveItemCategory(
+      existing.copyWith(
+        parentId: nextParentId,
+        clearParentId: nextParentId == null,
+        sectionId: nextSectionId,
+        clearSectionId: nextSectionId == null,
+      ),
+    );
+  }
+
+  /// نقل صنف واحد أو مجموعة أصناف دفعة واحدة إلى أي قسم أو فئة رئيسية أو فئة فرعية.
+  Future<int> moveItemsToHierarchy({
+    required List<int> itemIds,
+    int? sectionId,
+    int? categoryId,
+  }) async {
+    if (itemIds.isEmpty) return 0;
+    await _ensureCan('edit_tx');
+    final db = await _db;
+    int? effectiveSectionId = sectionId;
+    String categoryName = 'عام';
+    if (categoryId != null) {
+      final catRows = await db.query(
+        'item_categories',
+        where: 'id = ?',
+        whereArgs: [categoryId],
+        limit: 1,
+      );
+      if (catRows.isNotEmpty) {
+        categoryName = (catRows.first['name'] as String?) ?? 'عام';
+        effectiveSectionId =
+            (catRows.first['section_id'] as int?) ?? effectiveSectionId;
+        final pId = catRows.first['parent_id'] as int?;
+        if (effectiveSectionId == null && pId != null) {
+          final pRows = await db.query(
+            'item_categories',
+            columns: ['section_id'],
+            where: 'id = ?',
+            whereArgs: [pId],
+            limit: 1,
+          );
+          if (pRows.isNotEmpty) {
+            effectiveSectionId = pRows.first['section_id'] as int?;
+          }
+        }
+      }
+    }
+
+    final now = DateTime.now().toIso8601String();
+    var moved = 0;
+    await db.transaction((txn) async {
+      final rec = await newRecorder(txn);
+      for (final itemId in itemIds) {
+        final rows = await txn.query(
+          'items',
+          where: 'id = ?',
+          whereArgs: [itemId],
+          limit: 1,
+        );
+        if (rows.isEmpty) continue;
+        await txn.update(
+          'items',
+          {
+            'section_id': effectiveSectionId,
+            'category_id': categoryId,
+            'category': categoryName,
+            'updated_at': now,
+          },
+          where: 'id = ?',
+          whereArgs: [itemId],
+        );
+        final updatedRow = Map<String, Object?>.from(rows.first)
+          ..['section_id'] = effectiveSectionId
+          ..['category_id'] = categoryId
+          ..['category'] = categoryName
+          ..['updated_at'] = now;
+        await rec.record(
+          entityType: EntityKind.item,
+          entityId: '$itemId',
+          opType: OpKind.update,
+          payload: updatedRow,
+        );
+        moved++;
+      }
+    });
+    if (moved > 0) {
+      await logActivity(
+        'نقل $moved صنف إلى $categoryName',
+        'item',
+        itemIds.first.toString(),
+      );
+    }
+    return moved;
   }
 
   /// يحذف الفئة فقط، ويفك ربط أصنافها لتبقى بيانات الأصناف محفوظة.
@@ -7695,10 +7990,45 @@ class Repo {
       where.add(
           "(i.deleted_at IS NULL OR TRIM(i.deleted_at) = '' OR TRIM(i.deleted_at) = 'null')");
     }
+    // (3.98.39 / الملاحظة 4) البحث يشمل الملاحظات مع أولوية درجتين:
+    //   الدرجة 1: تطابق الاسم/الباركود/SKU/PLU/رقم الصنف (#id)/الفئة.
+    //   الدرجة 2: تطابق الملاحظات فقط (تأتي بعد كل نتائج الدرجة الأولى).
+    // كل كلمة مفتاحية يجب أن تتحقق (AND بين الكلمات، OR داخل الحقول).
+    final primaryOrder = StringBuffer();
     if (q.trim().isNotEmpty) {
-      where.add('(i.name LIKE ? OR i.sku LIKE ? OR COALESCE(c.name, i.category) LIKE ? OR i.notes LIKE ?)');
-      final like = '%${q.trim()}%';
-      args.addAll([like, like, like, like]);
+      final tokens = q
+          .trim()
+          .split(RegExp(r'\s+'))
+          .where((w) => w.isNotEmpty)
+          .toList();
+      final primaryConds = <String>[];
+      final primaryArgs = <Object?>[];
+      final allConds = <String>[];
+      final allArgs = <Object?>[];
+      for (final tok in tokens) {
+        final bare = tok.startsWith('#') ? tok.substring(1) : tok;
+        final like = '%$tok%';
+        final likeBare = '%$bare%';
+        // الباركود محفوظ في العمود sku (لا يوجد عمود barcode في items).
+        const primary =
+            '(i.name LIKE ? OR i.sku LIKE ? OR CAST(i.plu AS TEXT) LIKE ? '
+            'OR CAST(i.id AS TEXT) LIKE ? '
+            'OR COALESCE(c.name, i.category, \'\') LIKE ?)';
+        final prim = [like, like, likeBare, likeBare, like];
+        primaryConds.add(primary);
+        primaryArgs.addAll(prim);
+        allConds.add('($primary OR COALESCE(i.notes, \'\') LIKE ?)');
+        allArgs.addAll(prim);
+        allArgs.add(like);
+      }
+      where.add('(${allConds.join(' AND ')})');
+      args.addAll(allArgs);
+      primaryOrder
+        ..write('CASE WHEN (')
+        ..write(primaryConds.join(' AND '))
+        ..write(') THEN 0 ELSE 1 END, ');
+      // وسائط الترتيب تُضاف بعد وسائط WHERE (نفس الترتيب في الاستعلام).
+      args.addAll(primaryArgs);
     }
     final whereClause = where.isEmpty ? '' : 'WHERE ${where.join(' AND ')}';
     final sql = '''
@@ -7706,7 +8036,7 @@ class Repo {
       FROM items i
       LEFT JOIN item_categories c ON i.category_id = c.id
       $whereClause
-      ORDER BY i.name COLLATE NOCASE
+      ORDER BY ${primaryOrder}i.name COLLATE NOCASE
     ''';
     final rows = await db.rawQuery(sql, args.isEmpty ? null : args);
     return rows.map(Item.fromMap).toList();
@@ -8041,7 +8371,9 @@ class Repo {
         'stock',
         '$id',
       );
-      if (it.minQuantity > 0 && resultingQty <= it.minQuantity) {
+      if (!it.excludeFromShortages &&
+          it.minQuantity > 0 &&
+          resultingQty <= it.minQuantity) {
         lowStock = (
           itemId: m.itemId,
           name: it.name,

@@ -2082,7 +2082,7 @@ class CloudJoin {
             'users',
             {
               'id': uid,
-              'name': devName.isEmpty ? 'عضو' : devName,
+              'name': devName.isEmpty ? 'مستخدم جديد' : devName,
               'role': role.code,
               'pin': '',
               'password': '',
@@ -2104,10 +2104,8 @@ class CloudJoin {
           final curUpd = '${existing.first['updated_at'] ?? ''}';
           final curName = '${existing.first['name'] ?? ''}'.trim();
           final shouldSyncName = isCustomDeviceName(devName) &&
-              (curName.isEmpty ||
-                  curName == 'عضو' ||
-                  curName == 'المدير' ||
-                  upd.compareTo(curUpd) > 0);
+              (isPlaceholderDeviceName(curName) ||
+                  upd.compareTo(curUpd) >= 0);
           if (upd.compareTo(curUpd) > 0 ||
               curRole != role.code ||
               '${existing.first['permissions'] ?? ''}' != permStr ||
@@ -2126,6 +2124,22 @@ class CloudJoin {
             }
             await db.update('users', patch,
                 where: 'id = ?', whereArgs: [uid]);
+            changed = true;
+          }
+        } else if (isOwner && !isSelf) {
+          // المدير يستقبل اسم العضو الموحد المحدّث دون المساس بدوره أو صلاحياته.
+          final curUpd = '${existing.first['updated_at'] ?? ''}';
+          final curName = '${existing.first['name'] ?? ''}'.trim();
+          if (isCustomDeviceName(devName) &&
+              devName != curName &&
+              (isPlaceholderDeviceName(curName) ||
+                  upd.compareTo(curUpd) >= 0)) {
+            await db.update(
+              'users',
+              {'name': devName, 'updated_at': upd},
+              where: 'id = ? AND COALESCE(is_me, 0) = 0',
+              whereArgs: [uid],
+            );
             changed = true;
           }
         }
@@ -2355,7 +2369,7 @@ class CloudJoin {
           );
           row['id'] = id;
           row['workspace_id'] = localWs;
-          row['name'] = '${row['name'] ?? r['name'] ?? 'جهاز عضو'}';
+          row['name'] = '${row['name'] ?? r['name'] ?? 'مستخدم جديد'}';
           row['created_at'] =
               '${r['created_at'] ?? DateTime.now().toIso8601String()}';
           row['updated_at'] = remoteUpd.isEmpty

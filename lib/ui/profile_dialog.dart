@@ -314,9 +314,14 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
   Future<void> _submitMemberJoin({PairingData? qrData}) async {
     if (_joinBusy) return;
     final repo = ref.read(repoProvider);
-    final devName = _userNameCtrl.text.trim().isNotEmpty
-        ? _userNameCtrl.text.trim()
-        : 'جهاز عضو';
+    final devName = _userNameCtrl.text.trim();
+    if (!isCustomDeviceName(devName) || devName.length < 2) {
+      if (mounted) {
+        showSnack(context, 'يرجى إدخال اسم العضو الصريح أولاً للانضمام إلى المنشأة',
+            error: true);
+      }
+      return;
+    }
 
     String tokenOrPin = _joinPinCtrl.text.trim();
     String targetWs = '';

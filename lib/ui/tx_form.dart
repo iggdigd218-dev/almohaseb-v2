@@ -19,7 +19,7 @@ import 'pos_screen.dart';
 import 'tx_share.dart';
 import 'widgets.dart';
 
-/// يفتح نموذج العملية المالية (إضافة / تعديل / تكرار).
+/// يفتح نموذج العملية المالية (إضافة / تعديل / تكرار) كبطاقة مدمجة تعلو الكيبورد.
 Future<Object?> openTxForm(
   BuildContext context,
   WidgetRef ref, {
@@ -28,29 +28,24 @@ Future<Object?> openTxForm(
   bool isCopy = false,
   OpType? presetType,
 }) =>
-    showModalBottomSheet<Object>(
+    showDialog<Object>(
       context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      isDismissible: false,
-      enableDrag: false,
-      builder: (ctx) {
-        final kb = MediaQuery.viewInsetsOf(ctx).bottom;
-        final h = MediaQuery.sizeOf(ctx).height;
-        final maxH = (h - kb - 20).clamp(260.0, h * 0.76);
-        return Padding(
-          padding: EdgeInsets.only(bottom: kb),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: maxH),
-            child: TxForm(
-              existing: existing,
-              presetAccountId: presetAccountId,
-              isCopy: isCopy,
-              presetType: presetType,
-            ),
+      barrierDismissible: false,
+      builder: (ctx) => Dialog(
+        insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        clipBehavior: Clip.antiAlias,
+        backgroundColor: AppColors.surfaceOf(ctx),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 480),
+          child: TxForm(
+            existing: existing,
+            presetAccountId: presetAccountId,
+            isCopy: isCopy,
+            presetType: presetType,
           ),
-        );
-      },
+        ),
+      ),
     );
 
 class TxForm extends ConsumerStatefulWidget {
@@ -79,7 +74,6 @@ class _TxFormState extends ConsumerState<TxForm> {
   final _notes = TextEditingController();
 
   OpType _type = OpType.debit;
-  bool _showMoreTypes = false;
   int? _accountId;
   int? _toId;
   String _currency = 'YER';
@@ -98,7 +92,7 @@ class _TxFormState extends ConsumerState<TxForm> {
   bool _saving = false;
   bool _saveSlow = false;
 
-  /// توليد صورة الإيصال وإرسالها للعميل فور الحفظ (البنود ٣ و ٤ و ١٢ و ١٤).
+  /// مسار الصورة المرفقة بالعملية (اختياري).
   String _image = '';
 
   @override
@@ -197,7 +191,20 @@ class _TxFormState extends ConsumerState<TxForm> {
   bool get _hasInvoiceDetails =>
       _type == OpType.debit || _type == OpType.inflow;
 
-  /// نص الأثر المتوقّع — نفس تلميح نسخة الويب.
+  void _openPosShortcut() {
+    if (_saving) return;
+    Sfx.click();
+    final nav = Navigator.of(context);
+    nav.pop();
+    nav.push(
+      MaterialPageRoute(
+        builder: (_) => Scaffold(
+          appBar: AppBar(title: const Text('🛒 المبيعات')),
+          body: const PosScreen(),
+        ),
+      ),
+    );
+  }
 
   Future<void> _save() async {
     // Acquire the lock synchronously, before unfocus/validation awaits.
@@ -277,8 +284,6 @@ class _TxFormState extends ConsumerState<TxForm> {
       }
       final saleLines =
           _hasInvoiceDetails ? _invoiceLines : const <InvoiceLine>[];
-      // A timeout does NOT cancel an SQLite write. Report a slow/unknown state
-      // without permitting a retry until the original write has resolved.
       slowWarning = Timer(const Duration(seconds: 10), () {
         if (mounted) setState(() => _saveSlow = true);
       });
@@ -299,9 +304,7 @@ class _TxFormState extends ConsumerState<TxForm> {
                 .transactionById(savedId)
                 .timeout(const Duration(seconds: 2)) ??
             saved;
-      } catch (_) {
-        // The save is committed; failure of a follow-up read is not a save failure.
-      }
+      } catch (_) {}
       final targetAcc = _account;
       final autoShare =
           !_isTransfer && keepId == null && TxShare.isAutoShareConfigured(targetAcc);
@@ -315,7 +318,6 @@ class _TxFormState extends ConsumerState<TxForm> {
           share = TxShareOutcome.failed;
         }
       } else if (!_isTransfer) {
-        // نجهّز صورة السند عالية الدقة في الخلفية دون إرسال تلقائي عبر واتساب.
         unawaited(
           TxShare.generate(repo: repo, tx: saved, account: targetAcc)
               .then<void>((_) {}, onError: (Object _, StackTrace __) {}),
@@ -337,7 +339,6 @@ class _TxFormState extends ConsumerState<TxForm> {
       showSnack(context, message.toString(),
           error: share == TxShareOutcome.failed, silent: true);
       Navigator.pop(context, true);
-      // إنشاء عملية جديدة: اهتزاز طويل (1.5 ث) + صوت مميز؛ التعديل: نجاح عادي.
       if (widget.existing == null || widget.isCopy) {
         Sfx.opCreated();
         if (!autoShare && !Sfx.muted && rootNavContext.mounted) {
@@ -377,51 +378,11 @@ class _TxFormState extends ConsumerState<TxForm> {
     }
   }
 
-  bool _advancedOpen = false;
-
-  Widget _typeChips() => _typeGrid();
-
-  Widget _invoiceShortcut() {
-    return Card(
-      color: AppColors.primarySoftOf(context),
-      child: ListTile(
-        leading: const Icon(Icons.point_of_sale, size: 22),
-        title: const Text(
-          'فتح شاشة المبيعات لإضافة الفاتورة',
-          style: TextStyle(fontWeight: FontWeight.w700),
-        ),
-        subtitle: const Text(
-          'تنتقل إلى نقطة البيع لتسجيل الفاتورة كاملة مع العملاء والأصناف',
-        ),
-        trailing: const Icon(Icons.chevron_left),
-        onTap: _saving
-            ? null
-            : () {
-                Sfx.click();
-                // افتح شاشة المبيعات مباشرة مهما كانت الجهة التي فتحت النموذج.
-                // الاعتماد سابقاً على إشارة 'open_pos' كان يعمل فقط من زر
-                // «تسجيل عملية» في شاشة العمليات، ويبدو «بلا استجابة» من
-                // بقية الشاشات (تفاصيل الحساب، التعديل، التكرار...).
-                final nav = Navigator.of(context);
-                nav.pop();
-                nav.push(
-                  MaterialPageRoute(
-                    builder: (_) => Scaffold(
-                      appBar: AppBar(title: const Text('🛒 المبيعات')),
-                      body: const PosScreen(),
-                    ),
-                  ),
-                );
-              },
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     if (_loading) {
       return const SizedBox(
-        height: 260,
+        height: 220,
         child: Center(child: CircularProgressIndicator()),
       );
     }
@@ -453,31 +414,20 @@ class _TxFormState extends ConsumerState<TxForm> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const SizedBox(height: 6),
+          // ترويسة زرقاء مدمجة مع أيقونة فاتورة مبيعات وزر الإغلاق X
           Container(
-            width: 38,
-            height: 4,
-            decoration: BoxDecoration(
-              color: AppColors.borderOf(context),
-              borderRadius: BorderRadius.circular(4),
-            ),
-          ),
-          // ترويسة مدمجة أنيقة توفر المساحة الرأسية
-          Container(
-            margin: const EdgeInsets.fromLTRB(14, 8, 14, 2),
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
                 begin: Alignment.topRight,
                 end: Alignment.bottomLeft,
                 colors: [Color(0xFF1E3A5F), AppColors.primary],
               ),
-              borderRadius: BorderRadius.circular(14),
             ),
             child: Row(
               children: [
                 const Icon(Icons.edit_note_rounded,
-                    color: Colors.white, size: 22),
+                    color: Colors.white, size: 20),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -485,10 +435,27 @@ class _TxFormState extends ConsumerState<TxForm> {
                     style: const TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.w800,
-                      fontSize: 15.5,
+                      fontSize: 15,
                     ),
                   ),
                 ),
+                if (_hasInvoiceDetails)
+                  IconButton(
+                    tooltip: 'فتح شاشة المبيعات لإضافة الفاتورة',
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(
+                      minWidth: 32,
+                      minHeight: 32,
+                    ),
+                    padding: EdgeInsets.zero,
+                    icon: const Icon(
+                      Icons.point_of_sale_rounded,
+                      color: Colors.white,
+                      size: 19,
+                    ),
+                    onPressed: _saving ? null : _openPosShortcut,
+                  ),
+                const SizedBox(width: 4),
                 InkWell(
                   onTap: _saving ? null : () => Navigator.pop(context),
                   borderRadius: BorderRadius.circular(20),
@@ -507,114 +474,48 @@ class _TxFormState extends ConsumerState<TxForm> {
               child: SingleChildScrollView(
                 keyboardDismissBehavior:
                     ScrollViewKeyboardDismissBehavior.onDrag,
-                padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
                 child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    _typeChips(),
-                    const SizedBox(height: 10),
-                    _accountPickers(),
-                    const SizedBox(height: 10),
-                    _amountRow(),
-                    const SizedBox(height: 4),
-                    AmountWords(controller: _amount),
-                    if (_hasInvoiceDetails) ...[
-                      const SizedBox(height: 6),
-                      _invoiceShortcut(),
-                    ],
-                    if (_type == OpType.settle) ...[
-                      const SizedBox(height: 10),
-                      _signPicker(),
-                    ],
+                    // ══ الصف 1: نوع العملية (بارتفاع 38px: عليه 🔴 | له 🟢 | أخرى ▾) ══
+                    _compactTypeBar(),
                     const SizedBox(height: 8),
-                    TextFormField(
-                      controller: _desc,
-                      scrollPadding: const EdgeInsets.only(bottom: 120),
-                      decoration: const InputDecoration(
-                        isDense: true,
-                        labelText: 'البيان / الوصف',
-                        prefixIcon: Icon(Icons.notes_outlined),
-                        hintText: 'وصف مختصر (اختياري)',
-                      ),
-                      textInputAction: TextInputAction.done,
-                    ),
-                    Theme(
-                      data: Theme.of(context)
-                          .copyWith(dividerColor: Colors.transparent),
-                      child: ExpansionTile(
-                        tilePadding: EdgeInsets.zero,
-                        childrenPadding: EdgeInsets.zero,
-                        visualDensity: VisualDensity.compact,
-                        title: Text(
-                          _advancedOpen
-                              ? 'إخفاء التفاصيل الإضافية'
-                              : 'التفاصيل الإضافية',
-                          style: const TextStyle(fontSize: 13.5),
-                        ),
-                        leading: const Icon(Icons.tune, size: 20),
-                        onExpansionChanged: (v) =>
-                            setState(() => _advancedOpen = v),
-                        children: [
-                          const SizedBox(height: 4),
-                          _datePicker(),
-                          const SizedBox(height: 10),
-                          TextFormField(
-                            controller: _ref,
-                            scrollPadding: const EdgeInsets.only(bottom: 120),
-                            decoration: const InputDecoration(
-                              isDense: true,
-                              labelText: 'رقم مرجعي',
-                              prefixIcon: Icon(Icons.tag),
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                          TextFormField(
-                            controller: _notes,
-                            scrollPadding: const EdgeInsets.only(bottom: 120),
-                            decoration: const InputDecoration(
-                              isDense: true,
-                              labelText: 'ملاحظات',
-                              prefixIcon: Icon(Icons.sticky_note_2_outlined),
-                            ),
-                            maxLines: 2,
-                          ),
-                          const SizedBox(height: 8),
-                          _smallImagePicker(),
-                        ],
-                      ),
-                    ),
+
+                    // ══ الصف 2: الحساب + التاريخ في صف واحد ══
+                    _accountAndDateRow(),
+                    const SizedBox(height: 8),
+
+                    // ══ الصف 3: المبلغ + العملة في صف واحد ══
+                    _amountRow(),
+                    const SizedBox(height: 8),
+
+                    // ══ الصف 4: البيان / الوصف + أيقونة الكاميرا/المعرض المدمجة ══
+                    _descriptionWithImageField(),
+
                     if (_saveSlow)
                       const Padding(
-                        padding: EdgeInsets.only(bottom: 6),
+                        padding: EdgeInsets.only(top: 6),
                         child: Text(
-                            'الحفظ أبطأ من المعتاد. ننتظر نتيجة قاعدة البيانات؛ لا تُكرر العملية.',
-                            textAlign: TextAlign.center,
-                            style:
-                                TextStyle(color: Colors.orange, fontSize: 12)),
+                          'الحفظ أبطأ من المعتاد. ننتظر نتيجة قاعدة البيانات؛ لا تُكرر العملية.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.orange, fontSize: 12),
+                        ),
                       ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          // شريط أزرار الحفظ والإلغاء مثبّت أسفل النافذة وفوق الكيبورد دائماً
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
-              child: Row(
-                children: [
-                  Expanded(
-                    flex: 3,
-                    child: SizedBox(
-                      height: 44,
+                    const SizedBox(height: 10),
+
+                    // زر «حفظ العملية» بعرض النافذة بالكامل (بدون زر إلغاء سفلي)
+                    SizedBox(
+                      width: double.infinity,
+                      height: 42,
                       child: FilledButton.icon(
                         style: FilledButton.styleFrom(
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(12),
                           ),
                           textStyle: const TextStyle(
-                            fontSize: 15,
+                            fontSize: 14.5,
                             fontWeight: FontWeight.w800,
                           ),
                         ),
@@ -628,32 +529,14 @@ class _TxFormState extends ConsumerState<TxForm> {
                                   color: Colors.white,
                                 ),
                               )
-                            : const Icon(Icons.save_outlined, size: 20),
+                            : const Icon(Icons.save_outlined, size: 19),
                         label: Text(
                           _saving ? 'جارٍ الحفظ...' : 'حفظ العملية',
                         ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    flex: 1,
-                    child: SizedBox(
-                      height: 44,
-                      child: OutlinedButton(
-                        style: OutlinedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(horizontal: 6),
-                        ),
-                        onPressed:
-                            _saving ? null : () => Navigator.pop(context),
-                        child: const FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: Text('إلغاء'),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -662,65 +545,519 @@ class _TxFormState extends ConsumerState<TxForm> {
     );
   }
 
-  /// إرفاق صورة اختياري — أيقونة صغيرة بجانب بيانات العملية (تُولَّد صورة
-  /// الإيصال تلقائياً عند الحفظ، وهذا لإرفاق صورة خارجية فقط).
-  Widget _smallImagePicker() {
-    final hasImage = _image.isNotEmpty && File(_image).existsSync();
-    return Row(
+  /// الصف الأول: شريط أزرار نحيف ومدمج بارتفاع 38px يضم [عليه 🔴] و[له 🟢] و[أخرى ▾].
+  Widget _compactTypeBar() {
+    final isAlayh = _type == OpType.debit;
+    final isLahu = _type == OpType.credit;
+    final isOther = !isAlayh && !isLahu;
+    const otherTypes = <OpType>[
+      OpType.transfer,
+      OpType.expense,
+      OpType.settle,
+      OpType.inflow,
+      OpType.outflow,
+      OpType.revenue,
+    ];
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(Icons.attach_file, size: 16, color: AppColors.text3Of(context)),
-        const SizedBox(width: 6),
-        Text(
-          'إرفاق صورة (اختياري):',
-          style: TextStyle(fontSize: 12.5, color: AppColors.text2Of(context)),
-        ),
-        const SizedBox(width: 6),
-        IconButton(
-          tooltip: 'من المعرض',
-          visualDensity: VisualDensity.compact,
-          icon: Icon(
-            Icons.photo_library_outlined,
-            size: 20,
-            color: AppColors.primaryOf(context),
+        SizedBox(
+          height: 38,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                flex: 4,
+                child: InkWell(
+                  onTap: () => setState(() => _type = OpType.debit),
+                  borderRadius: BorderRadius.circular(10),
+                  child: Container(
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: isAlayh
+                          ? Colors.red.withValues(alpha: 0.12)
+                          : AppColors.surface2Of(context),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color:
+                            isAlayh ? Colors.red : AppColors.borderOf(context),
+                        width: isAlayh ? 1.8 : 1,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Text('🔴', style: TextStyle(fontSize: 13)),
+                        const SizedBox(width: 5),
+                        Text(
+                          'عليه',
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w800,
+                            color: isAlayh
+                                ? Colors.red.shade800
+                                : AppColors.textOf(context),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                flex: 4,
+                child: InkWell(
+                  onTap: () => setState(() => _type = OpType.credit),
+                  borderRadius: BorderRadius.circular(10),
+                  child: Container(
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: isLahu
+                          ? Colors.green.withValues(alpha: 0.12)
+                          : AppColors.surface2Of(context),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color:
+                            isLahu ? Colors.green : AppColors.borderOf(context),
+                        width: isLahu ? 1.8 : 1,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Text('🟢', style: TextStyle(fontSize: 13)),
+                        const SizedBox(width: 5),
+                        Text(
+                          'له',
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w800,
+                            color: isLahu
+                                ? Colors.green.shade800
+                                : AppColors.textOf(context),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                flex: 3,
+                child: PopupMenuButton<OpType>(
+                  tooltip: 'أنواع عمليات أخرى',
+                  onSelected: (t) => setState(() => _type = t),
+                  itemBuilder: (_) => [
+                    for (final t in otherTypes)
+                      PopupMenuItem<OpType>(
+                        value: t,
+                        height: 36,
+                        child: Row(
+                          children: [
+                            Text(t.icon, style: const TextStyle(fontSize: 14)),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                t.label,
+                                style: TextStyle(
+                                  fontSize: 12.5,
+                                  fontWeight: _type == t
+                                      ? FontWeight.w800
+                                      : FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                  child: Container(
+                    alignment: Alignment.center,
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    decoration: BoxDecoration(
+                      color: isOther
+                          ? AppColors.primaryOf(context).withValues(alpha: 0.12)
+                          : AppColors.surface2Of(context),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: isOther
+                            ? AppColors.primaryOf(context)
+                            : AppColors.borderOf(context),
+                        width: isOther ? 1.8 : 1,
+                      ),
+                    ),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            isOther ? _type.label : 'أخرى',
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w800,
+                              color: isOther
+                                  ? AppColors.primaryOf(context)
+                                  : AppColors.text2Of(context),
+                            ),
+                          ),
+                          const SizedBox(width: 2),
+                          Icon(
+                            Icons.arrow_drop_down_rounded,
+                            size: 18,
+                            color: isOther
+                                ? AppColors.primaryOf(context)
+                                : AppColors.text2Of(context),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
-          onPressed: _pickImage,
         ),
-        IconButton(
-          tooltip: 'التقاط من الكاميرا',
-          visualDensity: VisualDensity.compact,
-          icon: Icon(
-            Icons.photo_camera_outlined,
-            size: 20,
-            color: AppColors.primaryOf(context),
-          ),
-          onPressed: _captureImage,
-        ),
-        if (hasImage) ...[
-          const SizedBox(width: 4),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(6),
-            child: Image.file(
-              File(_image),
-              width: 34,
-              height: 34,
-              fit: BoxFit.cover,
-              // (PR-8) حدة Retina للمرفق المصغر.
-              cacheWidth: crispCacheWidth(context, 34),
-              filterQuality: FilterQuality.medium,
+        if (_type == OpType.settle) ...[
+          const SizedBox(height: 6),
+          _signPicker(),
+        ],
+      ],
+    );
+  }
+
+  /// الصف الثاني: قائمة «الحساب» وبجوارها في نفس الصف زر اختيار «التاريخ».
+  Widget _accountAndDateRow() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              flex: 6,
+              child: DropdownButtonFormField<int>(
+                initialValue: _accountId,
+                isExpanded: true,
+                decoration: InputDecoration(
+                  labelText: _isTransfer ? 'من حساب' : 'الحساب',
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 9,
+                  ),
+                ),
+                items: _accounts
+                    .map(
+                      (a) => DropdownMenuItem(
+                        value: a.id,
+                        child: Text(
+                          '${a.kind.icon} ${a.name}',
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (v) {
+                  setState(() {
+                    _accountId = v;
+                    if (_toId == v) _toId = null;
+                    final acc = _account;
+                    if (acc != null && widget.existing == null) {
+                      _currency = acc.currency;
+                    }
+                  });
+                },
+                validator: (v) => v == null ? 'اختر الحساب' : null,
+              ),
             ),
-          ),
-          IconButton(
-            tooltip: 'إزالة الصورة',
-            visualDensity: VisualDensity.compact,
-            icon: Icon(
-              Icons.close,
-              size: 18,
-              color: AppColors.dangerOf(context),
+            const SizedBox(width: 6),
+            Expanded(
+              flex: 4,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: () async {
+                  final d = await showDatePicker(
+                    context: context,
+                    initialDate: _date,
+                    firstDate: DateTime(2015),
+                    lastDate: DateTime(2100),
+                    locale: const Locale('ar'),
+                  );
+                  if (d != null) setState(() => _date = d);
+                },
+                child: InputDecorator(
+                  decoration: const InputDecoration(
+                    labelText: 'التاريخ',
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 9,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.event_outlined,
+                        size: 15,
+                        color: AppColors.primaryOf(context),
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          Fmt.date(_date),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ),
-            onPressed: () => setState(() => _image = ''),
+          ],
+        ),
+        if (_isTransfer) ...[
+          const SizedBox(height: 8),
+          DropdownButtonFormField<int>(
+            key: ValueKey('to_$_accountId'),
+            initialValue: _toId,
+            isExpanded: true,
+            decoration: const InputDecoration(
+              labelText: 'إلى حساب',
+              isDense: true,
+              contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+            ),
+            items: _accounts
+                .where((a) => a.id != _accountId)
+                .map(
+                  (a) => DropdownMenuItem(
+                    value: a.id,
+                    child: Text(
+                      '${a.kind.icon} ${a.name}',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                  ),
+                )
+                .toList(),
+            onChanged: (v) => setState(() => _toId = v),
+            validator: (v) => v == null ? 'اختر حساب الوجهة' : null,
           ),
         ],
       ],
+    );
+  }
+
+  /// الصف الثالث: حقل «المبلغ *» وبجواره قائمة «العملة» المختصرة.
+  Widget _amountRow() {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          flex: 6,
+          child: TextFormField(
+            controller: _amount,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: const [ThousandsFormatter()],
+            style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700),
+            decoration: InputDecoration(
+              labelText: 'المبلغ *',
+              hintText: '0.00',
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 10,
+                vertical: 10,
+              ),
+              suffixIcon: IconButton(
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+                tooltip: 'آلة حاسبة',
+                icon: const Icon(Icons.calculate_outlined, size: 18),
+                onPressed: () async {
+                  final v = await openCalculator(
+                    context,
+                    initial: _amount.text,
+                  );
+                  if (v == null) return;
+                  setState(() {
+                    _amount.text =
+                        v == v.roundToDouble() ? '${v.toInt()}' : '$v';
+                  });
+                },
+              ),
+            ),
+            validator: (v) {
+              final n = Fmt.parseAmount(v ?? '');
+              if (n == null || n <= 0) return 'مبلغ غير صالح';
+              return null;
+            },
+          ),
+        ),
+        const SizedBox(width: 6),
+        Expanded(
+          flex: 4,
+          child: DropdownButtonFormField<String>(
+            initialValue: _currencies.any((c) => c.code == _currency)
+                ? _currency
+                : (_currencies.isNotEmpty ? _currencies.first.code : null),
+            isExpanded: true,
+            decoration: const InputDecoration(
+              labelText: 'العملة',
+              isDense: true,
+              contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+            ),
+            items: _currencies
+                .map(
+                  (c) => DropdownMenuItem(
+                    value: c.code,
+                    child: Text(
+                      '${c.symbol} ${c.code}',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12.5),
+                    ),
+                  ),
+                )
+                .toList(),
+            onChanged: (v) async {
+              setState(() => _currency = v ?? _currency);
+              if (!_isTransfer && _currency != _baseCurrencyCode) {
+                try {
+                  final st = await ref.read(repoProvider).settings();
+                  final r = st['rate_$_currency'];
+                  if (r != null && mounted) {
+                    setState(() => _rate.text = r);
+                  }
+                } catch (_) {}
+              }
+            },
+          ),
+        ),
+        if (_isTransfer || _currency != _baseCurrencyCode) ...[
+          const SizedBox(width: 6),
+          Expanded(
+            flex: 3,
+            child: TextFormField(
+              controller: _rate,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              style: const TextStyle(fontSize: 13),
+              decoration: const InputDecoration(
+                labelText: 'الصرف',
+                isDense: true,
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: 8,
+                  vertical: 10,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// الصف الرابع: حقل «البيان / الوصف» وبداخله في طرفه الأيسر أيقونة الكاميرا/المعرض لإرفاق صورة.
+  Widget _descriptionWithImageField() {
+    final hasImage = _image.isNotEmpty && File(_image).existsSync();
+    return TextFormField(
+      controller: _desc,
+      style: const TextStyle(fontSize: 13.5),
+      decoration: InputDecoration(
+        isDense: true,
+        labelText: 'البيان / الوصف',
+        hintText: 'وصف مختصر (اختياري)',
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 10,
+          vertical: 10,
+        ),
+        suffixIconConstraints: const BoxConstraints(minWidth: 36, minHeight: 34),
+        suffixIcon: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (hasImage) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(5),
+                child: Image.file(
+                  File(_image),
+                  width: 24,
+                  height: 24,
+                  fit: BoxFit.cover,
+                  cacheWidth: crispCacheWidth(context, 24),
+                  filterQuality: FilterQuality.medium,
+                ),
+              ),
+              IconButton(
+                tooltip: 'إزالة الصورة',
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+                icon: Icon(
+                  Icons.close_rounded,
+                  size: 16,
+                  color: AppColors.dangerOf(context),
+                ),
+                onPressed: () => setState(() => _image = ''),
+              ),
+            ],
+            PopupMenuButton<String>(
+              tooltip: 'إرفاق صورة',
+              onSelected: (v) {
+                if (v == 'camera') {
+                  _captureImage();
+                } else if (v == 'gallery') {
+                  _pickImage();
+                }
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem<String>(
+                  value: 'camera',
+                  height: 36,
+                  child: Row(
+                    children: [
+                      Icon(Icons.photo_camera_outlined, size: 18),
+                      SizedBox(width: 8),
+                      Text('التقاط بالكاميرا', style: TextStyle(fontSize: 13)),
+                    ],
+                  ),
+                ),
+                PopupMenuItem<String>(
+                  value: 'gallery',
+                  height: 36,
+                  child: Row(
+                    children: [
+                      Icon(Icons.photo_library_outlined, size: 18),
+                      SizedBox(width: 8),
+                      Text('اختيار من المعرض', style: TextStyle(fontSize: 13)),
+                    ],
+                  ),
+                ),
+              ],
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Icon(
+                  hasImage
+                      ? Icons.photo_camera_back_rounded
+                      : Icons.camera_alt_outlined,
+                  size: 19,
+                  color: AppColors.primaryOf(context),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      textInputAction: TextInputAction.done,
     );
   }
 
@@ -753,332 +1090,6 @@ class _TxFormState extends ConsumerState<TxForm> {
     }
   }
 
-  Widget _typeGrid() {
-    final isAlayh = _type == OpType.debit || _type == OpType.outflow;
-    final isLahu = _type == OpType.credit || _type == OpType.inflow;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const SectionTitle('طبيعة العملية على الحساب'),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: InkWell(
-                onTap: () => setState(() => _type = OpType.debit),
-                borderRadius: BorderRadius.circular(14),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 11,
-                    horizontal: 8,
-                  ),
-                  decoration: BoxDecoration(
-                    color: isAlayh
-                        ? Colors.red.withValues(alpha: 0.12)
-                        : AppColors.surface2Of(context),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: isAlayh ? Colors.red : AppColors.borderOf(context),
-                      width: isAlayh ? 2 : 1,
-                    ),
-                  ),
-                  child: Column(
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Text('🔴', style: TextStyle(fontSize: 18)),
-                          const SizedBox(width: 6),
-                          Text(
-                            'عليه',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w800,
-                              color: isAlayh
-                                  ? Colors.red.shade800
-                                  : AppColors.textOf(context),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        '(مستحق لنا / مدين / بيع)',
-                        style: TextStyle(
-                          fontSize: 10.5,
-                          fontWeight: FontWeight.w600,
-                          color: isAlayh
-                              ? Colors.red.shade700
-                              : AppColors.text2Of(context),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: InkWell(
-                onTap: () => setState(() => _type = OpType.credit),
-                borderRadius: BorderRadius.circular(14),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 8,
-                    horizontal: 8,
-                  ),
-                  decoration: BoxDecoration(
-                    color: isLahu
-                        ? Colors.green.withValues(alpha: 0.12)
-                        : AppColors.surface2Of(context),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color:
-                          isLahu ? Colors.green : AppColors.borderOf(context),
-                      width: isLahu ? 2 : 1,
-                    ),
-                  ),
-                  child: Column(
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Text('🟢', style: TextStyle(fontSize: 18)),
-                          const SizedBox(width: 6),
-                          Text(
-                            'له',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w800,
-                              color: isLahu
-                                  ? Colors.green.shade800
-                                  : AppColors.textOf(context),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        '(مستحق له / دائن / دفعة)',
-                        style: TextStyle(
-                          fontSize: 10.5,
-                          fontWeight: FontWeight.w600,
-                          color: isLahu
-                              ? Colors.green.shade700
-                              : AppColors.text2Of(context),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 6),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: TextButton.icon(
-            onPressed: () => setState(() => _showMoreTypes = !_showMoreTypes),
-            icon: Icon(
-              _showMoreTypes ? Icons.expand_less : Icons.expand_more,
-              size: 16,
-            ),
-            label: const Text(
-              'خيارات متقدمة (تحويل، مصروف، تسوية)',
-              style: TextStyle(fontSize: 11.5),
-            ),
-          ),
-        ),
-        if (_showMoreTypes) ...[
-          const SizedBox(height: 4),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: OpType.values
-                .where((t) => t != OpType.debit && t != OpType.credit)
-                .map((t) {
-              final sel = t == _type;
-              return ChoiceChip(
-                selected: sel,
-                onSelected: (_) => setState(() => _type = t),
-                avatar: Text(t.icon, style: const TextStyle(fontSize: 13)),
-                label: Text(t.label),
-                labelStyle: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 11.5,
-                  color: sel
-                      ? AppColors.primaryOf(context)
-                      : AppColors.text2Of(context),
-                ),
-              );
-            }).toList(),
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _accountPickers() {
-    return Column(
-      children: [
-        DropdownButtonFormField<int>(
-          initialValue: _accountId,
-          isExpanded: true,
-          decoration: InputDecoration(
-            labelText: _isTransfer ? 'من حساب' : 'الحساب',
-            prefixIcon: const Icon(Icons.account_balance_wallet_outlined),
-          ),
-          items: _accounts
-              .map(
-                (a) => DropdownMenuItem(
-                  value: a.id,
-                  child: Text(
-                    '${a.kind.icon}  ${a.name}',
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              )
-              .toList(),
-          onChanged: (v) {
-            setState(() {
-              _accountId = v;
-              if (_toId == v) _toId = null;
-              final acc = _account;
-              if (acc != null && widget.existing == null) {
-                _currency = acc.currency;
-              }
-            });
-          },
-          validator: (v) => v == null ? 'اختر الحساب' : null,
-        ),
-        if (_isTransfer) ...[
-          const SizedBox(height: 14),
-          DropdownButtonFormField<int>(
-            key: ValueKey('to_$_accountId'),
-            initialValue: _toId,
-            isExpanded: true,
-            decoration: const InputDecoration(
-              labelText: 'إلى حساب',
-              prefixIcon: Icon(Icons.arrow_forward),
-            ),
-            items: _accounts
-                .where((a) => a.id != _accountId)
-                .map(
-                  (a) => DropdownMenuItem(
-                    value: a.id,
-                    child: Text(
-                      '${a.kind.icon}  ${a.name}',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                )
-                .toList(),
-            onChanged: (v) => setState(() => _toId = v),
-            validator: (v) => v == null ? 'اختر حساب الوجهة' : null,
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _amountRow() {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(
-          flex: 3,
-          child: TextFormField(
-            controller: _amount,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            // فواصل آلاف حية أثناء الكتابة: 1000000 → 1,000,000.
-            inputFormatters: const [ThousandsFormatter()],
-            decoration: InputDecoration(
-              labelText: 'المبلغ *',
-              hintText: '0.00',
-              prefixIcon: const Icon(Icons.payments_outlined),
-              suffixIcon: IconButton(
-                tooltip: 'آلة حاسبة',
-                icon: const Icon(Icons.calculate_outlined),
-                onPressed: () async {
-                  final v = await openCalculator(
-                    context,
-                    initial: _amount.text,
-                  );
-                  if (v == null) return;
-                  setState(() {
-                    _amount.text =
-                        v == v.roundToDouble() ? '${v.toInt()}' : '$v';
-                  });
-                },
-              ),
-            ),
-            validator: (v) {
-              final n = Fmt.parseAmount(v ?? '');
-              if (n == null || n <= 0) return 'مبلغ غير صالح';
-              return null;
-            },
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          flex: 2,
-          child: DropdownButtonFormField<String>(
-            initialValue: _currencies.any((c) => c.code == _currency)
-                ? _currency
-                : (_currencies.isNotEmpty ? _currencies.first.code : null),
-            isExpanded: true,
-            decoration: const InputDecoration(labelText: 'العملة'),
-            items: _currencies
-                .map(
-                  (c) => DropdownMenuItem(
-                    value: c.code,
-                    child: Text(
-                      '${c.symbol}  ${c.code}',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                )
-                .toList(),
-            onChanged: (v) async {
-              setState(() => _currency = v ?? _currency);
-              // اختيار عملة غير أساسية يقترح سعرها المعتمد (إعداد
-              // rate_<code>) كنقطة بداية قابلة للتجاوز لهذه العملية فقط.
-              if (!_isTransfer && _currency != _baseCurrencyCode) {
-                try {
-                  final st = await ref.read(repoProvider).settings();
-                  final r = st['rate_$_currency'];
-                  if (r != null && mounted) {
-                    setState(() => _rate.text = r);
-                  }
-                } catch (_) {}
-              }
-            },
-          ),
-        ),
-        // سعر الصرف: للتحويلات دائماً، ولأي عملية بعملة غير أساسية —
-        // تجاوز محلي على مستوى العملية لا يمس إعدادات العملات العالمية.
-        if (_isTransfer || _currency != _baseCurrencyCode) ...[
-          const SizedBox(width: 10),
-          Expanded(
-            flex: 2,
-            child: TextFormField(
-              controller: _rate,
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-              ),
-              decoration: const InputDecoration(
-                labelText: 'سعر الصرف',
-                helperText: 'لهذه العملية فقط',
-                helperMaxLines: 1,
-              ),
-            ),
-          ),
-        ],
-      ],
-    );
-  }
-
   Widget _signPicker() {
     return RadioGroup<String>(
       groupValue: _sign,
@@ -1092,7 +1103,7 @@ class _TxFormState extends ConsumerState<TxForm> {
               value: '+',
               title: Text(
                 'بالزيادة (+)',
-                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
               ),
               contentPadding: EdgeInsets.zero,
               dense: true,
@@ -1103,39 +1114,13 @@ class _TxFormState extends ConsumerState<TxForm> {
               value: '-',
               title: Text(
                 'بالنقصان (−)',
-                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
               ),
               contentPadding: EdgeInsets.zero,
               dense: true,
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _datePicker() {
-    return InkWell(
-      borderRadius: BorderRadius.circular(12),
-      onTap: () async {
-        final d = await showDatePicker(
-          context: context,
-          initialDate: _date,
-          firstDate: DateTime(2015),
-          lastDate: DateTime(2100),
-          locale: const Locale('ar'),
-        );
-        if (d != null) setState(() => _date = d);
-      },
-      child: InputDecorator(
-        decoration: const InputDecoration(
-          labelText: 'التاريخ',
-          prefixIcon: Icon(Icons.event_outlined),
-        ),
-        child: Text(
-          Fmt.date(_date),
-          style: const TextStyle(fontWeight: FontWeight.w700),
-        ),
       ),
     );
   }
