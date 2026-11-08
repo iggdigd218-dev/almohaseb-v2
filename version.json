@@ -1,1 +1,37 @@
-{"version": "3.98.33+348", "minSupported": "3.13.0", "sha256": "a7dd8bddf66dfc235bcdc9671349f3bb624490e31f3bdefc12bb34330edc89c6", "sha256Variants": {"arm64": "a7dd8bddf66dfc235bcdc9671349f3bb624490e31f3bdefc12bb34330edc89c6", "armv7": "13769ebeb272f25d6bee190874c5f0e4fd09ea0180d1c30984569785f6089985", "windows": "51f03259a92e5758e57aac62e189c28b2068b929b73aa83f463480391b30a855"}, "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/latest", "download_url": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk", "downloads": {"android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk", "androidVariants": {"arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk", "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-armv7.apk"}, "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe"}, "downloadsMirror": {"android": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.33-348/Almohaseb-Plus-arm64.apk", "androidVariants": {"arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.33-348/Almohaseb-Plus-arm64.apk", "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.33-348/nexora-armv7.apk"}, "windows": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.33-348/NexoraSetup.exe"}, "downloadsFallbackGithub": {"android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk", "androidVariants": {"arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk", "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-armv7.apk"}, "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe"}, "publishedAt": "2026-11-08T00:23:28Z", "notes": "• الطباعة الحرارية: استبدال شعار المنشأة الملون بإشارة السهم الصاعد المنحني باللون الأسود الصافي دون خلفية لتوافق تام مع الطابعات الحرارية.\n• خطوط PDF: دعم كامل للحروف الإنجليزية (A-Z) ورموز العملات (YER/SAR/USD) والرموز الحسابية (+، #، =، الأقواس) لمنع ظهور المربعات السوداء.\n• تنقية النصوص: إزالة محارف الاتجاه غير المرئية في أرقام الهواتف وضبط المسافات في تذييل الفاتورة الحرارية.", "mirror": {"provider": "github-pages", "baseUrl": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.33-348", "reason": "github-primary"}}
+{
+  "version": "3.98.39+354",
+  "minSupported": "3.13.0",
+  "sha256": "0a1412c823048c5de3c9a43f5cfee407a209303174842999bfa925173adbc4c7",
+  "sha256Variants": {
+    "arm64": "0a1412c823048c5de3c9a43f5cfee407a209303174842999bfa925173adbc4c7",
+    "armv7": "04ed0402ca0dfefabc1ca6358dc17b190cdf8c776657f3b716a6a5d822317443"
+  },
+  "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/latest",
+  "download_url": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk",
+  "downloads": {
+    "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk",
+    "androidVariants": {
+      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk",
+      "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-armv7.apk"
+    },
+    "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe"
+  },
+  "downloadsMirror": {
+    "android": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.39-354/Almohaseb-Plus-arm64.apk",
+    "androidVariants": {
+      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.39-354/Almohaseb-Plus-arm64.apk",
+      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.39-354/nexora-armv7.apk"
+    },
+    "windows": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.39-354/NexoraSetup.exe"
+  },
+  "downloadsFallbackGithub": {
+    "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk",
+    "androidVariants": {
+      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk",
+      "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-armv7.apk"
+    },
+    "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe"
+  },
+  "publishedAt": "2026-11-08T22:52:23Z",
+  "notes": "• إدارة المنتجات ونقطة البيع: دعم التفرع المتداخل للفئات والنقل المرن، ونقطة استبعاد النواقص، والبحث الذكي ذي الدرجتين.\n• إدارة المجموعة والواجهات: توحيد اسم العضو، ومزامنة اسم المدير سحابياً، وتصميم النوافذ الوسطية المدمجة للحسابات والعمليات.\n• قاعدة البيانات والاستقرار: الترقية الآمنة إلى مخطط V30 مع شبكة الأمان التلقائية للأعمدة والتصنيف الدقيق لأخطاء SQLite."
+}
