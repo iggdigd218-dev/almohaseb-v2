@@ -255,10 +255,10 @@ jobs:
             ## 📥 التحميل المباشر السريع (روابط قصيرة بسطر واحد — صالحة للمشاركة المباشرة)
 
             ### 📱 للأندرويد (64-بت):
-            - **رابط مباشر قصير:** https://${{ github.repository_owner }}.github.io/almohaseb-plus/Almohaseb-Plus-arm64.apk
+            - **رابط مباشر قصير:** https://${{ github.repository_owner }}.github.io/almohaseb-v2/Almohaseb-Plus-arm64.apk
 
             ### 🖥️ للكمبيوتر (ويندوز):
-            - **رابط مباشر قصير:** https://${{ github.repository_owner }}.github.io/almohaseb-plus/NexoraSetup.exe
+            - **رابط مباشر قصير:** https://${{ github.repository_owner }}.github.io/almohaseb-v2/NexoraSetup.exe
           prerelease: false
           make_latest: true
         env:

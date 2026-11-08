@@ -1906,8 +1906,8 @@ class ForceUpdateBarrier extends ConsumerWidget {
       status: UpdateStatus.required_,
       current: AppSemVer.current,
       downloadUrl: PlatformInfo.isWindows
-          ? 'https://github.com/iggdigd218-dev/almohaseb-plus/releases/download/latest/NexoraSetup.exe'
-          : 'https://github.com/iggdigd218-dev/almohaseb-plus/releases/download/latest/nexora-arm64.apk',
+          ? 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe'
+          : 'https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-arm64.apk',
     );
     final info = updateInfo ?? fallbackInfo;
 

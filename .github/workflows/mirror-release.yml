@@ -9,7 +9,7 @@ name: Mirror Release to GitHub Pages
 #
 # الحل على مرحلتين — كلاهما بلا أي إعداد إضافي من المالك:
 #   1) الافتراضي: رفع الحزم إلى فرع `releases` يتيم تخدمه GitHub Pages
-#      (https://<owner>.github.io/almohaseb-plus — شبكة Fastly) — يحتاج GITHUB_TOKEN فقط.
+#      (https://<owner>.github.io/almohaseb-v2 — شبكة Fastly) — يحتاج GITHUB_TOKEN فقط.
 #   2) الأفضل عند توفره: إن أُضيف سر FIREBASE_HOSTING_TOKEN (من firebase
 #      login:ci) تُرفع الحزم إلى Firebase Hosting (شبكة جوجل — نفس بنية
 #      RTDB التي تعمل لدى مستخدمينا بسرعة كاملة) وتُقدَّم روابطه أولوية.
@@ -50,7 +50,7 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p assets && cd assets
-          for f in version.json Almohaseb-Plus-arm64.apk nexora-arm64.apk nexora-armv7.apk NexoraSetup.exe; do
+          for f in version.json Almohaseb-Plus-arm64.apk Almohaseb-arm64.apk nexora-arm64.apk nexora-armv7.apk Almohaseb-armv7.apk NexoraSetup.exe; do
             gh release download latest --repo "$GITHUB_REPOSITORY" --pattern "$f" --clobber || true
           done
           if [ -s Almohaseb-Plus-arm64.apk ] && [ ! -s nexora-arm64.apk ]; then
@@ -96,7 +96,7 @@ jobs:
           fi
           npm install -g firebase-tools --no-fund --no-audit >/dev/null 2>&1
           mkdir -p "site/releases/$VDIR"
-          cp -f assets/Almohaseb-Plus-arm64.apk assets/nexora-arm64.apk assets/nexora-armv7.apk assets/NexoraSetup.exe "site/releases/$VDIR/" 2>/dev/null || true
+          cp -f assets/Almohaseb-Plus-arm64.apk assets/Almohaseb-arm64.apk assets/nexora-arm64.apk assets/nexora-armv7.apk assets/Almohaseb-armv7.apk assets/NexoraSetup.exe "site/releases/$VDIR/" 2>/dev/null || true
           cat > site/firebase.json <<'EOF'
           {
             "hosting": {
@@ -133,12 +133,12 @@ jobs:
           set -uo pipefail
           git config --global user.name  "nexora-mirror-bot"
           git config --global user.email "actions@users.noreply.github.com"
-          git clone -q --depth 1 -b releases "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" mrepo || { git init -q mrepo && cd mrepo && git checkout -b releases && cd ..; }
-          cd mrepo
+          # (2026-11-04) دفع محافظ بدل init الماحية — الحفاظ على أصول الأدمن والتاريخ
+          git clone -q --depth 1 -b releases "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" mrepo && cd mrepo
           mkdir -p "releases/$VDIR"
-          cp -f ../assets/Almohaseb-Plus-arm64.apk ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk \
+          cp -f ../assets/Almohaseb-Plus-arm64.apk ../assets/Almohaseb-arm64.apk ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk ../assets/Almohaseb-armv7.apk \
                 ../assets/NexoraSetup.exe ../assets/version.json "releases/$VDIR/" 2>/dev/null || true
-          cp -f ../assets/Almohaseb-Plus-arm64.apk ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk \
+          cp -f ../assets/Almohaseb-Plus-arm64.apk ../assets/Almohaseb-arm64.apk ../assets/nexora-arm64.apk ../assets/nexora-armv7.apk ../assets/Almohaseb-armv7.apk \
                 ../assets/NexoraSetup.exe ../assets/version.json . 2>/dev/null || true
           touch .nojekyll
           echo "محتويات الفرع:"; ls -lh "releases/$VDIR/"
@@ -167,7 +167,7 @@ jobs:
             BASE="https://nexora-broker.web.app/releases/$VDIR"
             PROVIDER="firebase-hosting"
           elif [ "${{ steps.pages.outputs.pushed }}" = "true" ]; then
-            BASE="https://${{ github.repository_owner }}.github.io/almohaseb-plus/releases/$VDIR"
+            BASE="https://${{ github.repository_owner }}.github.io/almohaseb-v2/releases/$VDIR"
             PROVIDER="github-pages"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
@@ -176,7 +176,7 @@ jobs:
           fi
           echo "المزوّد: $PROVIDER → $BASE"
           fail=0
-          for f in Almohaseb-Plus-arm64.apk nexora-arm64.apk nexora-armv7.apk NexoraSetup.exe; do
+          for f in Almohaseb-Plus-arm64.apk Almohaseb-arm64.apk nexora-arm64.apk nexora-armv7.apk Almohaseb-armv7.apk NexoraSetup.exe; do
             [ -s "assets/$f" ] || continue
             code=""
             for i in $(seq 1 18); do
@@ -309,6 +309,6 @@ jobs:
             fi
           }
           # (2026-10-29) مسار بلاس المستقل — فصل بيان التحديث عن تطبيق v2.
-          publish PUT   "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/plus/version_manifest.json"
-          publish PATCH "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/plus/force_update.json"
+          publish PUT   "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/version_manifest.json"
+          publish PATCH "https://nexora-broker-default-rtdb.europe-west1.firebasedatabase.app/system/force_update.json"
           echo "✔ نُشر بيان المرآة — روابط $MIRROR_PROVIDER فعّالة الآن."
