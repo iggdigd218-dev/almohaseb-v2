@@ -58,7 +58,6 @@ class CloudControlService {
   /// معالج عند وصول تنبيه سحابي جديد في الوقت الفعلي
   void Function(CloudAlert alert)? onNewAlertReceived;
 
-  bool _initializedAlertScan = false;
   final Set<String> _notifiedAlertIds = <String>{};
 
   Timer? _heartbeatTimer;
@@ -576,7 +575,6 @@ class CloudControlService {
     unreadAlertCountNotifier.value = unreadList.length;
 
     // سواء عند فتح التطبيق أو أثناء عمله: أي إشعار إداري غير مقروء لم يُعرض بعد ينبثق فوراً
-    _initializedAlertScan = true;
     for (final a in unreadList) {
       if (!_notifiedAlertIds.contains(a.id)) {
         _notifiedAlertIds.add(a.id);

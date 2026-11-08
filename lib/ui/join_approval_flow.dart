@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/cloud_config.dart';
+import '../core/device_names.dart';
 import '../core/platform_info.dart';
 import '../core/sfx.dart';
 import '../core/theme.dart';
@@ -658,8 +659,8 @@ class _JoinApprovalScreenState extends ConsumerState<JoinApprovalScreen> {
             controller: _nameCtrl,
             textInputAction: TextInputAction.done,
             decoration: const InputDecoration(
-              labelText: 'اسم الجهاز',
-              prefixIcon: Icon(Icons.devices),
+              labelText: 'اسم العضو *',
+              prefixIcon: Icon(Icons.badge_outlined),
               border: OutlineInputBorder(),
             ),
             onSubmitted: (_) => _toMethod(),
@@ -674,8 +675,9 @@ class _JoinApprovalScreenState extends ConsumerState<JoinApprovalScreen> {
       );
 
   void _toMethod() {
-    if (_nameCtrl.text.trim().isEmpty) {
-      setState(() => _error = 'اسم الجهاز مطلوب قبل المتابعة.');
+    final entered = _nameCtrl.text.trim();
+    if (!isCustomDeviceName(entered) || entered.length < 2) {
+      setState(() => _error = 'يرجى إدخال اسم العضو الصريح قبل المتابعة.');
       return;
     }
     Sfx.click();

@@ -368,9 +368,13 @@ void main() {
       expect(shellSrc, isNot(contains("value: 'theme'")));
 
       final settingsSrc = File('lib/ui/settings_screen.dart').readAsStringSync();
-      expect(settingsSrc, contains('ThemeModeSelectorCard'));
+      // (3.98.34) المظهر صار صفحة مستقلة تُفتح من قائمة الإعدادات، وبطاقة
+      // اختيار الوضع الليلي موجودة في صفحة المظهر نفسها بلا تكرار.
+      expect(settingsSrc, contains('AppearanceScreen'));
+      expect(settingsSrc, isNot(contains('ThemeModeSelectorCard')));
 
       final appSrc = File('lib/ui/appearance_screen.dart').readAsStringSync();
+      expect(appSrc, contains('ThemeModeSelectorCard'));
       expect(appSrc, contains('saveAppThemeMode'));
       expect(appSrc, contains('Icons.light_mode_rounded'));
       expect(appSrc, contains('Icons.dark_mode_rounded'));
@@ -389,7 +393,9 @@ void main() {
       final settingsSrc = File('lib/ui/settings_screen.dart').readAsStringSync();
       expect(settingsSrc, isNot(contains("'المظهر والخطوط'")));
       expect(settingsSrc, isNot(contains("title: Text('الخطوط')")));
-      expect(settingsSrc, contains("text: 'المظهر'"));
+      // (3.98.34) لا تبويبات أفقية: المظهر بند في قائمة الإعدادات العمودية.
+      expect(settingsSrc, contains('المظهر والأصوات'));
+      expect(settingsSrc, isNot(contains('TabBar(')));
     });
 
     test('SET-05 حذف عبارة «مؤسستك مربوطة بحسابك» نهائياً من المستودع', () {
@@ -403,7 +409,7 @@ void main() {
       expect(settingsSrc, isNot(contains("'منطقة الخطر — حذف الحساب'")));
       expect(settingsSrc, isNot(contains("'منطقة الخطر — تهيئة المجموعة'")));
       expect(settingsSrc, contains("'إعادة الضبط والحذف'"));
-      expect(settingsSrc, contains("text: 'الأمان'"));
+      expect(settingsSrc, contains("'الأمان'"));
     });
 
     test('SET-07 حذف «المجموعة وربط الأجهزة» من الإعدادات', () {

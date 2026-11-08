@@ -20,6 +20,7 @@ import '../data/sync/cloud_join.dart';
 import '../data/update_service.dart';
 import 'update_section.dart';
 import 'profile_dialog.dart';
+import 'widgets/profile_completion_nudge.dart';
 import 'account_form.dart';
 import 'accounts_screen.dart';
 import 'backup_screen.dart';
@@ -218,6 +219,8 @@ class _HomeShellState extends ConsumerState<HomeShell>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _applyStartupRouting();
       _consumeNotifyTap();
+      // (3.98.34) إشعار دوري (كل يومين كحد أقصى) لإكمال هاتف/بريد الاسترداد.
+      _maybeNudgeProfileCompletion();
     });
     // (دفعة 58) المستمع العالمي لطلبات الانضمام — للمدير فقط.
     _startGlobalJoinWatcher();
@@ -1296,19 +1299,26 @@ class _HomeShellState extends ConsumerState<HomeShell>
       };
 
   /// زر العملية العائم المميّز بالتدرج الدائري كما في هوية التطبيق
-  Widget? _fab() {
-    final me = ref.watch(currentUserProvider).valueOrNull;
-    bool can(String p) => me != null && me.can(p);
-    final add = can('add_tx');
-    if (!add) return null;
 
-    // (2026-09-22) زر الإضافة السريعة (+) يظهر في الشاشة الرئيسية فقط —
-    // بقية الشاشات (بما فيها نقطة البيع التي تحتوي شريط السلة الموحد) بلا زر عائم إطلاقاً.
-    if (_screen != AppScreen.dashboard) return null;
-
-    // (قانون 2026-09-19) الزر العائم «إجراء سريع» كما كان: يفتح ورقة
-    // الخيارات (عملية، سند، حساب، نقطة بيع) بدل نموذج مباشر.
-    return _MarkedOperationFab(onPressed: _quickActionSheet);
+  /// (3.98.34) فحص بيانات الحساب الناقصة وإظهار الإشعار الدوري مرة واحدة
+  /// لكل جلسة، بفاصل يومين محفوظ محلياً (طابع زمني محلي).
+  Future<void> _maybeNudgeProfileCompletion() async {
+    try {
+      final st = ref.read(settingsProvider).valueOrNull ?? const {};
+      final phone = (st['phone'] ?? '').toString();
+      final email = (st['email'] ?? st['account.email'] ?? '').toString();
+      await ProfileCompletionNudge.maybeShow(
+        context,
+        phone: phone,
+        email: email,
+        onOpenSettings: () {
+          if (!mounted) return;
+          _go(AppScreen.settings);
+        },
+      );
+    } catch (_) {
+      // إشعار تجميلي: أي فشل هنا لا يجوز أن يعطّل الإقلاع.
+    }
   }
 
   /// ورقة الإجراء السريع من زر Omni على الرئيسية: أكثر 4 مهام تكراراً
@@ -1548,6 +1558,26 @@ class _HomeShellState extends ConsumerState<HomeShell>
                 child: ListView(
                   padding: const EdgeInsets.symmetric(horizontal: 8),
                   children: [
+                    Consumer(
+                      builder: (ctx, rref, _) {
+                        final me = rref.watch(currentUserProvider).valueOrNull;
+                        final canAdd = me == null || me.can('add_tx');
+                        if (!canAdd) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 6),
+                          child: Tooltip(
+                            message: 'إجراء سريع',
+                            child: _RailTile(
+                              icon: Icons.add_circle_rounded,
+                              label: '+ عملية',
+                              selected: false,
+                              extended: _railExtended,
+                              onTap: _quickActionSheet,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
                     for (var i = 0; i < entries.length; i++)
                       _RailTile(
                         icon: entries[i].$2,
@@ -1781,40 +1811,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
                 return const SyncArrowsIndicator();
               },
             ),
-            Consumer(
-              builder: (ctx, rref, _) {
-                final isOwner = rref.watch(isOwnerProvider).valueOrNull ?? false;
-                final curUser = rref.watch(currentUserProvider).valueOrNull;
-                final isAdmin = isOwner || curUser?.role == UserRole.admin;
-                if (!isAdmin) return const SizedBox.shrink();
-                final isDark = Theme.of(ctx).brightness == Brightness.dark;
-                return _appBarSquircleAction(
-                  tooltip: 'روبوت المحاسب الذكي (Gemini)',
-                  bg: isDark
-                      ? const Color(0xFF064E3B)
-                      : const Color(0xFFD1FAE5),
-                  fg: isDark
-                      ? const Color(0xFFFCD34D)
-                      : const Color(0xFF047857),
-                  border: Border.all(
-                    color: isDark
-                        ? const Color(0xFF10B981)
-                        : const Color(0xFF6EE7B7),
-                    width: 1.1,
-                  ),
-                  icon: Icon(
-                    Icons.smart_toy_rounded,
-                    size: 21,
-                    color: isDark
-                        ? const Color(0xFFFCD34D)
-                        : const Color(0xFF047857),
-                  ),
-                  onTap: () => openGeminiAssistantSheet(context, ref),
-                );
-              },
-            ),
-            // رمز الإشعارات 🔔 (في مكان النقاط سابقاً، والآن النقاط في الزاوية)
-            // أو العكس: استبدال موقع النقاط الثلاث وجرس الإشعارات بحيث يعود الجرس إلى الزاوية مكان النقاط حالياً وتصبح النقاط قبله
+            // رمز الإشعارات 🔔
             Consumer(
               builder: (ctx, rref, _) {
                 final unreadLocal =
@@ -1978,12 +1975,12 @@ class _HomeShellState extends ConsumerState<HomeShell>
             ),
           ],
         ),
-        floatingActionButton: _fab(),
         bottomNavigationBar: (desktop || _screen == AppScreen.pos)
             ? null
             : _MarkedBottomBar(
                 currentScreen: _screen,
                 onSelect: (s) => _go(s),
+                onQuickAction: _quickActionSheet,
               ),
       ),
     );
@@ -1996,15 +1993,19 @@ class _HomeShellState extends ConsumerState<HomeShell>
   }
 }
 
-/// شريط التنقل السفلي الحديث ذو الأيقونات المُعلّمة والمميّزة بصرياً
-/// كما في هوية التطبيق (الرئيسية، العملاء، الحركات، التقارير، الإعدادات).
+/// شريط التنقل السفلي الحديث ذو الأيقونات الخمس المتناظرة:
+/// على اليمين: (الرئيسية) ثم (العملاء)
+/// في المنتصف: زر «+ عملية» الدائري البارز بالتدرج الأزرق المضيء
+/// على اليسار: (الحركات) ثم (التقارير)
 class _MarkedBottomBar extends ConsumerWidget {
   final AppScreen currentScreen;
   final ValueChanged<AppScreen> onSelect;
+  final VoidCallback onQuickAction;
 
   const _MarkedBottomBar({
     required this.currentScreen,
     required this.onSelect,
+    required this.onQuickAction,
   });
 
   @override
@@ -2040,49 +2041,56 @@ class _MarkedBottomBar extends ConsumerWidget {
         padding: const EdgeInsets.symmetric(vertical: 6),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceAround,
+          crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            _BottomItem(
-              label: 'الرئيسية',
-              tone: AppTone.blue,
-              selected: currentScreen == AppScreen.dashboard,
-              icon: (sel, fg) => Icon(
-                Icons.dashboard_rounded,
-                color: fg,
-                size: 21,
+            Expanded(
+              child: _BottomItem(
+                label: 'الرئيسية',
+                tone: AppTone.blue,
+                selected: currentScreen == AppScreen.dashboard,
+                icon: (sel, fg) => Icon(
+                  Icons.dashboard_rounded,
+                  color: fg,
+                  size: 21,
+                ),
+                onTap: () => onSelect(AppScreen.dashboard),
               ),
-              onTap: () => onSelect(AppScreen.dashboard),
             ),
-            _BottomItem(
-              label: 'العملاء',
-              tone: AppTone.blue,
-              selected: currentScreen == AppScreen.accounts,
-              icon: (sel, fg) => Icon(
-                Icons.people_alt_rounded,
-                color: fg,
-                size: 21,
+            Expanded(
+              child: _BottomItem(
+                label: 'العملاء',
+                tone: AppTone.blue,
+                selected: currentScreen == AppScreen.accounts,
+                icon: (sel, fg) => Icon(
+                  Icons.people_alt_rounded,
+                  color: fg,
+                  size: 21,
+                ),
+                onTap: () => onSelect(AppScreen.accounts),
               ),
-              onTap: () => onSelect(AppScreen.accounts),
             ),
-            _BottomItem(
-              label: 'الحركات',
-              tone: AppTone.green,
-              selected: currentScreen == AppScreen.transactions,
-              icon: (sel, fg) => _MarkedReceiptIcon(selected: sel),
-              onTap: () => onSelect(AppScreen.transactions),
+            Expanded(
+              child: _CenterOperationButton(
+                onTap: onQuickAction,
+              ),
             ),
-            _BottomItem(
-              label: 'التقارير',
-              tone: AppTone.violet,
-              selected: currentScreen == AppScreen.reports,
-              icon: (sel, fg) => _MarkedBarChartIcon(selected: sel),
-              onTap: () => onSelect(AppScreen.reports),
+            Expanded(
+              child: _BottomItem(
+                label: 'الحركات',
+                tone: AppTone.green,
+                selected: currentScreen == AppScreen.transactions,
+                icon: (sel, fg) => _MarkedReceiptIcon(selected: sel),
+                onTap: () => onSelect(AppScreen.transactions),
+              ),
             ),
-            _BottomItem(
-              label: 'الإعدادات',
-              tone: AppTone.teal,
-              selected: currentScreen == AppScreen.settings,
-              icon: (sel, fg) => _MarkedGearIcon(selected: sel),
-              onTap: () => onSelect(AppScreen.settings),
+            Expanded(
+              child: _BottomItem(
+                label: 'التقارير',
+                tone: AppTone.violet,
+                selected: currentScreen == AppScreen.reports,
+                icon: (sel, fg) => _MarkedBarChartIcon(selected: sel),
+                onTap: () => onSelect(AppScreen.reports),
+              ),
             ),
           ],
         ),
@@ -2276,77 +2284,79 @@ class _MarkedReceiptIcon extends StatelessWidget {
   }
 }
 
-/// أيقونة الترس المعدني للإعدادات
-class _MarkedGearIcon extends StatelessWidget {
-  final bool selected;
-  const _MarkedGearIcon({required this.selected});
-
-
-  @override
-  Widget build(BuildContext context) {
-    if (selected) {
-      return const Icon(Icons.settings_rounded, color: Colors.white, size: 22);
-    }
-    return const Icon(
-      Icons.settings_rounded,
-      color: Color(0xFF64748B),
-      size: 22,
-    );
-  }
-}
-
-/// زر العملية العائم المميّز بالتدرج الدائري كما في الصورة
-class _MarkedOperationFab extends StatelessWidget {
-  final VoidCallback? onPressed;
-  const _MarkedOperationFab({required this.onPressed});
-
+/// زر «+ عملية» الوسطي البارز في الشريط السفلي:
+/// دائرة بارزة للأعلى بتدرج لوني أزرق مشرق (من الأزرق السماوي المضيء إلى الأزرق الملكي الغني)،
+/// محاطة بإطار أبيض ناعم مع ظل مضيء خفيف، يتوسطها رمز (+) أبيض وتحتها كلمة «عملية».
+class _CenterOperationButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _CenterOperationButton({required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 58,
-      height: 58,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: const LinearGradient(
-          colors: [Color(0xFFFB923C), Color(0xFF0284C7)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF0284C7).withValues(alpha: 0.4),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
-          ),
-          BoxShadow(
-            color: const Color(0xFFFB923C).withValues(alpha: 0.25),
-            blurRadius: 8,
-            offset: const Offset(-2, -2),
-          ),
-        ],
-      ),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          customBorder: const CircleBorder(),
-          onTap: onPressed,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.add_rounded, color: Colors.white, size: 22),
-              Text(
-                'عملية',
-                style: TextStyle(
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Tooltip(
+      message: 'إجراء سريع',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          Sfx.tap();
+          onTap();
+        },
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Transform.translate(
+              offset: const Offset(0, -10),
+              child: Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: const LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Color(0xFF38BDF8),
+                      Color(0xFF0EA5E9),
+                      Color(0xFF2563EB),
+                    ],
+                  ),
+                  border: Border.all(
+                    color: isDark ? const Color(0xFF0F172A) : Colors.white,
+                    width: 3.2,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFF0EA5E9).withValues(alpha: 0.42),
+                      blurRadius: 12,
+                      spreadRadius: 1,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                alignment: Alignment.center,
+                child: const Icon(
+                  Icons.add_rounded,
                   color: Colors.white,
-                  fontSize: 10.5,
-                  fontWeight: FontWeight.w800,
-                  fontFamily: uiFontFamily,
-                  height: 1.0,
+                  size: 27,
                 ),
               ),
-            ],
-          ),
+            ),
+            Transform.translate(
+              offset: const Offset(0, -5),
+              child: Text(
+                'عملية',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: isDark
+                      ? const Color(0xFF38BDF8)
+                      : const Color(0xFF0284C7),
+                  fontFamily: uiFontFamily,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -2812,12 +2822,27 @@ class _Drawer extends ConsumerWidget {
                                     (wsMode == 'member' && rawUserName == 'المدير')
                                         ? ''
                                         : rawUserName;
+                                // (3.98.39 / الملاحظة 1) اسم المالك المخصّص
+                                // (profile.owner_name) مصدر ثالث موثوق: لا
+                                // يعود الدرج إلى «المدير 🫡» أو «المحاسب» بعد
+                                // إعادة المزامنة.
+                                final ownerName = rref
+                                    .watch(ownerDisplayNameProvider)
+                                    .valueOrNull
+                                    ?.trim();
+                                final customOwner =
+                                    (ownerName != null &&
+                                            ownerName.isNotEmpty &&
+                                            ownerName != 'المدير')
+                                        ? ownerName
+                                        : null;
                                 final label =
                                     (devName != null && devName.isNotEmpty)
                                         ? devName
-                                        : (safeUserName.isNotEmpty
-                                            ? safeUserName
-                                            : 'المحاسب');
+                                        : (customOwner ??
+                                            (safeUserName.isNotEmpty
+                                                ? safeUserName
+                                                : 'المحاسب'));
                                 return Row(
                                   children: [
                                     Flexible(
@@ -3164,6 +3189,68 @@ class _Drawer extends ConsumerWidget {
                     dark,
                     onSelect,
                   ),
+                  if (isMasterAdmin)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 3),
+                      child: Material(
+                        color: dark
+                            ? const Color(0xFF064E3B).withValues(alpha: 0.35)
+                            : const Color(0xFFECFDF5),
+                        borderRadius: BorderRadius.circular(14),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(14),
+                          onTap: () {
+                            Navigator.pop(context);
+                            openGeminiAssistantSheet(context, ref);
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 11,
+                            ),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                color: dark
+                                    ? const Color(0xFF10B981).withValues(alpha: 0.4)
+                                    : const Color(0xFFA7F3D0),
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.smart_toy_rounded,
+                                  color: dark
+                                      ? const Color(0xFF34D399)
+                                      : const Color(0xFF059669),
+                                  size: 22,
+                                ),
+                                const SizedBox(width: 14),
+                                Expanded(
+                                  child: Text(
+                                    'المساعد الذكي (Gemini)',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w800,
+                                      color: dark
+                                          ? const Color(0xFF6EE7B7)
+                                          : const Color(0xFF047857),
+                                    ),
+                                  ),
+                                ),
+                                Icon(
+                                  Icons.auto_awesome_rounded,
+                                  size: 16,
+                                  color: dark
+                                      ? const Color(0xFFFCD34D)
+                                      : const Color(0xFF059669),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),

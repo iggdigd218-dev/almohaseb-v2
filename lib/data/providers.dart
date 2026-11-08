@@ -6,12 +6,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/accounting.dart';
+import '../core/device_names.dart';
 import '../core/format.dart';
 import '../core/media_paths.dart';
 import '../core/models.dart';
 import '../core/rbac.dart';
 import 'repository.dart';
-import 'sync/device_id.dart';
 import 'device_license.dart';
 import 'sync/subscription_guard.dart';
 import 'sync/sync_engine.dart';
@@ -1366,13 +1366,10 @@ final ownDeviceNameProvider = FutureProvider<String?>((ref) async {
   if (rows.isEmpty) return null;
   final n = (rows.first['name'] as String?)?.trim();
   // الاسم الافتراضي قبل أي تخصيص لا يُعرض كعنوان — يبقى «المحاسب».
-  if (n == null ||
-      n.isEmpty ||
-      n == 'جهاز المحاسب' ||
-      n == 'جهاز مدير الحسابات' || // اسم افتراضي قديم.
-      n == kDefaultMemberName) {
-    return null;
-  }
+  // (3.98.39) التشييك مركزي في isPlaceholderDeviceName فيتجاهل النسخ
+  // المزخرفة مثل «المدير 🫡» التي كانت تُعدّ هوية مخصّصة.
+  if (n == null || isPlaceholderDeviceName(n)) return null;
+  if (n == 'جهاز المحاسب' || n == 'جهاز مدير الحسابات') return null;
   return n;
 });
 
@@ -1388,6 +1385,39 @@ final allDeviceNamesProvider = FutureProvider<Map<String, String>>((ref) async {
           ? (r['name'] as String).trim()
           : 'جهاز',
   };
+});
+
+/// (3.98.39 / الملاحظة 1) الاسم المعروض للمالك/المدير — مصدر حقيقة واحد
+/// للدرج الجانبي وبطاقة المالك في شاشة المجموعة:
+/// profile.owner_name ← account.name ← اسم جهاز المالك ← اسم مستخدم المالك.
+/// لا يعود أبداً إلى «المدير 🫡» لأن الأسماء الافتراضية المزخرفة تُتجاهل.
+final ownerDisplayNameProvider = FutureProvider<String>((ref) async {
+  ref.watch(refreshProvider);
+  final repo = ref.read(repoProvider);
+  final st = await repo.settings();
+  String deviceName = '';
+  String userName = '';
+  try {
+    final db = await repo.database;
+    final devRows = await db.query('devices',
+        columns: ['name'],
+        where: "is_owner = 1 AND COALESCE(deleted_at,'') = ''",
+        limit: 1);
+    if (devRows.isNotEmpty) {
+      deviceName = '${devRows.first['name'] ?? ''}'.trim();
+    }
+    final userRows = await db.query('users',
+        columns: ['name'], where: 'is_me = 1', limit: 1);
+    if (userRows.isNotEmpty) {
+      userName = '${userRows.first['name'] ?? ''}'.trim();
+    }
+  } catch (_) {}
+  return resolveOwnerDisplayName(
+    profileOwnerName: st['profile.owner_name'],
+    accountName: st['account.name'],
+    deviceName: deviceName,
+    userName: userName,
+  );
 });
 
 class GroupPeer {

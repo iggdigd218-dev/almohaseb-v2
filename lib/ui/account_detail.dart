@@ -136,6 +136,15 @@ class _AccountDetailScreenState extends ConsumerState<AccountDetailScreen> {
           appBar: AppBar(
             title: Text(a.name, overflow: TextOverflow.ellipsis),
             actions: [
+              // (3.98.34) كان زراً عائماً — صار أيقونة في شريط العنوان بلا تراكب.
+              IconButton(
+                tooltip: 'عملية جديدة',
+                icon: const Icon(Icons.add_rounded),
+                onPressed: () async {
+                  await openTxForm(context, ref, presetAccountId: accountId);
+                  bump(ref);
+                },
+              ),
               if (canEdit)
                 IconButton(
                   tooltip: 'تعديل',
@@ -385,14 +394,6 @@ class _AccountDetailScreenState extends ConsumerState<AccountDetailScreen> {
                   ),
                 ),
             ],
-          ),
-          floatingActionButton: FloatingActionButton.extended(
-            onPressed: () async {
-              await openTxForm(context, ref, presetAccountId: accountId);
-              bump(ref);
-            },
-            icon: const Icon(Icons.add),
-            label: const Text('عملية جديدة'),
           ),
         );
       },

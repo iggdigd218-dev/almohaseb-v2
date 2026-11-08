@@ -1124,6 +1124,7 @@ class Item {
   final bool archived;
   final bool isDeleted;
   final bool isActive;
+  final bool excludeFromShortages;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -1146,6 +1147,7 @@ class Item {
     this.archived = false,
     this.isDeleted = false,
     this.isActive = true,
+    this.excludeFromShortages = false,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -1189,6 +1191,7 @@ class Item {
     bool? archived,
     bool? isDeleted,
     bool? isActive,
+    bool? excludeFromShortages,
   }) =>
       Item(
         id: id ?? this.id,
@@ -1209,6 +1212,7 @@ class Item {
         archived: archived ?? this.archived,
         isDeleted: isDeleted ?? this.isDeleted,
         isActive: isActive ?? this.isActive,
+        excludeFromShortages: excludeFromShortages ?? this.excludeFromShortages,
         createdAt: createdAt,
         updatedAt: DateTime.now(),
       );
@@ -1232,6 +1236,7 @@ class Item {
         'archived': archived ? 1 : 0,
         'is_deleted': isDeleted ? 1 : 0,
         'is_active': isActive ? 1 : 0,
+        'exclude_from_shortages': excludeFromShortages ? 1 : 0,
         'created_at': createdAt.toIso8601String(),
         'updated_at': updatedAt.toIso8601String(),
       };
@@ -1258,6 +1263,8 @@ class Item {
                 '${m['deleted_at']}'.trim().isNotEmpty &&
                 '${m['deleted_at']}'.trim().toLowerCase() != 'null'),
         isActive: (m['is_active'] ?? 1) == 1,
+        excludeFromShortages:
+            ((m['exclude_from_shortages'] ?? 0) as num).toInt() == 1,
         createdAt: DateTime.parse(m['created_at'] as String),
         updatedAt: DateTime.parse(m['updated_at'] as String),
       );

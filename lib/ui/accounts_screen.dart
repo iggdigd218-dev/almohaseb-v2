@@ -151,22 +151,6 @@ class AccountsScreen extends ConsumerWidget {
             ),
           ],
         ),
-        PositionedDirectional(
-          bottom: 16,
-          end: 16,
-          child: FloatingActionButton.extended(
-            heroTag: 'accounts_add_fab',
-            onPressed: () {
-              Sfx.tap();
-              openAccountForm(context, ref);
-            },
-            icon: const Icon(Icons.person_add_alt_1_rounded),
-            label: const Text(
-              'حساب جديد',
-              style: TextStyle(fontWeight: FontWeight.w800),
-            ),
-          ),
-        ),
       ],
     );
   }

@@ -31,6 +31,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'logout_flow.dart' show showLogoutRequestsSheet, showSecuredLogout;
 import 'group_management_screen.dart';
 import 'support_chat_screen.dart';
+import 'gemini_assistant_sheet.dart';
 import 'widgets.dart';
 import '../core/cloud_config.dart';
 import '../core/platform_info.dart';
@@ -450,71 +451,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         final isIndividual = accountType != 'enterprise';
         // (3.70.0 — إعادة التصميم) تبويبات وبطاقات نقر مستقلة مصنّفة —
         // بلا قوائم منسدلة متداخلة (ExpansionTile) إطلاقاً.
-        return DefaultTabController(
-          length: 4,
-          child: Stack(
-            children: [
-              Column(
-                children: [
-                  Material(
-                    color: AppColors.surfaceOf(context),
-                    child: SafeArea(
-                      bottom: false,
-                      child: TabBar(
-                        isScrollable: true,
-                        tabAlignment: TabAlignment.start,
-                        labelColor: AppColors.primaryOf(context),
-                        unselectedLabelColor: AppColors.text2Of(context),
-                        indicatorColor: AppColors.primaryOf(context),
-                        dividerColor: AppColors.borderOf(context),
-                        labelStyle: const TextStyle(
-                            fontWeight: FontWeight.w800, fontSize: 12.5),
-                        unselectedLabelStyle: const TextStyle(
-                            fontWeight: FontWeight.w600, fontSize: 12.5),
-                        tabs: const [
-                          Tab(
-                              icon: Icon(Icons.palette_outlined, size: 19),
-                              text: 'المظهر'),
-                          Tab(
-                              icon: Icon(Icons.receipt_long_outlined, size: 19),
-                              text: 'الفواتير والبيع'),
-                          Tab(
-                              icon: Icon(Icons.security_outlined, size: 19),
-                              text: 'الأمان'),
-                          Tab(
-                              icon: Icon(Icons.hub_outlined, size: 19),
-                              text: 'النظام والمزامنة'),
-                        ],
-                      ),
-                    ),
-                  ),
-                  Expanded(
-                    child: TabBarView(
-                      children: [
-                        // [بطاقة المظهر والمنشأة]
+        // (3.98.34) شاشة الإعدادات: قائمة بطاقات عمودية — كل قسم صفحة
+        // مستقلة، ولا شريط تبويبات أفقي ولا تكرار لبطاقات المظهر.
+        final pageBodies = <Widget>[
+                        // [صفحة بيانات المؤسسة]
                         _tabPage([
-                          const ThemeModeSelectorCard(),
-                          const SizedBox(height: 12),
-                          Card(
-                            child: ListTile(
-                              leading: const Icon(Icons.palette_outlined),
-                              title: const Text('المظهر والأصوات'),
-                              subtitle: const Text(
-                                  'الوضع الليلي/النهاري، حجم الخط، الأصوات والاهتزاز'),
-                              trailing: const Icon(Icons.chevron_left),
-                              onTap: () => Navigator.of(context).push(
-                                MaterialPageRoute(
-                                    builder: (_) => const AppearanceScreen()),
-                              ),
-                            ),
-                          ),
-                          if (canEditOrg) ...[
-                            const SizedBox(height: 18),
+                          if (canEditOrg)
                             _Collapsible(
                               title: 'بيانات المؤسسة',
                               icon: Icons.storefront_outlined,
                               color: AppColors.primary,
-                              initiallyExpanded: false,
+                              initiallyExpanded: true,
                               children: [
                                 for (final f in _orgFields)
                                   Padding(
@@ -525,38 +472,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                                       maxLines: f.$5,
                                       decoration: InputDecoration(
                                         labelText: f.$2,
-                                        prefixIcon: Icon(f.$3, size: 19),
+                                        prefixIcon: Icon(f.$3, size: 18),
                                         isDense: true,
                                       ),
                                     ),
                                   ),
                               ],
+                            )
+                          else
+                            const EmptyState(
+                              icon: Icons.storefront_outlined,
+                              title: 'بيانات المؤسسة غير قابلة للتعديل',
+                              message:
+                                  'هذا القسم متاح لمالك المنشأة أو المدير فقط.',
                             ),
-                            const SizedBox(height: 12),
-                            Card(
-                              child: ListTile(
-                                leading: const Icon(
-                                  Icons.logout_rounded,
-                                  color: Colors.redAccent,
-                                ),
-                                title: const Text(
-                                  'تسجيل الخروج',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    color: Colors.redAccent,
-                                  ),
-                                ),
-                                subtitle: const Text(
-                                  'إنهاء الجلسة الحالية وإغلاق قاعدة البيانات والعودة لشاشة البداية',
-                                  style: TextStyle(fontSize: 12),
-                                ),
-                                trailing: const Icon(Icons.chevron_left,
-                                    color: Colors.redAccent),
-                                onTap: () => showSecuredLogout(ref),
-                              ),
-                            ),
-                          ],
-                          const SizedBox(height: 18),
                         ]),
                         // [بطاقة الفواتير ونقطة البيع]
                         _tabPage([
@@ -887,6 +816,30 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                                 const _FactoryResetTile(),
                               ],
                             ],
+                          ),
+                          const SizedBox(height: 12),
+                          // (3.98.34) تسجيل الخروج انتقل من صفحة المظهر إلى هنا.
+                          Card(
+                            child: ListTile(
+                              leading: const Icon(
+                                Icons.logout_rounded,
+                                color: Colors.redAccent,
+                              ),
+                              title: const Text(
+                                'تسجيل الخروج',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.redAccent,
+                                ),
+                              ),
+                              subtitle: const Text(
+                                'إنهاء الجلسة الحالية وإغلاق قاعدة البيانات والعودة لشاشة البداية',
+                                style: TextStyle(fontSize: 12),
+                              ),
+                              trailing: const Icon(Icons.chevron_left,
+                                  color: Colors.redAccent),
+                              onTap: () => showSecuredLogout(ref),
+                            ),
                           ),
                           const SizedBox(height: 18),
                         ]),
@@ -1338,12 +1291,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                             ),
                           ),
                         ]),
-
-                      ],
-                    ),
-                  ),
-                ],
-              ),
+        ];
+        return Stack(
+          children: [
+            _SettingsHome(pages: pageBodies, onSave: _saveAll, saving: _saving),
               // شريط حفظ عائم يظهر فور أي تعديل غير محفوظ.
               if (_dirty)
                 Positioned(
@@ -1389,8 +1340,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     ),
                   ),
                 ),
-            ],
-          ),
+          ],
         );
       },
     );
@@ -1413,6 +1363,173 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
             ]
           : children,
+    );
+  }
+}
+
+/// (3.98.34) الشاشة الرئيسية للإعدادات: قائمة بطاقات عمودية، كل بطاقة
+/// تفتح صفحة مستقلة (لا تبويبات أفقية ولا تكرار لبطاقات المظهر).
+class _SettingsHome extends ConsumerWidget {
+  final List<Widget> pages;
+  final VoidCallback? onSave;
+  final bool saving;
+  const _SettingsHome({
+    required this.pages,
+    this.onSave,
+    this.saving = false,
+  });
+
+  static const _items = <(String, String, IconData, Color, int)>[
+    (
+      'بيانات المؤسسة',
+      'الاسم التجاري والنشاط وبيانات التواصل والعنوان',
+      Icons.storefront_outlined,
+      Color(0xFF2563EB),
+      0,
+    ),
+    (
+      'الفواتير والبيع',
+      'العملة والترقيم وخيارات الفاتورة ونقطة البيع',
+      Icons.receipt_long_outlined,
+      Color(0xFF7C3AED),
+      1,
+    ),
+    (
+      'المظهر والأصوات',
+      'الوضع الليلي والنهاري وحجم الخط والأصوات والاهتزاز',
+      Icons.palette_outlined,
+      Color(0xFFDB2777),
+      -1,
+    ),
+    (
+      'المساعد الذكي (Gemini)',
+      'محادثة ذكية لإدارة الفواتير والأرصدة والأصناف والأوامر الصوتية',
+      Icons.smart_toy_rounded,
+      Color(0xFF10B981),
+      -2,
+    ),
+    (
+      'الأمان',
+      'قفل الشاشة والبصمة والنسخ الاحتياطي وإعادة الضبط',
+      Icons.security_outlined,
+      Color(0xFF059669),
+      2,
+    ),
+    (
+      'النظام والمزامنة',
+      'المزامنة وربط الأجهزة والاشتراك والدعم والتحديث',
+      Icons.hub_outlined,
+      Color(0xFFEA580C),
+      3,
+    ),
+  ];
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isOwner = ref.watch(isOwnerProvider).valueOrNull ?? false;
+    final curUser = ref.watch(currentUserProvider).valueOrNull;
+    final isAdmin = isOwner || curUser == null || curUser.role == UserRole.admin;
+    final visibleItems = _items.where((it) => it.$5 != -2 || isAdmin).toList();
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 40),
+      children: [
+        for (final it in visibleItems)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Material(
+              color: AppColors.surfaceOf(context),
+              borderRadius: BorderRadius.circular(AppRadius.card),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                onTap: () {
+                  if (it.$5 == -2) {
+                    openGeminiAssistantSheet(context, ref);
+                    return;
+                  }
+                  if (it.$5 < 0) {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const AppearanceScreen(),
+                      ),
+                    );
+                    return;
+                  }
+                  if (it.$5 >= pages.length) return;
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => Scaffold(
+                        appBar: AppBar(
+                          title: Text(it.$1),
+                          actions: [
+                            if (onSave != null)
+                              IconButton(
+                                tooltip: 'حفظ التعديلات',
+                                icon: const Icon(Icons.save_outlined),
+                                onPressed: saving ? null : onSave,
+                              ),
+                          ],
+                        ),
+                        body: pages[it.$5],
+                      ),
+                    ),
+                  );
+                },
+                child: Container(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(AppRadius.card),
+                    boxShadow: AppShadows.card(Theme.of(context).colorScheme),
+                  ),
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 38,
+                        height: 38,
+                        decoration: BoxDecoration(
+                          color: it.$4.withValues(alpha: .12),
+                          borderRadius: BorderRadius.circular(11),
+                        ),
+                        child: Icon(it.$3, size: 19, color: it.$4),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              it.$1,
+                              style: const TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              it.$2,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 11,
+                                height: 1.35,
+                                color: AppColors.text2Of(context),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(
+                        Icons.chevron_left,
+                        size: 20,
+                        color: AppColors.text3Of(context),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

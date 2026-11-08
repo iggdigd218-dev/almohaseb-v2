@@ -9,6 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../core/accounting.dart';
 import '../core/desktop.dart';
 import '../core/format.dart';
+import '../core/item_search.dart';
 import '../core/icon_catalog.dart';
 import '../core/models.dart';
 import '../core/thermal_invoice_doc.dart';
@@ -1379,7 +1380,6 @@ class _PosScreenState extends ConsumerState<PosScreen>
     List<ItemCategory> categories,
   ) {
     final hasSearch = _searchQuery.trim().isNotEmpty;
-    final normQ = hasSearch ? Fmt.normArabic(_searchQuery) : '';
 
     final catsInSection = <int>{
       for (final c in categories)
@@ -1396,14 +1396,20 @@ class _PosScreenState extends ConsumerState<PosScreen>
       }
     }
 
+    // (3.98.39 / الملاحظة 4) البحث في POS يشمل الملاحظات بأولوية درجتين:
+    // الاسم/الباركود/PLU/رقم الصنف/الفئة أولاً، ثم الملاحظات وحدها.
+    int tierOf(Item item) => itemSearchTier(
+          query: _searchQuery,
+          name: item.name,
+          sku: item.sku,
+          category: item.category,
+          notes: item.notes,
+          plu: item.plu,
+          id: item.id,
+        );
     final filteredItems = allItems.where((item) {
       if (hasSearch) {
-        final matchPlu = item.plu != null &&
-            ('${item.plu}' == normQ || '${item.plu}'.startsWith(normQ));
-        final matchSku = Fmt.normArabic(item.sku).contains(normQ);
-        final matchNameCat =
-            Fmt.smartContains('${item.name} ${item.category}', _searchQuery);
-        return matchPlu || matchSku || matchNameCat;
+        return tierOf(item) > ItemSearchTier.none;
       }
 
       if (_selectedCategoryId != null) {
@@ -1432,6 +1438,8 @@ class _PosScreenState extends ConsumerState<PosScreen>
 
     // (2026-09-24) الترتيب المختار من زر الفلاتر — **لا يغيّر أرقام PLU**:
     // الأرقام ثابتة للأبد ومستقلة عن أي فرز معروض.
+    // (3.98.39) عند وجود بحث: نتائج الدرجة الأولى (اسم/باركود/PLU/رقم) تسبق
+    // دائماً نتائج الملاحظات، والفرز المختار يُطبَّق داخل كل درجة.
     switch (_posSort) {
       case 1:
         filteredItems.sort((a, b) => b.sellPrice.compareTo(a.sellPrice));
@@ -1439,6 +1447,16 @@ class _PosScreenState extends ConsumerState<PosScreen>
         filteredItems.sort((a, b) => b.quantity.compareTo(a.quantity));
       default:
         filteredItems.sort((a, b) => a.name.compareTo(b.name));
+    }
+    if (hasSearch) {
+      // قسمة صريحة تحفظ الفرز المختار داخل كل درجة (الدرجة الأولى أولاً).
+      final primary = <Item>[];
+      final notesOnly = <Item>[];
+      for (final i in filteredItems) {
+        final tier = tierOf(i);
+        (tier >= ItemSearchTier.primary ? primary : notesOnly).add(i);
+      }
+      return [...primary, ...notesOnly];
     }
     return filteredItems;
   }

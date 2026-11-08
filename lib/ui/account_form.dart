@@ -1,4 +1,3 @@
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_contacts/flutter_contacts.dart' hide Account;
@@ -13,46 +12,34 @@ import '../data/providers.dart';
 import 'widgets.dart';
 import '../core/platform_info.dart';
 
-/// فتح نموذج إضافة/تعديل حساب.
-///
-/// (2026-09-24) نموذج منبثق سفلي بانحناء علوي 24px بدل شاشة كاملة —
-/// نفس المحتوى (AccountFormScreen) بلا أي تغيير في المنطق أو الحفظ.
+/// فتح نموذج إضافة/تعديل حساب كبطاقة منبثقة مدمجة تعلو الكيبورد.
 Future<bool> openAccountForm(
   BuildContext context,
   WidgetRef ref, {
   Account? existing,
 }) async {
-  final r = await showModalBottomSheet<bool>(
+  final r = await showDialog<bool>(
     context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
-    backgroundColor: Colors.transparent,
-    builder: (ctx) {
-      return Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(ctx).bottom),
-        child: SafeArea(
-          child: Container(
-            decoration: BoxDecoration(
-              color: AppColors.surfaceOf(ctx),
-              borderRadius: AppRadius.sheetTop,
-            ),
-            child: AccountFormScreen(
-              existing: existing,
-              embedded: true,
-            ),
-          ),
+    barrierDismissible: true,
+    builder: (ctx) => Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      clipBehavior: Clip.antiAlias,
+      backgroundColor: AppColors.surfaceOf(ctx),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 480),
+        child: AccountFormScreen(
+          existing: existing,
+          embedded: true,
         ),
-      );
-    },
+      ),
+    ),
   );
   return r ?? false;
 }
 
 class AccountFormScreen extends ConsumerStatefulWidget {
   final Account? existing;
-
-  /// `true` حين يُعرض داخل ورقة سفلية: يلغي الشريط العلوي والخلفية
-  /// المستقلّين (الورقة توفّرهما) ويكتفي بالمحتوى.
   final bool embedded;
 
   const AccountFormScreen({super.key, this.existing, this.embedded = false});
@@ -83,6 +70,14 @@ class _State extends ConsumerState<AccountFormScreen> {
 
   bool get _isEdit => widget.existing != null;
 
+  static const List<(String, String)> _shareOptions = <(String, String)>[
+    ('none', '🚫 عدم المشاركة'),
+    ('auto_whatsapp', '💬 واتساب'),
+    ('auto_w4b', '💼 واتساب أعمال'),
+    ('auto_sms', '✉️ رسائل SMS'),
+    ('auto_system', '📤 خيارات النظام'),
+  ];
+
   @override
   void initState() {
     super.initState();
@@ -109,8 +104,6 @@ class _State extends ConsumerState<AccountFormScreen> {
     final rawNotify = (a?.notifyChannel ?? 'none').trim();
     _notifyChannel = switch (rawNotify) {
       'auto_whatsapp' || 'auto_w4b' || 'auto_sms' || 'auto_system' => rawNotify,
-      // (دفعة التدقيق) ترحيل القيمتين القديمتين بأمان إلى نظيريهما
-      // التلقائيين بدل إسقاطهما إلى «عدم المشاركة».
       'whatsapp' => 'auto_whatsapp',
       'sms' => 'auto_sms',
       _ => 'none',
@@ -225,18 +218,15 @@ class _State extends ConsumerState<AccountFormScreen> {
       return;
     }
     try {
-      // طلب إذن جهات الاتصال من النظام نفسه مباشرة (دون أي نافذة مخصصة للتطبيق).
       if (!await NexKeepAlive.hasPermission(NexKeepAlive.permReadContacts)) {
         await NexKeepAlive.requestPermission(NexKeepAlive.permReadContacts);
       }
       if (!mounted) return;
 
-      // 1) فتح تطبيق جهات الاتصال الرسمي في الهاتف عبر Intent النظام المباشر.
       final picked = await NexKeepAlive.pickContact();
       String name = (picked?['name'] ?? '').trim();
       String phone = Fmt.phoneDigits(picked?['phone'] ?? '');
 
-      // 2) احتياطياً: عبر FlutterContacts.openExternalPick إن لم يرجع المنتقي المباشر نتيجة.
       if (name.isEmpty && phone.isEmpty) {
         final contact = await FlutterContacts.openExternalPick();
         if (contact == null) return;
@@ -263,264 +253,298 @@ class _State extends ConsumerState<AccountFormScreen> {
     }
   }
 
+  Widget _buildShareMenuButton(BuildContext context, {bool onHeader = false}) {
+    final active = _notifyChannel != 'none';
+    return PopupMenuButton<String>(
+      tooltip: 'إعداد مشاركة العمليات تلقائياً',
+      initialValue: _notifyChannel,
+      onSelected: (v) {
+        Sfx.tap();
+        setState(() => _notifyChannel = v);
+      },
+      itemBuilder: (_) => [
+        const PopupMenuItem<String>(
+          enabled: false,
+          height: 30,
+          child: Text(
+            'مشاركة العمليات تلقائياً:',
+            style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800),
+          ),
+        ),
+        for (final opt in _shareOptions)
+          PopupMenuItem<String>(
+            value: opt.$1,
+            height: 38,
+            child: Row(
+              children: [
+                Icon(
+                  _notifyChannel == opt.$1
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_off,
+                  size: 17,
+                  color: _notifyChannel == opt.$1
+                      ? AppColors.primaryOf(context)
+                      : Colors.grey,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(opt.$2, style: const TextStyle(fontSize: 12.5)),
+                ),
+              ],
+            ),
+          ),
+      ],
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: onHeader
+              ? Colors.white.withValues(alpha: active ? 0.24 : 0.14)
+              : AppColors.primaryOf(context).withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              active ? Icons.share_rounded : Icons.share_outlined,
+              size: 16,
+              color: onHeader ? Colors.white : AppColors.primaryOf(context),
+            ),
+            if (active) ...[
+              const SizedBox(width: 4),
+              Container(
+                width: 6,
+                height: 6,
+                decoration: const BoxDecoration(
+                  color: Color(0xFF10B981),
+                  shape: BoxShape.circle,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final curs =
         ref.watch(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
 
-    final formContent = Form(
+    final formBody = Form(
       key: _formKey,
       child: SingleChildScrollView(
         physics: const ClampingScrollPhysics(),
         keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-        padding: EdgeInsets.fromLTRB(
-          16,
-          widget.embedded ? 8 : 12,
-          16,
-          20,
-        ),
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (widget.embedded) ...[
-              Center(
-                child: Container(
-                  width: 44,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: 10),
-                  decoration: BoxDecoration(
-                    color: AppColors.borderOf(context),
-                    borderRadius: BorderRadius.circular(99),
-                  ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Text(
-                  _isEdit ? 'تعديل حساب' : 'حساب جديد',
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-            ],
-            // زر جلب بيانات العميل (اسم + رقم) من تطبيق جهات الاتصال.
+            // ══ الصف 1: اسم الحساب + أيقونة جهات الاتصال + قائمة نوع الحساب (عميل ▾) ══
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
+                  flex: 6,
                   child: TextFormField(
                     controller: _name,
-                    scrollPadding: const EdgeInsets.only(bottom: 140),
-                    decoration:
-                        const InputDecoration(labelText: 'اسم الحساب *'),
+                    style: const TextStyle(fontSize: 13.5),
+                    decoration: const InputDecoration(
+                      labelText: 'اسم الحساب *',
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 10,
+                      ),
+                    ),
                     textInputAction: TextInputAction.next,
                     validator: (v) =>
                         (v ?? '').trim().isEmpty ? 'الاسم مطلوب' : null,
                   ),
                 ),
-                const SizedBox(width: 8),
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: IconButton.filledTonal(
-                    tooltip: 'جلب من جهات الاتصال',
-                    style: IconButton.styleFrom(
-                      backgroundColor: Colors.blue.withValues(alpha: 0.12),
-                      foregroundColor: Colors.blue.shade700,
-                      minimumSize: const Size(48, 48),
+                const SizedBox(width: 6),
+                IconButton.filledTonal(
+                  tooltip: 'جلب من جهات الاتصال',
+                  visualDensity: VisualDensity.compact,
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.blue.withValues(alpha: 0.12),
+                    foregroundColor: Colors.blue.shade700,
+                    minimumSize: const Size(38, 40),
+                    padding: EdgeInsets.zero,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
                     ),
-                    icon: const Icon(Icons.contacts_rounded),
-                    onPressed: _pickContact,
+                  ),
+                  icon: const Icon(Icons.contacts_rounded, size: 19),
+                  onPressed: _pickContact,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  flex: 4,
+                  child: DropdownButtonFormField<AccountKind>(
+                    initialValue: _kind,
+                    isExpanded: true,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.textOf(context),
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'النوع',
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 9,
+                      ),
+                    ),
+                    items: AccountKind.values
+                        .map(
+                          (k) => DropdownMenuItem<AccountKind>(
+                            value: k,
+                            child: Text(
+                              k.label,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (v) {
+                      if (v != null) setState(() => _kind = v);
+                    },
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 8),
-            Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: Theme.of(context)
-                    .colorScheme
-                    .surfaceContainerHighest
-                    .withValues(alpha: 0.35),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Wrap(
-                spacing: 6,
-                runSpacing: 4,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  const Text(
-                    'نوع الحساب:',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.grey,
-                    ),
-                  ),
-                  ...AccountKind.values.map(
-                    (k) => ChoiceChip(
-                      label: Text(
-                        '${k.icon} ${k.label}',
-                        style: const TextStyle(fontSize: 11),
+
+            // ══ الصف 2: الرصيد الافتتاحي (يمين) + العملة (يسار) ══
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _opening,
+                    style: const TextStyle(fontSize: 13.5),
+                    decoration: const InputDecoration(
+                      labelText: 'الرصيد الافتتاحي',
+                      hintText: '0.00',
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 10,
                       ),
-                      visualDensity: VisualDensity.compact,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 4,
-                        vertical: 0,
-                      ),
-                      selected: _kind == k,
-                      showCheckmark: false,
-                      onSelected: (_) => setState(() => _kind = k),
                     ),
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                      signed: true,
+                    ),
+                    validator: (v) {
+                      if ((v ?? '').trim().isEmpty) return null;
+                      return Fmt.parseAmount(v!) == null
+                          ? 'مبلغ غير صالح'
+                          : null;
+                    },
                   ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 15),
-            TextFormField(
-              controller: _opening,
-              scrollPadding: const EdgeInsets.only(bottom: 140),
-              decoration: const InputDecoration(
-                labelText: 'الرصيد الافتتاحي (اختياري)',
-                hintText: '0.00',
-              ),
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-                signed: true,
-              ),
-              validator: (v) {
-                if ((v ?? '').trim().isEmpty) return null;
-                return Fmt.parseAmount(v!) == null ? 'مبلغ غير صالح' : null;
-              },
-            ),
-            AmountWords(controller: _opening, decimals: 2),
-            const SizedBox(height: 13),
-            DropdownButtonFormField<String>(
-              initialValue:
-                  curs.any((c) => c.code == _currency) ? _currency : null,
-              decoration: const InputDecoration(labelText: 'العملة'),
-              items: curs
-                  .map(
-                    (c) => DropdownMenuItem(
-                      value: c.code,
-                      child: Text('${c.name} (${c.symbol})'),
-                    ),
-                  )
-                  .toList(),
-              onChanged: (v) => setState(() => _currency = v ?? 'YER'),
-            ),
-            const SizedBox(height: 13),
-            TextFormField(
-              controller: _phone,
-              scrollPadding: const EdgeInsets.only(bottom: 140),
-              keyboardType: TextInputType.phone,
-              decoration: const InputDecoration(
-                labelText: 'رقم الجوال',
-                hintText: '7xxxxxxxx',
-                prefixIcon: Icon(Icons.phone_android),
-              ),
-            ),
-            const SizedBox(height: 10),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              decoration: BoxDecoration(
-                color: Theme.of(context)
-                    .colorScheme
-                    .surfaceContainerHighest
-                    .withValues(alpha: 0.35),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(
-                  color: AppColors.borderOf(context).withValues(alpha: 0.6),
                 ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
-                    children: [
-                      Icon(
-                        Icons.share_outlined,
-                        size: 15,
-                        color: AppColors.primaryOf(context),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    initialValue:
+                        curs.any((c) => c.code == _currency) ? _currency : null,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'العملة',
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 9,
                       ),
-                      const SizedBox(width: 6),
-                      const Expanded(
-                        child: Text(
-                          'إعداد مشاركة العمليات تلقائياً:',
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.w800,
+                    ),
+                    items: curs
+                        .map(
+                          (c) => DropdownMenuItem(
+                            value: c.code,
+                            child: Text(
+                              '${c.name} (${c.symbol})',
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 12.5),
+                            ),
                           ),
-                        ),
-                      ),
-                    ],
+                        )
+                        .toList(),
+                    onChanged: (v) => setState(() => _currency = v ?? 'YER'),
                   ),
-                  const SizedBox(height: 4),
-                  Wrap(
-                    spacing: 5,
-                    runSpacing: 4,
-                    children: [
-                      for (final opt in const <(String, String)>[
-                        ('none', '🚫 عدم المشاركة'),
-                        ('auto_whatsapp', '💬 واتساب'),
-                        ('auto_w4b', '💼 واتساب أعمال'),
-                        ('auto_sms', '✉️ رسائل SMS'),
-                        ('auto_system', '📤 خيارات النظام'),
-                      ])
-                        ChoiceChip(
-                          label: Text(
-                            opt.$2,
-                            style: const TextStyle(fontSize: 11),
-                          ),
-                          visualDensity: VisualDensity.compact,
-                          materialTapTargetSize:
-                              MaterialTapTargetSize.shrinkWrap,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 4,
-                            vertical: 0,
-                          ),
-                          selected: _notifyChannel == opt.$1,
-                          showCheckmark: false,
-                          onSelected: (_) =>
-                              setState(() => _notifyChannel = opt.$1),
-                        ),
-                    ],
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
-            const SizedBox(height: 13),
-            TextFormField(
-              controller: _limit,
-              scrollPadding: const EdgeInsets.only(bottom: 140),
-              decoration: const InputDecoration(
-                labelText: 'حد ائتماني (اختياري)',
-                hintText: '0.00',
-              ),
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-              ),
-            ),
-            AmountWords(controller: _limit, decimals: 2),
-            const SizedBox(height: 20),
-            FilledButton.icon(
-              onPressed: _saving ? null : _save,
-              icon: _saving
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
+            const SizedBox(height: 8),
+
+            // ══ الصف 3: رقم الجوال (يمين) + الحد الائتماني (يسار) ══
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _phone,
+                    keyboardType: TextInputType.phone,
+                    style: const TextStyle(fontSize: 13.5),
+                    decoration: const InputDecoration(
+                      labelText: 'رقم الجوال',
+                      hintText: '7xxxxxxxx',
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 10,
                       ),
-                    )
-                  : const Icon(Icons.check),
-              label: Text(_isEdit ? 'حفظ التعديلات' : 'إضافة الحساب'),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextFormField(
+                    controller: _limit,
+                    style: const TextStyle(fontSize: 13.5),
+                    decoration: const InputDecoration(
+                      labelText: 'حد ائتماني',
+                      hintText: '0.00',
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 10,
+                      ),
+                    ),
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+
+            SizedBox(
+              width: double.infinity,
+              height: 42,
+              child: FilledButton.icon(
+                onPressed: _saving ? null : _save,
+                icon: _saving
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.check, size: 18),
+                label: Text(_isEdit ? 'حفظ التعديلات' : 'إضافة الحساب'),
+              ),
             ),
           ],
         ),
@@ -528,23 +552,81 @@ class _State extends ConsumerState<AccountFormScreen> {
     );
 
     return PopScope(
-      // منع الرجوع المباشر إذا كانت هناك تغييرات لم تُحفظ.
       canPop: !_dirty,
       onPopInvokedWithResult: (didPop, _) => _guardedPop(didPop),
       child: widget.embedded
           ? Material(
               color: Colors.transparent,
-              child: formContent,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppColors.primaryOf(context),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.person_add_alt_1_rounded,
+                          color: Colors.white,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _isEdit ? 'تعديل حساب' : 'حساب جديد',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        _buildShareMenuButton(context, onHeader: true),
+                        const SizedBox(width: 4),
+                        IconButton(
+                          visualDensity: VisualDensity.compact,
+                          constraints: const BoxConstraints(
+                            minWidth: 32,
+                            minHeight: 32,
+                          ),
+                          padding: EdgeInsets.zero,
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            color: Colors.white,
+                            size: 20,
+                          ),
+                          onPressed: () => Navigator.of(context).maybePop(),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Flexible(child: formBody),
+                ],
+              ),
             )
           : Scaffold(
               resizeToAvoidBottomInset: false,
-              appBar: AppBar(title: Text(_isEdit ? 'تعديل حساب' : 'حساب جديد')),
+              appBar: AppBar(
+                title: Text(_isEdit ? 'تعديل حساب' : 'حساب جديد'),
+                actions: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: _buildShareMenuButton(context, onHeader: true),
+                  ),
+                ],
+              ),
               body: SafeArea(
                 child: Padding(
                   padding: EdgeInsets.only(
                     bottom: MediaQuery.viewInsetsOf(context).bottom,
                   ),
-                  child: formContent,
+                  child: formBody,
                 ),
               ),
             ),

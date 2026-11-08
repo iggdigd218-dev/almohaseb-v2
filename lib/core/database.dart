@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 
 import 'db_init.dart';
+import 'device_names.dart';
 
 /// معرف Workspace الافتراضي (ثابت محلي لتجنب circular imports).
 const defaultWorkspaceIdConst = 'default';
@@ -23,7 +24,7 @@ class AppDatabase {
   static Future<Database>? _opening;
   static String _activeWorkspaceId = defaultWorkspaceIdConst;
   static bool _isTestOverride = false;
-  static const int _version = 29;
+  static const int _version = 30;
 
   /// مفتاح التخزين الدائم للمنشأة النشطة في SharedPreferences
   static const String kPrefActiveWorkspaceId = 'nexora_active_workspace_id';
@@ -489,6 +490,9 @@ class AppDatabase {
         if (effectiveWs.isNotEmpty && effectiveWs != defaultWorkspaceIdConst) {
           await ensureWorkspaceRow(db, effectiveWs);
         }
+        // (3.98.39 / D1-D2) ترميم الأعمدة الحرجة في **كل** فتح — خارج بوابة
+        // alreadyEnsured — فلا يتكرر عطل «العمود الناقص» على الأجهزة المُرقّاة.
+        await ensureLatestColumns(db);
         await repairOwnerAdminStatus(db);
       },
     );
@@ -713,8 +717,12 @@ class AppDatabase {
         'CREATE INDEX IF NOT EXISTS idx_sections_ws ON sections(workspace_id)');
 
     await db.execute(createItemCategoriesSql);
+    // (3.98.39 / D4) الفرادة مرتبطة بالأب لا بالاسم عالمياً: الفئة الفرعية
+    // «أخرى» يمكن أن توجد تحت أكثر من فئة رئيسية دون تعارض.
+    await db.execute('DROP INDEX IF EXISTS idx_item_categories_name');
     await db.execute(
-      'CREATE UNIQUE INDEX IF NOT EXISTS idx_item_categories_name ON item_categories(name COLLATE NOCASE)',
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_item_categories_parent_name '
+      'ON item_categories(COALESCE(parent_id, 0), name COLLATE NOCASE)',
     );
 
     // ---------- المستخدمون والصلاحيات ----------
@@ -926,9 +934,20 @@ class AppDatabase {
       await migrateToV29(db);
     } catch (_) {}
     try {
+      // (3.98.39 / D1-D2) عمود exclude_from_shortages + فهرس الأصناف
+      // + فهرس الفئات المركّب — idempotent تماماً.
+      await migrateToV30(db);
+    } catch (_) {}
+    try {
       // (2026-09-26) أعمدة حالة الحذف والنشاط للأصناف (is_deleted, is_active)
       await _addColumn(db, 'items', 'is_deleted', 'INTEGER NOT NULL DEFAULT 0');
       await _addColumn(db, 'items', 'is_active', 'INTEGER NOT NULL DEFAULT 1');
+      await _addColumn(
+        db,
+        'items',
+        'exclude_from_shortages',
+        'INTEGER NOT NULL DEFAULT 0',
+      );
       // عمود is_synced للمزامنة التراكمية الذكية (Delta-Sync)
       await _addColumn(db, 'operations', 'is_synced', 'INTEGER NOT NULL DEFAULT 0');
       try {
@@ -1061,19 +1080,44 @@ class AppDatabase {
       final ownerDev = await db.query('devices', where: "is_owner = 1", limit: 1);
       final ownerDevName = ownerDev.isNotEmpty ? (ownerDev.first['name'] as String?)?.trim() : null;
       final settingDevName = await db.query('settings', where: "key = 'sync.deviceName'", limit: 1);
+      // (3.98.39 / الملاحظة 1) الاسم المخصّص الذي كتبه المالك (profile.owner_name)
+      // هو المصدر الأول — يسبق اسم الجهاز حتى لا يعود «المدير 🫡» بعد أي ترميم.
+      final profileNameRow = await db.query('settings',
+          where: "key = 'profile.owner_name'", limit: 1);
+      final profileOwnerName =
+          profileNameRow.isNotEmpty ? (profileNameRow.first['value'] as String?)?.trim() : null;
       final savedDevName = settingDevName.isNotEmpty ? (settingDevName.first['value'] as String?)?.trim() : null;
       final businessNameRow = await db.query('settings', where: "key = 'businessName'", limit: 1);
       final bizName = businessNameRow.isNotEmpty ? (businessNameRow.first['value'] as String?)?.trim() : null;
 
-      final preferredOwnerName = (savedDevName != null && savedDevName.isNotEmpty && savedDevName != 'جهاز' && !memberNames.contains(savedDevName))
-          ? savedDevName
-          : ((ownerDevName != null && ownerDevName.isNotEmpty && ownerDevName != 'جهاز' && !memberNames.contains(ownerDevName))
-              ? ownerDevName
-              : ((bizName != null && bizName.isNotEmpty && !memberNames.contains(bizName)) ? bizName : 'المدير'));
+      String? pickOwnerName() {
+        // (1) الاسم الذي كتبه المالك بنفسه حاكم مطلقاً — حتى لو تكرر مع اسم
+        // جهاز عضو؛ لأنه تعبير صريح عن هويته لا تلوّث.
+        final explicit = (profileOwnerName ?? '').trim();
+        if (explicit.isNotEmpty && !isPlaceholderDeviceName(explicit)) {
+          return explicit;
+        }
+        // (2) بقية المصادر: تُرفض إن كانت اسم مكان شاغر أو اسم جهاز عضو.
+        for (final c in [savedDevName, ownerDevName, bizName]) {
+          final v = (c ?? '').trim();
+          if (v.isEmpty) continue;
+          if (isPlaceholderDeviceName(v)) continue; // يشمل «المدير 🫡» المزخرف
+          if (memberNames.contains(v)) continue;
+          return v;
+        }
+        return null;
+      }
+
+      final preferredOwnerName = pickOwnerName() ?? 'المدير';
 
       if (myUser.isNotEmpty) {
         final curName = (myUser.first['name'] as String?)?.trim() ?? '';
-        if (memberNames.contains(curName) || curName.isEmpty) {
+        // يُستبدل الاسم إن كان اسم عضو (تلوّث) أو فارغاً أو اسم مكان شاغر
+        // (مثل «المدير 🫡») بينما لدينا اسم مخصّص حقيقي.
+        if (memberNames.contains(curName) ||
+            curName.isEmpty ||
+            (isPlaceholderDeviceName(curName) &&
+                preferredOwnerName != 'المدير')) {
           await db.update('users', {
             'name': preferredOwnerName,
             'updated_at': DateTime.now().toIso8601String(),
@@ -1339,6 +1383,7 @@ class AppDatabase {
         archived      INTEGER NOT NULL DEFAULT 0,
         is_deleted    INTEGER NOT NULL DEFAULT 0,
         is_active     INTEGER NOT NULL DEFAULT 1,
+        exclude_from_shortages INTEGER NOT NULL DEFAULT 0,
         deleted_at    TEXT DEFAULT '',
         deleted_by    INTEGER,
         restore_op_id TEXT DEFAULT '',
@@ -1588,8 +1633,10 @@ class AppDatabase {
     }
     if (from < 4) {
       await db.execute(createItemCategoriesSql);
+      await db.execute('DROP INDEX IF EXISTS idx_item_categories_name');
       await db.execute(
-        'CREATE UNIQUE INDEX IF NOT EXISTS idx_item_categories_name ON item_categories(name COLLATE NOCASE)',
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_item_categories_parent_name '
+        'ON item_categories(COALESCE(parent_id, 0), name COLLATE NOCASE)',
       );
       await _addColumn(db, 'items', 'category_id', 'INTEGER');
       final now = DateTime.now().toIso8601String();
@@ -1854,6 +1901,10 @@ class AppDatabase {
     // ====== v29: عمود original_tx_id المفهرس على جدول transactions ======
     if (from < 29) {
       await migrateToV29(db);
+    }
+    // ====== v30: عمود استبعاد النواقص + فهرس الفئات المركّب (D1/D2/D4) ======
+    if (from < 30) {
+      await migrateToV30(db);
     }
     // ====== v17: ضمان المخطط الكامل عند كل فتح (إصلاح قواعد ويندوز الناقصة) ======
     // أي جدول ناقص من بناء سابق يُنشأ، والبذرة idempotent. هذا يغلق نهائيًا
@@ -2221,6 +2272,54 @@ class AppDatabase {
           );
         }
       }
+    } catch (_) {}
+  }
+
+  /// (3.98.39 — D1/D2/D4) Migration v29 → v30:
+  ///  • إضافة عمود `items.exclude_from_shortages` (كان يُكتب في INSERT/UPDATE
+  ///    بلا هجرة، فيفشل الحفظ على كل جهاز مُرقّى برسالة «تعارض بيانات»).
+  ///  • فهرس `idx_items_shortage` لتسريع قائمة النواقص.
+  ///  • استبدال فهرس فرادة اسم الفئة العالمي بفهرس مركّب (الأب + الاسم)
+  ///    حتى تعمل الفئات الفرعية المتشابهة الأسماء تحت أبوين مختلفين.
+  /// idempotent بالكامل: آمنة عند كل فتح وعند الهجرة.
+  static Future<void> migrateToV30(Database db) async {
+    await _addColumn(
+      db,
+      'items',
+      'exclude_from_shortages',
+      'INTEGER NOT NULL DEFAULT 0',
+    );
+    await _tryCreateIndex(
+      db,
+      'idx_items_shortage',
+      'CREATE INDEX IF NOT EXISTS idx_items_shortage '
+          'ON items(exclude_from_shortages)',
+    );
+    await _tryCreateIndex(
+      db,
+      'idx_item_categories_parent_name',
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_item_categories_parent_name '
+          'ON item_categories(COALESCE(parent_id, 0), name COLLATE NOCASE)',
+    );
+    // الفهرس العالمي القديم يمنع تكرار اسم الفئة تحت أبوين مختلفين.
+    try {
+      await db.execute('DROP INDEX IF EXISTS idx_item_categories_name');
+    } catch (_) {}
+    try {
+      await db.insert(
+        'sync_meta',
+        {'key': 'schema_ensured_v', 'value': '$_version'},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    } catch (_) {}
+  }
+
+  /// (3.98.39) شبكة أمان دائمة تُستدعى عند **كل فتح** خارج بوابة
+  /// `schema_ensured_v`: تضيف أي عمود حرج أُضيف للمخطط بعد إصدار قاعدة
+  /// المستخدم، فلا يبقى جهاز مُرقّى عاجزاً عن الحفظ أو عن استقبال المزامنة.
+  static Future<void> ensureLatestColumns(Database db) async {
+    try {
+      await migrateToV30(db);
     } catch (_) {}
   }
 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/device_names.dart';
 import '../core/format.dart';
 import '../core/sfx.dart';
 import '../core/models.dart';
@@ -49,11 +50,11 @@ class DeviceCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // اسم العرض الموحد بلقب الدور: «المدير (اسم الجهاز)» وهكذا.
-    final name = roleDisplayName(
-      roleCode: (data['user_role'] as String?) ?? '',
-      isOwner: ((data['is_owner'] as int?) ?? 0) == 1,
-      deviceName: (data['name'] ?? 'جهاز') as String,
+    final isOwnerRow = ((data['is_owner'] as int?) ?? 0) == 1 || isOwnerDevice;
+    final name = resolveMemberUnifiedName(
+      deviceName: data['name'] as String?,
+      userName: data['user_name'] as String?,
+      isOwner: isOwnerRow,
     );
     final platform = (data['platform'] ?? '') as String;
     final expelled = ((data['expelled_at'] ?? '') as String).isNotEmpty;
@@ -61,7 +62,6 @@ class DeviceCard extends StatelessWidget {
         ((data['revoked_at'] ?? '') as String).isNotEmpty && !expelled;
     final inactive = expelled || revoked;
     final lastSeen = (data['last_seen_at'] ?? '') as String;
-    final userName = data['user_name'] as String?;
     final userRole = data['user_role'] as String?;
 
     // تحديد الأجهزة الخاملة لأكثر من شهر (للتنبيه البصري).
@@ -69,8 +69,6 @@ class DeviceCard extends StatelessWidget {
     final staleForMonth = lastSeenDt != null &&
         DateTime.now().difference(lastSeenDt) > const Duration(days: 30);
     // (دفعة 56) مؤشر الاتصال السحابي: ظهور خلال آخر 5 دقائق = متصل.
-    // (دفعة الواجهات) رُفع التسامح من 3 إلى 5 دقائق: فروق التوقيت البسيطة
-    // بين الأجهزة وتأخر نبضة الظهور كانت تُظهر أعضاء متصلين كغائبين.
     final cloudOnline = lastSeenDt != null &&
         DateTime.now().difference(lastSeenDt) < const Duration(minutes: 5);
     // دور الجهاز الفعلي (شارة ملونة عالية التباين).
@@ -79,6 +77,97 @@ class DeviceCard extends StatelessWidget {
         : (userRole == null || userRole.isEmpty
             ? null
             : UserRole.fromCode(userRole));
+
+    final Widget statusBadge;
+    if (expelled) {
+      statusBadge = Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: Colors.red.shade900.withValues(alpha: .15),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: const Text(
+          'مطرود',
+          style: TextStyle(
+            fontSize: 10,
+            color: Colors.red,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      );
+    } else if (revoked) {
+      statusBadge = Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: Colors.orange.withValues(alpha: .12),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: const Text(
+          'محظور',
+          style: TextStyle(
+            fontSize: 10,
+            color: Colors.deepOrange,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      );
+    } else if (staleForMonth) {
+      statusBadge = Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: Colors.red.withValues(alpha: .08),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: const Text(
+          'خامل ⚠️',
+          style: TextStyle(
+            fontSize: 10,
+            color: Colors.redAccent,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      );
+    } else {
+      statusBadge = Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: (cloudOnline || isSelf ? Colors.green : Colors.blueGrey)
+              .withValues(alpha: .12),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          cloudOnline || isSelf ? 'متصل سحابياً ☁️' : 'غائب (غير متصل)',
+          style: TextStyle(
+            fontSize: 10,
+            color: cloudOnline || isSelf ? Colors.green : Colors.blueGrey,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      );
+    }
+
+    final metadataItems = <Widget>[
+      _smallLabel(
+        'البصمة',
+        (data['id'] as String? ?? '').length > 10
+            ? (data['id'] as String).substring(0, 10)
+            : (data['id'] as String? ?? '—'),
+      ),
+      if (lastSeen.isNotEmpty)
+        _smallLabel(
+          'آخر ظهور',
+          DateTime.tryParse(lastSeen) == null
+              ? lastSeen
+              : Fmt.relative(DateTime.parse(lastSeen)),
+        ),
+      if ('${data['last_sync_at'] ?? ''}'.isNotEmpty)
+        _smallLabel(
+          'آخر مزامنة ☁️',
+          DateTime.tryParse('${data['last_sync_at']}') == null
+              ? '${data['last_sync_at']}'
+              : Fmt.relative(DateTime.parse('${data['last_sync_at']}')),
+        ),
+    ];
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
@@ -89,159 +178,62 @@ class DeviceCard extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   Icon(_iconFor(platform), size: 20),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
                       name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                      softWrap: true,
                       style: const TextStyle(
-                        fontWeight: FontWeight.w700,
-                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 15,
                       ),
                     ),
                   ),
-                  // (دفعة 56) شارة الدور الديناميكية — تعكس الدور الممنوح
-                  // فعلياً بلون مميز عالي التباين لكل دور.
-                  if (role != null) ...[
-                    Flexible(child: _RoleBadge(role: role)),
-                    const SizedBox(width: 6),
-                  ],
-                  if (expelled)
-                    Flexible(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.red.shade900.withValues(alpha: .15),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: const Text(
-                          'مطرود',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: Colors.red,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
+                  if (!inactive && (canManageMembers || isSelf))
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      constraints: const BoxConstraints(
+                        minWidth: 32,
+                        minHeight: 32,
                       ),
-                    )
-                  else if (revoked)
-                    Flexible(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.orange.withValues(alpha: .12),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: const Text(
-                          'محظور',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: Colors.deepOrange,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    )
-                  else if (staleForMonth)
-                    Flexible(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.red.withValues(alpha: .08),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: const Text(
-                          'خامل ⚠️',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: Colors.redAccent,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    )
-                  else
-                    Flexible(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: (cloudOnline || isSelf ? Colors.green : Colors.blueGrey)
-                              .withValues(alpha: .12),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Text(
-                          // (دفعة 56) مؤشر الحالة السحابية: إذا انقطعت مزامنة العضو يظهر كغائب حتى يزيله المدير.
-                          cloudOnline || isSelf
-                              ? 'متصل سحابياً ☁️'
-                              : 'غائب (غير متصل)',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: cloudOnline || isSelf
-                                ? Colors.green
-                                : Colors.blueGrey,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
+                      padding: EdgeInsets.zero,
+                      tooltip: 'تعديل اسم العضو',
+                      icon: const Icon(Icons.edit_outlined, size: 17),
+                      onPressed: onRename,
                     ),
                 ],
               ),
               const SizedBox(height: 6),
               Wrap(
-                spacing: 10,
+                spacing: 6,
                 runSpacing: 4,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
-                  // (دفعة 56) وسم منصة نظيف (Android/Windows...) بدل
-                  // عرض «المنصة: lan» وعناوين IP الخام البائدة.
-                  _smallLabel('الجهاز', _platformTag(platform)),
-                  _smallLabel('المستخدم', userName ?? 'غير معيّن'),
-                  // مقتطف بصمة الجهاز (المعرّف مشتق من بصمة العتاد).
-                  _smallLabel(
-                    'البصمة',
-                    (data['id'] as String? ?? '').length > 10
-                        ? (data['id'] as String).substring(0, 10)
-                        : (data['id'] as String? ?? '—'),
-                  ),
-                  if (lastSeen.isNotEmpty)
-                    _smallLabel(
-                      'آخر ظهور',
-                      DateTime.tryParse(lastSeen) == null
-                          ? lastSeen
-                          : Fmt.relative(DateTime.parse(lastSeen)),
-                    ),
-                  // (دفعة 58 — متطلب 9) وقت آخر مزامنة ناجحة لكل عضو —
-                  // يراها المدير على بطاقة الجهاز مباشرة.
-                  if ('${data['last_sync_at'] ?? ''}'.isNotEmpty)
-                    _smallLabel(
-                      'آخر مزامنة ☁️',
-                      DateTime.tryParse('${data['last_sync_at']}') == null
-                          ? '${data['last_sync_at']}'
-                          : Fmt.relative(
-                              DateTime.parse('${data['last_sync_at']}')),
-                    ),
+                  if (role != null) _RoleBadge(role: role),
+                  statusBadge,
+                ],
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  for (var i = 0; i < metadataItems.length; i++) ...[
+                    if (i > 0)
+                      const Text(
+                        '•',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.black38,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    metadataItems[i],
+                  ],
                 ],
               ),
               const SizedBox(height: 8),
@@ -327,8 +319,8 @@ class DeviceCard extends StatelessWidget {
           'إدارة صلاحيات الجهاز',
           enabled: !inactive);
     }
-    if (!isSelf) {
-      add('rename', Icons.edit_outlined, Colors.blueGrey, 'إعادة التسمية',
+    if (canManageMembers || isSelf) {
+      add('rename', Icons.edit_outlined, Colors.blueGrey, 'تعديل اسم العضو',
           enabled: !inactive);
     }
     if (!expelled) {
@@ -392,16 +384,6 @@ class DeviceCard extends StatelessWidget {
         'windows' => Icons.laptop_windows,
         'linux' || 'macos' => Icons.computer,
         _ => Icons.devices,
-      };
-
-  /// (دفعة 56) وسم منصة نظيف — لا «lan» ولا قيم خام.
-  String _platformTag(String p) => switch (p) {
-        'android' => 'Android',
-        'ios' => 'iPhone',
-        'windows' => 'Windows',
-        'linux' => 'Linux',
-        'macos' => 'Mac',
-        _ => 'جهاز',
       };
 
   Widget _smallLabel(String k, String v) => RichText(
