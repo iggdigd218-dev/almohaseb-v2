@@ -58,6 +58,7 @@ class CloudControlService {
   /// معالج عند وصول تنبيه سحابي جديد في الوقت الفعلي
   void Function(CloudAlert alert)? onNewAlertReceived;
 
+  bool _initializedAlertScan = false;
   final Set<String> _notifiedAlertIds = <String>{};
 
   Timer? _heartbeatTimer;
@@ -261,9 +262,9 @@ class CloudControlService {
       }
 
       // 2) فحص سياسة التحديث الإجباري (Force Update)
-      // (2026-10-29) من مسار بلاس المستقل `/system/plus/*` — لا تتبع سياسات إصدار v2.
-      var verPolicy = await _getJson('$base/system/plus/version_policy.json');
-      verPolicy ??= await _getJson('$base/system/plus/force_update.json');
+      // (2026-10-29) من مسار بلاس المستقل `/system/*` — لا تتبع سياسات إصدار v2.
+      var verPolicy = await _getJson('$base/system/version_policy.json');
+      verPolicy ??= await _getJson('$base/system/force_update.json');
       if (verPolicy != null) {
         final minBuild = _asInt(verPolicy['min_build'] ??
             verPolicy['min_version'] ??
@@ -575,6 +576,7 @@ class CloudControlService {
     unreadAlertCountNotifier.value = unreadList.length;
 
     // سواء عند فتح التطبيق أو أثناء عمله: أي إشعار إداري غير مقروء لم يُعرض بعد ينبثق فوراً
+    _initializedAlertScan = true;
     for (final a in unreadList) {
       if (!_notifiedAlertIds.contains(a.id)) {
         _notifiedAlertIds.add(a.id);

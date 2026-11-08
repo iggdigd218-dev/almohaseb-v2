@@ -189,7 +189,7 @@ class _SplashScreenState extends State<SplashScreen>
               FadeTransition(
                 opacity: _fade,
                 child: const Text(
-                  'المحاسب بلاس',
+                  'المحاسب',
                   style: TextStyle(
                     color: Color(0xFF0F172A),
                     fontSize: 24,

@@ -26,7 +26,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.nexora.almohaseb_plus"
+        applicationId = "com.nexora.almohaseb"
         // (PR-7) 23 هي الأرضية الصلبة لـFlutter 3.35 (فحص ReleaseMinSdkCheck
         // يرفض 21) — الفجوة 21-22 أندرويد 5 فقط وهي 32-بت مستبعدة أصلًا
         // بسياسة arm64 حصراً.
