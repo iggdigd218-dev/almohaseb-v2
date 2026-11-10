@@ -1042,6 +1042,29 @@ class ItemCategory {
   /// هل لها فئات فرعية؟
   bool get hasChildren => children.isNotEmpty;
 
+  /// (3.98.41) جمع كل معرفات الفئات الأحفاد والتابعة شجرياً لأي عمق.
+  Set<int> get allDescendantIds {
+    final ids = <int>{};
+    void collect(ItemCategory cat) {
+      for (final child in cat.children) {
+        if (child.id != null) {
+          ids.add(child.id!);
+          collect(child);
+        }
+      }
+    }
+    collect(this);
+    return ids;
+  }
+
+  /// المعرف الذاتي مضافاً إليه كل معرفات الأحفاد شجرياً.
+  Set<int> get selfAndAllDescendantIds {
+    final ids = <int>{};
+    if (id != null) ids.add(id!);
+    ids.addAll(allDescendantIds);
+    return ids;
+  }
+
   ItemCategory copyWith({
     int? id,
     int? parentId,

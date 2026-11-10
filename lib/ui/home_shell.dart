@@ -64,7 +64,9 @@ import 'widgets.dart' show showSnack;
 import 'create_workspace_screen.dart' show showWorkspaceManagerDialog;
 import '../core/cloud_config.dart';
 import '../core/format.dart';
+import '../core/item_conflict.dart';
 import '../core/license_model.dart';
+import 'item_conflict_dialog.dart';
 
 /// كل شاشات التطبيق الاثنتي عشرة.
 enum AppScreen {
@@ -248,6 +250,9 @@ class _HomeShellState extends ConsumerState<HomeShell>
         ref.invalidate(itemCategoryTreeProvider);
         ref.invalidate(sectionsProvider);
         ref.invalidate(inventorySummaryProvider);
+        ref.invalidate(pendingItemConflictsProvider);
+        ref.invalidate(notificationsProvider);
+        ref.invalidate(unreadCountProvider);
         // التحقق من مستمع طلبات الانضمام في حال تغيرت مساحة العمل أو الصلاحيات
         _startGlobalJoinWatcher();
       });
@@ -460,6 +465,13 @@ class _HomeShellState extends ConsumerState<HomeShell>
       case 'item' || 'stockMove' || 'itemCategory':
         _go(AppScreen.inventory);
         return true;
+      case 'item_conflict':
+        await showItemConflictResolutionDialog(
+          context,
+          ref,
+          conflictKey: id,
+        );
+        return true;
       case 'voucher':
         _go(AppScreen.vouchers);
         return true;
@@ -618,6 +630,27 @@ class _HomeShellState extends ConsumerState<HomeShell>
         ref.read(repoProvider).notify(title: title, body: body, kind: 'info');
       } catch (_) {}
       _showTappableNotice(title, body);
+    };
+    ItemConflictHooks.onConflictDetected = (conflict) {
+      if (!mounted) return;
+      try {
+        ref.invalidate(pendingItemConflictsProvider);
+        ref.invalidate(notificationsProvider);
+        ref.invalidate(unreadCountProvider);
+        bump(ref);
+      } catch (_) {}
+      Sfx.systemNotify(
+        title: conflict.notificationTitle,
+        body: conflict.notificationBody,
+        entityType: 'item_conflict',
+        entityId: conflict.key,
+      );
+      _showTappableNotice(
+        conflict.notificationTitle,
+        conflict.notificationBody,
+        entityType: 'item_conflict',
+        entityId: conflict.key,
+      );
     };
   }
 
@@ -1016,6 +1049,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
     SyncEngine.onSyncDanger = null;
     ChatHooks.onChatMessage = null;
     ChatHooks.onMemberNotice = null;
+    ItemConflictHooks.onConflictDetected = null;
     ShellNav.request.removeListener(_onShellNavRequest);
     CloudControlService.instance.deviceNameNotifier
         .removeListener(_onRemoteDeviceRename);
@@ -1963,6 +1997,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
                 return const TrialCountdownBanner();
               },
             ),
+            if (_screen != AppScreen.inventory) const ItemConflictBanner(),
             Expanded(
               child: desktop
                   ? Row(
@@ -2830,19 +2865,21 @@ class _Drawer extends ConsumerWidget {
                                     .watch(ownerDisplayNameProvider)
                                     .valueOrNull
                                     ?.trim();
-                                final customOwner =
-                                    (ownerName != null &&
-                                            ownerName.isNotEmpty &&
-                                            ownerName != 'المدير')
+                                final isOwnerOrStandalone =
+                                    wsMode != 'member';
+                                final label = isOwnerOrStandalone
+                                    ? (ownerName != null && ownerName.isNotEmpty
                                         ? ownerName
-                                        : null;
-                                final label =
-                                    (devName != null && devName.isNotEmpty)
-                                        ? devName
-                                        : (customOwner ??
-                                            (safeUserName.isNotEmpty
+                                        : (devName != null && devName.isNotEmpty
+                                            ? devName
+                                            : (safeUserName.isNotEmpty
                                                 ? safeUserName
-                                                : 'المحاسب'));
+                                                : 'المدير')))
+                                    : (devName != null && devName.isNotEmpty
+                                        ? devName
+                                        : (safeUserName.isNotEmpty
+                                            ? safeUserName
+                                            : 'المحاسب'));
                                 return Row(
                                   children: [
                                     Flexible(

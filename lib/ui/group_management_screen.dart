@@ -423,17 +423,17 @@ class _DevicesTabState extends ConsumerState<_DevicesTab> {
                                         (own?['name'] as String?)?.trim() ?? '';
                                     final syncedOwner =
                                         (ownerNameAsync.valueOrNull ?? '').trim();
-                                    final name = rawOwn.isNotEmpty &&
-                                            isCustomDeviceName(rawOwn)
-                                        ? rawOwn
-                                        : (amITheOwner &&
-                                                syncedOwner.isNotEmpty
+                                    final name = amITheOwner
+                                        ? (syncedOwner.isNotEmpty
                                             ? syncedOwner
+                                            : (rawOwn.isNotEmpty && isCustomDeviceName(rawOwn)
+                                                ? rawOwn
+                                                : 'المدير'))
+                                        : (rawOwn.isNotEmpty && isCustomDeviceName(rawOwn)
+                                            ? rawOwn
                                             : (rawOwn.isNotEmpty
                                                 ? rawOwn
-                                                : (amITheOwner
-                                                    ? 'جهاز المدير الأساسي'
-                                                    : 'جهاز وكيل المدير')));
+                                                : 'جهاز وكيل المدير'));
                                     final badge = Container(
                                       padding: const EdgeInsets.symmetric(
                                           horizontal: 8, vertical: 2),
