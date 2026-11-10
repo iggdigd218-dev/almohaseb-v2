@@ -7,6 +7,7 @@ import 'package:printing/printing.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/accounting.dart';
+import '../core/category_tree.dart';
 import '../core/desktop.dart';
 import '../core/format.dart';
 import '../core/item_search.dart';
@@ -1388,12 +1389,9 @@ class _PosScreenState extends ConsumerState<PosScreen>
 
     final allowedCatIds = <int>{};
     if (!hasSearch && _selectedCategoryId != null) {
-      allowedCatIds.add(_selectedCategoryId!);
-      for (final c in categories) {
-        if (c.parentId == _selectedCategoryId && c.id != null) {
-          allowedCatIds.add(c.id!);
-        }
-      }
+      allowedCatIds.addAll(
+        getCategoryAndAllDescendantIds(_selectedCategoryId!, categories),
+      );
     }
 
     // (3.98.39 / الملاحظة 4) البحث في POS يشمل الملاحظات بأولوية درجتين:
@@ -1485,6 +1483,44 @@ class _PosScreenState extends ConsumerState<PosScreen>
         if (s.id != null) s.id!: s,
     };
 
+    final selectedCat = findCategoryInTree(_selectedCategoryId, roots);
+    final categoryPath = getCategoryPath(_selectedCategoryId, roots);
+
+    // تحديد الفئات المعروضة في شريط الفئات وزر «الكل»
+    final List<ItemCategory> activeCategoriesToShow;
+    final ItemCategory? activeDrillParent;
+    final String allChipLabel;
+    final bool isAllChipActive;
+
+    if (_selectedCategoryId != null && selectedCat != null) {
+      if (selectedCat.hasChildren) {
+        activeCategoriesToShow = selectedCat.children;
+        activeDrillParent = selectedCat;
+        allChipLabel = 'كل ${selectedCat.name}';
+        isAllChipActive = true;
+      } else {
+        final parent = categoryPath.length >= 2
+            ? categoryPath[categoryPath.length - 2]
+            : null;
+        if (parent != null && parent.hasChildren) {
+          activeCategoriesToShow = parent.children;
+          activeDrillParent = parent;
+          allChipLabel = 'كل ${parent.name}';
+          isAllChipActive = false;
+        } else {
+          activeCategoriesToShow = [selectedCat];
+          activeDrillParent = selectedCat;
+          allChipLabel = 'كل ${selectedCat.name}';
+          isAllChipActive = true;
+        }
+      }
+    } else {
+      activeCategoriesToShow = sectionCategories;
+      activeDrillParent = null;
+      allChipLabel = 'الكل';
+      isAllChipActive = _selectedCategoryId == null;
+    }
+
     return PopScope(
       canPop: !hasSearch &&
           !_atSectionsGate &&
@@ -1498,7 +1534,12 @@ class _PosScreenState extends ConsumerState<PosScreen>
               _searchCtrl.clear();
             });
           } else if (_selectedCategoryId != null) {
-            setState(() => _selectedCategoryId = null);
+            final path = getCategoryPath(_selectedCategoryId, roots);
+            if (path.length > 1) {
+              setState(() => _selectedCategoryId = path[path.length - 2].id);
+            } else {
+              setState(() => _selectedCategoryId = null);
+            }
           } else if (_selectedSectionId != null) {
             setState(() => _selectedSectionId = null);
           } else if (_atSectionsGate) {
@@ -1572,16 +1613,111 @@ class _PosScreenState extends ConsumerState<PosScreen>
                     ),
             ),
 
-            // 4) شريط الفئات الأفقي التابع للقسم النشط (الضغط على «عرض الكل» يفتح لوحة جميع الفئات)
+            // شريط مسار التصفح (Breadcrumb) داخل نقطة البيع عند اختيار قسم أو فئة
+            if (!_atSectionsGate &&
+                (_selectedSectionId != null || _selectedCategoryId != null)) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: AppColors.surfaceOf(context),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppColors.borderOf(context)),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.account_tree_outlined,
+                        size: 13,
+                        color: AppColors.primaryOf(context),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: [
+                              _PosCrumb(
+                                label: 'الكل',
+                                active: _selectedSectionId == null &&
+                                    _selectedCategoryId == null,
+                                onTap: () => setState(() {
+                                  _selectedSectionId = null;
+                                  _selectedCategoryId = null;
+                                }),
+                              ),
+                              if (_selectedSectionId != null) ...[
+                                const _PosCrumbSep(),
+                                _PosCrumb(
+                                  label: _selectedSectionId == kGeneralSectionId
+                                      ? 'عام'
+                                      : (secById[_selectedSectionId]?.name ?? 'القسم'),
+                                  active: categoryPath.isEmpty,
+                                  onTap: () => setState(() {
+                                    _selectedCategoryId = null;
+                                  }),
+                                ),
+                              ],
+                              for (int i = 0; i < categoryPath.length; i++) ...[
+                                const _PosCrumbSep(),
+                                _PosCrumb(
+                                  label: categoryPath[i].name,
+                                  active: i == categoryPath.length - 1,
+                                  onTap: () => setState(() {
+                                    _selectedCategoryId = categoryPath[i].id;
+                                  }),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(6),
+                        onTap: () => setState(() {
+                          _selectedCategoryId = null;
+                          _selectedSectionId = null;
+                        }),
+                        child: Padding(
+                          padding: const EdgeInsets.all(2),
+                          child: Icon(
+                            Icons.close_rounded,
+                            size: 15,
+                            color: AppColors.text3Of(context),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+
+            // 4) شريط الفئات الأفقي التابع للقسم النشط مع دعم الغوص الشجري
             if (!_atSectionsGate)
               PosCategoryStrip(
-                categories: sectionCategories,
+                categories: activeCategoriesToShow,
                 selectedId: _selectedCategoryId,
+                allLabel: allChipLabel,
+                isAllActive: isAllChipActive,
                 showHeader: true,
-                allItemsCount: _countSectionItems(allItems, categories),
+                allItemsCount: activeDrillParent != null
+                    ? _countCategoryItems(activeDrillParent, allItems, categories)
+                    : _countSectionItems(allItems, categories),
                 itemCountOf: (cat) =>
                     _countCategoryItems(cat, allItems, categories),
-                onPick: (cid) => setState(() => _selectedCategoryId = cid),
+                onPick: (cid) => setState(() {
+                  if (cid == null) {
+                    if (activeDrillParent != null) {
+                      _selectedCategoryId = activeDrillParent.id;
+                    } else {
+                      _selectedCategoryId = null;
+                    }
+                  } else {
+                    _selectedCategoryId = cid;
+                  }
+                }),
               ),
           ],
 
@@ -1732,12 +1868,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
     List<ItemCategory> categories,
   ) {
     if (cat.id == null) return 0;
-    final allowed = <int>{cat.id!};
-    for (final c in categories) {
-      if (c.parentId == cat.id && c.id != null) {
-        allowed.add(c.id!);
-      }
-    }
+    final allowed = getCategoryAndAllDescendantIds(cat.id!, categories);
     var count = 0;
     for (final it in allItems) {
       if (it.categoryId != null && allowed.contains(it.categoryId)) {
@@ -2366,6 +2497,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                 onPressed: () async {
                   final code = await scanBarcode(context);
                   if (code != null && code.isNotEmpty) {
+                    if (_handleQuickIndex(code.trim())) return;
                     _searchCtrl.text = code;
                     setState(() => _searchQuery = code.trim());
                   }
@@ -2397,9 +2529,114 @@ class _PosScreenState extends ConsumerState<PosScreen>
         borderSide: BorderSide(color: c, width: 1),
       );
 
+  /// نافذة مصغرة فورية لاختيار الصنف المقصود عند مسح باركود مشترك بين أكثر من صنف.
+  Future<void> _showSharedBarcodePickerDialog(
+    List<Item> candidates, {
+    required String barcode,
+    double quantity = 1.0,
+  }) async {
+    if (!mounted || candidates.isEmpty) return;
+    final picked = await showDialog<Item>(
+      context: context,
+      builder: (ctx) {
+        final cs = Theme.of(ctx).colorScheme;
+        return AlertDialog(
+          key: const ValueKey('pos_shared_barcode_picker_dialog'),
+          titlePadding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+          contentPadding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+          title: Row(
+            children: [
+              const Icon(Icons.qr_code_scanner_rounded, color: AppColors.amber),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'باركود مشترك ($barcode) — اختر الصنف المقصود',
+                  style: const TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400, maxHeight: 340),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final it in candidates)
+                    Card(
+                      key: ValueKey('shared_barcode_option_${it.id}'),
+                      margin: const EdgeInsets.symmetric(vertical: 4),
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        side: BorderSide(
+                          color: cs.outlineVariant.withValues(alpha: 0.6),
+                        ),
+                      ),
+                      child: ListTile(
+                        dense: true,
+                        leading: CircleAvatar(
+                          radius: 17,
+                          backgroundColor:
+                              AppColors.primary.withValues(alpha: 0.12),
+                          child: Text(
+                            '#${it.plu ?? it.id ?? ''}',
+                            style: const TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                              color: AppColors.primary,
+                            ),
+                          ),
+                        ),
+                        title: Text(
+                          it.name,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 13.5,
+                          ),
+                        ),
+                        subtitle: Text(
+                          'السعر: ${Fmt.money(it.sellPrice)} • المتاح: ${Fmt.qty(it.quantity)} ${it.unit}',
+                          style: const TextStyle(fontSize: 11.5),
+                        ),
+                        trailing: const Icon(
+                          Icons.add_shopping_cart_rounded,
+                          color: AppColors.primary,
+                          size: 20,
+                        ),
+                        onTap: () => Navigator.of(ctx).pop(it),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(null),
+              child: const Text('إلغاء'),
+            ),
+          ],
+        );
+      },
+    );
+    if (!mounted || picked == null) return;
+    _addItem(picked, quantity: quantity);
+    _searchFocus.requestFocus();
+    showSnack(
+      context,
+      'أُضيف ${Fmt.qty(quantity)} ${picked.unit} من «${picked.name}» (باركود)',
+      silent: true,
+    );
+  }
+
   /// (2026-09-24) **نظام الترقيم السريع (PLU) ودعم قارئ الباركود**.
   ///
   /// • يدعم مسح الباركود مباشرة (USB/Bluetooth) بالبحث المطابق للـ SKU وإضافته فوراً للسلة.
+  /// • إذا اشترك أكثر من صنف في نفس الباركود (اعتماد الفصل بعد تعارض أوفلاين)، يعرض نافذة مصغرة فورية للكاشير لاختيار الصنف المقصود.
   /// • يدعم الترقيم السريع: `7` + Enter يضيف حبة واحدة، و `7*3` أو `7×3` يضيف 3 حبات.
   /// • يدعم الأرقام العربية/الفارسية تلقائياً عبر التطبيع.
   bool _handleQuickIndex(String raw, [List<Item>? itemsList]) {
@@ -2410,15 +2647,22 @@ class _PosScreenState extends ConsumerState<PosScreen>
         itemsList ?? (ref.read(itemsProvider).valueOrNull ?? const <Item>[]);
 
     // أولاً: فحص مطابقة باركود صنف (قارئات الباركود الخارجية USB / Bluetooth)
-    Item? barcodeHit;
+    final barcodeHits = <Item>[];
     for (final it in items) {
-      if (it.sku.trim().isNotEmpty &&
+      if (!it.isDeleted &&
+          it.sku.trim().isNotEmpty &&
           it.sku.trim().toLowerCase() == q.toLowerCase()) {
-        barcodeHit = it;
-        break;
+        barcodeHits.add(it);
       }
     }
-    if (barcodeHit != null) {
+    if (barcodeHits.length > 1) {
+      _searchCtrl.clear();
+      setState(() => _searchQuery = '');
+      unawaited(_showSharedBarcodePickerDialog(barcodeHits, barcode: q));
+      return true;
+    }
+    if (barcodeHits.length == 1) {
+      final barcodeHit = barcodeHits.first;
       _addItem(barcodeHit, quantity: 1);
       _searchCtrl.clear();
       setState(() => _searchQuery = '');
@@ -2439,14 +2683,26 @@ class _PosScreenState extends ConsumerState<PosScreen>
           ? (double.tryParse(m.group(2)!) ?? 1.0)
           : 1.0;
       if (idx != null && qty > 0) {
-        Item? hit;
+        final pluHits = <Item>[];
         for (final it in items) {
-          if (it.plu == idx) {
-            hit = it;
-            break;
+          if (!it.isDeleted && it.plu == idx) {
+            pluHits.add(it);
           }
         }
-        if (hit != null) {
+        if (pluHits.length > 1) {
+          _searchCtrl.clear();
+          setState(() => _searchQuery = '');
+          unawaited(
+            _showSharedBarcodePickerDialog(
+              pluHits,
+              barcode: '#$idx',
+              quantity: qty,
+            ),
+          );
+          return true;
+        }
+        if (pluHits.length == 1) {
+          final hit = pluHits.first;
           _addItem(hit, quantity: qty);
           _searchCtrl.clear();
           setState(() => _searchQuery = '');
@@ -5464,3 +5720,51 @@ class _PosSalesSummarySheetState extends ConsumerState<_PosSalesSummarySheet> {
   }
 }
 
+class _PosCrumb extends StatelessWidget {
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+
+  const _PosCrumb({
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(6),
+      onTap: active ? null : onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+            color: active
+                ? AppColors.primaryOf(context)
+                : AppColors.text2Of(context),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PosCrumbSep extends StatelessWidget {
+  const _PosCrumbSep();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: Icon(
+        Icons.chevron_left_rounded,
+        size: 14,
+        color: AppColors.text3Of(context),
+      ),
+    );
+  }
+}

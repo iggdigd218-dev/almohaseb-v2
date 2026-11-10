@@ -13,6 +13,7 @@ import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../core/format.dart';
+import '../core/category_tree.dart';
 import '../core/icon_catalog.dart';
 import '../core/media_paths.dart';
 import '../core/models.dart';
@@ -25,6 +26,7 @@ import '../data/sync/sync_activity.dart';
 import 'barcode_scanner.dart';
 import 'hierarchy_filter.dart';
 import 'calculator.dart';
+import 'item_conflict_dialog.dart';
 import 'widgets.dart';
 
 /// مزود عام لتفعيل تبويب «قسم النواقص» مباشرة عند فتح شاشة المخزون.
@@ -137,6 +139,7 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
       ref.invalidate(itemCategoryTreeProvider);
       ref.invalidate(sectionsProvider);
       ref.invalidate(inventorySummaryProvider);
+      ref.invalidate(pendingItemConflictsProvider);
       setState(() {});
     });
   }
@@ -195,31 +198,25 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
     });
   }
 
-  /// معرّفات الفئات المطلوب عرضها (null = كل الأصناف).
+  /// معرّفات الفئات المطلوب عرضها شجرياً لأي عمق (null = كل الأصناف).
   Set<int>? _selectedIds(List<ItemCategory> roots) {
-    if (_subId != null) return <int>{_subId!};
-    // قسم محدد بلا فئة: كل أصناف فئاته (أو الفئات بلا قسم في «عام»).
-    if (_rootId == null && _sectionId != null) {
-      final ids = <int>{
-        for (final c in _rootsOfSection(roots))
-          if (c.id != null) c.id!,
-      };
+    if (_subId != null) {
+      return getCategoryAndAllDescendantIds(_subId!, roots);
+    }
+    if (_rootId != null) {
+      return getCategoryAndAllDescendantIds(_rootId!, roots);
+    }
+    // قسم محدد بلا فئة: كل أصناف فئاته وأحفادها (أو الفئات بلا قسم في «عام»).
+    if (_sectionId != null) {
+      final ids = <int>{};
       for (final c in _rootsOfSection(roots)) {
-        for (final sub in c.children) {
-          if (sub.id != null) ids.add(sub.id!);
+        if (c.id != null) {
+          ids.addAll(getCategoryAndAllDescendantIds(c.id!, roots));
         }
       }
       return ids;
     }
-    if (_rootId == null) return null;
-    final ids = <int>{_rootId!};
-    for (final r in roots) {
-      if (r.id != _rootId) continue;
-      for (final c in r.children) {
-        if (c.id != null) ids.add(c.id!);
-      }
-    }
-    return ids;
+    return null;
   }
 
   /// فئات القسم المختار: قسم محدد ⇒ فئاته؛ «عام» ⇒ الفئات بلا قسم؛
@@ -286,7 +283,7 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
         id: it.id,
       );
 
-  /// شارة التصنيف: «اسم القسم • الفئة الرئيسية › الفئة الفرعية».
+  /// شارة التصنيف: «اسم القسم • الفئة الرئيسية › الفئة الفرعية › ...».
   String _badgeOf(
     Item item,
     List<ItemCategory> roots,
@@ -296,16 +293,12 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
     int? sectionId;
     final cid = item.categoryId;
     if (cid != null) {
-      for (final r in roots) {
-        if (r.id == cid) {
-          catName = r.name;
-          sectionId = r.sectionId;
-          break;
-        }
-        for (final c in r.children) {
-          if (c.id == cid) {
-            catName = '${r.name} › ${c.name}';
-            sectionId = c.sectionId ?? r.sectionId;
+      final path = getCategoryPath(cid, roots);
+      if (path.isNotEmpty) {
+        catName = path.map((c) => c.name).join(' › ');
+        for (var i = path.length - 1; i >= 0; i--) {
+          if (path[i].sectionId != null) {
+            sectionId = path[i].sectionId;
             break;
           }
         }
@@ -324,6 +317,24 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
     }
     if (catName.isNotEmpty) return catName;
     return 'بدون قسم';
+  }
+
+  String _findCategoryName(List<ItemCategory> roots, int? id) {
+    if (id == null) return 'فئة';
+    final path = getCategoryPath(id, roots);
+    if (path.isNotEmpty) {
+      return path.map((c) => c.name).join(' › ');
+    }
+    return findCategoryInTree(id, roots)?.name ?? 'فئة';
+  }
+
+  String _findSectionName(List<Section> sections, int? id) {
+    if (id == null) return 'قسم';
+    if (id == kGeneralSectionId) return 'عام';
+    for (final s in sections) {
+      if (s.id == id) return s.name;
+    }
+    return 'قسم';
   }
 
   @override
@@ -518,7 +529,7 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
     var totalCostValue = 0.0;
     var totalSellingValue = 0.0;
     if (canSeeValuation) {
-      for (final it in items) {
+      for (final it in visible) {
         if (it.quantity > 0) {
           totalCostValue += it.quantity * it.buyPrice;
           totalSellingValue += it.quantity * it.sellPrice;
@@ -530,6 +541,7 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
       onRefresh: () async => bump(ref),
       child: Column(
         children: [
+          const ItemConflictBanner(),
           if (canSeeValuation)
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 8, 14, 2),
@@ -770,7 +782,13 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
-                          '${sections.length} قسم · ${roots.length} فئة',
+                          _subId != null
+                              ? 'فئة فرعية: ${_findCategoryName(roots, _subId)}'
+                              : _rootId != null
+                                  ? 'فئة: ${_findCategoryName(roots, _rootId)}'
+                                  : _sectionId != null
+                                      ? 'قسم: ${_findSectionName(sections, _sectionId)}'
+                                      : '${sections.length} قسم · ${roots.length} فئة',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           textAlign: TextAlign.end,
@@ -1227,14 +1245,24 @@ class _HierarchyFilterBar extends StatelessWidget {
           (c) => c?.id == rootId,
           orElse: () => null,
         );
-    final subs = selectedRoot?.children ?? const <ItemCategory>[];
+
+    final activeId = subId ?? rootId;
+    final activeCat = findCategoryInTree(activeId, visibleRoots) ?? selectedRoot;
+    final categoryPath = getCategoryPath(activeId, visibleRoots);
+
+    // تحديد الفئة الأب لشريط الأزرار الأفقي (Drill-down لأي عمق)
+    final ItemCategory? drillParent;
+    if (activeCat != null && activeCat.hasChildren) {
+      drillParent = activeCat;
+    } else if (categoryPath.length >= 2) {
+      drillParent = categoryPath[categoryPath.length - 2];
+    } else {
+      drillParent = selectedRoot;
+    }
+    final subs = drillParent?.children ?? const <ItemCategory>[];
 
     final sec = sections.cast<Section?>().firstWhere(
           (x) => x?.id == sectionId,
-          orElse: () => null,
-        );
-    final sub = subs.cast<ItemCategory?>().firstWhere(
-          (c) => c?.id == subId,
           orElse: () => null,
         );
 
@@ -1264,15 +1292,8 @@ class _HierarchyFilterBar extends StatelessWidget {
         ),
     ];
 
-    // خيارات الفئات تعرض الفئات الرئيسية مع فئاتها الفرعية المتداخلة تحتها بوضوح
-    final parentOfSub = <int, int>{};
-    for (final c in visibleRoots) {
-      for (final child in c.children) {
-        if (child.id != null && c.id != null) {
-          parentOfSub[child.id!] = c.id!;
-        }
-      }
-    }
+    // خيارات الفئات تعرض الشجرة كاملة لأي عمق مع ربط كل فرع بجذره الرئيسي
+    final rootOfDescendant = <int, int>{};
     final cleanRootOptions = <HierarchyOption>[
       HierarchyOption(
         id: null,
@@ -1281,26 +1302,50 @@ class _HierarchyFilterBar extends StatelessWidget {
         tone: AppTone.blue,
         badge: '${visibleRoots.length} فئة',
       ),
-      for (final c in visibleRoots) ...[
-        HierarchyOption(
-          id: c.id,
-          label: c.name,
-          icon: IconCatalog.of(c.iconKey),
-          tone: toneOf(c.colorHex.isNotEmpty ? c.colorHex : ''),
-          badge: c.hasChildren ? '${c.children.length} فرع' : 'فئة',
-        ),
-        for (final child in c.children)
-          HierarchyOption(
-            id: child.id,
-            label: '↳ ${c.name} › ${child.name}',
-            icon: Icons.subdirectory_arrow_left_rounded,
-            tone: toneOf(child.colorHex.isNotEmpty
-                ? child.colorHex
-                : (c.colorHex.isNotEmpty ? c.colorHex : '')),
-            badge: 'فرعية',
-          ),
-      ],
     ];
+
+    void addCategoryTreeOptions(
+      ItemCategory node,
+      ItemCategory root,
+      List<String> ancestorNames,
+      int depth,
+    ) {
+      final pathNames = [...ancestorNames, node.name];
+      if (depth == 0) {
+        cleanRootOptions.add(
+          HierarchyOption(
+            id: node.id,
+            label: node.name,
+            icon: IconCatalog.of(node.iconKey),
+            tone: toneOf(node.colorHex.isNotEmpty ? node.colorHex : ''),
+            badge: node.hasChildren ? '${node.children.length} فرع' : 'فئة',
+          ),
+        );
+      } else {
+        if (node.id != null && root.id != null) {
+          rootOfDescendant[node.id!] = root.id!;
+        }
+        final effectiveColor = node.colorHex.isNotEmpty
+            ? node.colorHex
+            : (root.colorHex.isNotEmpty ? root.colorHex : '');
+        cleanRootOptions.add(
+          HierarchyOption(
+            id: node.id,
+            label: '${"  " * (depth - 1)}↳ ${pathNames.join(" › ")}',
+            icon: Icons.subdirectory_arrow_left_rounded,
+            tone: toneOf(effectiveColor),
+            badge: node.hasChildren ? '${node.children.length} فرع' : 'فرعية',
+          ),
+        );
+      }
+      for (final child in node.children) {
+        addCategoryTreeOptions(child, root, pathNames, depth + 1);
+      }
+    }
+
+    for (final c in visibleRoots) {
+      addCategoryTreeOptions(c, c, const [], 0);
+    }
 
     Future<void> pickSection() async {
       final pick = await showHierarchySheet(
@@ -1326,6 +1371,7 @@ class _HierarchyFilterBar extends StatelessWidget {
     }
 
     Future<void> pickRoot() async {
+      final targetParent = activeCat ?? selectedRoot;
       final pick = await showHierarchySheet(
         context: context,
         title: 'اختر الفئة أو الفئة الفرعية',
@@ -1340,13 +1386,14 @@ class _HierarchyFilterBar extends StatelessWidget {
               sectionId == kGeneralSectionId ? null : sectionId,
             ),
           ),
-          if (selectedRoot?.id != null)
+          if (targetParent?.id != null)
             HierarchyAction(
               label: 'فئة فرعية',
               icon: Icons.account_tree_outlined,
               onTap: () => onAddSubcategory(
-                selectedRoot!.id,
-                selectedRoot.sectionId ??
+                targetParent!.id,
+                targetParent.sectionId ??
+                    selectedRoot?.sectionId ??
                     (sectionId == kGeneralSectionId ? null : sectionId),
               ),
             ),
@@ -1359,8 +1406,8 @@ class _HierarchyFilterBar extends StatelessWidget {
       );
       if (pick != null) {
         final chosenId = pick.id;
-        if (chosenId != null && parentOfSub.containsKey(chosenId)) {
-          onRootAndSub(parentOfSub[chosenId], chosenId);
+        if (chosenId != null && rootOfDescendant.containsKey(chosenId)) {
+          onRootAndSub(rootOfDescendant[chosenId], chosenId);
         } else {
           onRoot(chosenId);
         }
@@ -1398,14 +1445,14 @@ class _HierarchyFilterBar extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: HierarchyDropdown(
-                    label: sub != null
-                        ? '${selectedRoot?.name ?? ''} › ${sub.name}'
+                    label: categoryPath.isNotEmpty
+                        ? categoryPath.map((c) => c.name).join(' › ')
                         : (selectedRoot?.name ?? 'كل الفئات'),
                     icon: selectedRoot == null
                         ? IconCatalog.of('widgets')
                         : IconCatalog.of(
-                            sub?.iconKey.isNotEmpty == true
-                                ? sub!.iconKey
+                            activeCat?.iconKey.isNotEmpty == true
+                                ? activeCat!.iconKey
                                 : selectedRoot.iconKey,
                           ),
                     tone: selectedRoot == null
@@ -1413,11 +1460,11 @@ class _HierarchyFilterBar extends StatelessWidget {
                         : toneOf(selectedRoot.colorHex.isNotEmpty
                             ? selectedRoot.colorHex
                             : ''),
-                    badge: selectedRoot == null
+                    badge: activeCat == null
                         ? '${visibleRoots.length}'
-                        : (selectedRoot.hasChildren
-                            ? '${selectedRoot.children.length} فرع'
-                            : 'فئة'),
+                        : (activeCat.hasChildren
+                            ? '${activeCat.children.length} فرع'
+                            : (activeCat.parentId != null ? 'فرعية' : 'فئة')),
                     active: rootId != null,
                     onTap: pickRoot,
                   ),
@@ -1456,7 +1503,7 @@ class _HierarchyFilterBar extends StatelessWidget {
                 ],
               ],
             ),
-            // شريط مسار التصفح التفاعلي (Breadcrumb) عند اختيار قسم أو فئة أو فئة فرعية
+            // شريط مسار التصفح التفاعلي (Breadcrumb) لأي عمق شجري
             if (hasActivePath) ...[
               const SizedBox(height: 6),
               Container(
@@ -1495,32 +1542,31 @@ class _HierarchyFilterBar extends StatelessWidget {
                                 onTap: () => onRoot(null),
                               ),
                             ],
-                            if (selectedRoot != null) ...[
+                            for (int i = 0; i < categoryPath.length; i++) ...[
                               const _BreadcrumbSep(),
                               _BreadcrumbCrumb(
-                                label: selectedRoot.name,
-                                active: sub == null,
-                                onTap: () => onSub(null),
-                              ),
-                            ],
-                            if (sub != null) ...[
-                              const _BreadcrumbSep(),
-                              _BreadcrumbCrumb(
-                                label: sub.name,
-                                active: true,
-                                onTap: () {},
+                                label: categoryPath[i].name,
+                                active: i == categoryPath.length - 1,
+                                onTap: () {
+                                  if (i == 0) {
+                                    onSub(null);
+                                  } else {
+                                    onSub(categoryPath[i].id);
+                                  }
+                                },
                               ),
                             ],
                           ],
                         ),
                       ),
                     ),
-                    if (selectedRoot != null)
+                    if (activeCat != null)
                       InkWell(
                         borderRadius: BorderRadius.circular(8),
                         onTap: () => onAddSubcategory(
-                          selectedRoot.id,
-                          selectedRoot.sectionId ??
+                          activeCat.id,
+                          activeCat.sectionId ??
+                              selectedRoot?.sectionId ??
                               (sectionId == kGeneralSectionId
                                   ? null
                                   : sectionId),
@@ -1568,7 +1614,7 @@ class _HierarchyFilterBar extends StatelessWidget {
                 ),
               ),
             ],
-            // شرائح الفئات الفرعية المدمجة (تظهر بسلاسة عند اختيار فئة رئيسية لها فئات فرعية)
+            // شرائح الفئات الفرعية المتعددة المستويات (تظهر بسلاسة عند اختيار فئة رئيسية أو فرعية لها أبناء)
             if (subs.isNotEmpty) ...[
               const SizedBox(height: 6),
               SizedBox(
@@ -1577,17 +1623,28 @@ class _HierarchyFilterBar extends StatelessWidget {
                   scrollDirection: Axis.horizontal,
                   children: [
                     _SubcategoryPill(
-                      label: 'كل ${selectedRoot?.name ?? "الفروع"} (${subs.length})',
-                      selected: subId == null,
-                      onTap: () => onSub(null),
+                      label:
+                          'كل ${drillParent?.name ?? selectedRoot?.name ?? "الفروع"} (${subs.length})',
+                      selected: activeCat?.id == drillParent?.id,
+                      onTap: () => onSub(
+                        drillParent?.id == rootId ? null : drillParent?.id,
+                      ),
                     ),
                     for (final c in subs)
                       Padding(
                         padding: const EdgeInsetsDirectional.only(start: 6),
                         child: _SubcategoryPill(
-                          label: c.name,
-                          selected: subId == c.id,
-                          onTap: () => onSub(subId == c.id ? null : c.id),
+                          label: c.hasChildren
+                              ? '${c.name} (${c.children.length})'
+                              : c.name,
+                          selected: activeCat?.id == c.id,
+                          onTap: () => onSub(
+                            activeCat?.id == c.id
+                                ? (drillParent?.id == rootId
+                                    ? null
+                                    : drillParent?.id)
+                                : c.id,
+                          ),
                         ),
                       ),
                     Padding(
@@ -1605,8 +1662,9 @@ class _HierarchyFilterBar extends StatelessWidget {
                           style: TextStyle(fontSize: 11.5),
                         ),
                         onPressed: () => onAddSubcategory(
-                          selectedRoot?.id,
-                          selectedRoot?.sectionId ??
+                          (activeCat ?? drillParent)?.id,
+                          (activeCat ?? drillParent)?.sectionId ??
+                              selectedRoot?.sectionId ??
                               (sectionId == kGeneralSectionId
                                   ? null
                                   : sectionId),
@@ -1875,47 +1933,38 @@ class _CategoryManager extends ConsumerWidget {
               ),
             ),
           ),
-          // فئات هذا القسم وفئاتها الفرعية المتداخلة تحتها:
-          for (final c in bySection[g.id] ?? const <ItemCategory>[]) ...[
+          // فئات هذا القسم وفئاتها الفرعية المتداخلة تحتها لأي عمق شجري:
+          for (final entry in sortCategoriesHierarchically(
+            bySection[g.id] ?? const <ItemCategory>[],
+          ))
             _CategoryManagerTile(
-              category: c,
-              level: 0,
+              category: entry.category,
+              level: entry.depth,
+              parentName: entry.depth > 0 ? entry.pathLabel : null,
               sectionId: g.id,
-              onAddItem: () => openItemForm(context, ref,
-                  categoryId: c.id, sectionId: g.id),
-              onEdit: () => openItemCategoryForm(context, ref, category: c),
-              onAddSub: () => openItemCategoryForm(context, ref,
-                  parentId: c.id, sectionId: g.id),
+              onAddItem: () => openItemForm(
+                context,
+                ref,
+                categoryId: entry.category.id,
+                sectionId: g.id,
+              ),
+              onEdit: () =>
+                  openItemCategoryForm(context, ref, category: entry.category),
+              onAddSub: () => openItemCategoryForm(
+                context,
+                ref,
+                parentId: entry.category.id,
+                sectionId: g.id,
+              ),
               onMove: () => openMoveCategorySheet(
                 context,
                 ref,
-                category: c,
+                category: entry.category,
                 sections: sections,
                 roots: roots,
               ),
-              onDelete: () => _deleteCategory(context, ref, c),
+              onDelete: () => _deleteCategory(context, ref, entry.category),
             ),
-            for (final sub in c.children)
-              _CategoryManagerTile(
-                category: sub,
-                level: 1,
-                parentName: c.name,
-                sectionId: g.id,
-                onAddItem: () => openItemForm(context, ref,
-                    categoryId: sub.id, sectionId: g.id),
-                onEdit: () => openItemCategoryForm(context, ref, category: sub),
-                onAddSub: () => openItemCategoryForm(context, ref,
-                    parentId: c.id, sectionId: g.id),
-                onMove: () => openMoveCategorySheet(
-                  context,
-                  ref,
-                  category: sub,
-                  sections: sections,
-                  roots: roots,
-                ),
-                onDelete: () => _deleteCategory(context, ref, sub),
-              ),
-          ],
           if ((bySection[g.id] ?? const []).isEmpty)
             const Padding(
               padding: EdgeInsetsDirectional.only(start: 12, bottom: 8),
@@ -1953,7 +2002,7 @@ class _CategoryManagerTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final indent = level * 20.0;
+    final indent = (level * 16.0).clamp(0.0, 64.0);
     return Padding(
       padding: EdgeInsetsDirectional.only(start: indent, bottom: 6),
       child: Card(
@@ -1976,7 +2025,7 @@ class _CategoryManagerTile extends StatelessWidget {
           ),
           subtitle: level > 0 && parentName != null
               ? Text(
-                  'فرع من: $parentName',
+                  parentName!.trim(),
                   style: const TextStyle(fontSize: 11),
                 )
               : (category.hasChildren
@@ -1992,13 +2041,12 @@ class _CategoryManagerTile extends StatelessWidget {
                 icon: const Icon(Icons.add_box_outlined, size: 19),
                 onPressed: onAddItem,
               ),
-              if (level == 0)
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  tooltip: 'إضافة فئة فرعية',
-                  icon: const Icon(Icons.add_circle_outline, size: 19),
-                  onPressed: onAddSub,
-                ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                tooltip: 'إضافة فئة فرعية',
+                icon: const Icon(Icons.add_circle_outline, size: 19),
+                onPressed: onAddSub,
+              ),
               IconButton(
                 visualDensity: VisualDensity.compact,
                 tooltip: 'نقل الفئة',
@@ -2028,8 +2076,8 @@ class _CategoryManagerTile extends StatelessWidget {
 
 /// نافذة نقل / إعادة ربط فئة رئيسية أو فرعية بمرونة كاملة:
 /// - نقل فئة رئيسية إلى قسم آخر (مع كافة فئاتها الفرعية وأصنافها).
-/// - نقل فئة فرعية إلى فئة رئيسية أخرى، أو ترقيتها إلى فئة رئيسية مستقلة.
-/// - تحويل فئة رئيسية إلى فئة فرعية تحت فئة رئيسية أخرى.
+/// - نقل فئة فرعية إلى فئة رئيسية أو فرعية أخرى، أو ترقيتها إلى فئة رئيسية مستقلة.
+/// - تحويل فئة رئيسية إلى فئة فرعية تحت فئة أخرى.
 Future<void> openMoveCategorySheet(
   BuildContext context,
   WidgetRef ref, {
@@ -2042,13 +2090,20 @@ Future<void> openMoveCategorySheet(
   int? targetSectionId = category.sectionId;
   int? targetParentId = category.parentId;
 
-  // الفئات الرئيسية المتاحة لتكون أباً (نستثني الفئة نفسها)
-  final availableParents =
-      roots.where((r) => r.id != null && r.id != category.id).toList();
+  // استثناء الفئة نفسها وكل أحفادها من قائمة الآباء المتاحين لمنع الحلقات
+  final forbiddenIds = getCategoryAndAllDescendantIds(category.id!, roots);
+  final allSorted = sortCategoriesHierarchically(roots);
+  final availableParents = allSorted
+      .where(
+        (e) =>
+            e.category.id != null && !forbiddenIds.contains(e.category.id),
+      )
+      .toList();
+
   if (asSubcategory &&
       targetParentId == null &&
       availableParents.isNotEmpty) {
-    targetParentId = availableParents.first.id;
+    targetParentId = availableParents.first.category.id;
   }
 
   final ok = await showDialog<bool>(
@@ -2110,7 +2165,7 @@ Future<void> openMoveCategorySheet(
                       if (asSubcategory &&
                           targetParentId == null &&
                           availableParents.isNotEmpty) {
-                        targetParentId = availableParents.first.id;
+                        targetParentId = availableParents.first.category.id;
                       }
                     });
                   },
@@ -2141,22 +2196,25 @@ Future<void> openMoveCategorySheet(
                   ),
                 ] else ...[
                   DropdownButtonFormField<int?>(
-                    initialValue:
-                        availableParents.any((r) => r.id == targetParentId)
-                            ? targetParentId
-                            : (availableParents.isNotEmpty
-                                ? availableParents.first.id
-                                : null),
+                    initialValue: availableParents
+                            .any((r) => r.category.id == targetParentId)
+                        ? targetParentId
+                        : (availableParents.isNotEmpty
+                            ? availableParents.first.category.id
+                            : null),
                     isExpanded: true,
                     decoration: const InputDecoration(
-                      labelText: 'الفئة الرئيسية الأب',
+                      labelText: 'الفئة الأب',
                       prefixIcon: Icon(Icons.category_outlined),
                     ),
                     items: [
-                      for (final r in availableParents)
+                      for (final entry in availableParents)
                         DropdownMenuItem<int?>(
-                          value: r.id,
-                          child: Text(r.name),
+                          value: entry.category.id,
+                          child: Text(
+                            entry.pathLabel,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                     ],
                     onChanged: (v) => setModalState(() => targetParentId = v),
@@ -2202,7 +2260,7 @@ Future<void> openMoveCategorySheet(
   }
 }
 
-/// نافذة سريعة ومختصرة لنقل صنف واحد أو عدة أصناف إلى أي قسم أو فئة رئيسية أو فئة فرعية.
+/// نافذة سريعة ومختصرة لنقل صنف واحد أو عدة أصناف إلى أي قسم أو فئة رئيسية أو فئة فرعية لأي عمق.
 Future<bool?> openMoveItemsSheet(
   BuildContext context,
   WidgetRef ref, {
@@ -2218,18 +2276,16 @@ Future<bool?> openMoveItemsSheet(
   int? selectedRootId;
   int? selectedSubId;
 
-  // استنتاج الفئة الرئيسية والفئة الفرعية الحالية للصنف الأول
-  for (final r in roots) {
-    if (r.id == first.categoryId) {
-      selectedRootId = r.id;
-      selectedSecId ??= r.sectionId;
-      break;
+  // استنتاج الفئة الرئيسية والفئة الفرعية الحالية للصنف الأول لأي عمق شجري
+  final path = getCategoryPath(first.categoryId, roots);
+  if (path.isNotEmpty) {
+    selectedRootId = path.first.id;
+    if (path.length > 1) {
+      selectedSubId = path.last.id;
     }
-    for (final sub in r.children) {
-      if (sub.id == first.categoryId) {
-        selectedRootId = r.id;
-        selectedSubId = sub.id;
-        selectedSecId ??= sub.sectionId ?? r.sectionId;
+    for (var i = path.length - 1; i >= 0; i--) {
+      if (path[i].sectionId != null) {
+        selectedSecId ??= path[i].sectionId;
         break;
       }
     }
@@ -2254,8 +2310,14 @@ Future<bool?> openMoveItemsSheet(
               (r) => r?.id == selectedRootId,
               orElse: () => null,
             );
-        final subs = activeRoot?.children ?? const <ItemCategory>[];
-        if (selectedSubId != null && !subs.any((s) => s.id == selectedSubId)) {
+        // جمع كل الفروع والأحفاد التابعة للفئة الرئيسية المختارة بمساراتها الكاملة
+        final descendantEntries = activeRoot == null
+            ? const <HierarchicalCategoryItem>[]
+            : sortCategoriesHierarchically(<ItemCategory>[activeRoot])
+                .where((e) => e.depth > 0)
+                .toList();
+        if (selectedSubId != null &&
+            !descendantEntries.any((s) => s.category.id == selectedSubId)) {
           selectedSubId = null;
         }
 
@@ -2346,7 +2408,7 @@ Future<bool?> openMoveItemsSheet(
                     selectedSubId = null;
                   }),
                 ),
-                if (subs.isNotEmpty) ...[
+                if (descendantEntries.isNotEmpty) ...[
                   const SizedBox(height: 10),
                   DropdownButtonFormField<int?>(
                     initialValue: selectedSubId,
@@ -2364,10 +2426,13 @@ Future<bool?> openMoveItemsSheet(
                         value: null,
                         child: Text('مباشرة داخل «${activeRoot?.name ?? ""}»'),
                       ),
-                      for (final sub in subs)
+                      for (final entry in descendantEntries)
                         DropdownMenuItem<int?>(
-                          value: sub.id,
-                          child: Text(sub.name),
+                          value: entry.category.id,
+                          child: Text(
+                            entry.pathLabel,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                     ],
                     onChanged: (v) => setModalState(() => selectedSubId = v),
@@ -3321,14 +3386,18 @@ class _ItemCategoryFormState extends ConsumerState<_ItemCategoryForm> {
                 },
               ),
               const SizedBox(height: 12),
-              // (2026-09-22) اختيار الفئة الأب: فارغ = فئة رئيسية.
+              // (2026-09-22 / 3.98.41) اختيار الفئة الأب: يعرض الشجرة الكاملة بمساراتها الواضحة.
               Consumer(
                 builder: (ctx, rref, _) {
                   final all = rref.watch(itemCategoriesProvider).valueOrNull ??
                       const [];
                   final banned = _forbidden(all);
-                  final options = all
-                      .where((c) => c.id != null && !banned.contains(c.id))
+                  final sortedOptions = sortCategoriesHierarchically(all)
+                      .where(
+                        (e) =>
+                            e.category.id != null &&
+                            !banned.contains(e.category.id),
+                      )
                       .toList();
                   final valid = _parentId != null && banned.contains(_parentId)
                       ? null
@@ -3347,11 +3416,11 @@ class _ItemCategoryFormState extends ConsumerState<_ItemCategoryForm> {
                         value: null,
                         child: Text('فئة رئيسية (بدون أب)'),
                       ),
-                      for (final c in options)
+                      for (final entry in sortedOptions)
                         DropdownMenuItem<int?>(
-                          value: c.id,
+                          value: entry.category.id,
                           child: Text(
-                            c.parentId == null ? c.name : '↳ ${c.name}',
+                            entry.pathLabel,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
@@ -3502,6 +3571,7 @@ class _ItemFormState extends ConsumerState<_ItemForm> {
       context,
       ref,
       sectionId: _sectionId == kGeneralSectionId ? null : _sectionId,
+      parentId: _categoryId,
     );
     if (mounted && id != null) setState(() => _categoryId = id);
   }
@@ -3834,29 +3904,15 @@ class _ItemFormState extends ConsumerState<_ItemForm> {
                                 style: TextStyle(fontSize: 12.5),
                               ),
                             ),
-                            ...scopedCats.map(
-                              (category) {
-                                String label = category.name;
-                                if (category.parentId != null) {
-                                  final parent = allCats
-                                      .cast<ItemCategory?>()
-                                      .firstWhere(
-                                        (p) => p?.id == category.parentId,
-                                        orElse: () => null,
-                                      );
-                                  if (parent != null) {
-                                    label = '↳ ${parent.name} › ${category.name}';
-                                  }
-                                }
-                                return DropdownMenuItem<int?>(
-                                  value: category.id,
-                                  child: Text(
-                                    label,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(fontSize: 12.5),
-                                  ),
-                                );
-                              },
+                            ...sortCategoriesHierarchically(scopedCats).map(
+                              (entry) => DropdownMenuItem<int?>(
+                                value: entry.category.id,
+                                child: Text(
+                                  entry.pathLabel,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 12.5),
+                                ),
+                              ),
                             ),
                           ],
                           onChanged: (value) {

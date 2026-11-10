@@ -9,10 +9,12 @@ import 'package:sqflite/sqflite.dart';
 
 import '../core/accounting.dart';
 import '../core/app_version.dart';
+import '../core/category_tree.dart' as category_tree;
 import '../core/ids.dart';
 import '../core/database.dart';
 import '../core/device_names.dart';
 import '../core/format.dart';
+import '../core/item_conflict.dart';
 import '../core/secret_store.dart';
 import '../core/media_paths.dart';
 import '../core/models.dart';
@@ -1667,6 +1669,79 @@ class Repo {
         .map((r) => r['account_id'] as int?)
         .whereType<int>()
         .toList();
+  }
+
+  /// (3.98.40 / الملاحظة 2) جلب اقتراحات البيان/الوصف للعمليات:
+  /// تبدأ بالبحث بمطابقة البادئة أو الجزئية لما يكتبه المستخدم مع إعطاء
+  /// الأولوية للبيانات السابقة لنفس الحساب المحدد ثم الأكثر تكراراً واستخداماً.
+  Future<List<String>> transactionDescriptionSuggestions({
+    String query = '',
+    int? accountId,
+    int limit = 8,
+  }) async {
+    final db = await _db;
+    final q = query.trim();
+    final result = <String>[];
+    final seen = <String>{};
+
+    void addUnique(String val) {
+      final clean = val.trim();
+      if (clean.length >= 2 && !seen.contains(clean)) {
+        seen.add(clean);
+        result.add(clean);
+      }
+    }
+
+    // 1) الاقتراحات السابقة لنفس الحساب أولاً
+    if (accountId != null && accountId > 0) {
+      final whereParts = <String>[
+        "(account_id = ? OR from_id = ? OR to_id = ?)",
+        "COALESCE(deleted_at, '') = ''",
+        "TRIM(COALESCE(description, '')) <> ''",
+      ];
+      final args = <dynamic>[accountId, accountId, accountId];
+      if (q.isNotEmpty) {
+        whereParts.add("description LIKE ?");
+        args.add('%$q%');
+      }
+      final rows = await db.rawQuery('''
+        SELECT description, COUNT(*) as cnt
+        FROM transactions
+        WHERE ${whereParts.join(' AND ')}
+        GROUP BY description
+        ORDER BY cnt DESC, MAX(id) DESC
+        LIMIT ?
+      ''', [...args, limit]);
+      for (final r in rows) {
+        addUnique('${r['description'] ?? ''}');
+        if (result.length >= limit) return result;
+      }
+    }
+
+    // 2) الاقتراحات العامة لبقية العمليات (الأكثر تكراراً)
+    final wherePartsGen = <String>[
+      "COALESCE(deleted_at, '') = ''",
+      "TRIM(COALESCE(description, '')) <> ''",
+    ];
+    final argsGen = <dynamic>[];
+    if (q.isNotEmpty) {
+      wherePartsGen.add("description LIKE ?");
+      argsGen.add('%$q%');
+    }
+    final rowsGen = await db.rawQuery('''
+      SELECT description, COUNT(*) as cnt
+      FROM transactions
+      WHERE ${wherePartsGen.join(' AND ')}
+      GROUP BY description
+      ORDER BY cnt DESC, MAX(id) DESC
+      LIMIT ?
+    ''', [...argsGen, limit * 2]);
+    for (final r in rowsGen) {
+      addUnique('${r['description'] ?? ''}');
+      if (result.length >= limit) break;
+    }
+
+    return result;
   }
 
   Future<void> updateTxImage(int id, String path) async {
@@ -7584,9 +7659,8 @@ class Repo {
     return rows.map(ItemCategory.fromMap).toList();
   }
 
-  /// (2026-09-22) الشجرة كاملة: الفئات الرئيسية وفي كل واحدة أبناؤها
-  /// المباشرون — قراءة واحدة للجدول تُجمَّع في الذاكرة (بلا استعلامات
-  /// متتابعة لكل فئة).
+  /// (2026-09-22 / 3.98.41) الشجرة كاملة: الفئات الرئيسية وفي كل واحدة أبناؤها
+  /// وأحفادها شجرياً لأي عمق — قراءة واحدة للجدول تُجمَّع في الذاكرة.
   Future<List<ItemCategory>> itemCategoryTree() async {
     final all = await itemCategories();
     final roots = <ItemCategory>[];
@@ -7599,9 +7673,18 @@ class Repo {
         byParent.putIfAbsent(p, () => <ItemCategory>[]).add(c);
       }
     }
-    return roots
-        .map((r) => r.withChildren(byParent[r.id] ?? const []))
-        .toList();
+    ItemCategory attachChildren(ItemCategory node) {
+      final kids = byParent[node.id] ?? const <ItemCategory>[];
+      final resolvedKids = kids.map(attachChildren).toList();
+      return node.withChildren(resolvedKids);
+    }
+    return roots.map(attachChildren).toList();
+  }
+
+  /// (3.98.41) استخراج معرّف الفئة مضافاً إليه جميع معرّفات الفئات الأبناء والأحفاد التابعة لها شجرياً لأي عمق.
+  Future<Set<int>> getCategoryAndAllDescendantIds(int categoryId) async {
+    final all = await itemCategories();
+    return category_tree.getCategoryAndAllDescendantIds(categoryId, all);
   }
 
   /// إضافة فئة أو تعديل اسمها مع تحديث اسم الفئة في الأصناف التابعة لها.
@@ -7636,19 +7719,25 @@ class Repo {
       whereArgs: [name, category.id ?? -1, parentScope],
     );
 
-    // إذا كانت الفئة فرعية (لها parentId)، ترث تلقائياً قسم الفئة الأب لضمان اتساق الشجرة.
+    // إذا كانت الفئة فرعية (لها parentId)، ترث تلقائياً قسم الفئة الأب أو الجد لضمان اتساق الشجرة.
     int? effectiveSectionId = category.sectionId;
     if (category.parentId != null) {
-      final parentRows = await db.query(
-        'item_categories',
-        columns: ['section_id'],
-        where: 'id = ?',
-        whereArgs: [category.parentId],
-        limit: 1,
-      );
-      if (parentRows.isNotEmpty) {
-        effectiveSectionId =
-            (parentRows.first['section_id'] as int?) ?? effectiveSectionId;
+      var cursor = category.parentId;
+      for (var guard = 0; guard < 64 && cursor != null; guard++) {
+        final parentRows = await db.query(
+          'item_categories',
+          columns: ['section_id', 'parent_id'],
+          where: 'id = ?',
+          whereArgs: [cursor],
+          limit: 1,
+        );
+        if (parentRows.isEmpty) break;
+        final secId = parentRows.first['section_id'] as int?;
+        if (secId != null) {
+          effectiveSectionId = secId;
+          break;
+        }
+        cursor = parentRows.first['parent_id'] as int?;
       }
     }
 
@@ -7761,48 +7850,55 @@ class Repo {
         },
       );
 
-      // إذا تغيّر قسم فئة رئيسية، تتبعها جميع فئاتها الفرعية وأصناف تلك الفئات الفرعية تلقائياً.
+      // إذا تغيّر قسم الفئة، تتبعها جميع فئاتها الفرعية والأحفاد شجرياً لأي عمق وأصنافها تلقائياً.
       if (prevSection != effectiveSectionId) {
-        final childRows = await txn.query(
-          'item_categories',
-          where: "parent_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
-          whereArgs: [id],
-        );
-        for (final child in childRows) {
-          final childId = child['id'] as int;
-          await txn.update(
+        final queue = <int>[id];
+        final visited = <int>{id};
+        while (queue.isNotEmpty) {
+          final currentParentId = queue.removeLast();
+          final childRows = await txn.query(
             'item_categories',
-            {
-              'section_id': effectiveSectionId,
-              'updated_at': now,
-            },
-            where: 'id = ?',
-            whereArgs: [childId],
+            where: "parent_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
+            whereArgs: [currentParentId],
           );
-          await txn.update(
-            'items',
-            {
-              'section_id': effectiveSectionId,
-              'updated_at': now,
-            },
-            where: 'category_id = ?',
-            whereArgs: [childId],
-          );
-          await rec.record(
-            entityType: EntityKind.itemCategory,
-            entityId: '$childId',
-            opType: OpKind.update,
-            payload: {
-              'id': childId,
-              'name': child['name'],
-              'parent_id': id,
-              'section_id': effectiveSectionId,
-              'icon_key': child['icon_key'],
-              'color_hex': child['color_hex'],
-              'image_path': child['image_path'],
-              'updated_at': now,
-            },
-          );
+          for (final child in childRows) {
+            final childId = child['id'] as int;
+            if (!visited.add(childId)) continue;
+            queue.add(childId);
+            await txn.update(
+              'item_categories',
+              {
+                'section_id': effectiveSectionId,
+                'updated_at': now,
+              },
+              where: 'id = ?',
+              whereArgs: [childId],
+            );
+            await txn.update(
+              'items',
+              {
+                'section_id': effectiveSectionId,
+                'updated_at': now,
+              },
+              where: 'category_id = ?',
+              whereArgs: [childId],
+            );
+            await rec.record(
+              entityType: EntityKind.itemCategory,
+              entityId: '$childId',
+              opType: OpKind.update,
+              payload: {
+                'id': childId,
+                'name': child['name'],
+                'parent_id': currentParentId,
+                'section_id': effectiveSectionId,
+                'icon_key': child['icon_key'],
+                'color_hex': child['color_hex'],
+                'image_path': child['image_path'],
+                'updated_at': now,
+              },
+            );
+          }
         }
       }
     });
@@ -7872,18 +7968,20 @@ class Repo {
         categoryName = (catRows.first['name'] as String?) ?? 'عام';
         effectiveSectionId =
             (catRows.first['section_id'] as int?) ?? effectiveSectionId;
-        final pId = catRows.first['parent_id'] as int?;
-        if (effectiveSectionId == null && pId != null) {
+        var cursor = catRows.first['parent_id'] as int?;
+        for (var guard = 0;
+            guard < 64 && effectiveSectionId == null && cursor != null;
+            guard++) {
           final pRows = await db.query(
             'item_categories',
-            columns: ['section_id'],
+            columns: ['section_id', 'parent_id'],
             where: 'id = ?',
-            whereArgs: [pId],
+            whereArgs: [cursor],
             limit: 1,
           );
-          if (pRows.isNotEmpty) {
-            effectiveSectionId = pRows.first['section_id'] as int?;
-          }
+          if (pRows.isEmpty) break;
+          effectiveSectionId = pRows.first['section_id'] as int?;
+          cursor = pRows.first['parent_id'] as int?;
         }
       }
     }
@@ -8106,9 +8204,25 @@ class Repo {
           whereArgs: it.id != null ? [sku, it.id] : [sku],
           limit: 1);
       if (dup.isNotEmpty) {
-        throw StateError(
-            'الباركود «$sku» مستخدم مسبقاً للصنف «${dup.first['name']}». '
-            'كل صنف يجب أن يملك باركوداً فريداً.');
+        var allowSharedBarcodeOnEdit = false;
+        if (it.id != null) {
+          final existingSelf = await db.query(
+            'items',
+            columns: ['sku'],
+            where: 'id = ?',
+            whereArgs: [it.id],
+            limit: 1,
+          );
+          if (existingSelf.isNotEmpty &&
+              '${existingSelf.first['sku'] ?? ''}'.trim() == sku) {
+            allowSharedBarcodeOnEdit = true;
+          }
+        }
+        if (!allowSharedBarcodeOnEdit) {
+          throw StateError(
+              'الباركود «$sku» مستخدم مسبقاً للصنف «${dup.first['name']}». '
+              'كل صنف يجب أن يملك باركوداً فريداً.');
+        }
       }
     }
     // (2026-09-22) القسم: إن لم يُحدَّد للصنف صراحةً نستمدّه من فئته،
@@ -8159,6 +8273,32 @@ class Repo {
     ({int itemId, String name, double qty, double minQty})? lowStock;
     await db.transaction((txn) async {
       final rec = await newRecorder(txn);
+      String creatorName = '';
+      try {
+        final meRows = await txn.query(
+          'users',
+          columns: ['name'],
+          where: "is_me = 1 AND COALESCE(deleted_at,'') = ''",
+          limit: 1,
+        );
+        if (meRows.isNotEmpty) {
+          creatorName = '${meRows.first['name'] ?? ''}'.trim();
+        }
+        if (creatorName.isEmpty) {
+          final stRows = await txn.query(
+            'settings',
+            columns: ['value'],
+            where: "key IN ('sync.deviceName', 'profile.owner_name', 'account.name')",
+          );
+          for (final r in stRows) {
+            final v = '${r['value'] ?? ''}'.trim();
+            if (v.isNotEmpty) {
+              creatorName = v;
+              break;
+            }
+          }
+        }
+      } catch (_) {}
       if (isCreate) {
         final newId = newGlobalId();
         id = await txn.insert(
@@ -8177,6 +8317,7 @@ class Repo {
         }
         final payload = itemToSave.toMap()..['id'] = id;
         if (thumbB64.isNotEmpty) payload['thumb_b64'] = thumbB64;
+        if (creatorName.isNotEmpty) payload['created_by_name'] = creatorName;
         await rec.record(
           entityType: EntityKind.item,
           entityId: '$id',
@@ -8191,6 +8332,7 @@ class Repo {
         final payload = Map<String, Object?>.from(map)
           ..['__qty_changed'] = qtyChanged ? 1 : 0;
         if (thumbB64.isNotEmpty) payload['thumb_b64'] = thumbB64;
+        if (creatorName.isNotEmpty) payload['created_by_name'] = creatorName;
         await rec.record(
           entityType: EntityKind.item,
           entityId: '$id',
@@ -8283,6 +8425,404 @@ class Repo {
       });
     });
     await logActivity('حذف صنف', 'item', '$id');
+  }
+
+  // ==================== معالجة تعارض الأصناف والباركود (أوفلاين) ====================
+
+  /// جميع سجلات تعارض الأصناف المسجّلة (المعلقة والمعالجة).
+  Future<List<OfflineItemConflict>> allItemConflicts() async {
+    final db = await _db;
+    final rows = await db.query(
+      'settings',
+      where: "key LIKE 'item_conflict:%'",
+    );
+    final out = <OfflineItemConflict>[];
+    for (final r in rows) {
+      final k = '${r['key'] ?? ''}'.trim();
+      final v = '${r['value'] ?? ''}'.trim();
+      final c = OfflineItemConflict.tryParseJson(v, fallbackKey: k);
+      if (c != null) out.add(c);
+    }
+    out.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return out;
+  }
+
+  /// التعارضات المعلّقة التي تنتظر اتخاذ إجراء من المدير.
+  Future<List<OfflineItemConflict>> pendingItemConflicts() async {
+    final all = await allItemConflicts();
+    return all.where((c) => c.isPending).toList();
+  }
+
+  /// جلب سجل تعارض محدد بمفتاحه.
+  Future<OfflineItemConflict?> itemConflictByKey(String conflictKey) async {
+    final db = await _db;
+    final normKey = conflictKey.startsWith('item_conflict:')
+        ? conflictKey
+        : 'item_conflict:$conflictKey';
+    final rows = await db.query(
+      'settings',
+      where: 'key = ?',
+      whereArgs: [normKey],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return OfflineItemConflict.tryParseJson(
+      '${rows.first['value'] ?? ''}',
+      fallbackKey: normKey,
+    );
+  }
+
+  /// توليد باركود رقمي فريد غير مستخدم (6 خانات على الأقل، يبدأ من 100001).
+  Future<String> generateUniqueItemBarcode() async {
+    final db = await _db;
+    final rows = await db.query(
+      'items',
+      columns: ['sku'],
+      where: "sku IS NOT NULL AND TRIM(sku) != ''",
+    );
+    final used = <String>{};
+    var maxNum = 100000;
+    for (final r in rows) {
+      final s = '${r['sku'] ?? ''}'.trim();
+      if (s.isEmpty) continue;
+      used.add(s.toLowerCase());
+      final n = int.tryParse(s);
+      if (n != null && n >= 100000 && n < 999999999 && n > maxNum) {
+        maxNum = n;
+      }
+    }
+    var candidate = maxNum + 1;
+    while (used.contains('$candidate')) {
+      candidate++;
+    }
+    return '$candidate';
+  }
+
+  /// الخيار 1: تغيير باركود أحد الصنفين المتعارضين أو توليد باركود جديد له فوراً
+  /// لإنهاء الاشتراك في الباركود ومزامنة النتيجة للجهازين.
+  Future<String> resolveItemConflictChangeBarcode({
+    required String conflictKey,
+    int? targetItemId,
+    String? newBarcode,
+  }) async {
+    final conflict = await itemConflictByKey(conflictKey);
+    if (conflict == null) {
+      throw StateError('سجل التعارض غير موجود.');
+    }
+    final itemId = targetItemId ?? conflict.item2Id;
+    var cleanSku = (newBarcode ?? '').trim();
+    if (cleanSku.isEmpty) {
+      cleanSku = await generateUniqueItemBarcode();
+    } else {
+      final db = await _db;
+      final dup = await db.query(
+        'items',
+        columns: ['id', 'name'],
+        where:
+            "LOWER(TRIM(sku)) = LOWER(TRIM(?)) AND id != ? AND COALESCE(is_deleted, 0) = 0 AND COALESCE(deleted_at, '') = ''",
+        whereArgs: [cleanSku, itemId],
+        limit: 1,
+      );
+      if (dup.isNotEmpty) {
+        throw StateError(
+          'الباركود «$cleanSku» مستخدم بالفعل للصنف «${dup.first['name']}». اختر باركوداً آخر أو اضغط توليد تلقائي.',
+        );
+      }
+    }
+
+    final db = await _db;
+    final nowIso = DateTime.now().toIso8601String();
+    final resolved = conflict.copyWith(
+      status: 'resolved',
+      resolution: 'barcode_changed',
+      resolvedAt: nowIso,
+    );
+
+    await db.transaction((txn) async {
+      await txn.update(
+        'items',
+        {'sku': cleanSku, 'updated_at': nowIso},
+        where: 'id = ?',
+        whereArgs: [itemId],
+      );
+      final updatedRows = await txn.query(
+        'items',
+        where: 'id = ?',
+        whereArgs: [itemId],
+        limit: 1,
+      );
+      await txn.insert(
+        'settings',
+        {'key': resolved.key, 'value': resolved.toJson()},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.update(
+        'notifications',
+        {'seen': 1},
+        where: "entity_type = 'item_conflict' AND entity_id = ?",
+        whereArgs: [resolved.key],
+      );
+      try {
+        final rec = await newRecorder(txn);
+        if (updatedRows.isNotEmpty) {
+          final payload = Map<String, Object?>.from(updatedRows.first)
+            ..['id'] = itemId
+            ..['__qty_changed'] = 0
+            ..['__conflict_resolved'] = true;
+          await rec.record(
+            entityType: EntityKind.item,
+            entityId: '$itemId',
+            opType: OpKind.update,
+            payload: payload,
+          );
+        }
+        await rec.record(
+          entityType: EntityKind.setting,
+          entityId: resolved.key,
+          opType: OpKind.settings,
+          payload: {'key': resolved.key, 'value': resolved.toJson()},
+        );
+      } catch (_) {}
+    });
+
+    await logActivity(
+      'معالجة تعارض باركود الصنف #$itemId إلى $cleanSku',
+      'item',
+      '$itemId',
+    );
+    return cleanSku;
+  }
+
+  /// الخيار 2: دمج الصنفين في بطاقة صنف واحدة مع جمع كميتيهما وتوحيد جميع الفواتير والحركات المخزنية.
+  Future<int> resolveItemConflictMergeItems({
+    required String conflictKey,
+    int? keepItemId,
+    int? mergeFromItemId,
+  }) async {
+    final conflict = await itemConflictByKey(conflictKey);
+    if (conflict == null) {
+      throw StateError('سجل التعارض غير موجود.');
+    }
+    final keepId = keepItemId ?? conflict.item1Id;
+    final dropId = mergeFromItemId ??
+        (keepId == conflict.item1Id ? conflict.item2Id : conflict.item1Id);
+
+    final db = await _db;
+    final nowIso = DateTime.now().toIso8601String();
+    final dateStr = nowIso.split('T').first;
+    final resolved = conflict.copyWith(
+      status: 'resolved',
+      resolution: 'merged',
+      resolvedAt: nowIso,
+    );
+
+    await db.transaction((txn) async {
+      final keepRows = await txn.query(
+        'items',
+        where: 'id = ?',
+        whereArgs: [keepId],
+        limit: 1,
+      );
+      final dropRows = await txn.query(
+        'items',
+        where: 'id = ?',
+        whereArgs: [dropId],
+        limit: 1,
+      );
+      if (keepRows.isEmpty) {
+        throw StateError('الصنف الأساسي غير موجود.');
+      }
+      final keepQty = ((keepRows.first['quantity'] as num?) ?? 0).toDouble();
+      final dropQty = dropRows.isEmpty
+          ? 0.0
+          : ((dropRows.first['quantity'] as num?) ?? 0).toDouble();
+      final mergedQty = keepQty + dropQty;
+
+      // فحص الحركات المسجلة على الصنف المدمج قبل ترحيلها
+      double recordedInMoves = 0.0;
+      if (dropQty > 0) {
+        try {
+          final moveRows = await txn.rawQuery(
+            "SELECT kind, SUM(quantity) as total FROM stock_moves "
+            "WHERE item_id = ? AND (deleted_at IS NULL OR deleted_at = '') "
+            "GROUP BY kind",
+            [dropId],
+          );
+          for (final r in moveRows) {
+            final k = r['kind']?.toString() ?? '';
+            final t = ((r['total'] as num?) ?? 0).toDouble();
+            if (k == 'purchase' || k == 'return' || k == 'returnIn') {
+              recordedInMoves += t;
+            } else if (k == 'sale') {
+              recordedInMoves -= t;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // توحيد جميع الحركات المخزنية والفواتير إلى الصنف الموحّد
+      await txn.update(
+        'stock_moves',
+        {'item_id': keepId},
+        where: 'item_id = ?',
+        whereArgs: [dropId],
+      );
+      await txn.update(
+        'transaction_items',
+        {'item_id': keepId},
+        where: 'item_id = ?',
+        whereArgs: [dropId],
+      );
+
+      if (dropQty > 0) {
+        final covered = recordedInMoves > 0 ? recordedInMoves : 0.0;
+        final uncoveredQty = dropQty > covered ? dropQty - covered : 0.0;
+        if (uncoveredQty > 0) {
+          try {
+            await txn.insert('stock_moves', {
+              'workspace_id': requireWorkspaceId,
+              'item_id': keepId,
+              'kind': StockKind.purchase.code,
+              'quantity': uncoveredQty,
+              'unit_price': 0,
+              'notes':
+                  'دمج رصيد الصنف المكرر (${conflict.item2Name}) في (${conflict.item1Name})',
+              'date': dateStr,
+              'created_at': nowIso,
+            });
+          } catch (_) {}
+        }
+      }
+
+      await txn.update(
+        'items',
+        {
+          'quantity': mergedQty,
+          'is_deleted': 0,
+          'is_active': 1,
+          'deleted_at': '',
+          'updated_at': nowIso,
+        },
+        where: 'id = ?',
+        whereArgs: [keepId],
+      );
+
+      if (dropRows.isNotEmpty) {
+        await txn.update(
+          'items',
+          {
+            'is_deleted': 1,
+            'is_active': 0,
+            'deleted_at': nowIso,
+            'updated_at': nowIso,
+          },
+          where: 'id = ?',
+          whereArgs: [dropId],
+        );
+      }
+
+      await txn.insert(
+        'settings',
+        {'key': resolved.key, 'value': resolved.toJson()},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.update(
+        'notifications',
+        {'seen': 1},
+        where: "entity_type = 'item_conflict' AND entity_id = ?",
+        whereArgs: [resolved.key],
+      );
+
+      try {
+        final rec = await newRecorder(txn);
+        final updatedKeep = await txn.query(
+          'items',
+          where: 'id = ?',
+          whereArgs: [keepId],
+          limit: 1,
+        );
+        if (updatedKeep.isNotEmpty) {
+          final payload = Map<String, Object?>.from(updatedKeep.first)
+            ..['id'] = keepId
+            ..['quantity'] = mergedQty
+            ..['__qty_changed'] = 1
+            ..['__conflict_resolved'] = true;
+          await rec.record(
+            entityType: EntityKind.item,
+            entityId: '$keepId',
+            opType: OpKind.update,
+            payload: payload,
+          );
+        }
+        if (dropRows.isNotEmpty) {
+          await rec.record(
+            entityType: EntityKind.item,
+            entityId: '$dropId',
+            opType: OpKind.delete_,
+            payload: {'id': dropId, 'deleted_at': nowIso, 'is_deleted': 1},
+          );
+        }
+        await rec.record(
+          entityType: EntityKind.setting,
+          entityId: resolved.key,
+          opType: OpKind.settings,
+          payload: {'key': resolved.key, 'value': resolved.toJson()},
+        );
+      } catch (_) {}
+    });
+
+    await logActivity(
+      'دمج الصنفين المتعارضين #$dropId في #$keepId',
+      'item',
+      '$keepId',
+    );
+    return keepId;
+  }
+
+  /// الخيار 3: اعتماد الفصل وإبقاء الصنفين منفصلين (مع إظهار نافذة اختيار فورية في POS عند قراءة باركود مشترك).
+  Future<void> resolveItemConflictKeepSeparate({
+    required String conflictKey,
+  }) async {
+    final conflict = await itemConflictByKey(conflictKey);
+    if (conflict == null) {
+      throw StateError('سجل التعارض غير موجود.');
+    }
+    final db = await _db;
+    final nowIso = DateTime.now().toIso8601String();
+    final resolved = conflict.copyWith(
+      status: 'resolved',
+      resolution: 'keep_separate',
+      resolvedAt: nowIso,
+    );
+
+    await db.transaction((txn) async {
+      await txn.insert(
+        'settings',
+        {'key': resolved.key, 'value': resolved.toJson()},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.update(
+        'notifications',
+        {'seen': 1},
+        where: "entity_type = 'item_conflict' AND entity_id = ?",
+        whereArgs: [resolved.key],
+      );
+      try {
+        final rec = await newRecorder(txn);
+        await rec.record(
+          entityType: EntityKind.setting,
+          entityId: resolved.key,
+          opType: OpKind.settings,
+          payload: {'key': resolved.key, 'value': resolved.toJson()},
+        );
+      } catch (_) {}
+    });
+
+    await logActivity(
+      'اعتماد فصل الصنفين المتعارضين #${conflict.item1Id} و #${conflict.item2Id}',
+      'item',
+      '${conflict.item1Id}',
+    );
   }
 
   Future<List<StockMove>> stockMoves({int? itemId, int limit = 200}) async {

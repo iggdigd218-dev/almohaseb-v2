@@ -1215,6 +1215,11 @@ Future<void> showTxDetails(
       final logoBase64 =
           (st['org.icon.b64'] ?? st['logoBase64'] ?? '').trim();
       final stamp = await featureNeedsStamp(ref, Feature.reportsExport);
+      final sellerIdentity = (st['profile.owner_name'] ??
+              st['sync.deviceName'] ??
+              st['account.name'] ??
+              tx.cashierName)
+          .trim();
       final built = await buildThermalInvoiceDocument(
         tx: tx,
         account: resolvedAccount,
@@ -1222,6 +1227,7 @@ Future<void> showTxDetails(
         orgName: orgName,
         orgPhone: orgPhone,
         footer: footer,
+        sellerOrDevice: sellerIdentity,
         logoPath: logoPath,
         logoBase64: logoBase64,
         stamp: stamp,

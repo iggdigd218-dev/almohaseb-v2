@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/accounting.dart';
 import '../core/device_names.dart';
 import '../core/format.dart';
+import '../core/item_conflict.dart';
 import '../core/media_paths.dart';
 import '../core/models.dart';
 import '../core/rbac.dart';
@@ -363,6 +364,13 @@ final unreadCountProvider = FutureProvider<int>((ref) async {
       .read(repoProvider)
       .unreadNotifications()
       .timeout(const Duration(seconds: 8), onTimeout: () => 0);
+});
+
+/// التعارضات المعلّقة للأصناف والباركود (أوفلاين) لعرض تنبيه Banner واضح.
+final pendingItemConflictsProvider =
+    FutureProvider<List<OfflineItemConflict>>((ref) async {
+  ref.watch(refreshProvider);
+  return ref.read(repoProvider).pendingItemConflicts();
 });
 
 /// عدد رسائل الدردشة غير المقروءة (شارة أيقونة الدردشة) —

@@ -66,9 +66,17 @@ String resolveOwnerDisplayName({
   String? deviceName,
   String? userName,
 }) {
-  for (final candidate in [profileOwnerName, accountName, deviceName, userName]) {
+  // 1) الاسم الصريح المحفوظ للمالك أولاً (من ✎ أو شاشة الملف الشخصي)
+  if (isCustomDeviceName(profileOwnerName)) {
+    return profileOwnerName!.trim();
+  }
+  // 2) اسم جهاز المالك أو اسم المستخدم المخصص
+  for (final candidate in [deviceName, userName]) {
     if (isCustomDeviceName(candidate)) return candidate!.trim();
   }
+  // 3) اسم حساب السحابة / Google
+  if (isCustomDeviceName(accountName)) return accountName!.trim();
+
   return 'المدير';
 }
 
