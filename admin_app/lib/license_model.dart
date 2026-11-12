@@ -79,6 +79,130 @@ String normalizeSubscriberPhone(String raw) {
   return digits.length >= 7 ? digits : '';
 }
 
+
+/// التحقق مما إذا كان اسم العميل/المالك اسماً افتراضياً عاماً وليس اسماً حقيقياً.
+bool isPlaceholderClientName(String? raw) {
+  final s = (raw ?? '').trim();
+  if (s.isEmpty) return true;
+  final lower = s.toLowerCase();
+  const placeholders = <String>{
+    'مستخدم جديد',
+    'مستخدم',
+    'المدير',
+    'مدير النظام',
+    'مسؤول غير محدد',
+    'عميل',
+    'جهاز جديد',
+    'جهاز المالك',
+    'جهاز موظف',
+    'جهاز مرتبط',
+    'جهاز عضو',
+    'غير محدد',
+    'بدون اسم',
+    'new user',
+    'admin',
+    'user',
+    'unknown',
+    '—',
+    '-',
+  };
+  if (placeholders.contains(lower)) return true;
+  if (lower.startsWith('device-') ||
+      lower.startsWith('ws_') ||
+      lower.startsWith('ws-')) {
+    return true;
+  }
+  return false;
+}
+
+/// اختيار الاسم الحقيقي للمالك/العميل وتجاهل الأسماء الافتراضية المؤقتة (مثل "مستخدم جديد").
+String pickRealClientName(Iterable<dynamic> candidates) {
+  String fallback = '';
+  for (final c in candidates) {
+    final s = asStr(c).trim();
+    if (s.isEmpty) continue;
+    if (!isPlaceholderClientName(s)) return s;
+    if (fallback.isEmpty &&
+        !s.toLowerCase().startsWith('device-') &&
+        !s.toLowerCase().startsWith('ws_') &&
+        !s.toLowerCase().startsWith('ws-')) {
+      fallback = s;
+    }
+  }
+  return fallback;
+}
+
+/// دمج قائمة الأجهزة مع الحفاظ على كل جهاز مستقل بمعرفه (DEVICE-...) أو بصمته (fingerprint)
+/// وعدم طمس الأجهزة المتعددة التي تشترك في بريد المنشأة (owner_email).
+List<ConnectedDevice> mergeDevicesList(Iterable<ConnectedDevice> raw) {
+  final byId = <String, ConnectedDevice>{};
+  final fpToKey = <String, String>{};
+
+  ConnectedDevice combine(ConnectedDevice prev, ConnectedDevice next) {
+    final newer = next.lastSeenAt >= prev.lastSeenAt ? next : prev;
+    final older = identical(newer, next) ? prev : next;
+    final bestName = pickRealClientName([
+      newer.deviceName,
+      older.deviceName,
+    ]);
+    return ConnectedDevice(
+      deviceId: newer.deviceId.trim().isNotEmpty ? newer.deviceId : older.deviceId,
+      deviceName: bestName.isNotEmpty
+          ? bestName
+          : (newer.deviceName.isNotEmpty ? newer.deviceName : older.deviceName),
+      model: newer.model != '—' && newer.model.isNotEmpty
+          ? newer.model
+          : older.model,
+      platform: newer.platform != '—' && newer.platform.isNotEmpty
+          ? newer.platform
+          : older.platform,
+      linkedAt: newer.linkedAt > 0 ? newer.linkedAt : older.linkedAt,
+      lastSeenAt: newer.lastSeenAt >= older.lastSeenAt
+          ? newer.lastSeenAt
+          : older.lastSeenAt,
+      isOwner: prev.isOwner || next.isOwner,
+      fingerprint: newer.fingerprint.isNotEmpty
+          ? newer.fingerprint
+          : older.fingerprint,
+      email: newer.email.isNotEmpty ? newer.email : older.email,
+      phone: newer.phone.isNotEmpty ? newer.phone : older.phone,
+    );
+  }
+
+  for (final d in raw) {
+    final k = d.deviceId.trim().toUpperCase();
+    if (k.isEmpty) continue;
+    final fp = d.fingerprint.trim().toLowerCase();
+
+    if (fp.isNotEmpty && fpToKey.containsKey(fp)) {
+      final prevKey = fpToKey[fp]!;
+      final prev = byId[prevKey];
+      if (prev != null) {
+        final merged = combine(prev, d);
+        final canonicalKey = k.startsWith('DEVICE-') ? k : prevKey;
+        byId.remove(prevKey);
+        byId[canonicalKey] = merged;
+        fpToKey[fp] = canonicalKey;
+        continue;
+      }
+    }
+
+    final existing = byId[k];
+    if (existing != null) {
+      final merged = combine(existing, d);
+      byId[k] = merged;
+      if (fp.isNotEmpty) fpToKey[fp] = k;
+    } else {
+      byId[k] = d;
+      if (fp.isNotEmpty) fpToKey[fp] = k;
+    }
+  }
+
+  final list = byId.values.toList()
+    ..sort((a, b) => b.lastSeenAt.compareTo(a.lastSeenAt));
+  return list;
+}
+
 /// توليد كود ترخيص قياسي منظم من معرف الجهاز أو البصمة.
 /// صيغة الكود: NX-XXXX-XXXX-XXXX
 String generateLicenseKey(String seed) {
@@ -354,44 +478,9 @@ class SubscriberEntry {
 
   /// دمج سجلين لنفس المنشأة أو نفس رقم الهاتف في بطاقة واحدة موحدة مع دمج الأجهزة وآخر ظهور وتاريخ الانتهاء.
   SubscriberEntry mergeWith(SubscriberEntry other) {
-    final mergedById = <String, ConnectedDevice>{};
-    final seenFingerprints = <String, String>{};
-    final seenEmails = <String, String>{};
-    for (final d in [...rosterDevices, ...other.rosterDevices]) {
-      final k = d.deviceId.trim().toUpperCase();
-      if (k.isEmpty) continue;
-      final fp = d.fingerprint.trim().toLowerCase();
-      final em = d.email.trim().toLowerCase();
-      if (em.isNotEmpty && seenEmails.containsKey(em)) {
-        final prevKey = seenEmails[em]!;
-        final prev = mergedById[prevKey];
-        if (prev == null || d.lastSeenAt > prev.lastSeenAt) {
-          mergedById.remove(prevKey);
-          mergedById[k] = d;
-          seenEmails[em] = k;
-          if (fp.isNotEmpty) seenFingerprints[fp] = k;
-        }
-        continue;
-      }
-      if (fp.isNotEmpty && seenFingerprints.containsKey(fp)) {
-        final prevKey = seenFingerprints[fp]!;
-        final prev = mergedById[prevKey];
-        if (prev == null || d.lastSeenAt > prev.lastSeenAt) {
-          mergedById.remove(prevKey);
-          mergedById[k] = d;
-          seenFingerprints[fp] = k;
-          if (em.isNotEmpty) seenEmails[em] = k;
-        }
-        continue;
-      }
-      final existing = mergedById[k];
-      if (existing == null || d.lastSeenAt > existing.lastSeenAt) {
-        mergedById[k] = d;
-        if (fp.isNotEmpty) seenFingerprints[fp] = k;
-        if (em.isNotEmpty) seenEmails[em] = k;
-      }
-    }
-    if (mergedById.isEmpty) {
+    var mergedList = mergeDevicesList([...rosterDevices, ...other.rosterDevices]);
+    if (mergedList.isEmpty) {
+      final fallbackDevs = <ConnectedDevice>[];
       for (final rawDev in [
         deviceId,
         deviceRef,
@@ -399,8 +488,8 @@ class SubscriberEntry {
         other.deviceRef,
       ]) {
         final k = rawDev.trim().toUpperCase();
-        if (k.isNotEmpty && !mergedById.containsKey(k)) {
-          mergedById[k] = ConnectedDevice(
+        if (k.isNotEmpty && !fallbackDevs.any((d) => d.deviceId.toUpperCase() == k)) {
+          fallbackDevs.add(ConnectedDevice(
             deviceId: rawDev.trim(),
             deviceName: rawDev.trim(),
             model: 'جهاز مرتبط',
@@ -408,12 +497,11 @@ class SubscriberEntry {
             lastSeenAt: lastSeenAtMs > other.lastSeenAtMs
                 ? lastSeenAtMs
                 : other.lastSeenAtMs,
-          );
+          ));
         }
       }
+      mergedList = fallbackDevs;
     }
-    final mergedList = mergedById.values.toList()
-      ..sort((a, b) => b.lastSeenAt.compareTo(a.lastSeenAt));
 
     final bestExpires =
         expiresAtMs >= other.expiresAtMs ? expiresAtMs : other.expiresAtMs;
@@ -451,7 +539,11 @@ class SubscriberEntry {
       activatedAtMs: bestActivated,
       lastSeenAtMs: bestLastSeen,
       deviceRef: deviceRef.isNotEmpty ? deviceRef : other.deviceRef,
-      clientName: clientName.isNotEmpty ? clientName : other.clientName,
+      clientName: pickRealClientName([
+        clientName,
+        other.clientName,
+        ...mergedList.where((d) => d.isOwner).map((d) => d.deviceName),
+      ]),
       storeName: storeName.isNotEmpty ? storeName : other.storeName,
       phone: phone.isNotEmpty ? phone : other.phone,
       deviceId: deviceId.isNotEmpty ? deviceId : other.deviceId,
@@ -514,11 +606,14 @@ class SubscriberEntry {
       activatedAtMs: actAt,
       lastSeenAtMs: seenAt,
       deviceRef: devId,
-      clientName: asStr(map['clientName'] ??
-          map['client_name'] ??
-          map['owner_name'] ??
-          map['ownerName'] ??
-          map['userName']),
+      clientName: pickRealClientName([
+        map['owner_name'],
+        map['ownerName'],
+        map['clientName'],
+        map['client_name'],
+        map['userName'],
+        ...rosterDevices.where((d) => d.isOwner).map((d) => d.deviceName),
+      ]),
       storeName:
           asStr(map['storeName'] ?? map['store_name'] ?? map['businessName']),
       phone: asStr(map['phone'] ?? map['phone_number'] ?? map['whatsapp']),
@@ -596,14 +691,43 @@ class ConnectedDevice {
     this.phone = '',
   });
 
+  Map<String, dynamic> toJson() => {
+        'deviceId': deviceId,
+        'device_name': deviceName,
+        'model': model,
+        'platform': platform,
+        'linked_at': linkedAt,
+        'last_seen_at': lastSeenAt,
+        'is_owner': isOwner,
+        'fingerprint': fingerprint,
+        'email': email,
+        'phone': phone,
+      };
+
   factory ConnectedDevice.fromJson(String id, Map<dynamic, dynamic> map) {
     final ownerFlag = asInt(map['is_owner'] ?? map['isOwner']) == 1 ||
         map['is_owner'] == true ||
         asStr(map['role']).toLowerCase() == 'owner' ||
         asStr(map['role']).toLowerCase() == 'admin';
+    final resolvedId = asStr(map['deviceId'] ?? map['device_id']).trim().isNotEmpty
+        ? asStr(map['deviceId'] ?? map['device_id']).trim()
+        : id.trim();
+    final bestName = pickRealClientName([
+      map['user_name'],
+      map['userName'],
+      map['name'],
+      map['device_name'],
+      map['deviceName'],
+      if (ownerFlag) map['owner_name'],
+      if (ownerFlag) map['ownerName'],
+      if (ownerFlag) map['client_name'],
+      if (ownerFlag) map['clientName'],
+    ]);
     return ConnectedDevice(
-      deviceId: id,
-      deviceName: asStr(map['device_name'] ?? map['deviceName'] ?? map['name'] ?? id),
+      deviceId: resolvedId,
+      deviceName: bestName.isNotEmpty
+          ? bestName
+          : asStr(map['device_name'] ?? map['deviceName'] ?? map['name'] ?? resolvedId),
       model: asStr(map['model'] ??
           map['device_model'] ??
           (ownerFlag ? 'جهاز المالك' : 'جهاز موظف')),
@@ -622,7 +746,9 @@ class ConnectedDevice {
       fingerprint: asStr(map['fingerprint'] ??
           map['hw_fingerprint'] ??
           map['device_fingerprint']),
-      email: asStr(map['email'] ?? map['user_email'] ?? map['owner_email']),
+      email: asStr(map['email'] ??
+          map['user_email'] ??
+          (ownerFlag ? map['owner_email'] : null)),
       phone: asStr(map['phone'] ?? map['phone_number'] ?? map['whatsapp']),
     );
   }
