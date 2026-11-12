@@ -1361,6 +1361,9 @@ class _PreviewInfoRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isPhoneOrEmail = label.contains('الهاتف') ||
+        label.contains('البريد') ||
+        value.trim().startsWith('+');
     return Row(
       children: [
         Icon(icon, size: 15, color: Colors.blueGrey),
@@ -1375,15 +1378,31 @@ class _PreviewInfoRow extends StatelessWidget {
         ),
         const SizedBox(width: 6),
         Expanded(
-          child: Text(
-            value,
-            style: const TextStyle(
-              fontSize: 12.5,
-              fontWeight: FontWeight.w800,
-              color: Color(0xFF0F172A),
-            ),
-            overflow: TextOverflow.ellipsis,
-          ),
+          child: isPhoneOrEmail
+              ? Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: Directionality(
+                    textDirection: TextDirection.ltr,
+                    child: Text(
+                      value,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF0F172A),
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                )
+              : Text(
+                  value,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF0F172A),
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
         ),
       ],
     );
@@ -3457,6 +3476,7 @@ class _SubscriberCardState extends State<SubscriberCard> {
     bool multiBranch = flags['multi_branch'] ?? true;
     bool multiUser = flags['multi_user'] ?? true;
     bool advancedInvoicing = flags['advanced_invoicing'] ?? true;
+    bool allowCloudMediaSync = flags['allow_cloud_media_sync'] ?? false;
     final maxDevCtrl = TextEditingController(text: '${entry.maxDevices}');
 
     showDialog<void>(
@@ -3493,6 +3513,15 @@ class _SubscriberCardState extends State<SubscriberCard> {
                   value: advancedInvoicing,
                   onChanged: (v) => setDState(() => advancedInvoicing = v),
                 ),
+                SwitchListTile(
+                  title: const Text('مزامنة الصور والوسائط على السحابة'),
+                  subtitle: const Text(
+                    'السماح برفع صور المنتجات والشعار والمرفقات للسحابة',
+                    style: TextStyle(fontSize: 11.5),
+                  ),
+                  value: allowCloudMediaSync,
+                  onChanged: (v) => setDState(() => allowCloudMediaSync = v),
+                ),
                 const SizedBox(height: 10),
                 TextField(
                   controller: maxDevCtrl,
@@ -3514,6 +3543,7 @@ class _SubscriberCardState extends State<SubscriberCard> {
                   'multi_branch': multiBranch,
                   'multi_user': multiUser,
                   'advanced_invoicing': advancedInvoicing,
+                  'allow_cloud_media_sync': allowCloudMediaSync,
                 };
                 final maxD = int.tryParse(maxDevCtrl.text.trim()) ?? entry.maxDevices;
                 await Rtdb.instance.updateFeatureFlags(entry.workspaceId, newFlags, maxDevices: maxD);
@@ -3529,55 +3559,7 @@ class _SubscriberCardState extends State<SubscriberCard> {
   }
 
   static List<ConnectedDevice> _dedupeDevicesList(List<ConnectedDevice> raw) {
-    final byId = <String, ConnectedDevice>{};
-    final fpToCanonicalId = <String, String>{};
-    final emailToCanonicalId = <String, String>{};
-    final sorted = List<ConnectedDevice>.from(raw)
-      ..sort((a, b) => b.lastSeenAt.compareTo(a.lastSeenAt));
-    for (final d in sorted) {
-      final idKey = d.deviceId.trim().toUpperCase();
-      if (idKey.isEmpty) continue;
-      final fpKey = d.fingerprint.trim().toLowerCase();
-      final emailKey = d.email.trim().toLowerCase();
-      String canonicalKey = idKey;
-      if (emailKey.isNotEmpty && emailToCanonicalId.containsKey(emailKey)) {
-        canonicalKey = emailToCanonicalId[emailKey]!;
-      } else if (fpKey.isNotEmpty && fpToCanonicalId.containsKey(fpKey)) {
-        canonicalKey = fpToCanonicalId[fpKey]!;
-      }
-      if (fpKey.isNotEmpty) {
-        fpToCanonicalId[fpKey] = canonicalKey;
-      }
-      if (emailKey.isNotEmpty) {
-        emailToCanonicalId[emailKey] = canonicalKey;
-      }
-      final prev = byId[canonicalKey];
-      if (prev == null || d.lastSeenAt >= prev.lastSeenAt) {
-        byId[canonicalKey] = prev == null
-            ? d
-            : ConnectedDevice(
-                deviceId: d.deviceId,
-                deviceName:
-                    d.deviceName.isNotEmpty ? d.deviceName : prev.deviceName,
-                model: d.model != '—' && d.model.isNotEmpty
-                    ? d.model
-                    : prev.model,
-                platform: d.platform != '—' && d.platform.isNotEmpty
-                    ? d.platform
-                    : prev.platform,
-                linkedAt: d.linkedAt > 0 ? d.linkedAt : prev.linkedAt,
-                lastSeenAt:
-                    d.lastSeenAt >= prev.lastSeenAt ? d.lastSeenAt : prev.lastSeenAt,
-                isOwner: d.isOwner || prev.isOwner,
-                fingerprint:
-                    d.fingerprint.isNotEmpty ? d.fingerprint : prev.fingerprint,
-                email: d.email.isNotEmpty ? d.email : prev.email,
-                phone: d.phone.isNotEmpty ? d.phone : prev.phone,
-              );
-      }
-    }
-    return byId.values.toList()
-      ..sort((a, b) => b.lastSeenAt.compareTo(a.lastSeenAt));
+    return mergeDevicesList(raw);
   }
 
   void _showConnectedDevicesDialog(BuildContext context) {
@@ -3669,10 +3651,34 @@ class _SubscriberCardState extends State<SubscriberCard> {
                               fontSize: 12.5, fontWeight: FontWeight.w800),
                         ),
                         const SizedBox(height: 3),
-                        Text(
-                          'معرف المساحة: ${entry.workspaceId} • الهاتف: ${entry.phone.isNotEmpty ? entry.phone : "غير مسجل"}',
-                          style: const TextStyle(
-                              fontSize: 11, color: Colors.black54),
+                        Wrap(
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: 4,
+                          children: [
+                            Text(
+                              'معرف المساحة: ${entry.workspaceId} • الهاتف:',
+                              style: const TextStyle(
+                                  fontSize: 11, color: Colors.black54),
+                            ),
+                            if (entry.phone.isNotEmpty)
+                              Directionality(
+                                textDirection: TextDirection.ltr,
+                                child: Text(
+                                  entry.phone,
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                    color: Colors.black87,
+                                  ),
+                                ),
+                              )
+                            else
+                              const Text(
+                                'غير مسجل',
+                                style: TextStyle(
+                                    fontSize: 11, color: Colors.black54),
+                              ),
+                          ],
                         ),
                         const SizedBox(height: 3),
                         Text(
@@ -3750,11 +3756,51 @@ class _SubscriberCardState extends State<SubscriberCard> {
                               style:
                                   const TextStyle(fontWeight: FontWeight.w800),
                             ),
-                            subtitle: Text(
-                              '${d.isOwner ? 'جهاز المالك' : 'جهاز عضو (Roster)'} • ${d.model} • ${d.platform}\n'
-                              'المعرف: ${d.deviceId}${d.email.isNotEmpty ? ' • البريد: ${d.email}' : ''}${d.phone.isNotEmpty ? ' • الجوال: ${d.phone}' : ''}${d.fingerprint.isNotEmpty ? ' • البصمة: ${d.fingerprint}' : ''}\n'
-                              'آخر ظهور: ${fmtDate(d.lastSeenAt)}',
-                              style: const TextStyle(fontSize: 11),
+                            subtitle: Text.rich(
+                              TextSpan(
+                                style: const TextStyle(fontSize: 11),
+                                children: [
+                                  TextSpan(
+                                    text:
+                                        '${d.isOwner ? 'جهاز المالك' : 'جهاز عضو (Roster)'} • ${d.model} • ${d.platform}\n',
+                                  ),
+                                  TextSpan(text: 'المعرف: ${d.deviceId}'),
+                                  if (d.email.isNotEmpty) ...[
+                                    const TextSpan(text: ' • البريد: '),
+                                    WidgetSpan(
+                                      alignment: PlaceholderAlignment.middle,
+                                      child: Directionality(
+                                        textDirection: TextDirection.ltr,
+                                        child: Text(
+                                          d.email,
+                                          style: const TextStyle(fontSize: 11),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                  if (d.phone.isNotEmpty) ...[
+                                    const TextSpan(text: ' • الجوال: '),
+                                    WidgetSpan(
+                                      alignment: PlaceholderAlignment.middle,
+                                      child: Directionality(
+                                        textDirection: TextDirection.ltr,
+                                        child: Text(
+                                          d.phone,
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                  if (d.fingerprint.isNotEmpty)
+                                    TextSpan(text: ' • البصمة: ${d.fingerprint}'),
+                                  TextSpan(
+                                    text: '\nآخر ظهور: ${fmtDate(d.lastSeenAt)}',
+                                  ),
+                                ],
+                              ),
                             ),
                             trailing: isDeleting
                                 ? const SizedBox(
@@ -3787,13 +3833,6 @@ class _SubscriberCardState extends State<SubscriberCard> {
                                                     d.deviceId
                                                         .trim()
                                                         .toUpperCase() &&
-                                                (d.email.trim().isEmpty ||
-                                                    item.email
-                                                            .trim()
-                                                            .toLowerCase() !=
-                                                        d.email
-                                                            .trim()
-                                                            .toLowerCase()) &&
                                                 (d.fingerprint.trim().isEmpty ||
                                                     item.fingerprint
                                                             .trim()
@@ -4910,7 +4949,15 @@ class _AdminSupportChatDetailScreenState
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('المنشأة: $workspaceId'),
-            Text('الهاتف: $phone'),
+            Row(
+              children: [
+                const Text('الهاتف: '),
+                Directionality(
+                  textDirection: TextDirection.ltr,
+                  child: Text(phone),
+                ),
+              ],
+            ),
             const SizedBox(height: 10),
             SelectableText('كلمة المرور: $password',
                 style: const TextStyle(fontWeight: FontWeight.bold)),
@@ -5158,12 +5205,28 @@ class _AdminSupportChatDetailScreenState
                 ],
               ],
             ),
-            Text(
-              [
-                if (widget.clientName.isNotEmpty) widget.clientName,
-                if (widget.phone.isNotEmpty) widget.phone,
-              ].join(' • '),
-              style: const TextStyle(fontSize: 12),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (widget.clientName.isNotEmpty)
+                  Flexible(
+                    child: Text(
+                      widget.clientName,
+                      style: const TextStyle(fontSize: 12),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                if (widget.clientName.isNotEmpty && widget.phone.isNotEmpty)
+                  const Text(' • ', style: TextStyle(fontSize: 12)),
+                if (widget.phone.isNotEmpty)
+                  Directionality(
+                    textDirection: TextDirection.ltr,
+                    child: Text(
+                      widget.phone,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+              ],
             ),
           ],
         ),
@@ -7405,18 +7468,41 @@ class _AdminCompactWorkspacesDialogState
                                               maxLines: 1,
                                               overflow: TextOverflow.ellipsis,
                                             ),
-                                            Text(
-                                              [
-                                                ws.workspaceId,
-                                                if (ws.phone.isNotEmpty)
-                                                  ws.phone,
-                                              ].join(' • '),
-                                              style: const TextStyle(
-                                                fontSize: 10.5,
-                                                color: Colors.black54,
-                                              ),
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
+                                            Row(
+                                              children: [
+                                                Flexible(
+                                                  child: Text(
+                                                    ws.workspaceId,
+                                                    style: const TextStyle(
+                                                      fontSize: 10.5,
+                                                      color: Colors.black54,
+                                                    ),
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                  ),
+                                                ),
+                                                if (ws.phone.isNotEmpty) ...[
+                                                  const Text(
+                                                    ' • ',
+                                                    style: TextStyle(
+                                                      fontSize: 10.5,
+                                                      color: Colors.black54,
+                                                    ),
+                                                  ),
+                                                  Directionality(
+                                                    textDirection:
+                                                        TextDirection.ltr,
+                                                    child: Text(
+                                                      ws.phone,
+                                                      style: const TextStyle(
+                                                        fontSize: 10.5,
+                                                        color: Colors.black54,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ],
                                             ),
                                           ],
                                         ),

@@ -746,5 +746,74 @@ void main() {
       );
       expect(reply, 'أهلاً بك! أنا أعمل بنموذج Gemini 3 Flash بنجاح.');
     });
+
+    test('LIC-ADM11 عدم دمج أجهزة المالك المتعددة المشتركة في البريد واختيار اسم المالك الحقيقي بدلاً من مستخدم جديد', () {
+      // التحقق من اختيار الاسم الحقيقي وتجاهل الأسماء الافتراضية المؤقتة
+      expect(
+        pickRealClientName(['مستخدم جديد', 'DEVICE-1234', 'منير']),
+        equals('منير'),
+      );
+      expect(isPlaceholderClientName('مستخدم جديد'), isTrue);
+      expect(isPlaceholderClientName('منير'), isFalse);
+
+      // التحقق من بقاء جهازين مستقلين (2/2) حتى لو اشتركا في بريد المالك owner_email
+      final dev1 = ConnectedDevice.fromJson('DEVICE-OWNER-01', {
+        'deviceId': 'DEVICE-OWNER-01',
+        'device_name': 'مستخدم جديد',
+        'owner_name': 'منير',
+        'is_owner': true,
+        'fingerprint': 'fp_hw_111',
+        'owner_email': 'moneer@example.com',
+        'phone': '+967774434292',
+        'last_seen_at': 1700001000000,
+      });
+      final dev2 = ConnectedDevice.fromJson('DEVICE-STAFF-02', {
+        'deviceId': 'DEVICE-STAFF-02',
+        'device_name': 'جهاز المحاسب',
+        'is_owner': false,
+        'fingerprint': 'fp_hw_222',
+        'owner_email': 'moneer@example.com',
+        'email': 'moneer@example.com',
+        'phone': '+967771112233',
+        'last_seen_at': 1700002000000,
+      });
+
+      expect(dev1.deviceName, equals('منير'));
+      final mergedDevs = mergeDevicesList([dev1, dev2]);
+      expect(mergedDevs.length, equals(2));
+
+      final sub1 = SubscriberEntry(
+        workspaceId: 'WS-MONEER-01',
+        planType: 'enterprise',
+        status: 'active',
+        maxDevices: 2,
+        activeDevices: 1,
+        expiresAtMs: 1850000000000,
+        activatedAtMs: 1700000000000,
+        deviceRef: 'DEVICE-OWNER-01',
+        clientName: 'مستخدم جديد',
+        storeName: 'منشأة منير التجارية',
+        phone: '+967774434292',
+        rosterDevices: [dev1],
+      );
+      final sub2 = SubscriberEntry(
+        workspaceId: 'WS-MONEER-01',
+        planType: 'enterprise',
+        status: 'active',
+        maxDevices: 2,
+        activeDevices: 1,
+        expiresAtMs: 1850000000000,
+        activatedAtMs: 1700000000000,
+        deviceRef: 'DEVICE-STAFF-02',
+        clientName: 'منير',
+        storeName: 'منشأة منير التجارية',
+        phone: '+967774434292',
+        rosterDevices: [dev2],
+      );
+      final mergedSub = sub1.mergeWith(sub2);
+      expect(mergedSub.clientName, equals('منير'));
+      expect(mergedSub.activeDevices, equals(2));
+      expect(mergedSub.rosterDevices.length, equals(2));
+    });
   });
 }

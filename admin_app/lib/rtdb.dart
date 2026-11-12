@@ -1260,14 +1260,19 @@ class Rtdb {
         trialEntry?['storeName'] ??
         trialEntry?['store_name'] ??
         trialEntry?['businessName']);
-    String ownerName = asStr(sub?['clientName'] ??
-        sub?['client_name'] ??
-        sub?['owner_name'] ??
-        sub?['userName'] ??
-        trialEntry?['clientName'] ??
-        trialEntry?['client_name'] ??
-        trialEntry?['owner_name'] ??
-        trialEntry?['userName']);
+    String ownerName = pickRealClientName([
+      sub?['owner_name'],
+      sub?['ownerName'],
+      sub?['clientName'],
+      sub?['client_name'],
+      sub?['userName'],
+      trialEntry?['owner_name'],
+      trialEntry?['ownerName'],
+      trialEntry?['clientName'],
+      trialEntry?['client_name'],
+      trialEntry?['userName'],
+      ...rosterList.where((d) => d.isOwner).map((d) => d.deviceName),
+    ]);
     String phone = asStr(sub?['phone'] ??
         sub?['phone_number'] ??
         sub?['whatsapp'] ??
@@ -1298,8 +1303,14 @@ class Rtdb {
           if (storeName.isEmpty) {
             storeName = asStr(req['storeName'] ?? req['store_name']);
           }
-          if (ownerName.isEmpty) {
-            ownerName = asStr(req['clientName'] ?? req['client_name']);
+          if (isPlaceholderClientName(ownerName)) {
+            final reqOwner = pickRealClientName([
+              req['owner_name'],
+              req['ownerName'],
+              req['clientName'],
+              req['client_name'],
+            ]);
+            if (reqOwner.isNotEmpty) ownerName = reqOwner;
           }
           if (phone.isEmpty) phone = asStr(req['phone']);
           if (devId.isEmpty) {
@@ -1795,13 +1806,17 @@ class Rtdb {
         'status': e.status,
         'isFrozen': e.isFrozen,
         'maxDevices': e.maxDevices,
-        'activeDevices': e.activeDevices,
+        'activeDevices': e.rosterDevices.isNotEmpty
+            ? e.rosterDevices.length
+            : e.activeDevices,
         'expiresAtMs': e.expiresAtMs,
         'activatedAtMs': e.activatedAtMs,
         'lastSeenAtMs': e.lastSeenAtMs,
         'deviceId': e.deviceId,
         'deviceRef': e.deviceRef,
         'hasSubscriptionNode': e.hasSubscriptionNode,
+        'featureFlags': e.featureFlags,
+        'rosterDevices': e.rosterDevices.map((d) => d.toJson()).toList(),
         'updatedAt': DateTime.now().millisecondsSinceEpoch,
       };
 
@@ -1819,22 +1834,50 @@ class Rtdb {
       final updated = asInt(m['updatedAt'] ?? m['updated_at']);
       if (updated > newest) newest = updated;
       final wsFromNode = asStr(m['workspaceId']);
+      final parsedFlags = <String, bool>{};
+      if (m['featureFlags'] is Map) {
+        (m['featureFlags'] as Map).forEach((fk, fv) {
+          parsedFlags['$fk'] = fv == true;
+        });
+      }
+      final rawRoster = <ConnectedDevice>[];
+      if (m['rosterDevices'] is List) {
+        for (final item in (m['rosterDevices'] as List)) {
+          if (item is Map) {
+            final id = asStr(item['deviceId'] ?? item['device_id']);
+            if (id.isNotEmpty) {
+              rawRoster.add(ConnectedDevice.fromJson(id, item));
+            }
+          }
+        }
+      }
+      final dedupedRoster = mergeDevicesList(rawRoster);
+      final resolvedClient = pickRealClientName([
+        m['clientName'],
+        ...dedupedRoster.where((d) => d.isOwner).map((d) => d.deviceName),
+      ]);
       rows.add(SubscriberEntry(
         workspaceId: wsFromNode.isNotEmpty ? wsFromNode : key,
         planType: asStr(m['planType']),
         status: asStr(m['status']),
         maxDevices: asInt(m['maxDevices']),
-        activeDevices: asInt(m['activeDevices']),
+        activeDevices: dedupedRoster.isNotEmpty
+            ? dedupedRoster.length
+            : asInt(m['activeDevices']),
         expiresAtMs: asInt(m['expiresAtMs']),
         activatedAtMs: asInt(m['activatedAtMs']),
         lastSeenAtMs: asInt(m['lastSeenAtMs']),
         deviceRef: asStr(m['deviceRef']),
-        clientName: asStr(m['clientName']),
+        clientName: resolvedClient.isNotEmpty
+            ? resolvedClient
+            : asStr(m['clientName']),
         storeName: asStr(m['storeName']),
         phone: asStr(m['phone']),
         deviceId: asStr(m['deviceId']),
         licenseKey: asStr(m['licenseKey']),
         isFrozen: m['isFrozen'] == true,
+        featureFlags: parsedFlags,
+        rosterDevices: dedupedRoster,
         hasSubscriptionNode: m['hasSubscriptionNode'] != false,
         ownerEmail: asStr(m['ownerEmail']),
       ));
@@ -1890,10 +1933,8 @@ class Rtdb {
       }
     } catch (_) {}
 
-    // قراءة أجهزة المنشأة (Roster & Devices) مع منع التكرار بالـ ID أو بالبريد الإلكتروني أو بالبصمة
-    final rosterById = <String, ConnectedDevice>{};
-    final keyByFp = <String, String>{};
-    final keyByEmail = <String, String>{};
+    // قراءة أجهزة المنشأة (Roster & Devices) مع منع التكرار بالـ ID أو البصمة دون طمس الأجهزة المتعددة لنفس المالك
+    final rawDevices = <ConnectedDevice>[];
     var hadCloudDeviceNodes = false;
 
     void addOrMergeDevice(String rawId, Map data) {
@@ -1901,36 +1942,7 @@ class Rtdb {
       final d = ConnectedDevice.fromJson(rawId, data);
       final k = d.deviceId.trim().toUpperCase();
       if (k.isEmpty || revokedIds.contains(k)) return;
-      final fp = d.fingerprint.trim().toLowerCase();
-      final em = d.email.trim().toLowerCase();
-      if (em.isNotEmpty && keyByEmail.containsKey(em)) {
-        final prevKey = keyByEmail[em]!;
-        final prev = rosterById[prevKey];
-        if (prev == null || d.lastSeenAt >= prev.lastSeenAt) {
-          rosterById.remove(prevKey);
-          rosterById[k] = d;
-          keyByEmail[em] = k;
-          if (fp.isNotEmpty) keyByFp[fp] = k;
-        }
-        return;
-      }
-      if (fp.isNotEmpty && keyByFp.containsKey(fp)) {
-        final prevKey = keyByFp[fp]!;
-        final prev = rosterById[prevKey];
-        if (prev == null || d.lastSeenAt >= prev.lastSeenAt) {
-          rosterById.remove(prevKey);
-          rosterById[k] = d;
-          keyByFp[fp] = k;
-          if (em.isNotEmpty) keyByEmail[em] = k;
-        }
-        return;
-      }
-      final prev = rosterById[k];
-      if (prev == null || d.lastSeenAt >= prev.lastSeenAt) {
-        rosterById[k] = d;
-        if (fp.isNotEmpty) keyByFp[fp] = k;
-        if (em.isNotEmpty) keyByEmail[em] = k;
-      }
+      rawDevices.add(d);
     }
 
     try {
@@ -1950,10 +1962,13 @@ class Rtdb {
     String storeFallback = asStr(live?['storeName'] ??
         live?['store_name'] ??
         live?['businessName']);
-    String clientFallback = asStr(live?['clientName'] ??
-        live?['client_name'] ??
-        live?['owner_name'] ??
-        live?['userName']);
+    String clientFallback = pickRealClientName([
+      live?['owner_name'],
+      live?['ownerName'],
+      live?['clientName'],
+      live?['client_name'],
+      live?['userName'],
+    ]);
     String phoneFallback = asStr(live?['phone'] ??
         live?['phone_number'] ??
         live?['whatsapp']);
@@ -1969,11 +1984,11 @@ class Rtdb {
     if (preloadedNode != null ||
         clientOverride == null ||
         storeFallback.isEmpty ||
-        clientFallback.isEmpty ||
+        isPlaceholderClientName(clientFallback) ||
         phoneFallback.isEmpty ||
         emailFallback.isEmpty ||
         devIdFallback.isEmpty ||
-        rosterById.isEmpty) {
+        rawDevices.isEmpty) {
       try {
         final devs = (preloadedNode != null && preloadedNode.containsKey('devices'))
             ? preloadedNode['devices']
@@ -1992,11 +2007,18 @@ class Rtdb {
               if (storeFallback.isEmpty) {
                 storeFallback = asStr(dv['storeName'] ?? dv['store_name']);
               }
-              if (clientFallback.isEmpty) {
-                clientFallback = asStr(dv['clientName'] ??
-                    dv['client_name'] ??
-                    dv['deviceName'] ??
-                    dv['device_name']);
+              if (isPlaceholderClientName(clientFallback)) {
+                final cand = pickRealClientName([
+                  dv['owner_name'],
+                  dv['ownerName'],
+                  dv['clientName'],
+                  dv['client_name'],
+                  dv['user_name'],
+                  dv['userName'],
+                  dv['deviceName'],
+                  dv['device_name'],
+                ]);
+                if (cand.isNotEmpty) clientFallback = cand;
               }
               if (phoneFallback.isEmpty) {
                 phoneFallback = asStr(dv['phone'] ?? dv['phone_number']);
@@ -2014,22 +2036,41 @@ class Rtdb {
       } catch (_) {}
     }
 
+    Map? metaNode;
     if (preloadedNode != null && preloadedNode['meta'] is Map) {
-      final meta = preloadedNode['meta'] as Map;
+      metaNode = preloadedNode['meta'] as Map;
+    } else if (clientOverride == null &&
+        (storeFallback.isEmpty ||
+            isPlaceholderClientName(clientFallback) ||
+            phoneFallback.isEmpty ||
+            emailFallback.isEmpty)) {
+      try {
+        final m = await _get('workspaces/$enc/meta');
+        if (m is Map) metaNode = m;
+      } catch (_) {}
+    }
+    if (metaNode != null) {
       if (storeFallback.isEmpty) {
-        storeFallback = asStr(
-            meta['storeName'] ?? meta['store_name'] ?? meta['businessName']);
+        storeFallback = asStr(metaNode['storeName'] ??
+            metaNode['store_name'] ??
+            metaNode['businessName']);
       }
-      if (clientFallback.isEmpty) {
-        clientFallback = asStr(
-            meta['owner_name'] ?? meta['clientName'] ?? meta['client_name']);
+      if (isPlaceholderClientName(clientFallback)) {
+        final cand = pickRealClientName([
+          metaNode['owner_name'],
+          metaNode['ownerName'],
+          metaNode['clientName'],
+          metaNode['client_name'],
+          metaNode['user_name'],
+        ]);
+        if (cand.isNotEmpty) clientFallback = cand;
       }
       if (phoneFallback.isEmpty) {
-        phoneFallback = asStr(meta['phone'] ?? meta['whatsapp']);
+        phoneFallback = asStr(metaNode['phone'] ?? metaNode['whatsapp']);
       }
       if (emailFallback.isEmpty) {
-        emailFallback =
-            asStr(meta['owner_email'] ?? meta['ownerEmail'] ?? meta['email']);
+        emailFallback = asStr(
+            metaNode['owner_email'] ?? metaNode['ownerEmail'] ?? metaNode['email']);
       }
     }
 
@@ -2048,8 +2089,14 @@ class Rtdb {
           if (storeFallback.isEmpty) {
             storeFallback = asStr(req['storeName'] ?? req['store_name']);
           }
-          if (clientFallback.isEmpty) {
-            clientFallback = asStr(req['clientName'] ?? req['client_name']);
+          if (isPlaceholderClientName(clientFallback)) {
+            final cand = pickRealClientName([
+              req['owner_name'],
+              req['ownerName'],
+              req['clientName'],
+              req['client_name'],
+            ]);
+            if (cand.isNotEmpty) clientFallback = cand;
           }
           if (phoneFallback.isEmpty) {
             phoneFallback = asStr(req['phone']);
@@ -2107,12 +2154,12 @@ class Rtdb {
             -1)
         : -1;
 
-    if (rosterById.isEmpty &&
+    if (rawDevices.isEmpty &&
         !hadCloudDeviceNodes &&
         explicitCount != 0 &&
         devRef.isNotEmpty &&
         !revokedIds.contains(devRef.toUpperCase())) {
-      rosterById[devRef.toUpperCase()] = ConnectedDevice(
+      rawDevices.add(ConnectedDevice(
         deviceId: devRef,
         deviceName: devRef,
         model: 'جهاز المالك',
@@ -2122,11 +2169,10 @@ class Rtdb {
             live?['activated_at'] ??
             latestLogActivatedAt),
         isOwner: true,
-      );
+      ));
     }
 
-    final rosterList = rosterById.values.toList()
-      ..sort((a, b) => b.lastSeenAt.compareTo(a.lastSeenAt));
+    final rosterList = mergeDevicesList(rawDevices);
 
     if (emailFallback.isEmpty && rosterList.isNotEmpty) {
       for (final d in rosterList) {
@@ -2159,12 +2205,21 @@ class Rtdb {
         latestLog?['store_name'] ??
         latestLog?['storeName'] ??
         storeFallback);
-    final resolvedClient = asStr(live?['clientName'] ??
-        live?['client_name'] ??
-        live?['owner_name'] ??
-        latestLog?['client_name'] ??
-        latestLog?['clientName'] ??
-        clientFallback);
+    final resolvedClient = pickRealClientName([
+      metaNode?['owner_name'],
+      metaNode?['ownerName'],
+      metaNode?['clientName'],
+      metaNode?['client_name'],
+      live?['owner_name'],
+      live?['ownerName'],
+      live?['clientName'],
+      live?['client_name'],
+      ...rosterList.where((d) => d.isOwner).map((d) => d.deviceName),
+      latestLog?['owner_name'],
+      latestLog?['client_name'],
+      latestLog?['clientName'],
+      clientFallback,
+    ]);
     final resolvedPhone = asStr(live?['phone'] ??
         live?['phone_number'] ??
         latestLog?['phone'] ??
@@ -2258,14 +2313,19 @@ class Rtdb {
       payload['max_devices'] = maxDevices;
     }
     await _patch('workspaces/$enc/subscription', payload);
+    await touchSubscriberSummary(
+      wsId,
+      patch: <String, dynamic>{
+        'featureFlags': flags,
+        if (maxDevices != null) 'maxDevices': maxDevices,
+      },
+    );
   }
 
   /// 4. الأجهزة المتصلة وطرد/حذف جهاز جذرياً (Multi-Device Management — Roster & Devices)
   Future<List<ConnectedDevice>> getConnectedDevices(String wsId) async {
     final enc = Uri.encodeComponent(wsId);
-    final byId = <String, ConnectedDevice>{};
-    final keyByFp = <String, String>{};
-    final keyByEmail = <String, String>{};
+    final rawDevices = <ConnectedDevice>[];
     final revokedIds = <String>{};
 
     try {
@@ -2283,36 +2343,7 @@ class Rtdb {
       final d = ConnectedDevice.fromJson(rawId, data);
       final k = d.deviceId.trim().toUpperCase();
       if (k.isEmpty || revokedIds.contains(k)) return;
-      final fp = d.fingerprint.trim().toLowerCase();
-      final em = d.email.trim().toLowerCase();
-      if (em.isNotEmpty && keyByEmail.containsKey(em)) {
-        final prevKey = keyByEmail[em]!;
-        final prev = byId[prevKey];
-        if (prev == null || d.lastSeenAt >= prev.lastSeenAt) {
-          byId.remove(prevKey);
-          byId[k] = d;
-          keyByEmail[em] = k;
-          if (fp.isNotEmpty) keyByFp[fp] = k;
-        }
-        return;
-      }
-      if (fp.isNotEmpty && keyByFp.containsKey(fp)) {
-        final prevKey = keyByFp[fp]!;
-        final prev = byId[prevKey];
-        if (prev == null || d.lastSeenAt >= prev.lastSeenAt) {
-          byId.remove(prevKey);
-          byId[k] = d;
-          keyByFp[fp] = k;
-          if (em.isNotEmpty) keyByEmail[em] = k;
-        }
-        return;
-      }
-      final prev = byId[k];
-      if (prev == null || d.lastSeenAt >= prev.lastSeenAt) {
-        byId[k] = d;
-        if (fp.isNotEmpty) keyByFp[fp] = k;
-        if (em.isNotEmpty) keyByEmail[em] = k;
-      }
+      rawDevices.add(d);
     }
 
     try {
@@ -2335,9 +2366,7 @@ class Rtdb {
         }
       }
     } catch (_) {}
-    final list = byId.values.toList()
-      ..sort((a, b) => b.lastSeenAt.compareTo(a.lastSeenAt));
-    return list;
+    return mergeDevicesList(rawDevices);
   }
 
   /// حذف جهاز جذرياً من المنشأة ومن الروستر ومن السجل العام مع التحقق الصارم من كود 200 OK
