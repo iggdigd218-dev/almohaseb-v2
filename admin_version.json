@@ -1,9 +1,9 @@
 {
-  "version": "1.8.11+61",
-  "sha256": "0907100671634938614f94d10b7dd98fcfa41996465772da40c0b3caf45d905d",
+  "version": "1.8.12+62",
+  "sha256": "fc50ec59f9954f968494ccbe4c56e0ce175d7b88e070250f89308bd54d69779d",
   "sha256Variants": {
-    "arm64": "0907100671634938614f94d10b7dd98fcfa41996465772da40c0b3caf45d905d",
-    "armv7": "8a4c9b2f2b075b8840afe3adbc14d67f7c55da033e72bc62ae47cf5b7c51d5bd"
+    "arm64": "fc50ec59f9954f968494ccbe4c56e0ce175d7b88e070250f89308bd54d69779d",
+    "armv7": "0c83a3c35523c54b55a2c1c9758a096a78c98b453385bd2d2e3c07adced1b398"
   },
   "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/admin-latest",
   "downloads": {
@@ -20,6 +20,6 @@
       "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin-armv7.apk"
     }
   },
-  "publishedAt": "2026-11-14T05:32:17Z",
-  "notes": "• إصلاح التحديث المباشر داخل تطبيق الإدارة (In-App Update) دون التحويل القسري للمتصفح.\n• استعادة بناء --split-per-abi ورفع versionCode (2055) لحل خطأ «الحزمة تبدو غير صالحة» عند التثبيت فوق النسخة السابقة.\n• توحيد تطبيق الإدارة وقناة تحديثه وسياسة التحديث الإجباري لكلا المستودعين (المحاسب v2 + المحاسب بلاس)."
+  "publishedAt": "2026-11-14T07:10:01Z",
+  "notes": "• إصلاح عرض جميع الأجهزة المتصلة للمنشأة (Roster + Devices) ومنع المساحات المهجورة من اختطاف معرف المنشآت النشطة.\n• ترقية فهرس الملخص السحابي (Schema v2) لتصحيح البيانات المخزنة مؤقتاً تلقائياً عند التحديث.\n• حماية سجل الأجهزة المشتركة بنفس البريد الإلكتروني أثناء المزامنة السحابية."
 }
