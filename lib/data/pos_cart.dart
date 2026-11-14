@@ -52,6 +52,7 @@ class PosDraft {
   final String discountText;
   final bool discountIsPercent;
   final String notesText;
+  final String cashCustomerName;
   final String? holdLabel;
   final DateTime? heldAt;
   final String? holdId;
@@ -64,6 +65,7 @@ class PosDraft {
     this.discountText = '',
     this.discountIsPercent = false,
     this.notesText = '',
+    this.cashCustomerName = 'عميل نقدي',
     this.holdLabel,
     this.heldAt,
     this.holdId,
@@ -79,6 +81,7 @@ class PosDraft {
     String? discountText,
     bool? discountIsPercent,
     String? notesText,
+    String? cashCustomerName,
     String? holdLabel,
     DateTime? heldAt,
     String? holdId,
@@ -93,6 +96,7 @@ class PosDraft {
         discountText: discountText ?? this.discountText,
         discountIsPercent: discountIsPercent ?? this.discountIsPercent,
         notesText: notesText ?? this.notesText,
+        cashCustomerName: cashCustomerName ?? this.cashCustomerName,
         holdLabel: holdLabel ?? this.holdLabel,
         heldAt: heldAt ?? this.heldAt,
         holdId: holdId ?? this.holdId,
@@ -106,6 +110,7 @@ class PosDraft {
         'discountText': discountText,
         'discountIsPercent': discountIsPercent,
         'notesText': notesText,
+        'cashCustomerName': cashCustomerName,
         'holdLabel': holdLabel,
         'heldAt': heldAt?.toIso8601String(),
         'holdId': holdId,
@@ -128,6 +133,7 @@ class PosDraft {
       discountText: json['discountText'] as String? ?? '',
       discountIsPercent: json['discountIsPercent'] as bool? ?? false,
       notesText: json['notesText'] as String? ?? '',
+      cashCustomerName: json['cashCustomerName'] as String? ?? 'عميل نقدي',
       holdLabel: json['holdLabel'] as String?,
       heldAt: json['heldAt'] != null
           ? DateTime.tryParse(json['heldAt'] as String)
@@ -301,6 +307,8 @@ class PosDraftNotifier extends StateNotifier<PosDraft> {
   void setDiscountIsPercent(bool v) =>
       state = state.copyWith(discountIsPercent: v);
   void setNotes(String t) => state = state.copyWith(notesText: t);
+  void setCashCustomerName(String name) =>
+      state = state.copyWith(cashCustomerName: name);
 
   void clear() => state = const PosDraft();
 

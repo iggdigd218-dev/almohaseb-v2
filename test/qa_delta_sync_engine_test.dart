@@ -178,18 +178,46 @@ void main() {
       expect(firstQuery['orderBy'], '"server_time"');
       expect(firstQuery.containsKey('startAt'), isTrue);
 
-      // التحقق من تحديث المؤشر المحلي الدائم last_synced_cursor فوراً إلى أحدث server_time
+      // التحقق من تحديث المؤشر المحلي الدائم last_synced_cursor ومفتاح العملية فوراً
       final savedCursor = await transport.getLastSyncedCursor();
       expect(savedCursor, 1760000002500);
+      final savedCursorKey = await transport.getLastSyncedCursorKey();
+      expect(savedCursorKey, 'OP-REMOTE-2');
 
-      // دورة سحب ثانية بدون عمليات جديدة: تطلب startAfter (startAt = cursor + 1) ولا تعيد تنزيل السجلات السابقة
+      // دورة سحب ثانية بدون عمليات جديدة: تطلب startAt = cursor وتمنع إعادة تطبيق السجلات السابقة عبر idempotentQ
       server.pullRequests.clear();
       final applied2 = await transport.pull(forceFullSync: true);
       expect(applied2, 0);
       final secondQuery = server.pullRequests.first.queryParameters;
       expect(secondQuery['orderBy'], '"server_time"');
-      expect(secondQuery['startAt'], '${1760000002500 + 1}',
-          reason: 'يجب استئناف السحب بعد المؤشر الزمني حصراً حتى مع forceFullSync');
+      expect(secondQuery['startAt'], '1760000002500',
+          reason: 'يجب استئناف السحب بالمؤشر المركب الشامل لنفس الملي ثانية لمنع سقوط العمليات المتزامنة');
+
+      // وصول عملية ثالثة متزامنة تحمل نفس الـ server_time (1760000002500) ولكن بمفتاح مختلف: يجب ألا تُتخطى!
+      server.operations['OP-REMOTE-3-SIMULTANEOUS'] = {
+        'id': 'OP-REMOTE-3-SIMULTANEOUS',
+        'device_id': 'DEV-REMOTE-8',
+        'workspace_id': 'default',
+        'entity_type': 'account',
+        'entity_id': '103',
+        'op_type': 'create',
+        'version': 1,
+        'parent_op_id': '',
+        'payload': jsonEncode({
+          'id': 103,
+          'name': 'حساب متزامن في نفس الملي ثانية',
+          'created_at': nowIso,
+          'updated_at': nowIso,
+        }),
+        'device_time': nowIso,
+        'timestamp': nowIso,
+        'server_time': 1760000002500,
+        'server_ts': 1760000002500,
+      };
+      final applied3 = await transport.pull();
+      expect(applied3, 1,
+          reason: 'العملية المتزامنة بنفس server_time يجب أن تُسحب وتُطبَّق دون ضياع');
+      expect(await transport.getLastSyncedCursorKey(), 'OP-REMOTE-3-SIMULTANEOUS');
 
       await db.close();
       await server.close();

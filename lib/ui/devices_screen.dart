@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/device_names.dart';
 import '../core/format.dart';
+import '../core/l10n.dart';
 import '../core/sfx.dart';
 import '../core/models.dart';
 import '../core/theme.dart';
@@ -20,15 +21,12 @@ class DeviceCard extends StatelessWidget {
   final VoidCallback? onPermissions;
   final VoidCallback? onCloudLink;
 
-  /// (دفعة 56) «حذف نهائي من السجل» — متاح للمالك أو الوكيل المخوّل.
   final VoidCallback? onPurge;
 
-  /// (دفعة 51) تعديل الدور مباشرة من البطاقة دون فتح نافذة الصلاحيات.
   final Future<void> Function(UserRole role)? onRoleChanged;
   final bool isSelf;
   final bool isOwnerDevice;
 
-  /// هل يملك المستخدم الحالي صلاحية إدارة أعضاء وأجهزة المجموعة (المالك أو الوكيل المخوّل)؟
   final bool canManageMembers;
   const DeviceCard({
     super.key,
@@ -64,14 +62,11 @@ class DeviceCard extends StatelessWidget {
     final lastSeen = (data['last_seen_at'] ?? '') as String;
     final userRole = data['user_role'] as String?;
 
-    // تحديد الأجهزة الخاملة لأكثر من شهر (للتنبيه البصري).
     final lastSeenDt = DateTime.tryParse(lastSeen);
     final staleForMonth = lastSeenDt != null &&
         DateTime.now().difference(lastSeenDt) > const Duration(days: 30);
-    // (دفعة 56) مؤشر الاتصال السحابي: ظهور خلال آخر 5 دقائق = متصل.
     final cloudOnline = lastSeenDt != null &&
         DateTime.now().difference(lastSeenDt) < const Duration(minutes: 5);
-    // دور الجهاز الفعلي (شارة ملونة عالية التباين).
     final role = isOwnerDevice
         ? UserRole.admin
         : (userRole == null || userRole.isEmpty
@@ -86,9 +81,9 @@ class DeviceCard extends StatelessWidget {
           color: Colors.red.shade900.withValues(alpha: .15),
           borderRadius: BorderRadius.circular(20),
         ),
-        child: const Text(
-          'مطرود',
-          style: TextStyle(
+        child: Text(
+          context.tr('مطرود'),
+          style: const TextStyle(
             fontSize: 10,
             color: Colors.red,
             fontWeight: FontWeight.w700,
@@ -102,9 +97,9 @@ class DeviceCard extends StatelessWidget {
           color: Colors.orange.withValues(alpha: .12),
           borderRadius: BorderRadius.circular(20),
         ),
-        child: const Text(
-          'محظور',
-          style: TextStyle(
+        child: Text(
+          context.tr('محظور'),
+          style: const TextStyle(
             fontSize: 10,
             color: Colors.deepOrange,
             fontWeight: FontWeight.w700,
@@ -118,9 +113,9 @@ class DeviceCard extends StatelessWidget {
           color: Colors.red.withValues(alpha: .08),
           borderRadius: BorderRadius.circular(20),
         ),
-        child: const Text(
-          'خامل ⚠️',
-          style: TextStyle(
+        child: Text(
+          context.tr('خامل ⚠️'),
+          style: const TextStyle(
             fontSize: 10,
             color: Colors.redAccent,
             fontWeight: FontWeight.w700,
@@ -136,7 +131,9 @@ class DeviceCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(20),
         ),
         child: Text(
-          cloudOnline || isSelf ? 'متصل سحابياً ☁️' : 'غائب (غير متصل)',
+          cloudOnline || isSelf
+              ? context.tr('متصل سحابياً ☁️')
+              : context.tr('غائب (غير متصل)'),
           style: TextStyle(
             fontSize: 10,
             color: cloudOnline || isSelf ? Colors.green : Colors.blueGrey,
@@ -148,24 +145,24 @@ class DeviceCard extends StatelessWidget {
 
     final metadataItems = <Widget>[
       _smallLabel(
-        'البصمة',
+        context.tr('البصمة'),
         (data['id'] as String? ?? '').length > 10
             ? (data['id'] as String).substring(0, 10)
             : (data['id'] as String? ?? '—'),
       ),
       if (lastSeen.isNotEmpty)
         _smallLabel(
-          'آخر ظهور',
-          DateTime.tryParse(lastSeen) == null
+          context.tr('آخر ظهور'),
+          safeParseNullableDateTime(lastSeen) == null
               ? lastSeen
-              : Fmt.relative(DateTime.parse(lastSeen)),
+              : context.tr(Fmt.relative(safeParseDateTime(lastSeen))),
         ),
       if ('${data['last_sync_at'] ?? ''}'.isNotEmpty)
         _smallLabel(
-          'آخر مزامنة ☁️',
-          DateTime.tryParse('${data['last_sync_at']}') == null
+          context.tr('آخر مزامنة ☁️'),
+          safeParseNullableDateTime(data['last_sync_at']) == null
               ? '${data['last_sync_at']}'
-              : Fmt.relative(DateTime.parse('${data['last_sync_at']}')),
+              : context.tr(Fmt.relative(safeParseDateTime(data['last_sync_at']))),
         ),
     ];
 
@@ -200,7 +197,7 @@ class DeviceCard extends StatelessWidget {
                         minHeight: 32,
                       ),
                       padding: EdgeInsets.zero,
-                      tooltip: 'تعديل اسم العضو',
+                      tooltip: context.tr('تعديل اسم العضو'),
                       icon: const Icon(Icons.edit_outlined, size: 17),
                       onPressed: onRename,
                     ),
@@ -239,7 +236,6 @@ class DeviceCard extends StatelessWidget {
               const SizedBox(height: 8),
               Row(
                 children: [
-                  // متاح للمالك أو الوكيل المخوّل (canManageMembers) لتعديل صلاحيات أعضاء المجموعة.
                   if (!isSelf && !isOwnerDevice && canManageMembers && onPermissions != null)
                     Expanded(
                       child: OutlinedButton.icon(
@@ -254,8 +250,8 @@ class DeviceCard extends StatelessWidget {
                         icon: const Icon(Icons.verified_user_outlined, size: 18),
                         label: Text(
                           role != null
-                              ? 'تعيين الدور والصلاحيات (${role.label})'
-                              : 'تعيين الدور والصلاحيات',
+                              ? '${context.tr('تعيين الدور والصلاحيات')} (${context.tr(role.label)})'
+                              : context.tr('تعيين الدور والصلاحيات'),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
@@ -268,8 +264,6 @@ class DeviceCard extends StatelessWidget {
                   else
                     const Spacer(),
                   const SizedBox(width: 6),
-                  // كل إجراءات الجهاز مجمّعة في قائمة ثلاث نقاط واحدة
-                  // بدل صف الأيقونات الصغيرة المبعثرة.
                   _buildActionsMenu(
                     context,
                     expelled: expelled,
@@ -285,9 +279,6 @@ class DeviceCard extends StatelessWidget {
     );
   }
 
-  /// قائمة ثلاث نقاط تجمع كل إجراءات الجهاز في مكان واحد مرتب:
-  /// صلاحيات/تسمية/حظر-سماح/إعادة رمز/طرد/حذف نهائي + ربط العضو عبر السحابة.
-  /// الخيارات الإدارية الحساسة متاحة للمالك أو الوكيل المخوّل (`canManageMembers`).
   Widget _buildActionsMenu(
     BuildContext context, {
     required bool expelled,
@@ -313,48 +304,44 @@ class DeviceCard extends StatelessWidget {
       ));
     }
 
-    // إدارة الصلاحيات متاحة للمالك أو الوكيل المخوّل (canManageMembers).
     if (!expelled && !isSelf && canManageMembers && onPermissions != null) {
       add('perms', Icons.verified_user_outlined, Colors.teal,
-          'إدارة صلاحيات الجهاز',
+          context.tr('إدارة صلاحيات الجهاز'),
           enabled: !inactive);
     }
     if (canManageMembers || isSelf) {
-      add('rename', Icons.edit_outlined, Colors.blueGrey, 'تعديل اسم العضو',
+      add('rename', Icons.edit_outlined, Colors.blueGrey,
+          context.tr('تعديل اسم العضو'),
           enabled: !inactive);
     }
     if (!expelled) {
       if (revoked) {
         add('restore', Icons.verified_user_outlined, Colors.green,
-            'إعادة السماح (إلغاء الحظر)',
+            context.tr('إعادة السماح (إلغاء الحظر)'),
             enabled: !isSelf);
       } else {
-        add('revoke', Icons.block, Colors.orange, 'حظر الجهاز',
+        add('revoke', Icons.block, Colors.orange, context.tr('حظر الجهاز'),
             enabled: !isSelf);
       }
     }
-    // (دفعة 58 — متطلب 19) «ربط العضو عبر السحابة» يظهر للمالك أو الوكيل المخوّل
-    // عندما يكون الجهاز موقوفاً/غير مرتبط — جهاز نشط مرتبط فعلاً لا يحتاج إعادة ربط.
     if (!expelled && !isSelf && canManageMembers && onCloudLink != null && revoked) {
       add('cloudlink', Icons.cloud_sync_outlined, const Color(0xFF0EA5E9),
-          'ربط العضو عبر السحابة');
+          context.tr('ربط العضو عبر السحابة'));
     }
     if (!expelled && !isSelf && !isOwnerDevice) {
-      add('expel', Icons.person_remove, Colors.red, 'طرد من المجموعة');
+      add('expel', Icons.person_remove, Colors.red,
+          context.tr('إزالة من المجموعة'));
     }
-    // (للمالك أو الوكيل المخوّل) «حذف نهائي من السجل» متاح لكل جهاز عدا
-    // جهازك أنت (لا تنتحر) وجهاز مالك المساحة (الهوية الثابتة) — بلا شرط
-    // «مطرود»: الأجهزة الوهمية (DEV-*) والقديمة قابلة للمسح النهائي.
     if (!isSelf && !isOwnerDevice && canManageMembers && onPurge != null) {
       if (items.isNotEmpty) items.add(const PopupMenuDivider());
       add('purge', Icons.delete_forever, Colors.red.shade700,
-          'حذف نهائي من السجل');
+          context.tr('حذف نهائي من السجل'));
     }
 
     if (items.isEmpty) return const SizedBox.shrink();
 
     return PopupMenuButton<String>(
-      tooltip: 'إجراءات الجهاز',
+      tooltip: context.tr('إجراءات الجهاز'),
       icon: const Icon(Icons.more_vert, size: 22),
       itemBuilder: (_) => items,
       onSelected: (v) {
@@ -401,9 +388,6 @@ class DeviceCard extends StatelessWidget {
       );
 }
 
-/// (دفعة 56) شارة الدور الديناميكية عالية التباين:
-/// مدير ذهبية، وكيل بنفسجية داكنة، كاشير زمردية، محاسب زرقاء،
-/// مدخل بيانات بنفسجية، عرض فقط رمادية.
 class _RoleBadge extends StatelessWidget {
   final UserRole role;
   const _RoleBadge({required this.role});
@@ -411,12 +395,12 @@ class _RoleBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (bg, fg) = switch (role) {
-      UserRole.admin => (const Color(0xFFF59E0B), Colors.white), // ذهبي
-      UserRole.agent => (const Color(0xFF7C3AED), Colors.white), // وكيل
-      UserRole.accountant => (const Color(0xFF10B981), Colors.white), // محاسب
-      UserRole.cashier => (const Color(0xFFF97316), Colors.white), // كاشير
-      UserRole.dataentry => (const Color(0xFFA855F7), Colors.white), // إدخال
-      UserRole.viewer => (const Color(0xFF6B7280), Colors.white), // عرض
+      UserRole.admin => (const Color(0xFFF59E0B), Colors.white),
+      UserRole.agent => (const Color(0xFF7C3AED), Colors.white),
+      UserRole.accountant => (const Color(0xFF10B981), Colors.white),
+      UserRole.cashier => (const Color(0xFFF97316), Colors.white),
+      UserRole.dataentry => (const Color(0xFFA855F7), Colors.white),
+      UserRole.viewer => (const Color(0xFF6B7280), Colors.white),
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -432,7 +416,7 @@ class _RoleBadge extends StatelessWidget {
         ],
       ),
       child: Text(
-        '${role.icon} ${role.label}',
+        '${role.icon} ${context.tr(role.label)}',
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: TextStyle(
@@ -445,7 +429,6 @@ class _RoleBadge extends StatelessWidget {
   }
 }
 
-/// نافذة موحدة لتعيين دور وصلاحيات الجهاز المرتبط بشكل مستقل ومباشر لكل عضو.
 Future<void> showDevicePermissionsDialog(
   BuildContext context,
   WidgetRef ref,
@@ -497,7 +480,9 @@ Future<void> showDevicePermissionsDialog(
 
         final isAgent = role == UserRole.agent;
         return AlertDialog(
-          title: Text('تعيين صلاحيات: ${device['name'] ?? 'الجهاز'}'),
+          title: Text(
+            '${ctx.tr('تعيين صلاحيات')}: ${device['name'] ?? ctx.tr('الجهاز')}',
+          ),
           content: SizedBox(
             width: double.maxFinite,
             child: SingleChildScrollView(
@@ -505,8 +490,10 @@ Future<void> showDevicePermissionsDialog(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text('الدور الوظيفي',
-                      style: TextStyle(fontWeight: FontWeight.w700)),
+                  Text(
+                    ctx.tr('الدور الوظيفي'),
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
                   const SizedBox(height: 6),
                   Wrap(
                     spacing: 8,
@@ -515,7 +502,7 @@ Future<void> showDevicePermissionsDialog(
                       for (final r in UserRole.values)
                         if (r != UserRole.admin)
                           ChoiceChip(
-                            label: Text('${r.icon} ${r.label}'),
+                            label: Text('${r.icon} ${ctx.tr(r.label)}'),
                             selected: role == r,
                             onSelected: (_) => setRole(r),
                           ),
@@ -525,8 +512,9 @@ Future<void> showDevicePermissionsDialog(
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
                       child: Text(
-                        '🛡️ الوكيل يقوم بعمل المدير أثناء غيابه — يملك كل '
-                        'الصلاحيات، ويمكنك تعديلها بدقة أدناه.',
+                        ctx.tr(
+                          '🛡️ الوكيل يقوم بعمل المدير أثناء غيابه — يملك كل الصلاحيات، ويمكنك تعديلها بدقة أدناه.',
+                        ),
                         style: TextStyle(
                           fontSize: 12,
                           height: 1.5,
@@ -535,15 +523,17 @@ Future<void> showDevicePermissionsDialog(
                       ),
                     ),
                   const SizedBox(height: 14),
-                  const Text('الصلاحيات التفصيلية',
-                      style: TextStyle(fontWeight: FontWeight.w700)),
+                  Text(
+                    ctx.tr('الصلاحيات التفصيلية'),
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
                   const SizedBox(height: 4),
                   for (final p in kPerms)
                     CheckboxListTile(
                       dense: true,
                       contentPadding: EdgeInsets.zero,
                       value: perms.contains(p.key),
-                      title: Text(p.label),
+                      title: Text(ctx.tr(p.label)),
                       onChanged: (v) => setDlg(() {
                         if (v == true) {
                           perms.add(p.key);
@@ -559,7 +549,7 @@ Future<void> showDevicePermissionsDialog(
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
-              child: const Text('إلغاء'),
+              child: Text(ctx.tr('إلغاء')),
             ),
             FilledButton(
               onPressed: () async {
@@ -567,20 +557,21 @@ Future<void> showDevicePermissionsDialog(
                   await repo.setDevicePermissions(
                       device['id'] as String, role, perms);
                   await engine.broadcastRosterChange();
-                  // (دفعة التدقيق) تحديث المزودات فوراً — كان الحوار يغلق
-                  // دون bump فتبقى الأدوار/الصلاحيات المعروضة قديمة حتى
-                  // إعادة الدخول للشاشة.
                   bump(ref);
                   if (ctx.mounted) Navigator.pop(ctx);
                   Sfx.success();
                 } catch (e) {
                   Sfx.error();
                   if (ctx.mounted) {
-                    showSnack(ctx, 'تعذّر حفظ الصلاحيات: $e', error: true);
+                    showSnack(
+                      ctx,
+                      '${ctx.tr('تعذّر حفظ الصلاحيات')}: $e',
+                      error: true,
+                    );
                   }
                 }
               },
-              child: const Text('حفظ الصلاحيات'),
+              child: Text(ctx.tr('حفظ الصلاحيات')),
             ),
           ],
         );
@@ -588,3 +579,4 @@ Future<void> showDevicePermissionsDialog(
     ),
   );
 }
+

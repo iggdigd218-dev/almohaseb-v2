@@ -170,9 +170,16 @@ class UpdateInstaller {
     final uri = Uri.tryParse(directUrl);
     if (uri == null) return false;
     try {
-      return await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (await canLaunchUrl(uri)) {
+        return await launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
+      return await launchUrl(uri, mode: LaunchMode.platformDefault);
     } catch (_) {
-      return false;
+      try {
+        return await launchUrl(uri);
+      } catch (_) {
+        return false;
+      }
     }
   }
 

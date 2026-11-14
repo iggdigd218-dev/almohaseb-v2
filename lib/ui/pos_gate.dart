@@ -590,12 +590,20 @@ class PosCategoryStrip extends StatelessWidget {
     this.allItemsCount,
     this.showHeader = false,
     this.onShowAll,
+    this.allLabel,
+    this.isAllActive,
   });
 
   /// فئات القسم النشط مرتّبة كما تظهر للمستخدم.
   final List<ItemCategory> categories;
 
   final int? selectedId;
+
+  /// تسمية زر «الكل» (يمكن تخصيصها عند الغوص في فئة فرعية مثل «كل Samsung»).
+  final String? allLabel;
+
+  /// هل زر «الكل» هو النشط حالياً؟
+  final bool? isAllActive;
 
   /// يُستدعى باختيار فئة (`null` = كل الفئات).
   final void Function(int? categoryId) onPick;
@@ -620,13 +628,13 @@ class PosCategoryStrip extends StatelessWidget {
         padding: const EdgeInsetsDirectional.fromSTEB(12, 2, 12, 2),
         children: [
           _CatChip(
-            label: 'الكل',
+            label: allLabel ?? 'الكل',
             icon: Icons.widgets_outlined,
             tone: AppTone.blue,
             countLabel: allItemsCount != null
                 ? '$allItemsCount صنف'
                 : '${categories.length} فئة',
-            active: selectedId == null,
+            active: isAllActive ?? (selectedId == null),
             onTap: () => onPick(null),
           ),
           for (var i = 0; i < categories.length; i++)

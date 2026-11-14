@@ -156,7 +156,10 @@ void main() {
       await _waitFor(tester, sheetAction);
       await tester.tap(sheetAction);
       await _drain(tester);
-      final debitTab = find.text('عليه');
+      final debitTab = find.descendant(
+        of: find.byType(TxForm),
+        matching: find.text('عليه'),
+      );
       await _waitFor(tester, debitTab);
       await tester.tap(debitTab);
       await tester.enterText(

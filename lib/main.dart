@@ -13,6 +13,7 @@ import 'core/desktop.dart';
 import 'core/desktop_net.dart';
 import 'core/media_paths.dart';
 import 'core/database.dart';
+import 'core/l10n.dart';
 import 'core/sfx.dart';
 import 'core/theme.dart';
 import 'data/providers.dart';
@@ -89,13 +90,16 @@ Future<void> main() async {
 
   var themeMode = ThemeMode.light;
   var hideBalances = false;
+  var appLocale = const Locale('ar');
   Map<String, String> initialSettings = const {};
   try {
     initialSettings = await repo.settings().timeout(const Duration(seconds: 4));
     String? savedTheme;
+    String? savedLang;
     try {
       final sp = await SharedPreferences.getInstance();
       savedTheme = sp.getString('app_theme_mode');
+      savedLang = sp.getString('app_locale');
     } catch (_) {}
     final effectiveThemeRaw =
         (savedTheme != null && savedTheme.trim().isNotEmpty)
@@ -106,6 +110,12 @@ Future<void> main() async {
       'system' => ThemeMode.system,
       _ => ThemeMode.light,
     };
+    final effectiveLangRaw =
+        (savedLang != null && savedLang.trim().isNotEmpty)
+            ? savedLang.trim().toLowerCase()
+            : (initialSettings['language'] ?? 'ar').trim().toLowerCase();
+    appLocale =
+        effectiveLangRaw.startsWith('en') ? const Locale('en') : const Locale('ar');
     hideBalances = initialSettings['hideBalances'] == '1';
     Sfx.applySettings(
       sound: (initialSettings['sfxSound'] ?? '1') == '1',
@@ -123,6 +133,7 @@ Future<void> main() async {
         syncEngineProvider.overrideWithValue(engine),
         themeModeProvider.overrideWith((ref) => themeMode),
         hideBalancesProvider.overrideWith((ref) => hideBalances),
+        appLocaleProvider.overrideWith((ref) => appLocale),
       ],
       child: const NexoraApp(),
     ),
@@ -159,9 +170,11 @@ class NexoraApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final activeThemeMode = ref.watch(themeModeProvider);
+    final activeLocale = ref.watch(appLocaleProvider);
+    final isEn = activeLocale.languageCode.toLowerCase().startsWith('en');
     return MaterialApp(
       navigatorKey: rootNavigatorKey,
-      title: 'المحاسب',
+      title: isEn ? 'Al-Mohaseb' : 'المحاسب',
       debugShowCheckedModeBanner: false,
       // سطح المكتب: تمرير طبيعي بعجلة الفأرة وبالسحب بالماوس معاً
       // في كل القوائم والصفوف الأفقية.
@@ -179,16 +192,17 @@ class NexoraApp extends ConsumerWidget {
           ? AppTheme.light()
           : AppTheme.dark(),
       themeMode: activeThemeMode,
-      locale: const Locale('ar'),
-      supportedLocales: const [Locale('ar'), Locale('en')],
+      locale: activeLocale,
+      supportedLocales: AppLocalizations.supportedLocales,
       localizationsDelegates: const [
+        AppLocalizations.delegate,
         GlobalMaterialLocalizations.delegate,
         GlobalWidgetsLocalizations.delegate,
         GlobalCupertinoLocalizations.delegate,
       ],
       builder: (context, child) {
         Widget w = Directionality(
-          textDirection: TextDirection.rtl,
+          textDirection: isEn ? TextDirection.ltr : TextDirection.rtl,
           child: child ?? const SizedBox.shrink(),
         );
         final mq = MediaQuery.maybeOf(context);

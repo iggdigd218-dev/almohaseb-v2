@@ -67,10 +67,57 @@ pw.Widget buildThermalArrowLogo({double size = 44}) {
   );
 }
 
+String _thermalQty(double q) {
+  if (q == q.truncateToDouble()) {
+    return q.toInt().toString();
+  }
+  return Fmt.money(q, 2);
+}
+
+String _resolveThermalCurrencySymbol(String rawCodeOrSymbol, String? explicitSymbol) {
+  if (explicitSymbol != null && explicitSymbol.trim().isNotEmpty) {
+    return PdfFonts.sanitize(explicitSymbol.trim());
+  }
+  final clean = rawCodeOrSymbol.trim();
+  if (clean.isEmpty) return 'محلي';
+  final upper = clean.toUpperCase();
+  for (final c in kDefaultCurrencies) {
+    if (c.code.toUpperCase() == upper) {
+      return PdfFonts.sanitize(c.symbol);
+    }
+  }
+  for (final c in kPresetCurrencies) {
+    if (c.code.toUpperCase() == upper) {
+      return PdfFonts.sanitize(c.symbol);
+    }
+  }
+  return PdfFonts.sanitize(clean);
+}
+
+pw.Widget _thermalTableCell(
+  String text, {
+  pw.Font? font,
+  double fontSize = 8.0,
+  pw.TextAlign align = pw.TextAlign.center,
+}) {
+  return pw.Padding(
+    padding: const pw.EdgeInsets.symmetric(horizontal: 2.5, vertical: 3),
+    child: pw.Text(
+      PdfFonts.sanitize(text),
+      textAlign: align,
+      style: pw.TextStyle(
+        fontSize: fontSize,
+        font: font,
+        fontWeight: font != null ? pw.FontWeight.bold : pw.FontWeight.normal,
+      ),
+    ),
+  );
+}
+
 /// يبني فاتورة حرارية 80مم بخط عربي مدمج واتجاه من اليمين إلى اليسار.
 ///
-/// * [orgName] اسم المتجر — يظهر بالخط العريض في رأس الفاتورة.
-/// * [lines] سطور الأصناف (الاسم والكمية وسعر الوحدة والإجمالي).
+/// * [orgName] اسم المتجر — يظهر على جوانب أعلى الفاتورة الحرارية.
+/// * [lines] سطور الأصناف (م، الصنف، الكمية، السعر، الإجمالي).
 /// * [stamp] يضيف سطر الختم الصغير أسفل التذييل للحساب المقيد.
 Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
   required Tx tx,
@@ -83,6 +130,7 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
   String sellerOrDevice = '',
   String logoPath = '',
   String logoBase64 = '',
+  String? currencySymbol,
   bool stamp = false,
 }) async {
   // (بند 2) تحميل الخط العربي قبل إنشاء المستند — مرة واحدة ومخبّأة.
@@ -92,18 +140,28 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
   final cleanOrgName = PdfFonts.sanitize(orgName.trim());
   final cleanOrgAddress = PdfFonts.sanitize(orgAddress.trim());
   final cleanOrgPhone = PdfFonts.sanitize(orgPhone.trim());
-  final cleanRef = PdfFonts.sanitize(tx.reference.trim());
-  final cleanCurrency = PdfFonts.sanitize(tx.currency.trim());
-  final cleanAccountName =
-      account != null ? PdfFonts.sanitize(account.name.trim()) : '';
-  final cleanAccountPhone =
-      account != null ? PdfFonts.sanitize(account.phone.trim()) : '';
+  final cleanRef = PdfFonts.sanitize(
+    tx.reference
+        .trim()
+        .replaceFirst(RegExp(r'^#+'), '')
+        .replaceFirst(RegExp(r'#+$'), '')
+        .trim(),
+  );
+  final currSymbol =
+      _resolveThermalCurrencySymbol(tx.currency, currencySymbol);
+  final cleanAccountName = PdfFonts.sanitize(tx.resolvedPartyName(account));
   final cleanSeller = PdfFonts.sanitize(sellerOrDevice.trim());
-  final cleanFooter = PdfFonts.sanitize(footer.trim());
+  final rawFooter = PdfFonts.sanitize(footer.trim());
+  final cleanFooter = (rawFooter.isEmpty ||
+          rawFooter.contains('شكراً لتعاملكم') ||
+          rawFooter.contains('شكراً لزيارتكم'))
+      ? 'سند آلي لا يحتاج إلى ختم أو توقيع'
+      : rawFooter;
 
-  // استخراج تفاصيل البيع الجزئي إن وُجدت في ملاحظات الفاتورة
+  // استخراج تفاصيل البيع الجزئي والخصم إن وُجدت في ملاحظات الفاتورة
   String? paidVal;
   String? remainVal;
+  String? discountVal;
   for (final l in tx.notes.split('\n')) {
     final t = l.trim();
     if (t.startsWith('المبلغ المدفوع:')) {
@@ -112,8 +170,21 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
     } else if (t.startsWith('المبلغ المتبقي:')) {
       remainVal = PdfFonts.sanitize(
           t.substring('المبلغ المتبقي:'.length).trim());
+    } else if (t.startsWith('الخصم:')) {
+      discountVal = PdfFonts.sanitize(
+          t.substring('الخصم:'.length).trim());
     }
   }
+
+  final itemsTotal = lines.fold<double>(0, (s, it) => s + it.total);
+  if ((discountVal == null || discountVal.isEmpty) &&
+      lines.isNotEmpty &&
+      itemsTotal > tx.amount + 0.009) {
+    discountVal = '${Fmt.money(itemsTotal - tx.amount)} $currSymbol';
+  }
+
+  final dateStr =
+      '${Fmt.date(tx.date)} ${tx.date.hour.toString().padLeft(2, '0')}:${tx.date.minute.toString().padLeft(2, '0')}';
 
   final doc = pw.Document(
     // (بند 3) تعيين الخط في ثيم المستند: يورّثه لكل النصوص تلقائياً.
@@ -126,7 +197,7 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
         pageFormat: const PdfPageFormat(
           80 * PdfPageFormat.mm,
           double.infinity,
-          marginAll: 4 * PdfPageFormat.mm,
+          marginAll: 3.5 * PdfPageFormat.mm,
         ),
         // (بند 4) اتجاه RTL على مستوى الصفحة: يضبط ترتيب الأحرف والأرقام
         // واتجاه الأعمدة في كل سطر، وليس فقط محاذاة النص.
@@ -134,117 +205,273 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
         theme: fonts.theme,
       ),
       build: (pw.Context context) {
-        // Directionality داخل الصفحة أيضاً: يحمي الأجزاء المضمّنة (مثل
-        // الجداول) التي قد تتجاهل ثيم الصفحة في إصدارات الحزمة.
         return PdfFonts.rtl(
           child: pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.center,
+            crossAxisAlignment: pw.CrossAxisAlignment.stretch,
             children: [
-              // إشارة السهم الصاعد باللون الأسود الصافي بدلاً من شعار المنشأة الملون
-              buildThermalArrowLogo(size: 42),
-              pw.SizedBox(height: 6),
-              pw.Text(
-                cleanOrgName,
-                textAlign: pw.TextAlign.center,
-                style: pw.TextStyle(
-                  fontSize: 16,
-                  font: fonts.bold,
-                  fontWeight: pw.FontWeight.bold,
-                ),
+              // 1) ترويسة الفاتورة الحرارية: شعار وهوية النظام في المنتصف، وبيانات المنشأة موزعة على الجوانب
+              pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  // الجانب الأيمن: اسم المنشأة وعنوانها
+                  pw.Expanded(
+                    flex: 3,
+                    child: pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.start,
+                      children: [
+                        if (cleanOrgName.isNotEmpty)
+                          pw.Text(
+                            cleanOrgName,
+                            style: pw.TextStyle(
+                              fontSize: 9.5,
+                              font: fonts.bold,
+                              fontWeight: pw.FontWeight.bold,
+                            ),
+                          ),
+                        if (cleanOrgAddress.isNotEmpty)
+                          pw.Text(
+                            cleanOrgAddress,
+                            style: const pw.TextStyle(fontSize: 7.5),
+                          ),
+                      ],
+                    ),
+                  ),
+                  pw.SizedBox(width: 4),
+                  // الوسط تماماً: أيقونة السهم الأسود + المحاسب - Al-Mohaseb + هاتف: +967774190040
+                  pw.Expanded(
+                    flex: 4,
+                    child: pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.center,
+                      children: [
+                        buildThermalArrowLogo(size: 28),
+                        pw.SizedBox(height: 2),
+                        pw.Text(
+                          'المحاسب - Al-Mohaseb',
+                          textAlign: pw.TextAlign.center,
+                          style: pw.TextStyle(
+                            fontSize: 8.5,
+                            font: fonts.bold,
+                            fontWeight: pw.FontWeight.bold,
+                          ),
+                        ),
+                        pw.Row(
+                          mainAxisAlignment: pw.MainAxisAlignment.center,
+                          mainAxisSize: pw.MainAxisSize.min,
+                          children: [
+                            pw.Text(
+                              'هاتف: ',
+                              style: const pw.TextStyle(fontSize: 7.5),
+                            ),
+                            pw.Directionality(
+                              textDirection: pw.TextDirection.ltr,
+                              child: pw.Text(
+                                '+967774190040',
+                                style: const pw.TextStyle(fontSize: 7.5),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  pw.SizedBox(width: 4),
+                  // الجانب الأيسر: هاتف المنشأة والتاريخ
+                  pw.Expanded(
+                    flex: 3,
+                    child: pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.end,
+                      children: [
+                        if (cleanOrgPhone.isNotEmpty)
+                          pw.Directionality(
+                            textDirection: pw.TextDirection.ltr,
+                            child: pw.Text(
+                              cleanOrgPhone,
+                              style: pw.TextStyle(
+                                fontSize: 8,
+                                font: fonts.bold,
+                              ),
+                            ),
+                          ),
+                        pw.Text(
+                          dateStr,
+                          textAlign: pw.TextAlign.left,
+                          style: const pw.TextStyle(fontSize: 7),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-              if (cleanOrgAddress.isNotEmpty)
-                pw.Text(
-                  cleanOrgAddress,
-                  textAlign: pw.TextAlign.center,
-                  style: const pw.TextStyle(fontSize: 9.5),
-                ),
-              if (cleanOrgPhone.isNotEmpty)
-                pw.Text(
-                  'هاتف: $cleanOrgPhone',
-                  textAlign: pw.TextAlign.center,
-                  style: const pw.TextStyle(fontSize: 10),
-                ),
-              pw.Divider(thickness: 1),
+              pw.SizedBox(height: 4),
+              pw.Divider(thickness: 0.8),
+              // 2) نوع الفاتورة والرقم المرجعي (بدون تكرار (مدفوع نقداً) وبدون #)
               pw.Row(
                 mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                 children: [
                   pw.Text(
                     PdfFonts.sanitize(
                       tx.type == OpType.revenue
-                          ? 'فاتورة نقدية مدفوعة (مدفوع نقداً)'
+                          ? 'فاتورة نقدية مدفوعة'
                           : 'فاتورة مبيعات',
                     ),
                     style: pw.TextStyle(
+                      fontSize: 9,
                       font: fonts.bold,
                       fontWeight: pw.FontWeight.bold,
                     ),
                   ),
-                  pw.Text('#$cleanRef'),
+                  if (cleanRef.isNotEmpty)
+                    pw.Directionality(
+                      textDirection: pw.TextDirection.ltr,
+                      child: pw.Text(
+                        cleanRef,
+                        style: pw.TextStyle(
+                          fontSize: 9,
+                          font: fonts.bold,
+                          fontWeight: pw.FontWeight.bold,
+                        ),
+                      ),
+                    ),
                 ],
               ),
               if (cleanAccountName.isNotEmpty)
                 pw.Align(
                   alignment: pw.Alignment.centerRight,
-                  child: pw.Text('العميل: $cleanAccountName'),
+                  child: pw.Text(
+                    'العميل: $cleanAccountName',
+                    style: const pw.TextStyle(fontSize: 8.5),
+                  ),
                 ),
-              pw.Divider(thickness: 1),
-              for (final item in lines) ...[
+              pw.SizedBox(height: 3),
+              // 3) جدول المبيعات الفعلي المقسم بأعمدة (م، الصنف، الكمية، السعر، الإجمالي)
+              if (lines.isNotEmpty)
+                pw.Table(
+                  border: pw.TableBorder.all(
+                    color: PdfColors.grey700,
+                    width: 0.5,
+                  ),
+                  columnWidths: const {
+                    0: pw.FlexColumnWidth(1.6), // الإجمالي (أقصى اليسار في RTL)
+                    1: pw.FlexColumnWidth(1.5), // السعر
+                    2: pw.FlexColumnWidth(1.1), // الكمية
+                    3: pw.FlexColumnWidth(3.2), // الصنف
+                    4: pw.FlexColumnWidth(0.7), // م (أقصى اليمين في RTL)
+                  },
+                  children: [
+                    pw.TableRow(
+                      decoration: const pw.BoxDecoration(
+                        color: PdfColors.grey200,
+                      ),
+                      children: [
+                        _thermalTableCell('الإجمالي', font: fonts.bold, fontSize: 8),
+                        _thermalTableCell('السعر', font: fonts.bold, fontSize: 8),
+                        _thermalTableCell('الكمية', font: fonts.bold, fontSize: 8),
+                        _thermalTableCell('الصنف', font: fonts.bold, fontSize: 8),
+                        _thermalTableCell('م', font: fonts.bold, fontSize: 8),
+                      ],
+                    ),
+                    for (var i = 0; i < lines.length; i++)
+                      pw.TableRow(
+                        children: [
+                          _thermalTableCell(
+                            Fmt.money(lines[i].total),
+                            font: fonts.bold,
+                            fontSize: 8,
+                          ),
+                          _thermalTableCell(
+                            Fmt.money(lines[i].unitPrice),
+                            fontSize: 8,
+                          ),
+                          _thermalTableCell(
+                            _thermalQty(lines[i].quantity),
+                            fontSize: 8,
+                          ),
+                          _thermalTableCell(
+                            lines[i].name,
+                            fontSize: 8,
+                            align: pw.TextAlign.right,
+                          ),
+                          _thermalTableCell(
+                            '${i + 1}',
+                            fontSize: 7.5,
+                          ),
+                        ],
+                      ),
+                  ],
+                ),
+              pw.SizedBox(height: 4),
+              // 4) قسم الإجماليات والخصم بعملة المنشأة المعتمدة
+              if (discountVal != null && discountVal.isNotEmpty) ...[
                 pw.Row(
                   mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                   children: [
-                    pw.Expanded(
-                      child: pw.Text(
-                        PdfFonts.sanitize(item.name),
-                        style: const pw.TextStyle(fontSize: 10),
-                      ),
+                    pw.Text(
+                      'إجمالي قيمة الأصناف:',
+                      style: const pw.TextStyle(fontSize: 8.5),
                     ),
                     pw.Text(
-                      '${item.quantity} × ${Fmt.money(item.unitPrice)} = ${Fmt.money(item.total)}',
-                      style: const pw.TextStyle(fontSize: 10),
+                      '${Fmt.money(itemsTotal)} $currSymbol',
+                      style: pw.TextStyle(
+                        fontSize: 8.5,
+                        font: fonts.bold,
+                      ),
+                    ),
+                  ],
+                ),
+                pw.Row(
+                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                  children: [
+                    pw.Text(
+                      'الخصم:',
+                      style: const pw.TextStyle(fontSize: 8.5),
+                    ),
+                    pw.Text(
+                      discountVal.contains(currSymbol)
+                          ? discountVal
+                          : '$discountVal $currSymbol',
+                      style: pw.TextStyle(
+                        fontSize: 8.5,
+                        font: fonts.bold,
+                      ),
                     ),
                   ],
                 ),
               ],
-              pw.Divider(thickness: 1),
               pw.Row(
                 mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                 children: [
                   pw.Text(
                     'الإجمالي المطلوب:',
                     style: pw.TextStyle(
+                      fontSize: 9.5,
                       font: fonts.bold,
                       fontWeight: pw.FontWeight.bold,
                     ),
                   ),
                   pw.Text(
-                    '${Fmt.money(tx.amount)} $cleanCurrency',
+                    '${Fmt.money(tx.amount)} $currSymbol',
                     style: pw.TextStyle(
                       font: fonts.bold,
                       fontWeight: pw.FontWeight.bold,
-                      fontSize: 13,
+                      fontSize: 10.5,
                     ),
                   ),
                 ],
               ),
               if (paidVal != null && paidVal.isNotEmpty) ...[
-                pw.SizedBox(height: 3),
+                pw.SizedBox(height: 2),
                 pw.Row(
                   mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                   children: [
                     pw.Text(
                       PdfFonts.sanitize('المبلغ المدفوع مقدماً:'),
-                      style: pw.TextStyle(
-                        font: fonts.bold,
-                        fontWeight: pw.FontWeight.bold,
-                        fontSize: 10,
-                      ),
+                      style: const pw.TextStyle(fontSize: 8.5),
                     ),
                     pw.Text(
-                      paidVal,
+                      paidVal.replaceAll('YER', currSymbol),
                       style: pw.TextStyle(
                         font: fonts.bold,
-                        fontWeight: pw.FontWeight.bold,
-                        fontSize: 10,
+                        fontSize: 8.5,
                       ),
                     ),
                   ],
@@ -257,18 +484,13 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                   children: [
                     pw.Text(
                       'المبلغ المتبقي (آجل):',
-                      style: pw.TextStyle(
-                        font: fonts.bold,
-                        fontWeight: pw.FontWeight.bold,
-                        fontSize: 10,
-                      ),
+                      style: const pw.TextStyle(fontSize: 8.5),
                     ),
                     pw.Text(
-                      remainVal,
+                      remainVal.replaceAll('YER', currSymbol),
                       style: pw.TextStyle(
                         font: fonts.bold,
-                        fontWeight: pw.FontWeight.bold,
-                        fontSize: 10,
+                        fontSize: 8.5,
                       ),
                     ),
                   ],
@@ -280,66 +502,50 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                   children: [
                     pw.Text(
                       'المتبقي:',
-                      style: pw.TextStyle(
-                        font: fonts.bold,
-                        fontWeight: pw.FontWeight.bold,
-                        fontSize: 10,
-                      ),
+                      style: const pw.TextStyle(fontSize: 8.5),
                     ),
                     pw.Text(
-                      '0.00 $cleanCurrency',
+                      '0 $currSymbol',
                       style: pw.TextStyle(
                         font: fonts.bold,
-                        fontWeight: pw.FontWeight.bold,
-                        fontSize: 10,
+                        fontSize: 8.5,
                       ),
                     ),
                   ],
                 ),
               ],
-              pw.SizedBox(height: 6),
-              pw.Divider(thickness: 0.6),
-              if (cleanSeller.isNotEmpty) ...[
-                pw.Text(
-                  'الموظف: $cleanSeller',
-                  style: pw.TextStyle(
-                    fontSize: 9,
-                    font: fonts.bold,
-                    fontWeight: pw.FontWeight.bold,
-                  ),
-                  textAlign: pw.TextAlign.center,
-                ),
-                pw.SizedBox(height: 3),
-              ],
-              // التاريخ ورقم الهاتف قبل العنصر الأخير مباشرة
+              pw.SizedBox(height: 4),
+              pw.Divider(thickness: 0.5),
+              // 5) التذييل النظيف (بدون رقم هاتف مكرر وبدون عبارة الشكر)
               pw.Row(
                 mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                 children: [
-                  pw.Text(
-                    'التاريخ: ${Fmt.date(tx.date)} ${tx.date.hour.toString().padLeft(2, '0')}:${tx.date.minute.toString().padLeft(2, '0')}',
-                    style: const pw.TextStyle(fontSize: 8.5),
-                  ),
-                  if (cleanOrgPhone.isNotEmpty || cleanAccountPhone.isNotEmpty)
+                  if (cleanSeller.isNotEmpty)
                     pw.Text(
-                      'هاتف: ${cleanOrgPhone.isNotEmpty ? cleanOrgPhone : cleanAccountPhone}',
-                      style: const pw.TextStyle(fontSize: 8.5),
+                      'الموظف: $cleanSeller',
+                      style: pw.TextStyle(
+                        fontSize: 8,
+                        font: fonts.bold,
+                        fontWeight: pw.FontWeight.bold,
+                      ),
                     ),
+                  pw.Expanded(
+                    child: pw.Text(
+                      cleanFooter,
+                      style: const pw.TextStyle(fontSize: 7.5),
+                      textAlign: cleanSeller.isNotEmpty
+                          ? pw.TextAlign.left
+                          : pw.TextAlign.center,
+                    ),
+                  ),
                 ],
               ),
-              pw.SizedBox(height: 3),
-              pw.Text(
-                cleanFooter,
-                style: const pw.TextStyle(fontSize: 9),
-                textAlign: pw.TextAlign.center,
-              ),
-              // الحراري 80مم يضيق عن ختم مائل مقروء — نكتفي بسطر ختم صغير
-              // أسفل التذييل.
               if (stamp) ...[
-                pw.SizedBox(height: 4),
+                pw.SizedBox(height: 3),
                 pw.Text(
                   PdfFonts.sanitize(kWatermarkText),
                   style: const pw.TextStyle(
-                    fontSize: 7,
+                    fontSize: 6.5,
                     color: PdfColors.grey600,
                   ),
                   textAlign: pw.TextAlign.center,
@@ -367,6 +573,7 @@ Future<Uint8List> buildThermalInvoicePdf({
   String sellerOrDevice = '',
   String logoPath = '',
   String logoBase64 = '',
+  String? currencySymbol,
   bool stamp = false,
 }) async =>
     (await buildThermalInvoiceDocument(
@@ -380,6 +587,7 @@ Future<Uint8List> buildThermalInvoicePdf({
       sellerOrDevice: sellerOrDevice,
       logoPath: logoPath,
       logoBase64: logoBase64,
+      currencySymbol: currencySymbol,
       stamp: stamp,
     ))
         .bytes;

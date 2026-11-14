@@ -1,10 +1,141 @@
-// شاشة المظهر المستقلة: حجم الخط، والأصوات/الاهتزاز.
+// شاشة المظهر المستقلة: حجم الخط، اللغة، والأصوات/الاهتزاز.
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/l10n.dart';
 import '../core/sfx.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
+
+/// بطاقة اختيار لغة التطبيق (العربية / English) مع حفظ فوري في SharedPreferences وتطبيق الاتجاه RTL/LTR دون إعادة تشغيل.
+class LanguageSelectorCard extends ConsumerWidget {
+  const LanguageSelectorCard({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final currentLocale = ref.watch(appLocaleProvider);
+    final isEn = currentLocale.languageCode.toLowerCase().startsWith('en');
+    final l10n = AppLocalizations.of(context);
+    final primary = AppColors.primaryOf(context);
+
+    return Card(
+      key: const ValueKey('settings_language_card'),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.language_rounded, color: primary, size: 21),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    l10n.languageLabel,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 14.5,
+                    ),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: primary.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    isEn ? 'English' : 'العربية',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w800,
+                      color: primary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    key: const ValueKey('lang_option_ar'),
+                    onPressed: () async {
+                      Sfx.tap();
+                      await saveAppLocale(ref, const Locale('ar'));
+                    },
+                    style: OutlinedButton.styleFrom(
+                      backgroundColor:
+                          !isEn ? primary.withValues(alpha: 0.12) : null,
+                      side: BorderSide(
+                        color: !isEn
+                            ? primary
+                            : Theme.of(context).dividerColor,
+                        width: !isEn ? 1.6 : 1,
+                      ),
+                    ),
+                    icon: Icon(
+                      !isEn
+                          ? Icons.check_circle_rounded
+                          : Icons.circle_outlined,
+                      size: 18,
+                      color: !isEn ? primary : AppColors.text3Of(context),
+                    ),
+                    label: Text(
+                      'العربية',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        color: !isEn ? primary : AppColors.textOf(context),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    key: const ValueKey('lang_option_en'),
+                    onPressed: () async {
+                      Sfx.tap();
+                      await saveAppLocale(ref, const Locale('en'));
+                    },
+                    style: OutlinedButton.styleFrom(
+                      backgroundColor:
+                          isEn ? primary.withValues(alpha: 0.12) : null,
+                      side: BorderSide(
+                        color: isEn
+                            ? primary
+                            : Theme.of(context).dividerColor,
+                        width: isEn ? 1.6 : 1,
+                      ),
+                    ),
+                    icon: Icon(
+                      isEn
+                          ? Icons.check_circle_rounded
+                          : Icons.circle_outlined,
+                      size: 18,
+                      color: isEn ? primary : AppColors.text3Of(context),
+                    ),
+                    label: Text(
+                      'English',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        color: isEn ? primary : AppColors.textOf(context),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class ThemeModeSelectorCard extends ConsumerWidget {
   const ThemeModeSelectorCard({super.key});
@@ -41,14 +172,6 @@ class ThemeModeSelectorCard extends ConsumerWidget {
                   ),
                 ),
               ],
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'يُحفظ اختيارك بشكل دائم، ولا يتأثر الوضع النهاري بإعدادات الجهاز الليلية.',
-              style: TextStyle(
-                fontSize: 12,
-                color: AppColors.text3Of(context),
-              ),
             ),
             const SizedBox(height: 8),
             RadioListTile<ThemeMode>(
@@ -136,10 +259,12 @@ class AppearanceScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final st = ref.watch(settingsProvider).valueOrNull ?? {};
     return Scaffold(
-      appBar: AppBar(title: const Text('المظهر والأصوات')),
+      appBar: AppBar(title: Text(context.tr('المظهر والأصوات'))),
       body: ListView(
         padding: const EdgeInsets.all(14),
         children: [
+          const LanguageSelectorCard(),
+          const SizedBox(height: 12),
           const ThemeModeSelectorCard(),
           const SizedBox(height: 12),
           Card(
@@ -231,12 +356,6 @@ class AppearanceScreen extends ConsumerWidget {
                           style: TextStyle(
                               fontWeight: FontWeight.w700, fontSize: 14.5)),
                     ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'لكل نوع تفاعل صوت مميز — اضغط أي زر لتجربته.',
-                    style: TextStyle(
-                        fontSize: 12, color: AppColors.text3Of(context)),
                   ),
                   const SizedBox(height: 10),
                   Wrap(

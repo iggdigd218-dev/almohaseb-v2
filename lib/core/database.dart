@@ -7,6 +7,7 @@ import 'package:sqflite/sqflite.dart';
 
 import 'db_init.dart';
 import 'device_names.dart';
+import 'models.dart';
 
 /// معرف Workspace الافتراضي (ثابت محلي لتجنب circular imports).
 const defaultWorkspaceIdConst = 'default';
@@ -356,6 +357,9 @@ class AppDatabase {
                   ? 'YER'
                   : (st['defaultCurrency'] ?? 'YER').trim(),
               'phone': (st['phone'] ?? st['whatsapp'] ?? '').trim(),
+              'passwordHash':
+                  (st['account.passwordHash'] ?? st['password_hash'] ?? '')
+                      .trim(),
               'accountsCount': '$accountsCount',
               'hasCompletedOnboarding':
                   (st['has_completed_onboarding'] ?? st['onboardingCompleted'] ?? '0')
@@ -1262,8 +1266,8 @@ class AppDatabase {
         paired_by      INTEGER,
         is_paired      INTEGER NOT NULL DEFAULT 1,
         is_owner       INTEGER NOT NULL DEFAULT 0,
-        created_at     TEXT NOT NULL,
-        updated_at     TEXT NOT NULL
+        created_at     TEXT NOT NULL DEFAULT '',
+        updated_at     TEXT NOT NULL DEFAULT ''
       );
 
       CREATE TABLE IF NOT EXISTS operations (
@@ -1441,7 +1445,7 @@ class AppDatabase {
         )''');
     await _tryCreateTable(db, 'devices', '''
         CREATE TABLE IF NOT EXISTS devices (
-          id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
+          id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL DEFAULT 'default',
           name TEXT NOT NULL DEFAULT '', platform TEXT DEFAULT '',
           app_version TEXT DEFAULT '', last_seen_at TEXT DEFAULT '',
           last_sync_at TEXT DEFAULT '', pair_token TEXT DEFAULT '',
@@ -1449,7 +1453,7 @@ class AppDatabase {
           revoked_at TEXT DEFAULT '', expelled_at TEXT DEFAULT '',
           user_id INTEGER, paired_by INTEGER,
           is_paired INTEGER NOT NULL DEFAULT 1, is_owner INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''
         )''');
     await _tryCreateTable(db, 'operations', '''
         CREATE TABLE IF NOT EXISTS operations (
@@ -2020,8 +2024,8 @@ class AppDatabase {
               paired_by      INTEGER,
               is_paired      INTEGER NOT NULL DEFAULT 1,
               is_owner       INTEGER NOT NULL DEFAULT 0,
-              created_at     TEXT NOT NULL,
-              updated_at     TEXT NOT NULL
+              created_at     TEXT NOT NULL DEFAULT '',
+              updated_at     TEXT NOT NULL DEFAULT ''
             )''');
           await txn.execute('''
             INSERT OR IGNORE INTO devices_v22
@@ -2035,7 +2039,7 @@ class AppDatabase {
                    COALESCE(pair_token_exp,''), COALESCE(auth_secret,''),
                    COALESCE(revoked_at,''), COALESCE(expelled_at,''),
                    user_id, paired_by, COALESCE(is_paired,1),
-                   COALESCE(is_owner,0), created_at, updated_at
+                   COALESCE(is_owner,0), COALESCE(created_at,''), COALESCE(updated_at,'')
             FROM devices''');
           await txn.execute('DROP TABLE devices');
           await txn.execute('ALTER TABLE devices_v22 RENAME TO devices');
@@ -2321,6 +2325,64 @@ class AppDatabase {
     try {
       await migrateToV30(db);
     } catch (_) {}
+    await _healCatalogDates(db);
+  }
+
+  /// ترميم أي قيم `created_at` أو `updated_at` فارغة أو غير صالحة في جدولي
+  /// `item_categories` و `items` لمنع خطأ `FormatException: Invalid date format`.
+  static Future<void> _healCatalogDates(Database db) async {
+    final nowDt = DateTime.now();
+    final nowIso = nowDt.toIso8601String();
+    for (final table in const ['item_categories', 'items']) {
+      try {
+        final badRows = await db.query(
+          table,
+          columns: ['id', 'created_at', 'updated_at'],
+          where: "created_at IS NULL OR TRIM(CAST(created_at AS TEXT)) = '' "
+              'OR datetime(created_at) IS NULL '
+              "OR updated_at IS NULL OR TRIM(CAST(updated_at AS TEXT)) = '' "
+              'OR datetime(updated_at) IS NULL',
+        );
+        if (badRows.isNotEmpty) {
+          final batch = db.batch();
+          for (final r in badRows) {
+            final id = r['id'];
+            if (id == null) continue;
+            final parsedCreated = safeParseNullableDateTime(r['created_at']);
+            final parsedUpdated = safeParseNullableDateTime(r['updated_at']);
+            final fixedCreated =
+                (parsedCreated ?? parsedUpdated ?? nowDt).toIso8601String();
+            final fixedUpdated =
+                (parsedUpdated ?? parsedCreated ?? nowDt).toIso8601String();
+            batch.update(
+              table,
+              {
+                'created_at': fixedCreated,
+                'updated_at': fixedUpdated,
+              },
+              where: 'id = ?',
+              whereArgs: [id],
+            );
+          }
+          await batch.commit(noResult: true);
+        }
+      } catch (_) {
+        try {
+          await db.rawUpdate(
+            'UPDATE $table SET '
+            'created_at = CASE '
+            "WHEN created_at IS NULL OR TRIM(CAST(created_at AS TEXT)) = '' OR datetime(created_at) IS NULL "
+            'THEN ? ELSE created_at END, '
+            'updated_at = CASE '
+            "WHEN updated_at IS NULL OR TRIM(CAST(updated_at AS TEXT)) = '' OR datetime(updated_at) IS NULL "
+            'THEN ? ELSE updated_at END '
+            "WHERE created_at IS NULL OR TRIM(CAST(created_at AS TEXT)) = '' OR datetime(created_at) IS NULL "
+            "OR updated_at IS NULL OR TRIM(CAST(updated_at AS TEXT)) = '' OR datetime(updated_at) IS NULL",
+            [nowIso, nowIso],
+          );
+        } catch (_) {}
+      }
+    }
   }
 
   static Future<int> migrateLegacyCreditRevenueToDebit(Database db) async {
@@ -2542,7 +2604,7 @@ class AppDatabase {
   static Future<void> _seed(Database db) async {
     final now = DateTime.now().toIso8601String();
     for (final c in const [
-      ['YER', 'الريال اليمني', 'ر.ي', 0],
+      ['YER', 'محلي', 'محلي', 0],
       ['USD', 'الدولار الأمريكي', r'$', 2],
       ['SAR', 'الريال السعودي', 'ر.س', 2],
     ]) {

@@ -172,7 +172,7 @@ void main() {
 
     test('CTL-07 قواعد فايربيس محصنة وتحصر الحقول السيادية بالمدير حصراً', () {
       final mainRulesFile = File('firebase/database.rules.json');
-      final adminRulesFile = File('admin_app/rules.license-hardened.json');
+      final adminRulesFile = File('firebase/rules.license-hardened.json');
       expect(mainRulesFile.existsSync(), isTrue);
       expect(adminRulesFile.existsSync(), isTrue);
 
@@ -207,13 +207,13 @@ void main() {
       final wsNode = (rulesRoot['workspaces'] as Map)[r'$ws'] as Map;
       final opsNode = wsNode['operations'] as Map;
       final rosterNode = wsNode['roster'] as Map;
-      // (v2) عقد بيانات التطبيق داخل مساحة العمل: للموثقين حصرًا — بعد إسقاط
-      // فحص المفاتيح (roster بـ auth.uid) الذي لا يطابق واقع البيانات.
-      const expectedAuthOnly = 'auth != null';
-      expect(opsNode['.read'] as String, expectedAuthOnly);
-      expect(opsNode['.write'] as String, expectedAuthOnly);
-      expect(rosterNode['.read'] as String, expectedAuthOnly);
-      expect(rosterNode['.write'] as String, expectedAuthOnly);
+      // التحقق من عزل المستأجرين في operations و roster على مالك المنشأة وأعضائها المسجلين
+      expect(opsNode['.read'] as String, startsWith('auth != null'));
+      expect(opsNode['.read'] as String, contains(r"workspaces/' + $ws"));
+      expect(opsNode['.write'] as String, startsWith('auth != null'));
+      expect(opsNode['.write'] as String, contains(r"workspaces/' + $ws"));
+      expect(rosterNode['.read'] as String, startsWith('auth != null'));
+      expect(rosterNode['.write'] as String, startsWith('auth != null'));
 
       // التحقق من تأمين عقدة التحديثات السيادية /system/version_manifest بحساب المشرف فقط
       final sysNode = rulesRoot['system'] as Map;

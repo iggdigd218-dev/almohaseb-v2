@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/accounting.dart';
 import '../core/device_names.dart';
 import '../core/format.dart';
+import '../core/item_conflict.dart';
 import '../core/media_paths.dart';
 import '../core/models.dart';
 import '../core/rbac.dart';
@@ -71,6 +72,26 @@ Future<void> saveAppThemeMode(WidgetRef ref, ThemeMode mode) async {
 
 /// إخفاء الأرصدة.
 final hideBalancesProvider = StateProvider<bool>((ref) => false);
+
+/// لغة التطبيق النشطة (الافتراضي: العربية `ar`، أو الإنجليزية `en`).
+final appLocaleProvider = StateProvider<Locale>((ref) => const Locale('ar'));
+
+/// حفظ اختيار المستخدم للغة في SharedPreferences وقاعدة البيانات وتطبيق التغيير فوراً.
+Future<void> saveAppLocale(WidgetRef ref, Locale locale) async {
+  final code = locale.languageCode.toLowerCase().startsWith('en') ? 'en' : 'ar';
+  ref.read(appLocaleProvider.notifier).state = Locale(code);
+  try {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setString('app_locale', code);
+  } catch (e) {
+    debugPrint('saveAppLocale SharedPreferences warning: $e');
+  }
+  try {
+    await ref.read(repoProvider).setSetting('language', code);
+  } catch (e) {
+    debugPrint('saveAppLocale repo.setSetting warning: $e');
+  }
+}
 
 /// وضع واجهة التطبيق والقائمة الجانبية (المبيعات / المحاسبة).
 enum NavAppMode {
@@ -365,6 +386,13 @@ final unreadCountProvider = FutureProvider<int>((ref) async {
       .timeout(const Duration(seconds: 8), onTimeout: () => 0);
 });
 
+/// التعارضات المعلّقة للأصناف والباركود (أوفلاين) لعرض تنبيه Banner واضح.
+final pendingItemConflictsProvider =
+    FutureProvider<List<OfflineItemConflict>>((ref) async {
+  ref.watch(refreshProvider);
+  return ref.read(repoProvider).pendingItemConflicts();
+});
+
 /// عدد رسائل الدردشة غير المقروءة (شارة أيقونة الدردشة) —
 /// المكان الرسمي الوحيد لعدّ رسائل الدردشة (لا تدخل جدول الإشعارات).
 final unreadChatProvider = FutureProvider<int>((ref) async {
@@ -450,6 +478,35 @@ enum TxSort {
   final String label;
 }
 
+/// فلتر الفترة الزمنية لبطاقتي (وارد / صادر) في شاشة العمليات.
+enum TxTotalsPeriod {
+  daily('يومي'),
+  weekly('أسبوعي'),
+  monthly('شهري'),
+  yearly('سنوي'),
+  all('الكل');
+
+  const TxTotalsPeriod(this.label);
+  final String label;
+
+  /// بداية الفترة الزمنية مقارنةً باللحظة الحالية (أو [reference]).
+  DateTime? startOf([DateTime? reference]) {
+    final now = reference ?? DateTime.now();
+    final todayStart = DateTime(now.year, now.month, now.day);
+    return switch (this) {
+      TxTotalsPeriod.daily => todayStart,
+      TxTotalsPeriod.weekly => todayStart.subtract(const Duration(days: 6)),
+      TxTotalsPeriod.monthly => DateTime(now.year, now.month, 1),
+      TxTotalsPeriod.yearly => DateTime(now.year, 1, 1),
+      TxTotalsPeriod.all => null,
+    };
+  }
+}
+
+final txTotalsPeriodProvider = StateProvider<TxTotalsPeriod>(
+  (ref) => TxTotalsPeriod.daily,
+);
+
 final txFilterProvider = StateProvider<TxFilter>((ref) => const TxFilter());
 
 /// نتيجة شاشة العمليات: العمليات المصفّاة + خريطة أسماء الحسابات + الإجماليات.
@@ -459,6 +516,8 @@ class TxPage {
   final Map<String, double> inflowByCurrency;
   final Map<String, double> outflowByCurrency;
   final Map<String, double> salesByCurrency;
+  final Map<int, String> itemsSummaryByTxId;
+  final Map<int, String> executorByTxId;
 
   const TxPage({
     required this.items,
@@ -466,21 +525,30 @@ class TxPage {
     required this.inflowByCurrency,
     required this.outflowByCurrency,
     this.salesByCurrency = const {},
+    this.itemsSummaryByTxId = const {},
+    this.executorByTxId = const {},
   });
 }
 
 final txPageProvider = FutureProvider<TxPage>((ref) async {
   ref.watch(refreshProvider);
   final f = ref.watch(txFilterProvider);
+  final period = ref.watch(txTotalsPeriodProvider);
   final repo = ref.watch(repoProvider);
 
-  final all = await repo.transactions(
-    accountId: f.accountId,
-    from: f.from,
-    to: f.to,
-    type: f.type,
-  );
-  final accs = await repo.accounts(includeArchived: true);
+  final initialBatch = await Future.wait<Object>([
+    repo.transactions(
+      accountId: f.accountId,
+      from: f.from,
+      to: f.to,
+      type: f.type,
+    ),
+    repo.accounts(includeArchived: true),
+    repo.posInvoiceTxIds(),
+  ]);
+  final all = initialBatch[0] as List<Tx>;
+  final accs = initialBatch[1] as List<Account>;
+  final posTxIds = initialBatch[2] as Set<int>;
   final byId = {for (final a in accs) a.id!: a};
 
   final q = f.query.trim();
@@ -511,12 +579,26 @@ final txPageProvider = FutureProvider<TxPage>((ref) async {
       list.sort((a, b) => b.date.compareTo(a.date));
   }
 
-  // إجماليات الداخل والخارج وإجمالي المبيعات لكل عملة على المجموعة المعروضة.
-  final posTxIds = await repo.posInvoiceTxIds();
+  // إجماليات الداخل والخارج وإجمالي المبيعات لكل عملة حسب الفترة المختارة (افتراضياً: اليوم من 00:00).
+  final periodStart = period.startOf();
   final inflow = <String, double>{};
   final outflow = <String, double>{};
   final sales = <String, double>{};
+
+  // تهيئة العملات الموجودة في القائمة لضمان بقاء بطاقتي (وارد / صادر) ظاهرتين وقابلتين للنقر حتى لو كانت حركة اليوم 0.
   for (final t in list) {
+    inflow.putIfAbsent(t.currency, () => 0.0);
+    outflow.putIfAbsent(t.currency, () => 0.0);
+  }
+  if (inflow.isEmpty && list.isNotEmpty) {
+    final c = list.first.currency;
+    inflow[c] = 0.0;
+    outflow[c] = 0.0;
+  }
+
+  for (final t in list) {
+    final inPeriod = periodStart == null || !t.date.isBefore(periodStart);
+    if (!inPeriod) continue;
     final g = opGroup(t.type);
     if (g == 'inflow') {
       inflow[t.currency] = (inflow[t.currency] ?? 0) + t.amount;
@@ -545,12 +627,22 @@ final txPageProvider = FutureProvider<TxPage>((ref) async {
     sales[cur] = (sales[cur] ?? 0.0).clamp(0.0, double.infinity);
   }
 
+  final txIds = list.map((t) => t.id).whereType<int>().toList();
+  final metaBatch = await Future.wait<Map<int, String>>([
+    repo.batchTxItemsSummary(txIds),
+    repo.batchTxExecutors(list),
+  ]);
+  final itemsSummaries = metaBatch[0];
+  final executors = metaBatch[1];
+
   return TxPage(
     items: list,
     accounts: byId,
     inflowByCurrency: inflow,
     outflowByCurrency: outflow,
     salesByCurrency: sales,
+    itemsSummaryByTxId: itemsSummaries,
+    executorByTxId: executors,
   );
 });
 

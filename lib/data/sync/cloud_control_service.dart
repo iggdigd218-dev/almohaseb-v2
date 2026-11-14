@@ -191,14 +191,16 @@ class CloudControlService {
                 '${v['fingerprint'] ?? v['hw_fingerprint'] ?? v['device_fingerprint'] ?? ''}'
                     .trim();
             final candEmail =
-                '${v['email'] ?? v['user_email'] ?? v['owner_email'] ?? ''}'
-                    .trim()
-                    .toLowerCase();
+                '${v['email'] ?? v['user_email'] ?? ''}'.trim().toLowerCase();
             final candPhone =
                 '${v['phone'] ?? v['phone_number'] ?? ''}'
                     .replaceAll(RegExp(r'[^0-9]'), '');
 
-            final sameEmail = memberEmail.isNotEmpty &&
+            final hasDifferentFp = fpHash.isNotEmpty &&
+                candFp.isNotEmpty &&
+                candFp.toLowerCase() != fpHash.toLowerCase();
+            final sameEmail = !hasDifferentFp &&
+                memberEmail.isNotEmpty &&
                 candEmail.isNotEmpty &&
                 candEmail == memberEmail;
             final sameEmailAndPhone = sameEmail &&
@@ -214,7 +216,8 @@ class CloudControlService {
               alreadyRegisteredInWorkspace = true;
               if (canonicalId == null) {
                 canonicalId = candId;
-              } else if (candId.toUpperCase() != canonicalId!.toUpperCase()) {
+              } else if (candId.toUpperCase() != canonicalId!.toUpperCase() &&
+                  (sameFp || sameId)) {
                 _deleteUrl(
                     '$base/workspaces/$encWs/$subPath/${Uri.encodeComponent(candId)}.json');
               }
@@ -240,13 +243,20 @@ class CloudControlService {
         }
       } catch (_) {}
 
-      // 1) فحص حالة التجميد والتعليق (Kill Switch)
+      // 1) فحص حالة التجميد والتعليق (Kill Switch) ومفتاح مزامنة الوسائط السحابية
       final subUrl = '$base/workspaces/${Uri.encodeComponent(wsId)}/subscription.json';
       final subMap = await _getJson(subUrl);
       if (subMap != null) {
         final frozen = subMap['is_frozen'] == true ||
             '${subMap['status']}'.trim().toLowerCase() == 'suspended';
         isFrozenNotifier.value = frozen;
+
+        final featRaw = subMap['feature_flags'] ?? subMap['features'];
+        final allowMedia = subMap['allow_cloud_media_sync'] == true ||
+            (featRaw is Map &&
+                (featRaw['allow_cloud_media_sync'] == true ||
+                    featRaw['cloud_media_sync'] == true));
+        await repo.setSetting('allow_cloud_media_sync', allowMedia ? '1' : '0');
 
         // التحقق من فك ارتباط الجهاز (Unlink Device) للمدير فقط
         final isOwner = await repo.isWorkspaceOwner();

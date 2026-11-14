@@ -19,7 +19,7 @@ import '../core/accounting.dart';
 import '../core/app_error_mapper.dart';
 import '../core/cloud_config.dart';
 import '../core/device_names.dart';
-import '../core/factory_reset.dart';
+import '../core/l10n.dart';
 import '../core/security.dart';
 import '../core/sfx.dart';
 import '../core/theme.dart';
@@ -93,6 +93,68 @@ Future<void> completeOnboarding(
     await repo.setSetting('email', email.trim());
   }
   await repo.setSetting(kOnboardingDoneKey, '1');
+}
+
+/// يصنّف أخطاء تسجيل الدخول واسترجاع مساحة العمل إلى إحدى الرسائل الصريحة المعتمدة:
+/// - «لا يوجد اتصال بالإنترنت، يرجى التحقق من الشبكة»
+/// - «خطأ في البريد الإلكتروني / رقم الهاتف أو كلمة المرور»
+/// - «لم يتم العثور على حسابك أو أي منشأة مرتبطة بهذا الحساب»
+String classifyOnboardingAuthError(
+  dynamic error, {
+  bool isWorkspaceNotFound = false,
+}) {
+  if (isWorkspaceNotFound) {
+    return AppLocalizations.errAccountOrWorkspaceNotFoundAr;
+  }
+  final raw = (error ?? '').toString().trim();
+  final lower = raw.toLowerCase();
+  final upper = raw.toUpperCase();
+
+  if (lower.contains('socketexception') ||
+      lower.contains('timeoutexception') ||
+      lower.contains('failed host lookup') ||
+      lower.contains('network is unreachable') ||
+      lower.contains('connection refused') ||
+      lower.contains('connection reset') ||
+      lower.contains('connection closed') ||
+      lower.contains('clientexception') ||
+      lower.contains('handshakeexception') ||
+      lower.contains('tlsexception') ||
+      lower.contains('xmlhttprequest error') ||
+      upper.contains('NETWORK_ERROR') ||
+      lower.contains('no address associated with hostname') ||
+      raw.contains('لا يوجد اتصال بالإنترنت') ||
+      raw.contains('فشل الاتصال بالشبكة')) {
+    return AppLocalizations.errNoInternetAr;
+  }
+
+  if (upper == 'USER_NOT_FOUND' ||
+      upper == 'EMAIL_NOT_FOUND' ||
+      upper.contains('USER_NOT_FOUND') ||
+      upper.contains('EMAIL_NOT_FOUND') ||
+      upper.contains('WORKSPACE_NOT_FOUND') ||
+      raw.contains('لم يتم العثور على حسابك')) {
+    return AppLocalizations.errAccountOrWorkspaceNotFoundAr;
+  }
+
+  if (upper.contains('INVALID_PASSWORD') ||
+      upper.contains('WRONG_PASSWORD') ||
+      upper.contains('WRONG-PASSWORD') ||
+      upper.contains('INVALID_LOGIN_CREDENTIALS') ||
+      upper.contains('INVALID-CREDENTIAL') ||
+      upper.contains('INVALID_CREDENTIALS_OR_NOT_FOUND') ||
+      upper.contains('INVALID_EMAIL') ||
+      upper.contains('INVALID-EMAIL') ||
+      raw.contains('كلمة المرور غير صحيحة') ||
+      raw.contains('بيانات تسجيل الدخول غير صحيحة')) {
+    return AppLocalizations.errInvalidCredentialsAr;
+  }
+
+  final mapped = AppErrorMapper.toUserFriendlyMessage(error);
+  if (mapped == AppErrorMapper.networkErrorMessage) {
+    return AppLocalizations.errNoInternetAr;
+  }
+  return mapped;
 }
 
 class OnboardingScreen extends ConsumerStatefulWidget {
@@ -257,10 +319,164 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     }
   }
 
+  /// بوابة أمان إلزامية قبل فتح أو حذف منشأة محفوظة على الجهاز:
+  /// تطلب بصمة الجهاز/قفل الشاشة أولاً (إن كانت متاحة)، أو كلمة مرور المنشأة.
+  Future<bool> _authenticateForSavedWorkspaceAction(
+    WorkspaceInfo ws, {
+    required String reason,
+  }) async {
+    try {
+      if (await Security.biometricsAvailable()) {
+        final ok = await Security.authenticate(reason: reason);
+        if (ok) return true;
+      }
+    } catch (e) {
+      debugPrint('biometricsAvailable/authenticate warning: $e');
+    }
+
+    if (!mounted) return false;
+    final pwCtrl = TextEditingController();
+    String? errText;
+    bool busyCheck = false;
+
+    final verified = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text(reason, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                ctx.tr('المنشأة: ${ws.storeName}', 'Workspace: ${ws.storeName}'),
+                style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: pwCtrl,
+                obscureText: true,
+                autofocus: true,
+                decoration: InputDecoration(
+                  labelText: AppLocalizations.of(context).passwordLabel,
+                  errorText: errText,
+                  prefixIcon: const Icon(Icons.lock_outline_rounded),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: busyCheck ? null : () => Navigator.of(dctx).pop(false),
+              child: Text(AppLocalizations.of(context).cancelBtn),
+            ),
+            FilledButton(
+              onPressed: busyCheck
+                  ? null
+                  : () async {
+                      final pw = pwCtrl.text.trim();
+                      if (pw.length < 4) {
+                        setDialogState(() {
+                          errText = ctx.tr(
+                            'يرجى إدخال كلمة المرور الصحيحة',
+                            'Please enter the correct password',
+                          );
+                        });
+                        return;
+                      }
+                      setDialogState(() {
+                        busyCheck = true;
+                        errText = null;
+                      });
+                      try {
+                        final localOk =
+                            await AccountWorkspace.verifyLocalWorkspacePassword(
+                          ws.workspaceId,
+                          pw,
+                        );
+                        if (localOk == true) {
+                          if (dctx.mounted) Navigator.of(dctx).pop(true);
+                          return;
+                        }
+                        if (localOk == false) {
+                          setDialogState(() {
+                            busyCheck = false;
+                            errText = AppLocalizations.of(context).errInvalidCredentials;
+                          });
+                          return;
+                        }
+
+                        // في حال عدم وجود بصمة كلمة مرور محلية بعد، نتحقق سحابياً
+                        final repo = ref.read(repoProvider);
+                        final st = await repo.settings();
+                        final backendUrl = effectiveBackendUrl(st['cloudBackendUrl']);
+                        final authIdentity = ws.ownerEmail.isNotEmpty
+                            ? ws.ownerEmail
+                            : ws.phone;
+                        if (ws.ownerEmail.contains('@')) {
+                          try {
+                            await FirebaseAuthRest.signInWithEmailPassword(
+                              email: ws.ownerEmail,
+                              password: pw,
+                            );
+                            if (dctx.mounted) Navigator.of(dctx).pop(true);
+                            return;
+                          } catch (_) {}
+                        }
+                        if (backendUrl.isNotEmpty && authIdentity.isNotEmpty) {
+                          final cloudMatch =
+                              await AccountWorkspace.verifyWorkspacePasswordInCloud(
+                            backendUrl: backendUrl,
+                            emailOrPhone: authIdentity,
+                            password: pw,
+                          );
+                          if (cloudMatch != null) {
+                            if (dctx.mounted) Navigator.of(dctx).pop(true);
+                            return;
+                          }
+                        }
+                        setDialogState(() {
+                          busyCheck = false;
+                          errText = AppLocalizations.of(context).errInvalidCredentials;
+                        });
+                      } catch (e) {
+                        setDialogState(() {
+                          busyCheck = false;
+                          errText = AppLocalizations.of(context).errInvalidCredentials;
+                        });
+                      }
+                    },
+              child: busyCheck
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('تأكيد'),
+            ),
+          ],
+        ),
+      ),
+    );
+    pwCtrl.dispose();
+    return verified == true;
+  }
+
   /// فتح منشأة محفوظة مسبقاً على هذا الجهاز مباشرة بقاعدة بياناتها المعزولة.
-  Future<void> _openSavedDeviceWorkspace(WorkspaceInfo ws) async {
-    if (_busy) return;
+  Future<void> _openSavedDeviceWorkspace(
+    WorkspaceInfo ws, {
+    bool fromInternalFlow = false,
+  }) async {
+    if (_busy && !fromInternalFlow) return;
     Sfx.click();
+    if (!fromInternalFlow) {
+      final authed = await _authenticateForSavedWorkspaceAction(
+        ws,
+        reason: 'تأكيد الهوية للدخول إلى المنشأة',
+      );
+      if (!authed || !mounted) return;
+    }
     setState(() => _busy = true);
     try {
       final repo = ref.read(repoProvider);
@@ -269,7 +485,9 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
 
       try {
         ref.read(syncEngineProvider).stop();
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('stop syncEngine before switch warning: $e');
+      }
 
       final ok = await AccountWorkspace.switchToExistingWorkspace(
         repo,
@@ -280,7 +498,6 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       if (!ok) {
         if (mounted) {
           showSnack(context, 'تعذّر فتح المنشأة المحددة', error: true);
-          setState(() => _busy = false);
         }
         return;
       }
@@ -289,7 +506,9 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         final engine = ref.read(syncEngineProvider);
         await engine.start();
         unawaited(engine.forceSyncNow());
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('restart syncEngine after switch warning: $e');
+      }
 
       _invalidateAllSessionProviders();
       Sfx.success();
@@ -301,7 +520,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     } catch (e) {
       if (!mounted) return;
       showSnack(context, 'خطأ أثناء فتح المنشأة: $e', error: true);
-      setState(() => _busy = false);
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -309,6 +529,11 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   Future<void> _deleteSavedDeviceWorkspace(WorkspaceInfo ws) async {
     if (_busy) return;
     Sfx.click();
+    final authed = await _authenticateForSavedWorkspaceAction(
+      ws,
+      reason: 'تأكيد الهوية لحذف المنشأة',
+    );
+    if (!authed || !mounted) return;
     final confirmed = await confirmDialog(
       context,
       title: 'حذف المنشأة نهائياً',
@@ -447,65 +672,28 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           uid: account.uid,
           deviceId: devId,
           deviceFingerprint: hwFp,
-        ).timeout(
-          const Duration(seconds: 12),
-          onTimeout: () => const CloudWorkspaceResolution.timeout(),
         );
-      } catch (_) {
+      } catch (e) {
+        debugPrint('resolveWorkspaceInCloud error: $e');
         cloudRes = const CloudWorkspaceResolution.networkError();
       }
     }
 
     final hasExistingWorkspace = cloudRes.found || localMatches.isNotEmpty;
 
-    // في حال فشل الاتصال أو انتهاء المهلة وعدم وجود نسخة محلية مطابقة:
-    // يُمنع التوجيه لشاشة إنشاء المنشأة ويُمنع استدعاء linkAccountOnly(forceIsolateNewUser: true)
+    // في حال فشل الاتصال وعدم وجود نسخة محلية مطابقة:
+    // إيقاف التحميل فوراً وإظهار رسالة انقطاع الشبكة الصريحة.
     if (!hasExistingWorkspace && cloudRes.isNetworkOrTimeoutError) {
       if (!mounted) return;
-      final retry = await showDialog<bool>(
-        context: context,
-        builder: (dctx) => AlertDialog(
-          title: const Row(
-            children: [
-              Icon(Icons.wifi_off_rounded, color: Colors.orange, size: 22),
-              SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  'تعذر التحقق من الحساب',
-                  style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w800),
-                ),
-              ),
-            ],
-          ),
-          content: const Text(
-            'تعذر التحقق من حسابك بسبب بطء أو انقطاع الاتصال.. يرجى إعادة المحاولة',
-            style: TextStyle(fontSize: 13.5, height: 1.6),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dctx).pop(false),
-              child: const Text('إلغاء'),
-            ),
-            FilledButton.icon(
-              onPressed: () => Navigator.of(dctx).pop(true),
-              icon: const Icon(Icons.refresh_rounded, size: 18),
-              label: const Text('إعادة المحاولة'),
-            ),
-          ],
-        ),
-      );
-      if (retry == true && mounted) {
-        await _resolveWorkspaceOrRedirectToRegister(
-          account: account,
-          isLoginFlow: isLoginFlow,
-        );
-      }
+      setState(() {
+        _authError = AppLocalizations.of(context).errNoInternet;
+        _busy = false;
+      });
+      Sfx.error();
       return;
     }
 
     // ══ (إصلاح المنشآت الوهمية) المنشأة المحلية المعتمدة أولى من كل شيء ══
-    // إن وُجد على هذا الهاتف منشأة محفوظة لهذا البريد المسجل باسم تجاري
-    // حقيقي وبيانات مسجلة سابقة، فهي وجهة الدخول المباشرة المعتمدة.
     WorkspaceInfo? trustedLocal;
     for (final w in localMatches) {
       final sn = w.storeName.trim();
@@ -568,10 +756,6 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       bool restored = false;
       var didStopSyncEngine = false;
 
-      // ══ (إصلاح المنشآت الوهمية) التوجيه المباشر للمنشأة المعتمدة ══
-      // عند وجود منشأة محفوظة معتمدة على هذا الهاتف للبريد المسجل، يتم
-      // الانتقال إليها فوراً عبر switchToExistingWorkspace — دون المرور
-      // بأي مسار توليد مسودات أو إنشاء قواعد بيانات جديدة خلف المستخدم.
       if (trustedLocal != null) {
         try {
           try {
@@ -583,7 +767,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             backendUrl: url,
             targetWorkspaceId: trustedLocal.workspaceId,
           );
-        } catch (_) {
+        } catch (e) {
+          debugPrint('switchToExistingWorkspace trustedLocal warning: $e');
           restored = false;
         }
       }
@@ -595,11 +780,13 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             backendUrl: url,
             account: account,
             forceIsolateNewUser: false,
-          ).timeout(const Duration(seconds: 35));
+          );
           restored = outcome == AccountLinkOutcome.switched ||
               outcome == AccountLinkOutcome.migrated ||
               outcome == AccountLinkOutcome.recovered;
-        } catch (_) {}
+        } catch (e) {
+          debugPrint('linkAccountOnly warning: $e');
+        }
       }
 
       if (!restored) {
@@ -611,7 +798,6 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       }
 
       if (restored) {
-        // إعادة تشغيل محرك المزامنة إن كنا قد أوقفناه للتبديل المباشر.
         if (didStopSyncEngine) {
           try {
             final engine = ref.read(syncEngineProvider);
@@ -651,22 +837,30 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         );
         return;
       }
+
+      if (!mounted) return;
+      setState(() {
+        _authError = cloudRes.isNetworkOrTimeoutError
+            ? AppLocalizations.of(context).errNoInternet
+            : AppLocalizations.of(context).errAccountOrWorkspaceNotFound;
+        _busy = false;
+      });
+      Sfx.error();
+      return;
     }
 
     // إذا كان تدفق تسجيل دخول عادي ولم يُعثر على أي منشأة سابقة:
-    // إشعار المستخدم صراحة بعدم وجود حساب أو منشأة مسجلة دون إدخاله لمنشأة فارغة جديدة رغماً عنه
     if (isLoginFlow) {
       if (!mounted) return;
       setState(() {
-        _authError =
-            'لا توجد منشأة سابقة مسجلة للبريد ($cleanAuthEmail).\nإذا كنت ترغب بتأسيس منشأة جديدة، اضغط على «تسجيل حساب جديد وتأسيس منشأة».';
+        _authError = AppLocalizations.of(context).errAccountOrWorkspaceNotFound;
+        _busy = false;
       });
       Sfx.error();
       return;
     }
 
     // في حال تدفق إنشاء حساب جديد وتأكد عدم وجود منشأة مسجلة (notFound):
-    // حفظ جلسة الحساب فقط دون توليد أو عزل WS-* وهمي، والتوجيه لشاشة إعداد المنشأة
     await FirebaseAuthRest.saveSession(repo, account);
     if (cleanAuthEmail.isNotEmpty) {
       await repo.setSetting('account.email', cleanAuthEmail);
@@ -768,42 +962,68 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       _authError = null;
     });
 
-    // 1) فحص فوري للمنشآت المحفوظة محلياً على الجهاز لنفس البريد الإلكتروني
-    if (isEmailInput) {
+    try {
+      // 1) فحص المنشآت المحفوظة محلياً لنفس البريد الإلكتروني أو رقم الهاتف مع التحقق الصارم من كلمة المرور
+      WorkspaceInfo? localCandidate;
       try {
-        final localMatches = await AccountWorkspace.findLocalWorkspacesOnDevice(
-          filterEmail: email,
+        final localMatches =
+            await AccountWorkspace.findLocalWorkspacesOnDevice(
+          filterEmail: rawInput,
         );
         if (localMatches.isNotEmpty) {
-          await _openSavedDeviceWorkspace(localMatches.first);
-          return;
+          localCandidate = localMatches.first;
+          final localPwValid =
+              await AccountWorkspace.verifyLocalWorkspacePassword(
+            localCandidate.workspaceId,
+            password,
+          );
+          if (localPwValid == true) {
+            await _openSavedDeviceWorkspace(
+              localCandidate,
+              fromInternalFlow: true,
+            );
+            return;
+          }
+          if (localPwValid == false) {
+            if (!mounted) return;
+            setState(
+              () => _authError = AppLocalizations.of(context).errInvalidCredentials,
+            );
+            Sfx.error();
+            return;
+          }
         }
-      } catch (_) {}
-    }
+      } catch (e) {
+        debugPrint('findLocalWorkspacesOnDevice warning: $e');
+      }
 
-    // 2) المصادقة الرسمية عبر Firebase Auth أولاً (المسار الأساسي دائمًا).
-    //    رقم الهاتف يُترجم إلى بريده الداخلي المعياري (أو بريده المرتبط).
-    {
+      final repo = ref.read(repoProvider);
+      final st0 = await repo.settings();
+      final backendUrl = effectiveBackendUrl(st0['cloudBackendUrl']);
+
+      // 2) المصادقة الرسمية عبر Firebase Auth أولاً (يدعم البريد الإلكتروني أو رقم الهاتف المرتبط).
       String authEmail = isEmailInput
           ? email
-          : AccountWorkspace.internalEmailForPhone(rawInput);
-      if (!isEmailInput) {
+          : (localCandidate != null && localCandidate.ownerEmail.contains('@')
+              ? localCandidate.ownerEmail.toLowerCase()
+              : AccountWorkspace.internalEmailForPhone(rawInput));
+      if (!isEmailInput && backendUrl.isNotEmpty) {
         try {
-          final st0 = await ref.read(repoProvider).settings();
-          final url0 = effectiveBackendUrl(st0['cloudBackendUrl']);
-          if (url0.isNotEmpty) {
-            final found =
-                await AccountWorkspace.lookupWorkspaceByPhoneForRecovery(
-              backendUrl: url0,
-              phone: rawInput,
-              countryDialCode: '+967',
-            );
-            if (found != null && found.ownerEmail.contains('@')) {
-              authEmail = found.ownerEmail.toLowerCase();
-            }
+          final found =
+              await AccountWorkspace.lookupWorkspaceByPhoneForRecovery(
+            backendUrl: backendUrl,
+            phone: rawInput,
+            countryDialCode: '+967',
+          );
+          if (found != null && found.ownerEmail.contains('@')) {
+            authEmail = found.ownerEmail.toLowerCase();
           }
-        } catch (_) {}
+        } catch (e) {
+          debugPrint('lookupWorkspaceByPhoneForRecovery warning: $e');
+        }
       }
+
+      String? authFailureCode;
       try {
         final account = await FirebaseAuthRest.signInWithEmailPassword(
           email: authEmail,
@@ -816,53 +1036,87 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         return;
       } on StateError catch (se) {
         final msg = se.message;
-        final credentialsFailure = msg.contains('USER_NOT_FOUND') ||
+        final isNotFound =
+            msg.contains('USER_NOT_FOUND') || msg.contains('EMAIL_NOT_FOUND');
+        final isCredentialsErr =
             msg.contains('INVALID_CREDENTIALS_OR_NOT_FOUND') ||
-            msg.contains('INVALID_PASSWORD') ||
-            msg.contains('EMAIL_NOT_FOUND');
-        if (!credentialsFailure) {
+                msg.contains('INVALID_PASSWORD') ||
+                msg.contains('WRONG_PASSWORD') ||
+                msg.contains('INVALID_LOGIN_CREDENTIALS');
+        if (!isNotFound && !isCredentialsErr) {
           if (!mounted) return;
-          setState(() => _authError = msg);
+          setState(() => _authError = classifyOnboardingAuthError(se));
           Sfx.error();
-          setState(() => _busy = false);
           return;
         }
-        // فشل معتاد ⇒ نكمل إلى المسار الرديف.
+        authFailureCode = isNotFound ? 'USER_NOT_FOUND' : 'INVALID_PASSWORD';
       } catch (e) {
         if (!mounted) return;
-        setState(() => _authError = AppErrorMapper.toUserFriendlyMessage(e));
+        setState(() => _authError = classifyOnboardingAuthError(e));
         Sfx.error();
-        setState(() => _busy = false);
         return;
       }
-    }
 
-    // 3) (R-05) مسار رديف للمالك الذي عيّن له المشرف كلمة مرور عبر لوحة
-    //    الإدارة: تحقّق **قراءة فقط** من `meta.password_hash` — بلا أي كتابة.
-    try {
-      final repo = ref.read(repoProvider);
-      final st2 = await repo.settings();
-      final url2 = effectiveBackendUrl(st2['cloudBackendUrl']);
-      if (url2.isNotEmpty) {
-        final verified = await AccountWorkspace.verifyWorkspacePasswordInCloud(
-          backendUrl: url2,
-          emailOrPhone: rawInput,
-          password: password,
-        );
-        if (verified != null) {
-          await _openVerifiedCloudWorkspace(verified);
-          return;
+      // 3) (R-05) مسار رديف للمالك الذي عيّن له المشرف كلمة مرور عبر لوحة الإدارة
+      if (backendUrl.isNotEmpty) {
+        try {
+          final verified =
+              await AccountWorkspace.verifyWorkspacePasswordInCloud(
+            backendUrl: backendUrl,
+            emailOrPhone: rawInput,
+            password: password,
+          );
+          if (verified != null) {
+            await _openVerifiedCloudWorkspace(verified);
+            return;
+          }
+        } catch (e) {
+          final classified = classifyOnboardingAuthError(e);
+          if (classified == AppLocalizations.errNoInternetAr) {
+            if (!mounted) return;
+            setState(
+              () => _authError = AppLocalizations.of(context).errNoInternet,
+            );
+            Sfx.error();
+            return;
+          }
         }
       }
-    } catch (_) {}
 
-    // 4) لا Firebase Auth ولا بصمة معتمدة ⇒ رسالة موحّدة بلا كشف تفاصيل.
-    if (mounted) {
-      setState(() => _authError =
-          'بيانات الدخول غير صحيحة أو الحساب غير مسجل.\nإذا نسيت كلمة السر اضغط على «نسيت كلمة السر؟» بالأسفل، أو سجل الدخول عبر (حساب Google).');
-      setState(() => _busy = false);
+      // 4) تحديد سبب الفشل النهائي بدقة: عدم وجود حساب/منشأة أم خطأ في بيانات الاعتماد
+      bool accountHasNoWorkspace = authFailureCode == 'USER_NOT_FOUND';
+      if (!accountHasNoWorkspace && backendUrl.isNotEmpty) {
+        try {
+          final checkCloud = await AccountWorkspace.resolveWorkspaceInCloud(
+            backendUrl: backendUrl,
+            email: authEmail,
+            uid: '',
+          );
+          if (checkCloud.isNetworkOrTimeoutError) {
+            if (!mounted) return;
+            setState(
+              () => _authError = AppLocalizations.of(context).errNoInternet,
+            );
+            Sfx.error();
+            return;
+          }
+        } catch (e) {
+          debugPrint('resolveWorkspaceInCloud post-check warning: $e');
+        }
+      }
+
+      if (mounted) {
+        final l10n = AppLocalizations.of(context);
+        setState(() {
+          _authError = accountHasNoWorkspace
+              ? l10n.errAccountOrWorkspaceNotFound
+              : l10n.errInvalidCredentials;
+        });
+      }
+      Sfx.error();
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
-    Sfx.error();
   }
 
   /// المسار الموحّد لتسجيل الدخول أو إنشاء حساب عبر Google.
@@ -966,95 +1220,9 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     );
   }
 
-  /// «حذف كامل من كل مكان»: الجهاز + السحابة.
-  Future<void> _purgeEverything() async {
-    if (_busy) return;
-    final sure = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('حذف كامل من الجهاز والسحابة'),
-        content: const Text(
-          'سيُحذف كل شيء نهائياً ومن كل مكان:\n\n'
-          '• كل البيانات المحلية على هذا الجهاز.\n'
-          '• كل بياناتك من السحابة (المساحة، النسخ، السجل).\n'
-          '• موقع جهازك في مجموعته (إن كان عضواً) وبصمة الجهاز وفهرس '
-          'حساب Google.\n\n'
-          'بعد هذا الحذف لا يمكن استرجاع بياناتك ولا موقعك في المجموعة '
-          'أبداً. يُستثنى الاشتراك المدفوع فقط.\n\n'
-          'هل أنت متأكد تماماً؟',
-          style: TextStyle(height: 1.6),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('إلغاء'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('حذف كل شيء من كل مكان'),
-          ),
-        ],
-      ),
-    );
-    if (sure != true || !mounted) return;
-    final authed = await Security.authenticate(
-      reason: 'أكّد هويتك للحذف الكامل من الجهاز والسحابة',
-    );
-    if (!authed) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('لم تكتمل المصادقة — أُلغي الحذف')));
-      }
-      return;
-    }
-    if (!mounted) return;
-    setState(() => _busy = true);
-    try {
-      final repo = ref.read(repoProvider);
-      final engine = ref.read(syncEngineProvider);
-      try {
-        engine.stop();
-      } catch (_) {}
-      try {
-        final st = await repo.settings();
-        final url = effectiveBackendUrl(st['cloudBackendUrl']);
-        if (url.isNotEmpty) {
-          await CloudJoin.purgeDeviceEverywhere(repo, backendUrl: url);
-        }
-        final db = await repo.database;
-        try {
-          await GoogleAuthService(db).signOut();
-        } catch (_) {}
-      } catch (_) {}
-      await FactoryReset.wipeAllLocalData();
-      await FirebaseAuthRest.purgeAllSessionPrefs(clearWorkspacesList: true);
-      Sfx.success();
-      try {
-        await repo.initSyncInfra().timeout(const Duration(seconds: 8));
-      } catch (_) {}
-      try {
-        await engine.start();
-      } catch (_) {}
-      if (!mounted) return;
-      await _loadSavedDeviceWorkspaces();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('تم الحذف الكامل — الجهاز والسحابة نظيفان'),
-          backgroundColor: Color(0xFF16A34A)));
-      setState(() => _choice = null);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('تعذّر الحذف الكامل: $e')));
-      }
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final primary = AppColors.primaryOf(context);
     final surface = Theme.of(context).colorScheme.surface;
     final divider = Theme.of(context).dividerColor;
@@ -1065,36 +1233,40 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 520),
             child: ListView(
-              padding: const EdgeInsets.fromLTRB(20, 28, 20, 28),
+              padding: const EdgeInsets.fromLTRB(18, 22, 18, 22),
               children: [
                 Text(
-                  'تسجيل الدخول وإدارة الحساب',
+                  l10n.loginScreenTitle,
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                         fontWeight: FontWeight.w800,
                       ),
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 4),
                 Text(
-                  'أدخل بريدك الإلكتروني للدخول إلى منشأتك أو إنشاء حساب جديد',
+                  l10n.loginScreenSubtitle,
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    fontSize: 13.5,
+                    fontSize: 13,
                     color: AppColors.text2Of(context),
-                    height: 1.5,
+                    height: 1.45,
                   ),
                 ),
-                const SizedBox(height: 22),
+                const SizedBox(height: 16),
 
-                // ---------- المنشآت المحفوظة على هذا الجهاز (إن وجدت) ----------
+                // ---------- المنشآت المحفوظة على هذا الجهاز (مدمج وأنيق) ----------
                 if (!_loadingWorkspaces && _deviceWorkspaces.isNotEmpty) ...[
                   Container(
-                    padding: const EdgeInsets.all(14),
+                    key: const ValueKey('onboarding_saved_workspaces_card'),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
                     decoration: BoxDecoration(
                       color: primary.withValues(alpha: 0.05),
-                      borderRadius: BorderRadius.circular(14),
+                      borderRadius: BorderRadius.circular(12),
                       border: Border.all(
-                        color: primary.withValues(alpha: 0.24),
+                        color: primary.withValues(alpha: 0.22),
                       ),
                     ),
                     child: Column(
@@ -1102,42 +1274,54 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                       children: [
                         Row(
                           children: [
-                            const Expanded(
+                            Expanded(
                               child: Text(
-                                'المنشآت المحفوظة على هذا الجهاز',
-                                style: TextStyle(
+                                l10n.savedWorkspacesOnDevice,
+                                style: const TextStyle(
                                   fontWeight: FontWeight.w800,
-                                  fontSize: 13.5,
+                                  fontSize: 12.5,
                                 ),
                               ),
                             ),
-                            Text(
-                              '${_deviceWorkspaces.length}',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                color: primary,
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 1,
+                              ),
+                              decoration: BoxDecoration(
+                                color: primary.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                '${_deviceWorkspaces.length}',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                  color: primary,
+                                ),
                               ),
                             ),
                           ],
                         ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 6),
                         for (final ws in _deviceWorkspaces)
                           Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.only(bottom: 5),
                             child: Material(
                               color: surface,
-                              borderRadius: BorderRadius.circular(12),
+                              borderRadius: BorderRadius.circular(10),
                               child: InkWell(
-                                borderRadius: BorderRadius.circular(12),
+                                borderRadius: BorderRadius.circular(10),
                                 onTap: _busy
                                     ? null
                                     : () => _openSavedDeviceWorkspace(ws),
                                 child: Container(
                                   padding: const EdgeInsets.symmetric(
-                                      horizontal: 12, vertical: 10),
+                                    horizontal: 10,
+                                    vertical: 6,
+                                  ),
                                   decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(12),
+                                    borderRadius: BorderRadius.circular(10),
                                     border: Border.all(color: divider),
                                   ),
                                   child: Row(
@@ -1149,12 +1333,13 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                                           children: [
                                             Text(
                                               ws.storeName,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
                                               style: const TextStyle(
                                                 fontWeight: FontWeight.w800,
-                                                fontSize: 13.5,
+                                                fontSize: 12.5,
                                               ),
                                             ),
-                                            const SizedBox(height: 2),
                                             Text(
                                               [
                                                 if (ws.ownerEmail.isNotEmpty)
@@ -1164,8 +1349,10 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                                                   ws.businessActivity,
                                                 ws.defaultCurrency,
                                               ].join(' • '),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
                                               style: TextStyle(
-                                                fontSize: 11.5,
+                                                fontSize: 10.5,
                                                 color:
                                                     AppColors.text2Of(context),
                                               ),
@@ -1173,21 +1360,41 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                                           ],
                                         ),
                                       ),
-                                      FilledButton.tonal(
-                                        onPressed: _busy
-                                            ? null
-                                            : () =>
-                                                _openSavedDeviceWorkspace(ws),
-                                        child: const Text('دخول'),
+                                      SizedBox(
+                                        height: 30,
+                                        child: FilledButton.tonal(
+                                          style: FilledButton.styleFrom(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 10,
+                                            ),
+                                            visualDensity:
+                                                VisualDensity.compact,
+                                          ),
+                                          onPressed: _busy
+                                              ? null
+                                              : () =>
+                                                  _openSavedDeviceWorkspace(ws),
+                                          child: Text(
+                                            l10n.enterBtn,
+                                            style:
+                                                const TextStyle(fontSize: 12),
+                                          ),
+                                        ),
                                       ),
-                                      const SizedBox(width: 6),
+                                      const SizedBox(width: 4),
                                       IconButton(
+                                        visualDensity: VisualDensity.compact,
+                                        constraints: const BoxConstraints(
+                                          minWidth: 32,
+                                          minHeight: 32,
+                                        ),
+                                        padding: EdgeInsets.zero,
                                         tooltip:
                                             'حذف المنشأة نهائياً من السحابة والجهاز',
                                         icon: const Icon(
                                           Icons.delete_forever_rounded,
                                           color: Colors.redAccent,
-                                          size: 22,
+                                          size: 19,
                                         ),
                                         onPressed: _busy
                                             ? null
@@ -1203,81 +1410,71 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                       ],
                     ),
                   ),
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 12),
                 ],
 
-                // ---------- 1. بطاقة البدء في الاستخدام المحلي المستقل (بارزة ومباشرة) ----------
-                Container(
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFD97706).withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: const Color(0xFFD97706).withValues(alpha: 0.32),
-                    ),
-                  ),
-                  child: Material(
-                    color: Colors.transparent,
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(16),
-                      onTap: _busy ? null : _openLocalStandaloneDialog,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 12),
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 44,
-                              height: 44,
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFD97706)
-                                    .withValues(alpha: 0.16),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: const Icon(
-                                Icons.flash_on_rounded,
-                                color: Color(0xFFD97706),
-                                size: 24,
-                              ),
+                // ---------- 1. صف «الدخول بدون حساب» + زر أيقونة باركود مصغر بدون نص (QR) ----------
+                Row(
+                  children: [
+                    Expanded(
+                      child: SizedBox(
+                        height: 46,
+                        child: OutlinedButton.icon(
+                          key: const ValueKey('onboarding_local_standalone_btn'),
+                          onPressed: _busy ? null : _openLocalStandaloneDialog,
+                          style: OutlinedButton.styleFrom(
+                            backgroundColor:
+                                const Color(0xFFD97706).withValues(alpha: 0.08),
+                            side: BorderSide(
+                              color: const Color(0xFFD97706)
+                                  .withValues(alpha: 0.35),
                             ),
-                            const SizedBox(width: 12),
-                            const Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'الاستخدام المحلي المستقل',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w800,
-                                      fontSize: 14.5,
-                                    ),
-                                  ),
-                                  SizedBox(height: 2),
-                                  Text(
-                                    'بدء العمل فوراً على هذا الهاتف بدون إنترنت أو حساب',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: Colors.grey,
-                                    ),
-                                  ),
-                                ],
-                              ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
                             ),
-                            const Icon(
-                              Icons.arrow_forward_ios_rounded,
-                              size: 15,
-                              color: Color(0xFFD97706),
+                          ),
+                          icon: const Icon(
+                            Icons.flash_on_rounded,
+                            color: Color(0xFFD97706),
+                            size: 20,
+                          ),
+                          label: Text(
+                            l10n.loginWithoutAccount,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w800,
+                              fontSize: 13.5,
                             ),
-                          ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 46,
+                      height: 46,
+                      child: IconButton.outlined(
+                        key: const ValueKey('onboarding_qr_join_btn'),
+                        tooltip: 'QR',
+                        onPressed: _busy ? null : _openJoinMemberDialog,
+                        style: IconButton.styleFrom(
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          side: BorderSide(color: divider),
+                        ),
+                        icon: const Icon(
+                          Icons.qr_code_scanner_rounded,
+                          size: 22,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 14),
 
                 // ---------- 2. بطاقة تسجيل الدخول السحابي ----------
                 Container(
-                  padding: const EdgeInsets.all(20),
+                  padding: const EdgeInsets.all(18),
                   decoration: BoxDecoration(
                     color: surface,
                     borderRadius: BorderRadius.circular(16),
@@ -1288,6 +1485,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                     children: [
                       if (_authError != null) ...[
                         Container(
+                          key: const ValueKey('onboarding_auth_error_box'),
                           padding: const EdgeInsets.all(10),
                           decoration: BoxDecoration(
                             color: Colors.red.withValues(alpha: 0.08),
@@ -1307,19 +1505,21 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                         const SizedBox(height: 14),
                       ],
                       TextField(
+                        key: const ValueKey('onboarding_email_field'),
                         controller: _emailCtrl,
                         enabled: !_busy,
                         keyboardType: TextInputType.emailAddress,
                         textDirection: TextDirection.ltr,
                         textInputAction: TextInputAction.next,
-                        decoration: const InputDecoration(
-                          labelText: 'البريد الإلكتروني',
+                        decoration: InputDecoration(
+                          labelText: l10n.emailLabel,
                           hintText: 'name@example.com',
-                          border: OutlineInputBorder(),
+                          border: const OutlineInputBorder(),
                         ),
                       ),
                       const SizedBox(height: 12),
                       TextField(
+                        key: const ValueKey('onboarding_password_field'),
                         controller: _passwordCtrl,
                         enabled: !_busy,
                         obscureText: _obscurePassword,
@@ -1327,7 +1527,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                         textInputAction: TextInputAction.done,
                         onSubmitted: (_) => _handleEmailLogin(),
                         decoration: InputDecoration(
-                          labelText: 'كلمة المرور',
+                          labelText: l10n.passwordLabel,
                           border: const OutlineInputBorder(),
                           suffixIcon: IconButton(
                             onPressed: () => setState(
@@ -1355,9 +1555,9 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                             Icons.lock_reset_rounded,
                             size: 18,
                           ),
-                          label: const Text(
-                            'نسيت كلمة السر؟',
-                            style: TextStyle(
+                          label: Text(
+                            l10n.forgotPassword,
+                            style: const TextStyle(
                               fontSize: 13,
                               fontWeight: FontWeight.w700,
                             ),
@@ -1368,6 +1568,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                       SizedBox(
                         height: 48,
                         child: FilledButton(
+                          key: const ValueKey('onboarding_login_submit_btn'),
                           onPressed: _busy ? null : () => _handleEmailLogin(),
                           child: _busy
                               ? const SizedBox(
@@ -1378,9 +1579,9 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                                     color: Colors.white,
                                   ),
                                 )
-                              : const Text(
-                                  'تسجيل الدخول',
-                                  style: TextStyle(
+                              : Text(
+                                  l10n.signInBtn,
+                                  style: const TextStyle(
                                     fontSize: 15,
                                     fontWeight: FontWeight.w800,
                                   ),
@@ -1388,19 +1589,20 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                         ),
                       ),
                       const SizedBox(height: 12),
-                      // سطر متوازن: تسجيل حساب جديد (يمين) | أيقونة Google (يسار)
+                      // سطر متوازن: تسجيل جديد | حساب Google
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           TextButton(
+                            key: const ValueKey('onboarding_register_new_btn'),
                             onPressed: _busy ? null : _openCreateWorkspace,
                             style: TextButton.styleFrom(
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 8, vertical: 6),
                             ),
-                            child: const Text(
-                              'تسجيل حساب جديد وتأسيس منشأة',
-                              style: TextStyle(
+                            child: Text(
+                              l10n.registerNewBtn,
+                              style: const TextStyle(
                                 fontSize: 13,
                                 fontWeight: FontWeight.w700,
                               ),
@@ -1442,9 +1644,9 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                                     ),
                                   ),
                                   const SizedBox(width: 8),
-                                  const Text(
-                                    'حساب Google',
-                                    style: TextStyle(
+                                  Text(
+                                    l10n.googleAccountBtn,
+                                    style: const TextStyle(
                                       fontSize: 12.5,
                                       fontWeight: FontWeight.w700,
                                     ),
@@ -1456,39 +1658,6 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                         ],
                       ),
                     ],
-                  ),
-                ),
-                const SizedBox(height: 14),
-
-                // ---------- 3. خيار الانضمام كعضو / كاشير عبر QR ----------
-                SizedBox(
-                  width: double.infinity,
-                  height: 46,
-                  child: OutlinedButton.icon(
-                    onPressed: _busy ? null : _openJoinMemberDialog,
-                    icon: const Icon(Icons.qr_code_scanner_rounded, size: 20),
-                    label: const Text(
-                      'انضمام كعضو لمحل قائم (رمز / باركود QR)',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ),
-
-                const SizedBox(height: 18),
-                Center(
-                  child: TextButton(
-                    onPressed: _busy ? null : _purgeEverything,
-                    child: const Text(
-                      'حذف كامل من الجهاز والسحابة',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.red,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
                   ),
                 ),
               ],

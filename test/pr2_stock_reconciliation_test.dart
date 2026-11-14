@@ -15,6 +15,8 @@ import 'package:nexora_app/core/database.dart';
 import 'package:nexora_app/core/models.dart';
 import 'package:nexora_app/data/repository.dart';
 import 'package:nexora_app/data/sync/apply_remote.dart';
+import 'package:nexora_app/data/sync/conflict_resolver.dart';
+import 'package:nexora_app/data/sync/operation.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
@@ -286,6 +288,132 @@ void main() {
         [itemId],
       );
       expect((queued.first['n'] as int?) ?? 0, greaterThan(0));
+    });
+
+    test('٧ — البيع المتزامن أوفلاين من جهازين لصنف كميته 1 ينتج -1 (بدون تصفير فوقي)',
+        () async {
+      // 1. الصنف يبدأ بكمية 1 على الجهاز الأول
+      final itemId = await makeItem(1);
+      expect(await qtyOf(itemId), 1);
+
+      // 2. الجهاز الأول يبيع حبة واحدة أوفلاين -> الكمية المحلية تصير 0
+      await repo.saveTx(
+        Tx(
+          type: OpType.revenue,
+          amount: 10,
+          currency: 'YER',
+          date: now,
+          createdAt: now,
+          updatedAt: now,
+        ),
+        items: [
+          InvoiceLine(
+            itemId: itemId,
+            name: 'صنف متزامن',
+            quantity: 1,
+            unitPrice: 10,
+          ),
+        ],
+      );
+      expect(await qtyOf(itemId), 0);
+
+      // 3. الجهاز الثاني كان أوفلاين وباع نفس الحبة (فكانت لقطته للصنف = 0 أيضاً مع حركة مخزون)
+      const remoteMoveId = 777001;
+      final resolver = ConflictResolver();
+      final remoteTs = now.add(const Duration(seconds: 5)).toIso8601String();
+
+      await db.transaction((txn) async {
+        // تصل أولاً عملية تحديث الصنف (رتبة التبعية 3) بكمية اللقطة 0 ورفيق الحركة
+        await repo.applyRemoteOperation(
+          txn,
+          SyncOperation(
+            id: 'op-remote-item-zero',
+            parentOpId: '',
+            workspaceId: 'default',
+            deviceId: 'DEV-PEER-2',
+            userId: 1,
+            entityType: EntityKind.item,
+            entityId: '$itemId',
+            opType: OpKind.update,
+            version: 99,
+            timestamp: remoteTs,
+            deviceTime: remoteTs,
+            payload: {
+              'id': itemId,
+              'name': 'صنف متزامن',
+              'buy_price': 5.0,
+              'sell_price': 10.0,
+              'quantity': 0.0,
+              '__from_stock_move': remoteMoveId,
+              '__stock_move_delta': -1.0,
+              'updated_at': remoteTs,
+            },
+          ),
+          resolver,
+        );
+
+        // ثم تصل حركة المخزون من الجهاز الثاني (رتبة التبعية 5) ببيع 1
+        await repo.applyRemoteOperation(
+          txn,
+          SyncOperation(
+            id: 'op-remote-move-sale',
+            parentOpId: '',
+            workspaceId: 'default',
+            deviceId: 'DEV-PEER-2',
+            userId: 1,
+            entityType: EntityKind.stockMove,
+            entityId: '$remoteMoveId',
+            opType: OpKind.create,
+            version: 1,
+            timestamp: remoteTs,
+            deviceTime: remoteTs,
+            payload: {
+              'id': remoteMoveId,
+              'item_id': itemId,
+              'kind': 'sale',
+              'quantity': 1.0,
+              'unit_price': 10.0,
+              'date': remoteTs,
+              'created_at': remoteTs,
+            },
+          ),
+          resolver,
+        );
+      });
+
+      // يجب أن يكون الرصيد التراكمي: 1 - 1 - 1 = -1 (وليس 0)
+      expect(await qtyOf(itemId), -1.0);
+
+      // حتى بعد تشغيل مصالحة المخزون يظل الرصيد -1 دون المساس به
+      await ApplyRemoteOp.reconcileInventoryQuantities(db);
+      expect(await qtyOf(itemId), -1.0);
+    });
+
+    test('٨ — استخراج اسم العميل المخصص للفواتير النقدية مع افتراضي عميل نقدي', () {
+      final nowDt = DateTime.now();
+      final txCustom = Tx(
+        type: OpType.revenue,
+        amount: 1500,
+        currency: 'YER',
+        notes: 'اسم العميل: محمد صالح\nطريقة الدفع: مدفوع نقداً',
+        date: nowDt,
+        createdAt: nowDt,
+        updatedAt: nowDt,
+      );
+      expect(txCustom.customCustomerName, 'محمد صالح');
+      expect(txCustom.resolvedPartyName(null), 'محمد صالح');
+
+      final txDefault = Tx(
+        type: OpType.revenue,
+        amount: 1500,
+        currency: 'YER',
+        notes: 'طريقة الدفع: مدفوع نقداً',
+        date: nowDt,
+        createdAt: nowDt,
+        updatedAt: nowDt,
+      );
+      expect(txDefault.customCustomerName, isNull);
+      expect(txDefault.resolvedPartyName(null), 'عميل نقدي');
     });
   });
 }

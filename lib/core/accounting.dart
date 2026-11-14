@@ -106,9 +106,26 @@ class CurrencyDef {
 }
 
 const kDefaultCurrencies = <CurrencyDef>[
-  CurrencyDef('YER', 'الريال اليمني', 'ر.ي', 0),
+  CurrencyDef('YER', 'محلي', 'محلي', 0),
   CurrencyDef('USD', 'الدولار الأمريكي', '\$', 2),
   CurrencyDef('SAR', 'الريال السعودي', 'ر.س', 2),
+];
+
+/// قائمة العملات الجاهزة للاختيار السريع أو التخصيص من إعدادات العملات.
+const kPresetCurrencies = <CurrencyDef>[
+  CurrencyDef('YER', 'محلي', 'محلي', 0),
+  CurrencyDef('YER', 'الريال اليمني', 'ر.ي', 0),
+  CurrencyDef('SAR', 'الريال السعودي', 'ر.س', 2),
+  CurrencyDef('USD', 'الدولار الأمريكي', '\$', 2),
+  CurrencyDef('AED', 'الدرهم الإماراتي', 'د.إ', 2),
+  CurrencyDef('OMR', 'الريال العماني', 'ر.ع', 3),
+  CurrencyDef('QAR', 'الريال القطري', 'ر.ق', 2),
+  CurrencyDef('KWD', 'الدينار الكويتي', 'د.ك', 3),
+  CurrencyDef('BHD', 'الدينار البحريني', 'د.ب', 3),
+  CurrencyDef('EGP', 'الجنيه المصري', 'ج.م', 2),
+  CurrencyDef('JOD', 'الدينار الأردني', 'د.أ', 3),
+  CurrencyDef('EUR', 'اليورو', '€', 2),
+  CurrencyDef('TRY', 'الليرة التركية', '₺', 2),
 ];
 
 /// أثر نوع العملية على الرصيد.

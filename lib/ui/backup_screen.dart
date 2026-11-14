@@ -596,17 +596,6 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'تُحفظ النسخة بصيغة مضغوطة محمية (.nexora) تضم قاعدة البيانات المدمجة '
-                  'بالكامل (VACUUM INTO) وملف التعريف الوصفي (manifest.json)، مع أخذ لقطة '
-                  'أمان تلقائية قبل أي استعادة.',
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    height: 1.6,
-                    color: AppColors.text2Of(context),
-                  ),
-                ),
-                const SizedBox(height: 12),
                 Row(
                   children: [
                     Expanded(
@@ -698,16 +687,6 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'تُحفظ النسخ بصيغة (.nexora) داخل مساحة التطبيق في Google Drive، '
-                  'ويمكنك استعراض النسخ المحفوظة والفلترة بينها أو مشاركتها واستعادتها مباشرة.',
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    height: 1.6,
-                    color: AppColors.text2Of(context),
-                  ),
-                ),
-                const SizedBox(height: 10),
                 if (_cloudLoading)
                   const ListTile(
                     contentPadding: EdgeInsets.zero,
