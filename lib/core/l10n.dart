@@ -61,6 +61,24 @@ class AppLocalizations {
         'Pending Join Requests',
       );
     }
+    if (trimmed.startsWith('عدد العمليات: ')) {
+      return 'Transactions: ${trimmed.substring('عدد العمليات: '.length)}';
+    }
+    if (trimmed.startsWith('الكاشير: ')) {
+      return 'Cashier: ${trimmed.substring('الكاشير: '.length)}';
+    }
+    if (trimmed.startsWith('تصفية وعرض · ')) {
+      return 'Filter & View · ${trimmed.substring('تصفية وعرض · '.length)}';
+    }
+    if (trimmed.startsWith('تاريخ الإصدار: ')) {
+      return 'Issued on: ${trimmed.substring('تاريخ الإصدار: '.length)}';
+    }
+    if (trimmed.startsWith('الفترة الزمنية: ')) {
+      return 'Date Range: ${trimmed.substring('الفترة الزمنية: '.length)}';
+    }
+    if (trimmed.startsWith('المبيعات والمقبوضات: ')) {
+      return 'Sales & Inflows: ${trimmed.substring('المبيعات والمقبوضات: '.length)}';
+    }
     return ar;
   }
 
@@ -265,6 +283,12 @@ class AppLocalizations {
     'عميل نقدي': 'Cash Customer',
     'تصفية وفرز': 'Filter & Sort',
     'تصفية وعرض': 'Filter & View',
+    'تصفية وعرض التقارير': 'Filter & View Reports',
+    'وحدة تجميع الفترة': 'Period Grouping Unit',
+    'فترات سريعة': 'Quick Ranges',
+    'آخر ٣٠ يومًا': 'Last 30 Days',
+    'هذه السنة': 'This Year',
+    'تم نسخ التقرير بصيغة CSV ✅': 'Report copied as CSV ✅',
     'إجمالي المبيعات': 'Total Sales',
     'إجمالي مبيعاتك اليومية': 'Your Daily Sales Total',
     'إجمالي المستحق لنا': 'Total Receivable',
@@ -342,6 +366,82 @@ class AppLocalizations {
     'البيانات والأدوات': 'Data & Tools',
     'النظام': 'System',
     'المبيعات والمخزون': 'Sales & Inventory',
+    // ───────── شاشة التقارير ─────────
+    '📋 ملخص إجمالي المبالغ': '📋 Balance & Sales Summary',
+    '🧾 تفصيل العمليات': '🧾 Transaction Details',
+    '🗂️ التصنيفات': '🗂️ Categories',
+    '🗓️ يومي/أسبوعي/شهري/سنوي': '🗓️ Daily / Weekly / Monthly / Yearly',
+    '👤 حسب عميل/مورد': '👤 By Customer / Supplier',
+    '💱 حسب العملة': '💱 By Currency',
+    '📈 إيرادات ومصروفات': '📈 Income & Expenses (P&L)',
+    '💸 أكثر الحسابات مديونية': '💸 Highest Receivables',
+    '⚡ أكثر الحسابات نشاطًا': '⚡ Most Active Accounts',
+    '⏰ تجاوز حد الائتمان': '⏰ Credit Limit Exceeded',
+    'تعذّر بناء التقرير': 'Failed to build report',
+    'التصنيفات': 'Categories',
+    'صنّف حساباتك وأصنافك واستعرض تقارير مجمّعة لكل تصنيف بضغطة واحدة.':
+        'Categorize your accounts and items to view grouped reports in one tap.',
+    'تصفية وفرز التقرير': 'Filter & Sort Report',
+    'إعادة ضبط': 'Reset',
+    'نوع التقرير والتصنيفات': 'Report Type & Categories',
+    'فترة التجميع (يومي / أسبوعي / شهري / سنوي)':
+        'Grouping Period (Daily / Weekly / Monthly / Yearly)',
+    'الفترة الزمنية (من - إلى)': 'Date Range (From - To)',
+    'اختر الفترة من - إلى': 'Select date range',
+    'العملة': 'Currency',
+    'الحساب': 'Account',
+    'كل الحسابات': 'All Accounts',
+    'حساب': 'Account',
+    'الكاشير / الموظف': 'Cashier / Staff',
+    'كل الكاشيرات': 'All Cashiers',
+    'كل الكاشيرات والموظفين': 'All Cashiers & Staff',
+    'تطبيق الفلاتر والعرض': 'Apply Filters & View',
+    'لا بيانات في هذه الفترة': 'No data in this period',
+    'وسّع الفترة أو غيّر المرشّحات.': 'Expand the date range or adjust filters.',
+    'تصدير CSV': 'Export CSV',
+    'تم نسخ بيانات التقرير (CSV) ✅': 'Report data copied as CSV ✅',
+    'مستحق لنا': 'Receivable',
+    'مستحق علينا': 'Payable',
+    'الصافي': 'Net',
+    'التاريخ': 'Date',
+    'النوع': 'Type',
+    'البيان': 'Description',
+    'المبلغ': 'Amount',
+    'المرجع': 'Reference',
+    'تحويل': 'Transfer',
+    'التصنيف': 'Category',
+    'عدد الحسابات': 'Accounts Count',
+    'إجمالي الرصيد': 'Total Balance',
+    'بدون تصنيف': 'Uncategorized',
+    'الفترة': 'Period',
+    'الإيرادات/القبض': 'Revenue / Inflow',
+    'المصروفات/الصرف': 'Expenses / Outflow',
+    'قبض/إيراد': 'Inflow / Revenue',
+    'صرف/مصروف': 'Outflow / Expense',
+    'البند': 'Item',
+    'إجمالي الإيرادات': 'Total Revenue',
+    'إجمالي المصروفات': 'Total Expenses',
+    'صافي الأرباح / الخسائر': 'Net Profit / Loss',
+    'صافي الربح/الخسارة': 'Net Profit / Loss',
+    'صافي المستحق': 'Net Balance',
+    'الإيرادات التشغيلية': 'Operating Revenue',
+    'مصروف تشغيلي': 'Operating Expense',
+    'إيراد تشغيلي': 'Operating Revenue',
+    'المصروفات التشغيلية': 'Operating Expenses',
+    'صافي الربح التشغيلي': 'Net Operating Profit',
+    'التدفقات النقدية (القبض)': 'Cash Inflows (Receipts)',
+    'التدفقات النقدية (الصرف)': 'Cash Outflows (Payments)',
+    'ذمم مستحقة لنا': 'Accounts Receivable',
+    'ذمم مستحقة علينا': 'Accounts Payable',
+    'المبلغ المستحق لنا (عليه)': 'Amount Owed to Us',
+    'المبلغ المستحق علينا (له)': 'Amount Owed by Us',
+    'المبلغ المستحق لنا': 'Receivable Amount',
+    'عدد العمليات': 'Transactions',
+    'الرصيد': 'Balance',
+    'حد الائتمان': 'Credit Limit',
+    'التجاوز': 'Excess',
+    'الإيرادات': 'Revenue',
+    'المصروفات': 'Expenses',
   };
 }
 

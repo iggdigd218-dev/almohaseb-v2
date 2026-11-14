@@ -87,46 +87,89 @@ class SyncQueueOps {
 
   Future<void> markSynced(int id) async {
     final now = DateTime.now().toIso8601String();
-    final rows = await db.query(
-      'sync_queue',
-      columns: ['operation_id'],
-      where: 'id = ?',
-      whereArgs: [id],
-      limit: 1,
-    );
-    await db.update(
-      'sync_queue',
-      {
-        'status': SyncStatus.synced.name,
-        'last_error': '',
-        'next_try_at': '',
-        'updated_at': now,
-      },
-      where: 'id = ?',
-      whereArgs: [id],
-    );
-    if (rows.isNotEmpty) {
-      final opId = rows.first['operation_id'] as String?;
-      if (opId != null && opId.isNotEmpty) {
-        try {
-          await db.update(
-            'operations',
-            {'synced': 1, 'is_synced': 1},
-            where: 'id = ?',
-            whereArgs: [opId],
-          );
-        } on DatabaseException catch (_) {
+    await db.transaction((txn) async {
+      final rows = await txn.query(
+        'sync_queue',
+        columns: ['operation_id'],
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      await txn.update(
+        'sync_queue',
+        {
+          'status': SyncStatus.synced.name,
+          'last_error': '',
+          'next_try_at': '',
+          'updated_at': now,
+        },
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      if (rows.isNotEmpty) {
+        final opId = rows.first['operation_id'] as String?;
+        if (opId != null && opId.isNotEmpty) {
           try {
-            await db.update(
+            await txn.update(
+              'operations',
+              {'synced': 1, 'is_synced': 1},
+              where: 'id = ?',
+              whereArgs: [opId],
+            );
+          } on DatabaseException catch (_) {
+            await txn.update(
               'operations',
               {'synced': 1},
               where: 'id = ?',
               whereArgs: [opId],
             );
-          } catch (_) {}
+          }
         }
       }
-    }
+    });
+  }
+
+  /// (S3/S4) مصالحة ذرية بين جدول العمليات (`operations`) وطابور المزامنة (`sync_queue`):
+  /// 1) صفوف طابور غير متزامنة لعمليات تم رفعها (`is_synced = 1`) تُقفل `synced`.
+  /// 2) صفوف `cloud` وُسمت `synced` خطأً رغم بقاء العملية `is_synced = 0` تُعاد `pending`.
+  Future<int> reconcileSyncedQueue({bool cloudReady = true}) async {
+    final now = DateTime.now().toIso8601String();
+    var touched = 0;
+    await db.transaction((txn) async {
+      try {
+        touched += await txn.rawUpdate(
+          "UPDATE sync_queue SET status = ?, last_error = '', next_try_at = '', updated_at = ? "
+          "WHERE status <> ? AND operation_id IN ("
+          "SELECT id FROM operations WHERE COALESCE(is_synced, synced, 0) = 1)",
+          [SyncStatus.synced.name, now, SyncStatus.synced.name],
+        );
+      } on DatabaseException catch (_) {
+        touched += await txn.rawUpdate(
+          "UPDATE sync_queue SET status = ?, last_error = '', next_try_at = '', updated_at = ? "
+          "WHERE status <> ? AND operation_id IN ("
+          "SELECT id FROM operations WHERE COALESCE(synced, 0) = 1)",
+          [SyncStatus.synced.name, now, SyncStatus.synced.name],
+        );
+      }
+      if (cloudReady) {
+        try {
+          touched += await txn.rawUpdate(
+            "UPDATE sync_queue SET status = ?, next_try_at = '', updated_at = ? "
+            "WHERE target = 'cloud' AND status = ? AND operation_id IN ("
+            "SELECT id FROM operations WHERE COALESCE(is_synced, synced, 0) = 0)",
+            [SyncStatus.pending.name, now, SyncStatus.synced.name],
+          );
+        } on DatabaseException catch (_) {
+          touched += await txn.rawUpdate(
+            "UPDATE sync_queue SET status = ?, next_try_at = '', updated_at = ? "
+            "WHERE target = 'cloud' AND status = ? AND operation_id IN ("
+            "SELECT id FROM operations WHERE COALESCE(synced, 0) = 0)",
+            [SyncStatus.pending.name, now, SyncStatus.synced.name],
+          );
+        }
+      }
+    });
+    return touched;
   }
 
   /// تسجيل فشل مؤقت: لا توجد حالة "فشل نهائي" إطلاقًا — أي عملية تبقى
@@ -144,7 +187,7 @@ class SyncQueueOps {
         rows.isEmpty ? 1 : max(1, (rows.first['attempts'] as int?) ?? 0);
     // Backoff متزايد لكنه مقيّد بسقف دقيقتين كحد أقصى، فتستمر المحاولات
     // للأبد (كل دقيقتين) حتى في حالات انقطاع الشبكة الطويلة.
-    final next = now.add(_backoffFor(attempts));
+    final next = now.add(_backoffFor(attempts, error: error));
     await db.update(
       'sync_queue',
       {
@@ -379,18 +422,33 @@ class SyncQueueOps {
     return (r.first['c'] as int?) ?? 0;
   }
 
-  /// Backoff متزايد لكنه يصل إلى سقف دقيقتين ثم يثبت عليه، فلا تتوقف
-  /// المحاولات أبدًا (إعادة كل دقيقتين حتى تُستأنف الشبكة وتنجح العملية).
-  static Duration _backoffFor(int attempt) {
-    const table = [
-      Duration(seconds: 5),
-      Duration(seconds: 10),
-      Duration(seconds: 20),
-      Duration(seconds: 45),
-      Duration(minutes: 1),
-    ];
-    if (attempt - 1 < table.length) return table[attempt - 1];
-    return const Duration(minutes: 2);
+  static final Random _jitterRng = Random();
+
+  static bool _isPermanentSyncError(Object? error) {
+    if (error == null) return false;
+    final s = '$error'.toLowerCase();
+    return s.contains('401') ||
+        s.contains('403') ||
+        s.contains('cloud-auth-failed') ||
+        s.contains('cloud-http-400') ||
+        s.contains('formatexception') ||
+        s.contains('permission_denied') ||
+        s.contains('insufficient');
+  }
+
+  /// (S11) تأخير أُسي حقيقي مع تشتيت عشوائي (Jitter ±20%) لمنع تزامن العواصف:
+  /// - أخطاء دائمة (401/403/تنسيق/صلاحيات): تدرج أبطأ (60ث..15د).
+  /// - أخطاء عابرة (شبكة/مهلة): تدرج أُسي (5ث * 2^(attempt-1) حتى 5 دقائق).
+  static Duration _backoffFor(int attempt, {Object? error}) {
+    final effAttempt = max(1, attempt);
+    final isPermanent = _isPermanentSyncError(error);
+    final int baseMs = isPermanent
+        ? min(15 * 60 * 1000, 60 * 1000 * (1 << min(effAttempt - 1, 4)))
+        : min(5 * 60 * 1000, 5 * 1000 * (1 << min(effAttempt - 1, 6)));
+    // Jitter ±20% around baseMs
+    final jitterFactor = 0.8 + (_jitterRng.nextDouble() * 0.4);
+    final finalMs = max(1000, (baseMs * jitterFactor).round());
+    return Duration(milliseconds: finalMs);
   }
 
   /// فحص متقدم لطابع زمن المزامنة الأخير ومقارنته بين الخادم والجهاز المحلي.

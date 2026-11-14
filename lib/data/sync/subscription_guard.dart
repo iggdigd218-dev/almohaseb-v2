@@ -180,18 +180,17 @@ class SubscriptionState {
     required this.serverNowMs,
   });
 
-  /// هل انتهت التجربة؟ المقارنة بوقت الخادم حصراً.
+  /// هل انتهت التجربة أو الاشتراك المدفوع؟ المقارنة بوقت الخادم حصراً (SEC5).
   bool get expired =>
       // (دفعة التدقيق) «unactivated» منشأة حديثة بانتظار الترخيص — ليست
       // اشتراكاً منتهياً ولا تُحسب كذلك في أي بوابة.
       status != 'unactivated' &&
       !isFrozen &&
-      status != 'active' &&
       expiresAtMs > 0 &&
       serverNowMs >= expiresAtMs;
 
-  /// هل الاشتراك مدفوع وفعّال؟
-  bool get isSubscribed => status == 'active' && !isFrozen;
+  /// هل الاشتراك مدفوع وفعّال (غير مجمّد ولم ينتهِ أجله)؟ (SEC5)
+  bool get isSubscribed => status == 'active' && !isFrozen && !expired;
 
   /// هل الميزة المدفوعة مفتوحة الآن؟ (تجربة سارية أو اشتراك فعّال +
   /// مفتاح الميزة نفسه غير مطفأ من الخادم).
@@ -1241,7 +1240,7 @@ class SubscriptionGuard {
     final st = await check(repo,
         backendUrl: backendUrl, workspaceId: workspaceId);
     if (st.isFrozen) return true; // مجمّد عن بعد عبر مفتاح القفل الفوري
-    if (st.status == 'active') return false; // اشتراك مدفوع فعّال.
+    if (st.status == 'active' && !st.expired) return false; // اشتراك مدفوع فعّال (SEC5).
     if (st.status == 'none') return false; // لا سحابة — لا حظر.
     if (st.status == 'unactivated') {
       // (دفعة التدقيق) المنشأة غير المفعلة بعد لا تُحجب عن المزامنة —

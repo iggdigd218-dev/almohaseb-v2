@@ -74,6 +74,20 @@ String _thermalQty(double q) {
   return Fmt.money(q, 2);
 }
 
+int _resolveThermalCurrencyDecimals(String rawCodeOrSymbol, int? explicitDecimals) {
+  if (explicitDecimals != null) {
+    return explicitDecimals < 0 ? 0 : (explicitDecimals > 6 ? 6 : explicitDecimals);
+  }
+  final upper = rawCodeOrSymbol.trim().toUpperCase();
+  for (final c in kDefaultCurrencies) {
+    if (c.code.toUpperCase() == upper) return c.decimal;
+  }
+  for (final c in kPresetCurrencies) {
+    if (c.code.toUpperCase() == upper) return c.decimal;
+  }
+  return 0;
+}
+
 String _resolveThermalCurrencySymbol(String rawCodeOrSymbol, String? explicitSymbol) {
   if (explicitSymbol != null && explicitSymbol.trim().isNotEmpty) {
     return PdfFonts.sanitize(explicitSymbol.trim());
@@ -131,6 +145,7 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
   String logoPath = '',
   String logoBase64 = '',
   String? currencySymbol,
+  int? currencyDecimals,
   bool stamp = false,
 }) async {
   // (بند 2) تحميل الخط العربي قبل إنشاء المستند — مرة واحدة ومخبّأة.
@@ -149,6 +164,8 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
   );
   final currSymbol =
       _resolveThermalCurrencySymbol(tx.currency, currencySymbol);
+  final currDecimals =
+      _resolveThermalCurrencyDecimals(tx.currency, currencyDecimals);
   final cleanAccountName = PdfFonts.sanitize(tx.resolvedPartyName(account));
   final cleanSeller = PdfFonts.sanitize(sellerOrDevice.trim());
   final rawFooter = PdfFonts.sanitize(footer.trim());
@@ -180,7 +197,7 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
   if ((discountVal == null || discountVal.isEmpty) &&
       lines.isNotEmpty &&
       itemsTotal > tx.amount + 0.009) {
-    discountVal = '${Fmt.money(itemsTotal - tx.amount)} $currSymbol';
+    discountVal = '${Fmt.money(itemsTotal - tx.amount, currDecimals)} $currSymbol';
   }
 
   final dateStr =
@@ -374,12 +391,12 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                       pw.TableRow(
                         children: [
                           _thermalTableCell(
-                            Fmt.money(lines[i].total),
+                            Fmt.money(lines[i].total, currDecimals),
                             font: fonts.bold,
                             fontSize: 8,
                           ),
                           _thermalTableCell(
-                            Fmt.money(lines[i].unitPrice),
+                            Fmt.money(lines[i].unitPrice, currDecimals),
                             fontSize: 8,
                           ),
                           _thermalTableCell(
@@ -410,7 +427,7 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                       style: const pw.TextStyle(fontSize: 8.5),
                     ),
                     pw.Text(
-                      '${Fmt.money(itemsTotal)} $currSymbol',
+                      '${Fmt.money(itemsTotal, currDecimals)} $currSymbol',
                       style: pw.TextStyle(
                         fontSize: 8.5,
                         font: fonts.bold,
@@ -449,7 +466,7 @@ Future<ThermalInvoiceDoc> buildThermalInvoiceDocument({
                     ),
                   ),
                   pw.Text(
-                    '${Fmt.money(tx.amount)} $currSymbol',
+                    '${Fmt.money(tx.amount, currDecimals)} $currSymbol',
                     style: pw.TextStyle(
                       font: fonts.bold,
                       fontWeight: pw.FontWeight.bold,
@@ -574,6 +591,7 @@ Future<Uint8List> buildThermalInvoicePdf({
   String logoPath = '',
   String logoBase64 = '',
   String? currencySymbol,
+  int? currencyDecimals,
   bool stamp = false,
 }) async =>
     (await buildThermalInvoiceDocument(
@@ -588,6 +606,7 @@ Future<Uint8List> buildThermalInvoicePdf({
       logoPath: logoPath,
       logoBase64: logoBase64,
       currencySymbol: currencySymbol,
+      currencyDecimals: currencyDecimals,
       stamp: stamp,
     ))
         .bytes;

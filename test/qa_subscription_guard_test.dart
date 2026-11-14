@@ -198,6 +198,7 @@ void main() {
         .firstWhere((k) => k.contains('/wsC/subscription'));
     final rec = Map<String, Object?>.from(cloud.store[key] as Map);
     rec['status'] = 'active';
+    rec['expires_at'] = cloud.serverClock + dayMs * 365;
     cloud.store[key] = rec;
     SubscriptionGuard.debugReset();
     expect(
@@ -645,7 +646,7 @@ void main() {
     });
 
     test('اشتراك مدفوع فعّال: وصول كامل بلا ختم', () {
-      final sub = state(status: 'active', expiresAtMs: 1000, serverNowMs: 2000);
+      final sub = state(status: 'active', expiresAtMs: 5000, serverNowMs: 2000);
       expect(FeatureAccessGuard.isRestricted(sub), isFalse);
       expect(FeatureAccessGuard.accessLevel(sub, Feature.whatsappClaims),
           FeatureAccess.full);

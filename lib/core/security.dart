@@ -69,16 +69,56 @@ class Security {
   /// القيم القديمة (sha256 بملح ثابت) تبقى قابلة للتحقق للتوافق الخلفي،
   /// وتُرقّى تلقائياً عند أول تسجيل دخول ناجح عبر [needsRehash].
   static const int _iterations = 10000;
+  static const int _pbkdf2KeyLength = 32;
+  static const String hashPrefix = 'pbkdf2_sha256\$';
 
   static String hash(String password) {
     if (password.isEmpty) return '';
     final rnd = Random.secure();
     final salt = Uint8List.fromList(
         List<int>.generate(16, (_) => rnd.nextInt(256)));
-    return _hashWithSalt(password, salt);
+    return _pbkdf2WithSalt(password, salt, _iterations);
   }
 
-  static String _hashWithSalt(String password, Uint8List salt) {
+  /// اشتقاق PBKDF2-HMAC-SHA256 قياسي (RFC 2898) — يُنتج
+  /// `pbkdf2_sha256$<iterations>$<salt-base64>$<hex-dk>`.
+  static String _pbkdf2WithSalt(
+    String password,
+    Uint8List salt,
+    int iterations,
+  ) {
+    final hmac = Hmac(sha256, utf8.encode(password));
+    const hLen = 32;
+    const blocks = (_pbkdf2KeyLength + hLen - 1) ~/ hLen;
+    final dk = Uint8List(_pbkdf2KeyLength);
+    var offset = 0;
+
+    for (var blockIndex = 1; blockIndex <= blocks; blockIndex++) {
+      final blockInput = Uint8List(salt.length + 4)
+        ..setRange(0, salt.length, salt)
+        ..[salt.length] = (blockIndex >> 24) & 0xff
+        ..[salt.length + 1] = (blockIndex >> 16) & 0xff
+        ..[salt.length + 2] = (blockIndex >> 8) & 0xff
+        ..[salt.length + 3] = blockIndex & 0xff;
+      var u = hmac.convert(blockInput).bytes;
+      final t = List<int>.from(u);
+      for (var i = 1; i < iterations; i++) {
+        u = hmac.convert(u).bytes;
+        for (var j = 0; j < hLen; j++) {
+          t[j] ^= u[j];
+        }
+      }
+      final toCopy = (_pbkdf2KeyLength - offset).clamp(0, hLen);
+      for (var j = 0; j < toCopy; j++) {
+        dk[offset + j] = t[j];
+      }
+      offset += toCopy;
+    }
+    return 'pbkdf2_sha256\$$iterations\$${base64Encode(salt)}\$${hex(dk)}';
+  }
+
+  /// الشكل الانتقالي (v2) — للتوافق الخلفي مع admin_app والكلمات المخزنة سابقاً.
+  static String _hashV2WithSalt(String password, Uint8List salt) {
     var digest = sha256.convert([...salt, ...utf8.encode(password)]).bytes;
     for (var i = 1; i < _iterations; i++) {
       digest = sha256.convert([...salt, ...digest]).bytes;
@@ -98,12 +138,24 @@ class Security {
 
   static bool verify(String password, String stored) {
     if (stored.isEmpty) return true; // لا كلمة مرور مضبوطة
+    if (stored.startsWith(hashPrefix)) {
+      final parts = stored.split('\$');
+      if (parts.length != 4) return false;
+      try {
+        final iters = int.tryParse(parts[1]) ?? 0;
+        if (iters <= 0) return false;
+        final salt = Uint8List.fromList(base64Decode(parts[2]));
+        return _constEq(_pbkdf2WithSalt(password, salt, iters), stored);
+      } catch (_) {
+        return false;
+      }
+    }
     if (stored.startsWith('v2\$')) {
       final parts = stored.split('\$');
       if (parts.length != 3) return false;
       try {
         final salt = Uint8List.fromList(base64Decode(parts[1]));
-        return _constEq(_hashWithSalt(password, salt), stored);
+        return _constEq(_hashV2WithSalt(password, salt), stored);
       } catch (_) {
         return false;
       }
@@ -112,9 +164,9 @@ class Security {
     return _constEq(_legacyHash(password), stored);
   }
 
-  /// هل التجزئة المخزنة قديمة وتحتاج ترقية للشكل الجديد؟
+  /// هل التجزئة المخزنة قديمة (v2/legacy) وتحتاج ترقية إلى PBKDF2-HMAC-SHA256؟
   static bool needsRehash(String stored) =>
-      stored.isNotEmpty && !stored.startsWith('v2\$');
+      stored.isNotEmpty && !stored.startsWith(hashPrefix);
 
   /// مقارنة بوقت ثابت (تمنع هجمات التوقيت).
   static bool _constEq(String a, String b) {

@@ -91,8 +91,13 @@ class _PosScreenState extends ConsumerState<PosScreen>
   int? get _selectedCustomerId => _draft.customerId;
   _PosPayment get _payment => _PosPayment.fromCode(_draft.payment);
   double get _subtotal => _draft.subtotal;
-  double get _discount => _draft.discountValue;
-  double get _netTotal => _draft.netTotal;
+  int get _activeCurrencyDecimals {
+    final curs = ref.read(currenciesProvider).valueOrNull ?? kDefaultCurrencies;
+    return curs.isEmpty ? 2 : curs.first.decimal;
+  }
+
+  double get _discount => _draft.discountValueFor(_activeCurrencyDecimals);
+  double get _netTotal => _draft.netTotalFor(_activeCurrencyDecimals);
   int get _itemCount => _draft.itemCount;
   // حقول نصية تُستعاد من المسودة عند إعادة بناء الشاشة (تُهيأ في
   // initState — التهيئة الكسولة تنفجر لو أول وصول كان في dispose).
@@ -4042,10 +4047,10 @@ class _PosScreenState extends ConsumerState<PosScreen>
         _clearCart();
 
         if (isRealDesktop) {
-          // في نسخة الويندوز: إرسال أمر الطباعة في الخلفية فوراً دون إرباك الموظف بنوافذ إضافية.
+          // في نسخة الويندوز: حفظ الفاتورة أولاً ثم إرسال أمر الطباعة مع إبلاغ واضح عند فشل الطابعة.
           showSnack(
             context,
-            'تم حفظ الفاتورة #$refNum وإرسال أمر الطباعة في الخلفية ✅',
+            'تم حفظ الفاتورة #$refNum ✅',
             silent: true,
           );
           unawaited(_printThermalInvoiceInBackground(txId, selectedAcc, lines));
@@ -4126,6 +4131,11 @@ class _PosScreenState extends ConsumerState<PosScreen>
       final logoBase64 =
           (st['org.icon.b64'] ?? st['logoBase64'] ?? '').trim();
 
+      final curs = await repo.currencies();
+      final txCur = curs.firstWhere(
+        (c) => c.code.toUpperCase() == tx.currency.trim().toUpperCase(),
+        orElse: () => CurrencyDef(tx.currency, tx.currency, tx.currency, 0),
+      );
       final bytes = await buildThermalInvoicePdf(
         tx: tx,
         account: acc,
@@ -4137,14 +4147,18 @@ class _PosScreenState extends ConsumerState<PosScreen>
         sellerOrDevice: sellerOrDevice,
         logoPath: logoPath,
         logoBase64: logoBase64,
+        currencySymbol: txCur.symbol,
+        currencyDecimals: txCur.decimal,
         stamp: stamp,
       );
 
+      var directTried = false;
       try {
         final printers = await Printing.listPrinters();
         final defaultPrinter = printers.where((p) => p.isDefault).firstOrNull ??
             printers.firstOrNull;
         if (defaultPrinter != null) {
+          directTried = true;
           final printed = await Printing.directPrintPdf(
             printer: defaultPrinter,
             onLayout: (_) async => bytes,
@@ -4152,13 +4166,29 @@ class _PosScreenState extends ConsumerState<PosScreen>
           );
           if (printed) return;
         }
-      } catch (_) {}
+      } catch (e) {
+        if (directTried && mounted) {
+          showSnack(
+            context,
+            'تم حفظ الفاتورة لكن تعذّر الإرسال للطابعة الافتراضية: $e',
+            error: true,
+          );
+        }
+      }
 
       await Printing.layoutPdf(
         onLayout: (_) async => bytes,
         name: 'invoice-${tx.reference}.pdf',
       );
-    } catch (_) {}
+    } catch (e) {
+      if (mounted) {
+        showSnack(
+          context,
+          'تم حفظ الفاتورة لكن تعذّر فتح معاينة الطباعة: $e',
+          error: true,
+        );
+      }
+    }
   }
 
   void _showSuccessDialog(
@@ -4359,6 +4389,11 @@ class _PosScreenState extends ConsumerState<PosScreen>
     // (2026-09-24) بناء الفاتورة انتقل إلى thermal_invoice_doc.dart: المستند
     // صار يحمل الخط العربي المدمج (AppNaskh) واتجاه RTL، بدل مستند بلا ثيم
     // الذي كان يُخرج الحروف العربية مربعات «▯» في المعاينة والطباعة.
+    final curs = await repo.currencies();
+    final txCur = curs.firstWhere(
+      (c) => c.code.toUpperCase() == tx.currency.trim().toUpperCase(),
+      orElse: () => CurrencyDef(tx.currency, tx.currency, tx.currency, 0),
+    );
     final bytes = await buildThermalInvoicePdf(
       tx: tx,
       account: account,
@@ -4370,6 +4405,8 @@ class _PosScreenState extends ConsumerState<PosScreen>
       sellerOrDevice: sellerOrDevice,
       logoPath: logoPath,
       logoBase64: logoBase64,
+      currencySymbol: txCur.symbol,
+      currencyDecimals: txCur.decimal,
       stamp: stamp,
     );
 
@@ -4872,12 +4909,14 @@ class _PosHistoryTabState extends ConsumerState<_PosHistoryTab> {
 class _ReturnLineState {
   final InvoiceLine originalLine;
   final double previouslyReturned;
+  final double discountRatio;
   double returnQty;
 
   _ReturnLineState({
     required this.originalLine,
     required this.previouslyReturned,
     required this.returnQty,
+    this.discountRatio = 1.0,
   });
 
   double get maxReturnable {
@@ -4885,9 +4924,12 @@ class _ReturnLineState {
     return rem > 0 ? rem : 0;
   }
 
-  double get unitNetPrice => originalLine.quantity > 0
-      ? originalLine.total / originalLine.quantity
-      : originalLine.unitPrice;
+  double get unitNetPrice {
+    final grossUnit = originalLine.quantity > 0
+        ? originalLine.total / originalLine.quantity
+        : originalLine.unitPrice;
+    return grossUnit * discountRatio;
+  }
 
   double get returnSubtotal => returnQty * unitNetPrice;
 }
@@ -4951,6 +4993,11 @@ class _SalesReturnSheetState extends ConsumerState<_SalesReturnSheet> {
             ),
           );
         } else {
+          final grossTotal = items.fold<double>(0.0, (s, l) => s + l.total);
+          final discRatio = (grossTotal > widget.tx.amount + Fmt.moneyEpsilon &&
+                  grossTotal > 0)
+              ? (widget.tx.amount / grossTotal).clamp(0.0, 1.0)
+              : 1.0;
           for (final l in items) {
             final key = l.itemId != null
                 ? 'id:${l.itemId}'
@@ -4961,6 +5008,7 @@ class _SalesReturnSheetState extends ConsumerState<_SalesReturnSheet> {
               _ReturnLineState(
                 originalLine: l,
                 previouslyReturned: prev,
+                discountRatio: discRatio,
                 returnQty: rem, // افتراضياً محدد للإرجاع السريع مع إمكانية التعديل
               ),
             );

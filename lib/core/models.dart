@@ -1565,3 +1565,26 @@ class StockMove {
     );
   }
 }
+
+/// هل تمثل العملية مرتجع مبيعات مسجل؟
+bool isSalesReturnTx(Tx t) {
+  final desc = t.description.trim();
+  return desc.startsWith('مرتجع ') ||
+      t.category.trim() == 'مرتجع مبيعات' ||
+      t.notes.contains('[ORIG_TX:');
+}
+
+/// هل تمثل العملية فاتورة مبيعات فعلية (نقدية أو آجلة من نقطة البيع/بأصناف/بتصنيف مبيعات)
+/// وليست ديناً شخصياً يدوياً على العميل أو دفعة مقدمة؟
+bool isSalesInvoiceTx(Tx t, {Set<int> posTxIds = const {}}) {
+  if (isSalesReturnTx(t)) return false;
+  final desc = t.description.trim();
+  if (desc.startsWith('دفعة مقدمة من فاتورة')) return false;
+  final isPosInvoice = (t.id != null && posTxIds.contains(t.id)) ||
+      desc.startsWith('فاتورة نقدية مدفوعة') ||
+      desc.startsWith('فاتورة مبيعات') ||
+      t.category.trim() == 'مبيعات';
+  if (!isPosInvoice) return false;
+  return t.type == OpType.revenue ||
+      (t.type == OpType.debit && t.accountKind != AccountKind.supplier);
+}

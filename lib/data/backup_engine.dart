@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
@@ -10,6 +11,7 @@ import '../core/app_version.dart';
 import '../core/database.dart';
 import '../core/desktop_net.dart';
 import '../core/format.dart';
+import '../core/media_paths.dart';
 import 'repository.dart';
 import 'sync/subscription_guard.dart';
 import 'sync/sync_diagnostics.dart';
@@ -85,6 +87,7 @@ class BackupManifest {
   final String createdAt;
   final int schemaVersion;
   final String lastTransactionTime;
+  final Map<String, Map<String, String>> mediaFiles;
 
   const BackupManifest({
     required this.app,
@@ -93,6 +96,7 @@ class BackupManifest {
     required this.createdAt,
     required this.schemaVersion,
     required this.lastTransactionTime,
+    this.mediaFiles = const {},
   });
 
   DateTime? get createdAtDate => DateTime.tryParse(createdAt);
@@ -113,6 +117,7 @@ class BackupManifest {
         'created_at': createdAt,
         'schema_version': schemaVersion,
         'last_transaction_time': lastTransactionTime,
+        if (mediaFiles.isNotEmpty) 'media_files': mediaFiles,
       };
 
   factory BackupManifest.fromJson(Map<String, dynamic> json) {
@@ -121,6 +126,17 @@ class BackupManifest {
       throw const BackupRestoreException(
         'ملف manifest.json غير صالح أو لا ينتمي لتطبيق Nexora.',
       );
+    }
+    final parsedMedia = <String, Map<String, String>>{};
+    final rawMedia = json['media_files'];
+    if (rawMedia is Map) {
+      rawMedia.forEach((k, v) {
+        if (v is Map) {
+          parsedMedia['$k'] = <String, String>{
+            for (final e in v.entries) '${e.key}': '${e.value ?? ''}',
+          };
+        }
+      });
     }
     return BackupManifest(
       app: appVal,
@@ -132,6 +148,7 @@ class BackupManifest {
           AppDatabase.schemaVersion,
       lastTransactionTime:
           '${json['last_transaction_time'] ?? ''}'.trim(),
+      mediaFiles: parsedMedia,
     );
   }
 }
@@ -140,20 +157,24 @@ class BackupManifest {
 class BackupInspectionResult {
   final BackupManifest manifest;
   final File? extractedDbFile;
+  final Directory? extractedMediaDir;
   final Map<String, Object?>? legacyJsonPayload;
   final Directory? tempDir;
   final DateTime? localLastTransactionTime;
   final DateTime? backupComparisonTime;
   final bool isOutdated;
+  final bool dateReadFailed;
 
   const BackupInspectionResult({
     required this.manifest,
     this.extractedDbFile,
+    this.extractedMediaDir,
     this.legacyJsonPayload,
     this.tempDir,
     this.localLastTransactionTime,
     this.backupComparisonTime,
     required this.isOutdated,
+    this.dateReadFailed = false,
   });
 
   bool get isOlderThanLocal => isOutdated;
@@ -386,26 +407,117 @@ class BackupEngine {
       }
 
       if (!vacuumSucceeded) {
-        // احتياط آمن إذا كان محرك SQLite على نظام قديم لا يدعم VACUUM INTO
-        try {
-          await db.rawQuery('PRAGMA wal_checkpoint(FULL)');
-        } catch (_) {}
-        final srcPath = db.path;
-        if (srcPath.isNotEmpty &&
-            srcPath != ':memory:' &&
-            !srcPath.contains('in_memory') &&
-            await File(srcPath).exists()) {
-          await File(srcPath).copy(vacuumDbPath);
-        } else {
-          throw const BackupRestoreException(
-            'تعذّر استخراج ملف قاعدة البيانات عبر VACUUM INTO.',
-          );
-        }
+        // (M6) احتياط محمي بقفل تزامن: WAL checkpoint(TRUNCATE) + التحقق الصارم من busy == 0
+        await AppDatabase.runWithBackupCopyGuard(() async {
+          var checkpointedCleanly = false;
+          for (var attempt = 0; attempt < 3; attempt++) {
+            try {
+              final cpRows = await db.rawQuery('PRAGMA wal_checkpoint(TRUNCATE)');
+              if (cpRows.isNotEmpty) {
+                final busyVal =
+                    (cpRows.first['busy'] as num?)?.toInt() ??
+                    (cpRows.first.values.first as num?)?.toInt() ??
+                    1;
+                if (busyVal == 0) {
+                  checkpointedCleanly = true;
+                  break;
+                }
+              }
+            } catch (_) {}
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+          }
+          if (!checkpointedCleanly) {
+            throw const BackupRestoreException(
+              'تعذّر إتمام WAL checkpoint قبل نسخ قاعدة البيانات لوجود قفل كتابة نشط.',
+            );
+          }
+          final srcPath = db.path;
+          if (srcPath.isNotEmpty &&
+              srcPath != ':memory:' &&
+              !srcPath.contains('in_memory') &&
+              await File(srcPath).exists()) {
+            await File(srcPath).copy(vacuumDbPath);
+          } else {
+            throw const BackupRestoreException(
+              'تعذّر استخراج ملف قاعدة البيانات عبر VACUUM INTO.',
+            );
+          }
+        });
       }
 
       final dbBytes = await vacuumDbFile.readAsBytes();
 
-      // 2) بناء ملف manifest.json بالمواصفات المعمارية المطلوبة
+      // 2) جمع الصور والمرفقات المرجعية لحزمها داخل media/ في أرشيف .nexora (M4)
+      await MediaPaths.ensureDocsDir();
+      final mediaEntries = <ArchiveFile>[];
+      final mediaManifestMap = <String, Map<String, String>>{};
+      final seenStoredPaths = <String>{};
+      var mediaIdx = 0;
+
+      Future<void> collectMediaFile(Object? rawVal) async {
+        final stored = '${rawVal ?? ''}'.trim();
+        if (stored.isEmpty || !seenStoredPaths.add(stored)) return;
+        try {
+          final abs = MediaPaths.toAbsolute(stored);
+          final f = File(abs);
+          if (!await f.exists()) return;
+          final len = await f.length();
+          if (len <= 0 || len > 25 * 1024 * 1024) return;
+          final bytes = await f.readAsBytes();
+          if (bytes.isEmpty) return;
+          final hash = sha256.convert(bytes).toString();
+          var rel = MediaPaths.toRelative(stored).replaceAll('\\', '/');
+          // تنظيف المسار ومنع الخروج عبر .. أو المسارات المطلقة داخل الأرشيف
+          if (rel.startsWith('/') ||
+              RegExp(r'^[A-Za-z]:').hasMatch(rel) ||
+              rel.split('/').contains('..')) {
+            final baseName = p.basename(stored).replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
+            rel = 'restored_media/${mediaIdx++}_$baseName';
+          }
+          while (mediaManifestMap.containsKey('media/$rel')) {
+            rel = 'restored_media/${mediaIdx++}_${p.basename(rel)}';
+          }
+          final archivePath = 'media/$rel';
+          mediaEntries.add(ArchiveFile(archivePath, bytes.length, bytes));
+          mediaManifestMap[archivePath] = <String, String>{
+            'storedPath': stored,
+            'relativePath': rel,
+            'sha256': hash,
+          };
+        } catch (_) {}
+      }
+
+      Future<void> collectFromQuery(String sql) async {
+        try {
+          final rows = await db.rawQuery(sql);
+          for (final r in rows) {
+            for (final v in r.values) {
+              await collectMediaFile(v);
+            }
+          }
+        } catch (_) {}
+      }
+
+      await collectFromQuery(
+        "SELECT attachment, image FROM transactions WHERE COALESCE(attachment,'') != '' OR COALESCE(image,'') != ''",
+      );
+      await collectFromQuery(
+        "SELECT image FROM accounts WHERE COALESCE(image,'') != ''",
+      );
+      await collectFromQuery(
+        "SELECT image FROM items WHERE COALESCE(image,'') != ''",
+      );
+      await collectFromQuery(
+        "SELECT image_path FROM item_categories WHERE COALESCE(image_path,'') != ''",
+      );
+      await collectFromQuery(
+        "SELECT media_path FROM messages WHERE COALESCE(media_path,'') != ''",
+      );
+      await collectFromQuery(
+        "SELECT value FROM settings WHERE key = 'logo' AND COALESCE(value,'') != ''",
+      );
+
+      // 3) بناء ملف manifest.json بالمواصفات المعمارية المطلوبة
       final manifest = BackupManifest(
         app: 'Nexora',
         version: kAppVersion,
@@ -413,12 +525,13 @@ class BackupEngine {
         createdAt: nowUtc.toIso8601String(),
         schemaVersion: AppDatabase.schemaVersion,
         lastTransactionTime: lastTx?.toUtc().toIso8601String() ?? '',
+        mediaFiles: mediaManifestMap,
       );
       final manifestJsonStr =
           const JsonEncoder.withIndent('  ').convert(manifest.toJson());
       final manifestBytes = utf8.encode(manifestJsonStr);
 
-      // 3) حزم الملفين في أرشيف مضغوط بصيغة Gzip
+      // 4) حزم الملفات في أرشيف مضغوط بصيغة Gzip
       final archive = Archive()
         ..addFile(
           ArchiveFile('manifest.json', manifestBytes.length, manifestBytes),
@@ -426,6 +539,9 @@ class BackupEngine {
         ..addFile(
           ArchiveFile('database.db', dbBytes.length, dbBytes),
         );
+      for (final mf in mediaEntries) {
+        archive.addFile(mf);
+      }
 
       final tarBytes = TarEncoder().encode(archive);
       final gzBytes = const GZipEncoder().encode(tarBytes);
@@ -560,7 +676,8 @@ class BackupEngine {
     }
 
     final currentWorkspaceId = await repo.activeWorkspaceId();
-    final localLastTx = await repo.latestTransactionTime();
+    final localActivity = await repo.latestActivityInfo();
+    final localLastTx = localActivity.latest;
     final isFreshLocal =
         allowCrossWorkspace || await _isLocalWorkspaceFreshOrEmpty(repo, localLastTx);
 
@@ -577,13 +694,17 @@ class BackupEngine {
 
         ArchiveFile? manifestEntry;
         ArchiveFile? dbEntry;
+        final mediaArchiveEntries = <ArchiveFile>[];
         for (final entry in archive.files) {
           if (!entry.isFile) continue;
-          final base = p.basename(entry.name);
-          if (base == 'manifest.json') {
+          final normName = entry.name.replaceAll('\\', '/');
+          final base = p.basename(normName);
+          if (base == 'manifest.json' && !normName.startsWith('media/')) {
             manifestEntry = entry;
-          } else if (base == 'database.db') {
+          } else if (base == 'database.db' && !normName.startsWith('media/')) {
             dbEntry = entry;
+          } else if (normName.startsWith('media/')) {
+            mediaArchiveEntries.add(entry);
           }
         }
 
@@ -629,8 +750,41 @@ class BackupEngine {
         }
         await extractedDbFile.writeAsBytes(dbContent, flush: true);
 
-        // فحص سلامة قاعدة البيانات المستخرجة وقراءة أحدث حركة فعلية بداخلها
+        // استخراج ملفات المرفقات/الصور مع التحقق من سلامة المسار والبصمة (M4)
+        Directory? extractedMediaDir;
+        if (mediaArchiveEntries.isNotEmpty) {
+          extractedMediaDir = Directory(p.join(tempExtractDir.path, 'media'));
+          await extractedMediaDir.create(recursive: true);
+          for (final entry in mediaArchiveEntries) {
+            final normName = entry.name.replaceAll('\\', '/');
+            final relFromMedia = normName.substring('media/'.length);
+            if (relFromMedia.isEmpty ||
+                relFromMedia.startsWith('/') ||
+                relFromMedia.split('/').contains('..')) {
+              throw BackupRestoreException(
+                'مسار مرفق غير آمن داخل الحزمة: $normName',
+              );
+            }
+            final contentBytes = entry.content as List<int>;
+            final meta = manifest.mediaFiles[normName];
+            final expectedSha = meta?['sha256'] ?? '';
+            if (expectedSha.isNotEmpty) {
+              final actualSha = sha256.convert(contentBytes).toString();
+              if (actualSha != expectedSha) {
+                throw BackupRestoreException(
+                  'تلف في مرفق النسخة الاحتياطية ($normName): عدم تطابق التجزئة.',
+                );
+              }
+            }
+            final destFile = File(p.join(extractedMediaDir.path, relFromMedia));
+            await destFile.parent.create(recursive: true);
+            await destFile.writeAsBytes(contentBytes, flush: true);
+          }
+        }
+
+        // فحص سلامة قاعدة البيانات المستخرجة + فحص المفاتيح الأجنبية (M7) + قراءة أحدث نشاط (M8)
         DateTime? embeddedDbLatestTx;
+        var embeddedDateReadFailed = false;
         Database? inspectDb;
         try {
           inspectDb = await databaseFactory.openDatabase(
@@ -646,7 +800,17 @@ class BackupEngine {
               );
             }
           }
-          embeddedDbLatestTx = await Repo.latestTransactionTimeFromDb(inspectDb);
+          // (M7) فحص المفاتيح الأجنبية داخل الحزمة لمنع استعادة قواعد تالفة العلاقات
+          final fkRows = await inspectDb.rawQuery('PRAGMA foreign_key_check');
+          if (fkRows.isNotEmpty) {
+            throw BackupRestoreException(
+              'ملف قاعدة البيانات داخل الحزمة يحتوي علاقات معطوبة (${fkRows.length} خلل في المفاتيح الأجنبية).',
+            );
+          }
+          final embeddedActivity =
+              await Repo.latestActivityInfoFromDb(inspectDb);
+          embeddedDbLatestTx = embeddedActivity.latest;
+          embeddedDateReadFailed = embeddedActivity.readFailed;
         } catch (e) {
           if (e is BackupRestoreException) rethrow;
           throw BackupRestoreException(
@@ -676,10 +840,12 @@ class BackupEngine {
         return BackupInspectionResult(
           manifest: manifest,
           extractedDbFile: extractedDbFile,
+          extractedMediaDir: extractedMediaDir,
           tempDir: tempExtractDir,
           localLastTransactionTime: localLastTx,
           backupComparisonTime: backupCompareTime,
           isOutdated: isOutdated,
+          dateReadFailed: localActivity.readFailed || embeddedDateReadFailed,
         );
       } catch (e) {
         try {
@@ -874,8 +1040,10 @@ class BackupEngine {
       throw const BackupRestoreException(kActiveSyncRestoreBlockedMessage);
     }
 
+    final liveActivity = await repo.latestActivityInfo();
     final liveLocalLastTx =
-        await repo.latestTransactionTime() ?? inspection.localLastTransactionTime;
+        liveActivity.latest ?? inspection.localLastTransactionTime;
+    final dateReadFailed = inspection.dateReadFailed || liveActivity.readFailed;
     final isFreshLocal =
         allowCrossWorkspace || await _isLocalWorkspaceFreshOrEmpty(repo, liveLocalLastTx);
 
@@ -902,7 +1070,8 @@ class BackupEngine {
               inspection.backupComparisonTime != null,
         );
 
-    if (isCurrentlyOutdated && !confirmedOutdated) {
+    if ((isCurrentlyOutdated || (dateReadFailed && !isFreshLocal)) &&
+        !confirmedOutdated) {
       throw BackupOutdatedConflictException(
         backupTime: backupCompareTime ?? DateTime.now(),
         currentLastTxTime: liveLocalLastTx ?? DateTime.now(),
@@ -928,6 +1097,76 @@ class BackupEngine {
           dbFile,
           workspaceId: inspection.manifest.workspaceId,
         );
+
+        // استعادة المرفقات والصور من الأرشيف إلى مجلد المستندات وتحديث المسارات المطلقة إن وُجدت (M4)
+        final mediaDir = inspection.extractedMediaDir;
+        if (mediaDir != null && await mediaDir.exists()) {
+          String? docsPath;
+          try {
+            docsPath = await MediaPaths.ensureDocsDir();
+            docsPath ??= (await getApplicationDocumentsDirectory()).path;
+          } catch (_) {
+            docsPath = null;
+          }
+          if (docsPath != null && docsPath.isNotEmpty) {
+            final pathRemaps = <String, String>{};
+            if (inspection.manifest.mediaFiles.isNotEmpty) {
+              for (final entry in inspection.manifest.mediaFiles.entries) {
+                final archiveKey = entry.key;
+                final relFromMedia = archiveKey.startsWith('media/')
+                    ? archiveKey.substring('media/'.length)
+                    : (entry.value['relativePath'] ?? '');
+                final targetRel = (entry.value['relativePath'] ?? relFromMedia)
+                    .replaceAll('\\', '/');
+                if (relFromMedia.isEmpty ||
+                    targetRel.isEmpty ||
+                    targetRel.split('/').contains('..')) {
+                  continue;
+                }
+                final srcMediaFile = File(p.join(mediaDir.path, relFromMedia));
+                if (!await srcMediaFile.exists()) continue;
+                final dstMediaFile = File(p.join(docsPath, targetRel));
+                await dstMediaFile.parent.create(recursive: true);
+                await srcMediaFile.copy(dstMediaFile.path);
+                final origStored = entry.value['storedPath'] ?? '';
+                if (origStored.isNotEmpty && origStored != targetRel) {
+                  pathRemaps[origStored] = targetRel;
+                }
+              }
+            } else {
+              await for (final ent in mediaDir.list(recursive: true)) {
+                if (ent is! File) continue;
+                final rel = p.relative(ent.path, from: mediaDir.path);
+                final dst = File(p.join(docsPath, rel));
+                await dst.parent.create(recursive: true);
+                await ent.copy(dst.path);
+              }
+            }
+            if (pathRemaps.isNotEmpty) {
+              for (final entry in pathRemaps.entries) {
+                final oldPath = entry.key;
+                final newRel = entry.value;
+                try {
+                  await reopenedDb.update('transactions', {'attachment': newRel},
+                      where: 'attachment = ?', whereArgs: [oldPath]);
+                  await reopenedDb.update('transactions', {'image': newRel},
+                      where: 'image = ?', whereArgs: [oldPath]);
+                  await reopenedDb.update('accounts', {'image': newRel},
+                      where: 'image = ?', whereArgs: [oldPath]);
+                  await reopenedDb.update('items', {'image': newRel},
+                      where: 'image = ?', whereArgs: [oldPath]);
+                  await reopenedDb.update('item_categories', {'image_path': newRel},
+                      where: 'image_path = ?', whereArgs: [oldPath]);
+                  await reopenedDb.update('messages', {'media_path': newRel},
+                      where: 'media_path = ?', whereArgs: [oldPath]);
+                  await reopenedDb.update('settings', {'value': newRel},
+                      where: "key = 'logo' AND value = ?", whereArgs: [oldPath]);
+                } catch (_) {}
+              }
+            }
+          }
+        }
+
         // حساب إجمالي السجلات المستعادة لعرضها للمستخدم
         for (final table in [
           'accounts',
@@ -952,18 +1191,17 @@ class BackupEngine {
         throw const BackupRestoreException('لا توجد بيانات قابلة للاستعادة.');
       }
 
-      if (wasEngineStarted && engine != null) {
-        try {
-          await engine.start();
-        } catch (_) {}
-      }
-
       return BackupRestoreResult(
         manifest: inspection.manifest,
         safetySnapshotFile: safetySnapshot,
         restoredRecordsCount: restoredCount,
       );
     } finally {
+      if (wasEngineStarted && engine != null && !engine.hasStarted) {
+        try {
+          await engine.start();
+        } catch (_) {}
+      }
       await inspection.dispose();
     }
   }

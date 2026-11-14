@@ -6,16 +6,24 @@ import 'accounting.dart';
 /// تنسيق الأرقام والتواريخ.
 class Fmt {
   static final _int = NumberFormat('#,##0', 'en_US');
-  static final _two = NumberFormat('#,##0.00', 'en_US');
+  static final _decFormatters = <int, NumberFormat>{};
   static final _date = DateFormat('yyyy/MM/dd', 'en_US');
   static final _dateTime = DateFormat('yyyy/MM/dd  hh:mm a', 'en_US');
   static final _clock = DateFormat('hh:mm a', 'en_US');
   static final _month = DateFormat('MMMM yyyy', 'ar');
   static final _day = DateFormat('EEEE d MMMM', 'ar');
 
-  /// مبلغ بعدد المنازل العشرية المناسب للعملة.
-  static String money(double v, [int decimals = 0]) =>
-      decimals > 0 ? _two.format(v) : _int.format(v);
+  /// مبلغ بعدد المنازل العشرية المناسب للعملة (0..6).
+  static String money(double v, [int decimals = 0]) {
+    final safeV = (!v.isFinite || v.abs() < 1e-9) ? 0.0 : v;
+    final d = decimals < 0 ? 0 : (decimals > 6 ? 6 : decimals);
+    if (d == 0) return _int.format(roundMoney(safeV, 0));
+    final f = _decFormatters.putIfAbsent(
+      d,
+      () => NumberFormat('#,##0.${'0' * d}', 'en_US'),
+    );
+    return f.format(roundMoney(safeV, d));
+  }
 
   static String moneyFor(double v, CurrencyDef c) => money(v, c.decimal);
 
@@ -37,11 +45,13 @@ class Fmt {
   /// القيم غير المنتهية (NaN/Infinity) تُردّ إلى صفر بدل أن تتفشى في
   /// كل الحسابات اللاحقة.
   static double roundMoney(double v, [int decimals = 2]) {
-    if (!v.isFinite) return 0;
+    if (!v.isFinite || v.abs() < 1e-9) return 0.0;
     final d = decimals < 0
         ? 0
         : (decimals > 6 ? 6 : decimals);
-    return double.parse(v.toStringAsFixed(d));
+    final nudged = v >= 0 ? v + 1e-12 : v - 1e-12;
+    final parsed = double.parse(nudged.toStringAsFixed(d));
+    return parsed == 0 ? 0.0 : parsed;
   }
 
   /// هل المبلغان متساويان حسابيّاً (بتسامح)؟

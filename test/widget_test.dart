@@ -840,7 +840,7 @@ void main() {
       // ملح عشوائي فريد لكل استدعاء: تجزئتا نفس الكلمة تختلفان (v2)،
       // والتحقق الصحيح يكون بـ verify وليس بمقارنة النصوص.
       expect(h, isNot(equals(Security.hash('1234'))));
-      expect(h, startsWith('v2\$'));
+      expect(h, startsWith('pbkdf2_sha256\$'));
       expect(h, isNot(equals('1234')));
       expect(Security.verify('1234', h), isTrue);
       expect(Security.verify('9999', h), isFalse);

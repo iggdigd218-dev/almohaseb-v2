@@ -235,6 +235,7 @@ class CatalogSyncGuard {
             final snap = await CloudJoin.buildWorkspaceSnapshot(repo);
             final snapHash =
                 sha256.convert(utf8.encode(jsonEncode(snap))).toString();
+            var publishOk = true;
             if (snapHash != _lastSnapshotHash) {
               final snapPayload = {
                 'createdAt': DateTime.now().toIso8601String(),
@@ -243,7 +244,7 @@ class CatalogSyncGuard {
                     DateTime.now().millisecondsSinceEpoch,
                 'data': snap,
               };
-              await http
+              final putRes = await http
                   .put(
                     Uri.parse('$root/snapshot.json').replace(queryParameters:
                         token != null ? {'auth': token} : null),
@@ -251,11 +252,16 @@ class CatalogSyncGuard {
                     headers: {'Content-Type': 'application/json'},
                   )
                   .timeout(const Duration(seconds: 10));
-              _lastSnapshotHash = snapHash;
+              // (S7) التحقق من نجاح HTTP (200..299) قبل تثبيت البصمة ووقت النشر.
+              publishOk = putRes.statusCode >= 200 && putRes.statusCode < 300;
+              if (publishOk) {
+                _lastSnapshotHash = snapHash;
+              }
             }
-            // تثبيت وقت الفحص يمنع إعادة بناء اللقطة كل دورة حتى لو لم
-            // يتغير شيء — فالفحص القادم لا يحدث قبل انقضاء الفاصل مجدداً.
-            _lastSnapshotPublishMs = nowMs;
+            if (publishOk) {
+              // تثبيت وقت الفحص يمنع إعادة بناء اللقطة كل دورة فقط بعد التأكد من النشر.
+              _lastSnapshotPublishMs = nowMs;
+            }
           }
         } catch (_) {}
         return;
@@ -614,19 +620,22 @@ class CatalogSyncGuard {
       }
     }
 
-    // 5. إذا كان الجهاز عائداً بعد غياب طويل وتجاوزت اللقطة مؤشره المحلي (isCompactedGap)،
-    // نُرمّم الفواتير وبنودها والسندات وحركات المخزون المفقودة من اللقطة دون المساس بالموجود.
+    // 5. (S8) ترميم الفجوة المضغوطة داخل معاملة ذرية واحدة: إذا فشل أي جدول
+    // تتراجع المعاملة بالكامل ولا يُسجَّل healedCompactedTs حتى يعاد الترميم لاحقاً.
+    final safeSnapData = snapData;
     if (isCompactedGap) {
-      for (final table in const [
-        'transactions',
-        'transaction_items',
-        'vouchers',
-        'stock_moves',
-      ]) {
-        if (snapData[table] is List) {
-          try {
-            final rows = (snapData[table] as List).whereType<Map>();
-            final tableInfo = await db.rawQuery('PRAGMA table_info($table)');
+      var compactedHealed = 0;
+      await db.transaction((txn) async {
+        for (final table in const [
+          'transactions',
+          'transaction_items',
+          'vouchers',
+          'stock_moves',
+        ]) {
+          final rawTable = safeSnapData[table];
+          if (rawTable is List) {
+            final rows = rawTable.whereType<Map>();
+            final tableInfo = await txn.rawQuery('PRAGMA table_info($table)');
             final validCols = {
               for (final col in tableInfo) col['name'] as String
             };
@@ -639,18 +648,16 @@ class CatalogSyncGuard {
               });
               final rid = rMap['id'];
               if (rid == null) continue;
-              final inserted = await db.insert(
+              final inserted = await txn.insert(
                 table,
                 rMap,
                 conflictAlgorithm: ConflictAlgorithm.ignore,
               );
-              if (inserted > 0) healed++;
+              if (inserted > 0) compactedHealed++;
             }
-          } catch (_) {}
+          }
         }
-      }
-      try {
-        await db.insert(
+        await txn.insert(
           'sync_meta',
           {
             'key': 'healedCompactedTs:$workspaceId',
@@ -658,7 +665,8 @@ class CatalogSyncGuard {
           },
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
-      } catch (_) {}
+      });
+      healed += compactedHealed;
     }
 
     if (healed > 0) {

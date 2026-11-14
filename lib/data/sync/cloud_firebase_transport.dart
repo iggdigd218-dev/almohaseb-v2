@@ -290,14 +290,28 @@ class CloudFirebaseTransport implements SyncTransport {
     if (!allowMediaSync &&
         op.entityType == EntityKind.setting &&
         op.entityId == 'org.icon.b64') {
-      // لا نرفع صورة الشعار للسحابة طالما مزامنة الوسائط مغلقة، ونكتفي بوسم العملية محلياً.
+      // لا نرفع صورة الشعار للسحابة طالما مزامنة الوسائط مغلقة، ونكتفي بوسم العملية وطابورها محلياً.
       try {
-        await db.update(
-          'operations',
-          {'synced': 1, 'is_synced': 1},
-          where: 'id = ?',
-          whereArgs: [op.id],
-        );
+        final nowIso = DateTime.now().toIso8601String();
+        await db.transaction((txn) async {
+          await txn.update(
+            'operations',
+            {'synced': 1, 'is_synced': 1},
+            where: 'id = ?',
+            whereArgs: [op.id],
+          );
+          await txn.update(
+            'sync_queue',
+            {
+              'status': SyncStatus.synced.name,
+              'last_error': '',
+              'next_try_at': '',
+              'updated_at': nowIso,
+            },
+            where: 'operation_id = ?',
+            whereArgs: [op.id],
+          );
+        });
       } catch (_) {}
       return;
     }
@@ -328,75 +342,149 @@ class CloudFirebaseTransport implements SyncTransport {
       ..['is_synced'] = 1
       ..['synced'] = 1;
     final body = jsonEncode(rawMap);
-    final token = await _idToken();
-    final auth =
+    var token = await _idToken();
+    var auth =
         token == null ? null : 'auth=${Uri.encodeQueryComponent(token)}';
-    final targetUri = auth == null ? uri : uri.replace(query: auth);
-    var res = await http
-        .put(targetUri, body: body, headers: _authHeaders)
-        .timeout(const Duration(seconds: 10));
-    if ((res.statusCode == 401 || res.statusCode == 403) && token != null) {
-      // (المرحلة 2) إعادة المحاولة **بلا مصادقة** أُلغيت نهائياً: القواعد
-      // تشترط `auth != null`، والطلب العاري كان يخفي غياب الهوية فقط
-      // (ثغرة أ-1). الآن: نجدّد توكن الجهاز ونعيد المحاولة مرة واحدة.
-      final fresh = await FirebaseAuthRest.forceRefreshToken();
-      if (fresh != null && fresh != token) {
-        res = await http
-            .put(
-              uri.replace(query: 'auth=${Uri.encodeComponent(fresh)}'),
-              body: body,
-              headers: _authHeaders,
-            )
-            .timeout(const Duration(seconds: 10));
-      }
-    }
-    if (res.statusCode == 401 || res.statusCode == 403) {
-      throw StateError('cloud-auth-failed: ${res.statusCode}');
-    }
-    if (res.statusCode < 200 || res.statusCode >= 300) {
-      throw StateError('cloud-http-${res.statusCode}');
-    }
+    var targetUri = auth == null ? uri : uri.replace(query: auth);
 
-    // استخلاص وقت الخادم الفعلي المعاد من Firebase بعد حل ServerValue.TIMESTAMP
-    String resolvedServerTime = '${DateTime.now().millisecondsSinceEpoch}';
+    // (S6) عند إعادة المحاولة بعد سقوط الشبكة أو فشل سابق، نستعلم أولاً عن العملية
+    // في السحابة: إذا كانت قد وصلت مسبقاً نُبقي `server_time` الأصلي دون استبدال.
+    bool isRetryAttempt = false;
     try {
-      final respDecoded = jsonDecode(res.body);
-      if (respDecoded is Map) {
-        final st = respDecoded['server_time'] ?? respDecoded['server_ts'];
-        if (st is int && st > 0) {
-          resolvedServerTime = '$st';
-        } else if (st is num && st > 0) {
-          resolvedServerTime = '${st.toInt()}';
-        }
+      final qState = await db.query(
+        'sync_queue',
+        columns: ['attempts', 'last_error'],
+        where: 'operation_id = ? AND target = ?',
+        whereArgs: [op.id, SyncTarget.cloud],
+        limit: 1,
+      );
+      if (qState.isNotEmpty) {
+        final att = (qState.first['attempts'] as int?) ?? 0;
+        final err = '${qState.first['last_error'] ?? ''}'.trim();
+        isRetryAttempt = att > 1 || err.isNotEmpty;
       }
     } catch (_) {}
 
-    // 3. بمجرد استلام رد التأكيد بالنجاح، يتم تحديث السجل محلياً إلى `is_synced = 1`
-    // ومنع إعادة إرساله في أي دورة مزامنة لاحقة.
-    try {
-      await db.update(
-        'operations',
-        {
-          'server_time': resolvedServerTime,
-          'synced': 1,
-          'is_synced': 1,
-          'payload': jsonEncode(localSanitizedPayload),
-        },
-        where: 'id = ?',
-        whereArgs: [op.id],
-      );
-    } on DatabaseException catch (_) {
-      await db.update(
-        'operations',
-        {
-          'server_time': resolvedServerTime,
-          'synced': 1,
-          'payload': jsonEncode(localSanitizedPayload),
-        },
-        where: 'id = ?',
-        whereArgs: [op.id],
-      );
+    String resolvedServerTime = '${DateTime.now().millisecondsSinceEpoch}';
+    bool alreadyExistsOnServer = false;
+    if (isRetryAttempt) {
+      try {
+        var getRes = await http
+            .get(targetUri, headers: _authHeaders)
+            .timeout(const Duration(seconds: 8));
+        if ((getRes.statusCode == 401 || getRes.statusCode == 403) &&
+            token != null) {
+          final fresh = await FirebaseAuthRest.forceRefreshToken();
+          if (fresh != null && fresh != token) {
+            token = fresh;
+            auth = 'auth=${Uri.encodeQueryComponent(fresh)}';
+            targetUri = uri.replace(query: auth);
+            getRes = await http
+                .get(targetUri, headers: _authHeaders)
+                .timeout(const Duration(seconds: 8));
+          }
+        }
+        if (getRes.statusCode >= 200 &&
+            getRes.statusCode < 300 &&
+            getRes.body.trim().isNotEmpty &&
+            getRes.body.trim() != 'null') {
+          final existingRemote = jsonDecode(getRes.body);
+          if (existingRemote is Map && existingRemote.isNotEmpty) {
+            alreadyExistsOnServer = true;
+            final st =
+                existingRemote['server_time'] ?? existingRemote['server_ts'];
+            if (st is int && st > 0) {
+              resolvedServerTime = '$st';
+            } else if (st is num && st > 0) {
+              resolvedServerTime = '${st.toInt()}';
+            } else if (st is String && (int.tryParse(st.trim()) ?? 0) > 0) {
+              resolvedServerTime = st.trim();
+            }
+          }
+        }
+      } catch (_) {}
     }
+
+    if (!alreadyExistsOnServer) {
+      var res = await http
+          .put(targetUri, body: body, headers: _authHeaders)
+          .timeout(const Duration(seconds: 10));
+      if ((res.statusCode == 401 || res.statusCode == 403) && token != null) {
+        // (المرحلة 2) إعادة المحاولة **بلا مصادقة** أُلغيت نهائياً: القواعد
+        // تشترط `auth != null`، والطلب العاري كان يخفي غياب الهوية فقط
+        // (ثغرة أ-1). الآن: نجدّد توكن الجهاز ونعيد المحاولة مرة واحدة.
+        final fresh = await FirebaseAuthRest.forceRefreshToken();
+        if (fresh != null && fresh != token) {
+          res = await http
+              .put(
+                uri.replace(query: 'auth=${Uri.encodeComponent(fresh)}'),
+                body: body,
+                headers: _authHeaders,
+              )
+              .timeout(const Duration(seconds: 10));
+        }
+      }
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        throw StateError('cloud-auth-failed: ${res.statusCode}');
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw StateError('cloud-http-${res.statusCode}');
+      }
+
+      // استخلاص وقت الخادم الفعلي المعاد من Firebase بعد حل ServerValue.TIMESTAMP
+      try {
+        final respDecoded = jsonDecode(res.body);
+        if (respDecoded is Map) {
+          final st = respDecoded['server_time'] ?? respDecoded['server_ts'];
+          if (st is int && st > 0) {
+            resolvedServerTime = '$st';
+          } else if (st is num && st > 0) {
+            resolvedServerTime = '${st.toInt()}';
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 3. بمجرد استلام رد التأكيد بالنجاح (أو استرجاع الوجود السحابي السابق)،
+    // يتم تحديث operations و sync_queue ذرياً في معاملة واحدة (S3).
+    final syncNowIso = DateTime.now().toIso8601String();
+    await db.transaction((txn) async {
+      try {
+        await txn.update(
+          'operations',
+          {
+            'server_time': resolvedServerTime,
+            'synced': 1,
+            'is_synced': 1,
+            'payload': jsonEncode(localSanitizedPayload),
+          },
+          where: 'id = ?',
+          whereArgs: [op.id],
+        );
+      } on DatabaseException catch (_) {
+        await txn.update(
+          'operations',
+          {
+            'server_time': resolvedServerTime,
+            'synced': 1,
+            'payload': jsonEncode(localSanitizedPayload),
+          },
+          where: 'id = ?',
+          whereArgs: [op.id],
+        );
+      }
+      await txn.update(
+        'sync_queue',
+        {
+          'status': SyncStatus.synced.name,
+          'last_error': '',
+          'next_try_at': '',
+          'updated_at': syncNowIso,
+        },
+        where: 'operation_id = ?',
+        whereArgs: [op.id],
+      );
+    });
     final resolvedSyncMs = int.tryParse(resolvedServerTime) ??
         DateTime.now().millisecondsSinceEpoch;
     final resolvedSyncIso =
@@ -476,13 +564,14 @@ class CloudFirebaseTransport implements SyncTransport {
 
     bool hasMore = true;
     int currentCursorMs = lastCursorMs;
+    int pageLimit = kPullPageSize;
     String indexField = 'server_time';
     while (hasMore) {
-      // حصر الاستعلام بالاستئناف فقط: .orderByChild('server_time').startAfter(last_synced_cursor)
+      // حصر الاستعلام بالاستئناف فقط: .orderByChild('server_time').startAt(last_synced_cursor)
       final params = buildCursorQueryParams(
         lastSyncedCursor: currentCursorMs,
         indexField: indexField,
-        limit: kPullPageSize,
+        limit: pageLimit,
       );
       final tok = await _idToken();
       if (tok != null) params['auth'] = tok;
@@ -503,7 +592,7 @@ class CloudFirebaseTransport implements SyncTransport {
         final fallbackParams = buildCursorQueryParams(
           lastSyncedCursor: currentCursorMs,
           indexField: indexField,
-          limit: kPullPageSize,
+          limit: pageLimit,
         );
         if (tok != null) fallbackParams['auth'] = tok;
         final fallbackUri =
@@ -515,7 +604,7 @@ class CloudFirebaseTransport implements SyncTransport {
         final fallbackParams = buildCursorQueryParams(
           lastSyncedCursor: currentCursorMs,
           indexField: indexField,
-          limit: kPullPageSize,
+          limit: pageLimit,
         );
         if (tok != null) fallbackParams['auth'] = tok;
         final fallbackUri =
@@ -636,110 +725,111 @@ class CloudFirebaseTransport implements SyncTransport {
       final preverifiedTakeoverIdentities =
           await _preverifyTakeoverIdentities(entries);
 
-      await _setForeignKeys(false);
-      try {
-        const microBatchSize = 40;
-        for (var i = 0; i < entries.length; i += microBatchSize) {
-          final end = (i + microBatchSize < entries.length)
-              ? i + microBatchSize
-              : entries.length;
-          final chunk = entries.sublist(i, end);
-          ItemConflictHooks.beginTransactionScope();
-          try {
-            await db.transaction((txn) async {
-            for (final entry in chunk) {
-              final v = entry.value;
-              if (v is! Map) continue;
-              final op = SyncOperation.fromMap(Map<String, Object?>.from(v));
-              if (op.workspaceId != workspaceId &&
-                  op.workspaceId != 'default' &&
-                  workspaceId != 'default' &&
-                  op.workspaceId.isNotEmpty) {
-                droppedOtherWs++;
-                if (droppedSample.isEmpty) droppedSample = op.workspaceId;
-                continue;
-              }
-              // idempotent: نفس opId موجود مسبقًا -> تجاهل.
-              final idempotentQ = await txn.query(
-                'operations',
-                where: 'id = ?',
-                whereArgs: [op.id],
+      const microBatchSize = 40;
+      for (var i = 0; i < entries.length; i += microBatchSize) {
+        final end = (i + microBatchSize < entries.length)
+            ? i + microBatchSize
+            : entries.length;
+        final chunk = entries.sublist(i, end);
+        await _setForeignKeys(false);
+        ItemConflictHooks.beginTransactionScope();
+        try {
+          await db.transaction((txn) async {
+          for (final entry in chunk) {
+            final v = entry.value;
+            if (v is! Map) continue;
+            final op = SyncOperation.fromMap(Map<String, Object?>.from(v));
+            if (op.workspaceId != workspaceId &&
+                op.workspaceId != 'default' &&
+                workspaceId != 'default' &&
+                op.workspaceId.isNotEmpty) {
+              droppedOtherWs++;
+              if (droppedSample.isEmpty) droppedSample = op.workspaceId;
+              continue;
+            }
+            // idempotent: نفس opId موجود مسبقًا -> تجاهل.
+            final idempotentQ = await txn.query(
+              'operations',
+              where: 'id = ?',
+              whereArgs: [op.id],
+              limit: 1,
+            );
+            if (idempotentQ.isNotEmpty) {
+              continue;
+            }
+            String prevOwnerBeforeOp = '';
+            if (op.entityType == EntityKind.setting &&
+                op.entityId == 'ownershipTransfer') {
+              final curOwnQ = await txn.query(
+                'devices',
+                columns: ['id'],
+                where: 'is_owner = 1',
                 limit: 1,
               );
-              if (idempotentQ.isNotEmpty) {
-                continue;
-              }
-              String prevOwnerBeforeOp = '';
-              if (op.entityType == EntityKind.setting &&
-                  op.entityId == 'ownershipTransfer') {
-                final curOwnQ = await txn.query(
-                  'devices',
-                  columns: ['id'],
-                  where: 'is_owner = 1',
-                  limit: 1,
-                );
-                if (curOwnQ.isNotEmpty) {
-                  prevOwnerBeforeOp = '${curOwnQ.first['id'] ?? ''}';
-                }
-              }
-              final ok = await repo.applyRemoteOperation(txn, op, r,
-                  preverifiedTakeoverIdentities:
-                      preverifiedTakeoverIdentities);
-              if (ok) applied++;
-              if (ok &&
-                  op.entityType == EntityKind.message &&
-                  op.deviceId != ourId) {
-                chatOps.add(op);
-              }
-              if (ok &&
-                  op.entityType == EntityKind.user &&
-                  op.deviceId != ourId) {
-                roleOps.add(op);
-              }
-              if (op.entityType == EntityKind.setting &&
-                  (op.entityId == 'deviceExpelled:$ourId' ||
-                      op.entityId == 'deviceRevoked:$ourId') &&
-                  op.deviceId != ourId) {
-                final opMs = opTimeMs(op, v);
-                // حماية حاسمة لإعادة الانضمام بعد الطرد: أي عملية طرد/حظر تاريخية في /operations
-                // أقدم من (أو متزامنة مع) طابع آخر انضمام معتمد (sync.joinedAtMs) هي أثر منتهٍ يُتجاهل تماماً.
-                if (joinedAtMs > 0 && (opMs == 0 || opMs <= joinedAtMs + 10000)) {
-                  // تجاهل أثر الطرد القديم
-                } else {
-                  pendingSelfRevokeOps.add(op);
-                }
-              }
-              if (ok &&
-                  op.entityType == EntityKind.setting &&
-                  op.entityId == 'ownershipTransfer' &&
-                  op.deviceId != ourId) {
-                final curOwnAfterQ = await txn.query(
-                  'devices',
-                  columns: ['id'],
-                  where: 'is_owner = 1',
-                  limit: 1,
-                );
-                final ownerAfterOp = curOwnAfterQ.isNotEmpty
-                    ? '${curOwnAfterQ.first['id'] ?? ''}'
-                    : '';
-                if (ownerAfterOp.isNotEmpty &&
-                    ownerAfterOp != prevOwnerBeforeOp) {
-                  ownershipOps.add(op);
-                }
+              if (curOwnQ.isNotEmpty) {
+                prevOwnerBeforeOp = '${curOwnQ.first['id'] ?? ''}';
               }
             }
-            });
-            ItemConflictHooks.commitTransactionScope();
-          } catch (_) {
-            ItemConflictHooks.discardTransactionScope();
-            rethrow;
+            final ok = await repo.applyRemoteOperation(txn, op, r,
+                preverifiedTakeoverIdentities:
+                    preverifiedTakeoverIdentities);
+            if (ok) applied++;
+            if (ok &&
+                op.entityType == EntityKind.message &&
+                op.deviceId != ourId) {
+              chatOps.add(op);
+            }
+            if (ok &&
+                op.entityType == EntityKind.user &&
+                op.deviceId != ourId) {
+              roleOps.add(op);
+            }
+            if (op.entityType == EntityKind.setting &&
+                (op.entityId == 'deviceExpelled:$ourId' ||
+                    op.entityId == 'deviceRevoked:$ourId') &&
+                op.deviceId != ourId) {
+              final opMs = opTimeMs(op, v);
+              // حماية حاسمة لإعادة الانضمام بعد الطرد: أي عملية طرد/حظر تاريخية في /operations
+              // أقدم من (أو متزامنة مع) طابع آخر انضمام معتمد (sync.joinedAtMs) هي أثر منتهٍ يُتجاهل تماماً.
+              if (joinedAtMs > 0 && (opMs == 0 || opMs <= joinedAtMs + 10000)) {
+                // تجاهل أثر الطرد القديم
+              } else {
+                pendingSelfRevokeOps.add(op);
+              }
+            }
+            if (ok &&
+                op.entityType == EntityKind.setting &&
+                op.entityId == 'ownershipTransfer' &&
+                op.deviceId != ourId) {
+              final curOwnAfterQ = await txn.query(
+                'devices',
+                columns: ['id'],
+                where: 'is_owner = 1',
+                limit: 1,
+              );
+              final ownerAfterOp = curOwnAfterQ.isNotEmpty
+                  ? '${curOwnAfterQ.first['id'] ?? ''}'
+                  : '';
+              if (ownerAfterOp.isNotEmpty &&
+                  ownerAfterOp != prevOwnerBeforeOp) {
+                ownershipOps.add(op);
+              }
+            }
           }
-          if (end < entries.length) {
-            await Future<void>.delayed(Duration.zero);
-          }
+          });
+          ItemConflictHooks.commitTransactionScope();
+        } catch (_) {
+          ItemConflictHooks.discardTransactionScope();
+          rethrow;
+        } finally {
+          await _setForeignKeys(true);
         }
-      } finally {
-        await _setForeignKeys(true);
+        try {
+          await db.rawQuery('PRAGMA foreign_key_check');
+        } catch (_) {}
+        if (end < entries.length) {
+          await Future<void>.delayed(Duration.zero);
+        }
       }
 
       if (pendingSelfRevokeOps.isNotEmpty) {
@@ -974,10 +1064,19 @@ class CloudFirebaseTransport implements SyncTransport {
         await saveLastSyncedCursor(maxTsMs, cursorKey: maxTsKey);
       }
 
-      if (fetchedCount >= kPullPageSize && pageMaxTs >= currentCursorMs) {
-        currentCursorMs =
-            pageMaxTs > currentCursorMs ? pageMaxTs : pageMaxTs + 1;
-        hasMore = true;
+      if (fetchedCount >= pageLimit && pageMaxTs >= currentCursorMs) {
+        if (pageMaxTs > currentCursorMs) {
+          currentCursorMs = pageMaxTs;
+          pageLimit = kPullPageSize;
+          hasMore = true;
+        } else if (pageLimit < 10000) {
+          // (S1) أكثر من `pageLimit` عمليات تشترك في نفس الملي ثانية `server_time`:
+          // نوسّع حد الصفحة بدلاً من التقدم بـ `+ 1` الذي كان يُسقط العملية 501 وما بعدها.
+          pageLimit = (pageLimit * 2).clamp(kPullPageSize, 10000);
+          hasMore = true;
+        } else {
+          hasMore = false;
+        }
       } else {
         hasMore = false;
       }
@@ -1056,6 +1155,7 @@ class CloudFirebaseTransport implements SyncTransport {
 
     if (applied > 0 || forceFullSync || resetCursor || lastCursorMs == 0) {
       try {
+        await ApplyRemoteOp.autoHealFalseItemIdSplits(db, repo: repo);
         await ApplyRemoteOp.reconcileInventoryQuantities(db);
       } catch (_) {}
     }

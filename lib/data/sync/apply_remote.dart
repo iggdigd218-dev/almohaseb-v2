@@ -1250,54 +1250,96 @@ extension ApplyRemoteOp on Repo {
       } catch (_) {}
     }
 
-    // إذا كان الصنف الوارد قد أُعيد ترقيمه مسبقاً بسبب تعارض أوفلاين، نوجّه التعديل/الحذف للمعرّف الجديد.
-    if (op.entityType == EntityKind.item && op.opType != OpKind.create) {
-      final remapped = await _lookupRemappedItemId(
-        txn,
-        op.deviceId,
-        op.entityId,
+    // حارس صارم ضد العمليات الوهمية الناتجة عن فصل خاطئ سابق لمعرّفات 64-بت عالمية (Snowflake):
+    if (op.entityType == EntityKind.item) {
+      final reassignedFrom =
+          (op.payload['__reassigned_from_id'] as num?)?.toInt() ??
+              int.tryParse('${op.payload['__reassigned_from_id'] ?? ''}');
+      if (reassignedFrom != null && reassignedFrom >= 1000000000) {
+        await _insertStoredOperation(txn, op);
+        return false;
+      }
+    } else if (op.entityType == EntityKind.setting &&
+        op.entityId.startsWith('item_conflict:')) {
+      final rawConflictVal = '${op.payload['value'] ?? ''}'.trim();
+      final incomingConflict = OfflineItemConflict.tryParseJson(
+        rawConflictVal,
+        fallbackKey: op.entityId,
       );
-      if (remapped != null && '$remapped' != op.entityId) {
-        final newPayload = Map<String, Object?>.from(op.payload)
-          ..['id'] = remapped;
-        op = SyncOperation(
-          id: op.id,
-          deviceId: op.deviceId,
-          workspaceId: op.workspaceId,
-          userId: op.userId,
-          entityType: op.entityType,
-          entityId: '$remapped',
-          opType: op.opType,
-          version: op.version,
-          parentOpId: op.parentOpId,
-          payload: newPayload,
-          deviceTime: op.deviceTime,
-          timestamp: op.timestamp,
-          serverTime: op.serverTime,
-          isSynced: op.isSynced,
+      if (incomingConflict != null &&
+          incomingConflict.isPending &&
+          ((incomingConflict.originalCollidingId ?? 0) >= 1000000000 ||
+              (incomingConflict.item1Id >= 1000000000 &&
+                  incomingConflict.item2Id >= 1000000000 &&
+                  (incomingConflict.conflictType == 'id' ||
+                      incomingConflict.conflictType == 'id_and_sku' ||
+                      (incomingConflict.item1Id & 0xFF) != 0 ||
+                      (incomingConflict.item2Id & 0xFF) != 0)))) {
+        await _insertStoredOperation(txn, op);
+        return false;
+      }
+    }
+
+    // إذا كان الصنف الوارد قد أُعيد ترقيمه مسبقاً بسبب تعارض أوفلاين (لمعرّفات صغيرة < 1000000000)، نوجّه التعديل/الحذف للمعرّف الجديد.
+    if (op.entityType == EntityKind.item && op.opType != OpKind.create) {
+      final entNum = int.tryParse(op.entityId) ?? 0;
+      if (entNum > 0 && entNum < 1000000000) {
+        final remapped = await _lookupRemappedItemId(
+          txn,
+          op.deviceId,
+          op.entityId,
         );
+        if (remapped != null && '$remapped' != op.entityId) {
+          final newPayload = Map<String, Object?>.from(op.payload)
+            ..['id'] = remapped;
+          op = SyncOperation(
+            id: op.id,
+            deviceId: op.deviceId,
+            workspaceId: op.workspaceId,
+            userId: op.userId,
+            entityType: op.entityType,
+            entityId: '$remapped',
+            opType: op.opType,
+            version: op.version,
+            parentOpId: op.parentOpId,
+            payload: newPayload,
+            deviceTime: op.deviceTime,
+            timestamp: op.timestamp,
+            serverTime: op.serverTime,
+            isSynced: op.isSynced,
+          );
+        }
       }
     }
 
     final existing = await txn.query(table,
         where: '$primaryKey = ?', whereArgs: [op.entityId], limit: 1);
-    final latest = await txn.query('operations',
-        where: 'entity_type = ? AND entity_id = ?',
-        whereArgs: [op.entityType.name, op.entityId],
-        orderBy: 'version DESC, timestamp DESC',
-        limit: 1);
+    final latest = await txn.query(
+      'operations',
+      where: 'entity_type = ? AND entity_id = ?',
+      whereArgs: [op.entityType.name, op.entityId],
+      orderBy:
+          'COALESCE(NULLIF(CAST(server_time AS INTEGER), 0), 0) DESC, '
+          'version DESC, timestamp DESC, id DESC',
+      limit: 1,
+    );
     final localLatest =
         latest.isEmpty ? null : SyncOperation.fromMap(latest.first);
 
     // ══ (نظام منع مسح البيانات وإعادة الترقيم التلقائي الذكي للأصناف — أوفلاين) ══
-    // عند استقبال صنف عبر المزامنة يحمل نفس id لصنف محلي مختلف (أُدخلا أوفلاين من جهازين):
-    // لا نسمح لـ ConflictResolver بتجاهل أحدهما ولا نسمح بالكتابة فوق الصنف المحلي.
+    // عند استقبال صنف عبر المزامنة يحمل نفس id لصنف محلي مختلف (أُدخلا أوفلاين من جهازين بمعرف تسلسلي صغير):
+    // ملاحظة: المعرفات العالمية 64-بت (newGlobalId >= 1000000000) لا تتصادم بين الأجهزة أبداً،
+    // وأي اختلاف في الاسم على نفس المعرف العالمي 64-بت هو تعديل/إعادة تسمية لنفس الصنف.
     var isOfflineItemIdCollision = false;
     String localCreateDeviceId = '';
     if (table == 'items' &&
         existing.isNotEmpty &&
         (op.opType == OpKind.create || op.opType == OpKind.update)) {
       final existingRow = existing.first;
+      final itemIdNum = (existingRow['id'] as num?)?.toInt() ??
+          int.tryParse(op.entityId) ??
+          0;
+      final isGlobalSnowflakeId = itemIdNum >= 1000000000;
       final existingName = '${existingRow['name'] ?? ''}'.trim();
       final incomingName = '${op.payload['name'] ?? ''}'.trim();
       final isStubRow = existingName.isEmpty ||
@@ -1313,6 +1355,18 @@ extension ApplyRemoteOp on Repo {
           op.payload['__reconciled'] == true ||
           op.payload['__conflict_resolved'] == true ||
           op.payload['__reassigned_from_id'] != null;
+
+      final localCreatedMs =
+          safeParseNullableDateTime(existingRow['created_at'])
+                  ?.millisecondsSinceEpoch ??
+              0;
+      final incomingCreatedMs = safeParseNullableDateTime(
+                op.payload['created_at'] ?? op.deviceTime,
+              )?.millisecondsSinceEpoch ??
+              0;
+      final sameCreationInstant = localCreatedMs > 0 &&
+          incomingCreatedMs > 0 &&
+          (localCreatedMs - incomingCreatedMs).abs() <= 2000;
 
       try {
         final createOps = await txn.query(
@@ -1332,13 +1386,15 @@ extension ApplyRemoteOp on Repo {
       if (!isStubRow &&
           !isExistingDeleted &&
           !isControlOp &&
+          !isGlobalSnowflakeId &&
+          !sameCreationInstant &&
           incomingName.isNotEmpty) {
         final namesDiffer =
             existingName.toLowerCase() != incomingName.toLowerCase();
         final devicesDiffer = localCreateDeviceId.isNotEmpty &&
             op.deviceId.trim().isNotEmpty &&
             localCreateDeviceId != op.deviceId.trim();
-        if (op.opType == OpKind.create && (namesDiffer || devicesDiffer)) {
+        if (op.opType == OpKind.create && namesDiffer) {
           isOfflineItemIdCollision = true;
         } else if (op.opType == OpKind.update &&
             op.version <= 1 &&
@@ -1350,6 +1406,41 @@ extension ApplyRemoteOp on Repo {
     }
 
     if (!isOfflineItemIdCollision) {
+      // حماية بيانات اللقطة (Snapshot) من الكتابة الفوقية بعمليات تاريخية أقدم عند غياب سجل العمليات المحلي
+      if (existing.isNotEmpty && localLatest == null) {
+        final existingUpdMs = safeParseNullableDateTime(
+              existing.first['updated_at'],
+            )?.millisecondsSinceEpoch ??
+            0;
+        final existingCreatedMs = safeParseNullableDateTime(
+              existing.first['created_at'],
+            )?.millisecondsSinceEpoch ??
+            0;
+        final incomingOpMs = op.serverTimeMs > 0
+            ? op.serverTimeMs
+            : (safeParseNullableDateTime(op.timestamp)
+                    ?.millisecondsSinceEpoch ??
+                (safeParseNullableDateTime(op.deviceTime)
+                        ?.millisecondsSinceEpoch ??
+                    (safeParseNullableDateTime(op.payload['updated_at'])
+                            ?.millisecondsSinceEpoch ??
+                        0)));
+        final existingRowName = '${existing.first['name'] ?? ''}'.trim();
+        final isExistingStub = existingRowName == 'صنف' ||
+            existingRowName.startsWith('صنف مؤقت') ||
+            existingRowName.startsWith('حساب مؤقت') ||
+            existingRowName.startsWith('قسم مؤقت') ||
+            existingRowName.startsWith('تصنيف مؤقت');
+        if (!isExistingStub &&
+            existingUpdMs > 0 &&
+            incomingOpMs > 0 &&
+            existingUpdMs > incomingOpMs + 1000 &&
+            (op.opType == OpKind.create || existingUpdMs > existingCreatedMs)) {
+          await _insertStoredOperation(txn, op);
+          return false;
+        }
+      }
+
       final shouldApply = resolver.decide(
         incoming: op,
         exists: existing.isNotEmpty,
@@ -2013,49 +2104,45 @@ extension ApplyRemoteOp on Repo {
               );
             }
           }
-          // تطبيق فرق الكمية (Delta) عند إدراج حركة مخزون جديدة واردة من جهاز آخر
+          // (S5) تطبيق فرق الكمية (Delta) ذرياً دون ابتلاع الأخطاء حتى تتراجع المعاملة بالكامل عند التعثر
           if (op.entityType == EntityKind.stockMove) {
-            try {
-              final itemId = insertRow['item_id'];
-              final moveId = insertRow['id'] ?? op.entityId;
-              final moveQty = (insertRow['quantity'] as num?)?.toDouble() ?? 0.0;
-              final kindStr = '${insertRow['kind'] ?? 'sale'}'.trim();
-              if (itemId != null && moveQty != 0) {
-                // تُطبَّق حركة المخزون دائماً كفرق تراكمي (Delta) على الرصيد المحلي الحالي،
-                // ولا تُتخطى إلا إذا كان الصنف غير موجود محلياً وأُنشئ لتوّه بلقطة شملت هذه الحركة.
-                final alreadyAppliedByItemOp = _snapshotAppliedMoveIds
-                    .remove('${op.workspaceId}:$moveId');
+            final itemId = insertRow['item_id'];
+            final moveId = insertRow['id'] ?? op.entityId;
+            final moveQty = (insertRow['quantity'] as num?)?.toDouble() ?? 0.0;
+            final kindStr = '${insertRow['kind'] ?? 'sale'}'.trim();
+            if (itemId != null && moveQty != 0) {
+              final alreadyAppliedByItemOp = _snapshotAppliedMoveIds
+                  .remove('${op.workspaceId}:$moveId');
 
-                final itRows = await txn.query(
+              final itRows = await txn.query(
+                'items',
+                columns: ['quantity'],
+                where: 'id = ?',
+                whereArgs: [itemId],
+                limit: 1,
+              );
+              if (itRows.isNotEmpty && !alreadyAppliedByItemOp) {
+                final curQty =
+                    (itRows.first['quantity'] as num?)?.toDouble() ?? 0.0;
+                final double newQty;
+                if (kindStr == 'adjust') {
+                  newQty = moveQty;
+                } else {
+                  final sign = (kindStr == 'purchase' ||
+                          kindStr == 'return' ||
+                          kindStr == 'returnIn')
+                      ? 1.0
+                      : -1.0;
+                  newQty = curQty + sign * moveQty;
+                }
+                await txn.update(
                   'items',
-                  columns: ['quantity'],
+                  {'quantity': newQty, 'updated_at': now},
                   where: 'id = ?',
                   whereArgs: [itemId],
-                  limit: 1,
                 );
-                if (itRows.isNotEmpty && !alreadyAppliedByItemOp) {
-                  final curQty =
-                      (itRows.first['quantity'] as num?)?.toDouble() ?? 0.0;
-                  final double newQty;
-                  if (kindStr == 'adjust') {
-                    newQty = moveQty;
-                  } else {
-                    final sign = (kindStr == 'purchase' ||
-                            kindStr == 'return' ||
-                            kindStr == 'returnIn')
-                        ? 1.0
-                        : -1.0;
-                    newQty = curQty + sign * moveQty;
-                  }
-                  await txn.update(
-                    'items',
-                    {'quantity': newQty, 'updated_at': now},
-                    where: 'id = ?',
-                    whereArgs: [itemId],
-                  );
-                }
               }
-            } catch (_) {}
+            }
           }
         }
         if (op.entityType == EntityKind.user) {
@@ -2104,41 +2191,35 @@ extension ApplyRemoteOp on Repo {
         break;
       case OpKind.delete_:
         if (op.entityType == EntityKind.stockMove && existing.isNotEmpty) {
-          try {
-            final oldMove = existing.first;
-            final itemId = oldMove['item_id'];
-            final moveQty = (oldMove['quantity'] as num?)?.toDouble() ?? 0.0;
-            final kindStr = '${oldMove['kind'] ?? 'sale'}'.trim();
-            if (itemId != null && moveQty != 0 && kindStr != 'adjust') {
-              final itRows = await txn.query(
+          final oldMove = existing.first;
+          final itemId = oldMove['item_id'];
+          final moveQty = (oldMove['quantity'] as num?)?.toDouble() ?? 0.0;
+          final kindStr = '${oldMove['kind'] ?? 'sale'}'.trim();
+          if (itemId != null && moveQty != 0 && kindStr != 'adjust') {
+            final itRows = await txn.query(
+              'items',
+              columns: ['quantity'],
+              where: 'id = ?',
+              whereArgs: [itemId],
+              limit: 1,
+            );
+            if (itRows.isNotEmpty) {
+              final curQty =
+                  (itRows.first['quantity'] as num?)?.toDouble() ?? 0.0;
+              final sign = (kindStr == 'purchase' ||
+                      kindStr == 'return' ||
+                      kindStr == 'returnIn')
+                  ? 1.0
+                  : -1.0;
+              final newQty = curQty - sign * moveQty;
+              await txn.update(
                 'items',
-                columns: ['quantity'],
+                {'quantity': newQty, 'updated_at': now},
                 where: 'id = ?',
                 whereArgs: [itemId],
-                limit: 1,
               );
-              if (itRows.isNotEmpty) {
-                final curQty =
-                    (itRows.first['quantity'] as num?)?.toDouble() ?? 0.0;
-                // (دفعة التدقيق) «return» (مرتجع بيع) إشارته موجبة كالشراء
-                // وفق StockKind.qtySign — إنشاؤه يزيد المخزون فحذفه يجب أن
-                // يخصم. كانت الإشارة السالبة تجعل حذف المرتجع الوارد من
-                // جهاز آخر يزيد الكمية بدل تخفيضها.
-                final sign = (kindStr == 'purchase' ||
-                        kindStr == 'return' ||
-                        kindStr == 'returnIn')
-                    ? 1.0
-                    : -1.0;
-                final newQty = curQty - sign * moveQty;
-                await txn.update(
-                  'items',
-                  {'quantity': newQty, 'updated_at': now},
-                  where: 'id = ?',
-                  whereArgs: [itemId],
-                );
-              }
             }
-          } catch (_) {}
+          }
         }
         final delTime = (op.deviceTime.isNotEmpty) ? op.deviceTime : (op.timestamp.isNotEmpty ? op.timestamp : now);
         if (op.entityType == EntityKind.user) {
@@ -2989,10 +3070,13 @@ extension ApplyRemoteOp on Repo {
         // 1. سجل عمليات الصنف: الكمية الافتتاحية عند الإنشاء وآخر كمية مرفوعة صريحة
         double? initialCreateQty;
         double? latestOpQty;
+        double? latestManualQty;
+        int latestManualOpMs = 0;
+        double? prevSeenQty;
         try {
           final itemOps = await db.query(
             'operations',
-            columns: ['op_type', 'payload', 'version'],
+            columns: ['op_type', 'payload', 'version', 'timestamp', 'device_time', 'server_time'],
             where: "entity_type = 'item' AND entity_id = ?",
             whereArgs: ['$itemId'],
             orderBy: 'version ASC, timestamp ASC',
@@ -3018,7 +3102,27 @@ extension ApplyRemoteOp on Repo {
                 }
                 if (!isCompanionMoveOp) {
                   latestOpQty = q;
+                  final isExplicitManualEdit = decoded['__qty_changed'] == 1 ||
+                      decoded['__reconciled'] == true ||
+                      decoded['__conflict_resolved'] == true ||
+                      (opType == 'update' &&
+                          decoded['__qty_changed'] != 0 &&
+                          prevSeenQty != null &&
+                          (q - prevSeenQty).abs() > 0.0001);
+                  if (opType == 'update' && isExplicitManualEdit) {
+                    latestManualQty = q;
+                    final opMs = safeParseNullableDateTime(
+                          decoded['updated_at'] ??
+                              opRow['timestamp'] ??
+                              opRow['device_time'],
+                        )?.millisecondsSinceEpoch ??
+                        ((opRow['server_time'] as num?)?.toInt() ?? 0);
+                    if (opMs > latestManualOpMs) {
+                      latestManualOpMs = opMs;
+                    }
+                  }
                 }
+                prevSeenQty = q;
               }
             }
           }
@@ -3027,7 +3131,7 @@ extension ApplyRemoteOp on Repo {
         // 2. حركات المخزون الفعلية: طيّ زمني + مجموعا البيع والإرجاع للتغطية
         final moves = await db.query(
           'stock_moves',
-          columns: ['kind', 'quantity'],
+          columns: ['kind', 'quantity', 'date', 'created_at'],
           where:
               "item_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
           whereArgs: [itemId],
@@ -3037,18 +3141,35 @@ extension ApplyRemoteOp on Repo {
         var running = initialCreateQty ?? 0.0;
         var moveSalesSum = 0.0;
         var moveReturnsSum = 0.0;
+        var netMovesAfterManual = 0.0;
+        var moveSalesAfterManual = 0.0;
+        var moveReturnsAfterManual = 0.0;
         for (final m in moves) {
           final k = '${m['kind'] ?? 'sale'}'.trim();
           final mq = (m['quantity'] as num?)?.toDouble() ?? 0.0;
+          final mMs = safeParseNullableDateTime(m['created_at'] ?? m['date'])
+                  ?.millisecondsSinceEpoch ??
+              0;
+          final isAfterManual =
+              latestManualOpMs > 0 && mMs > latestManualOpMs + 1000;
           if (k == 'adjust') {
             running = mq;
             hasAdjust = true;
+            if (isAfterManual) netMovesAfterManual = mq - (latestManualQty ?? 0.0);
           } else if (k == 'purchase' || k == 'return' || k == 'returnIn') {
             running += mq;
             if (k == 'return' || k == 'returnIn') moveReturnsSum += mq;
+            if (isAfterManual) {
+              netMovesAfterManual += mq;
+              if (k == 'return' || k == 'returnIn') moveReturnsAfterManual += mq;
+            }
           } else {
             running -= mq;
             moveSalesSum += mq;
+            if (isAfterManual) {
+              netMovesAfterManual -= mq;
+              moveSalesAfterManual += mq;
+            }
           }
         }
 
@@ -3056,11 +3177,14 @@ extension ApplyRemoteOp on Repo {
         //    وغير الملغاة) — مصدر الحقيقة للبيانات القديمة الخالية من الحركات
         double txSold = 0.0;
         double txReturned = 0.0;
+        double txSoldAfterManual = 0.0;
+        double txReturnedAfterManual = 0.0;
         try {
           final txLines = await db.rawQuery('''
             SELECT ti.quantity AS qty, t.type AS tx_type,
                    COALESCE(t.original_tx_id, '') AS orig_id,
-                   COALESCE(t.notes, '') AS notes
+                   COALESCE(t.notes, '') AS notes,
+                   t.created_at AS tx_created, t.date AS tx_date
             FROM transaction_items ti
             JOIN transactions t ON t.id = ti.tx_id
             WHERE ti.item_id = ?
@@ -3073,16 +3197,24 @@ extension ApplyRemoteOp on Repo {
             final origId = '${tl['orig_id'] ?? ''}'.trim();
             final notes = '${tl['notes'] ?? ''}';
             final txType = '${tl['tx_type'] ?? ''}'.trim();
+            final txMs = safeParseNullableDateTime(
+                  tl['tx_created'] ?? tl['tx_date'],
+                )?.millisecondsSinceEpoch ??
+                0;
+            final isAfterManual =
+                latestManualOpMs > 0 && txMs > latestManualOpMs + 1000;
             final isReturn = origId.isNotEmpty ||
                 txType == 'sales_return' ||
                 notes.contains('[ORIG_TX:') ||
                 notes.contains('مرتجع من الفاتورة');
             if (isReturn) {
               txReturned += q;
+              if (isAfterManual) txReturnedAfterManual += q;
             } else if (txType == 'revenue' ||
                 txType == 'debit' ||
                 txType == 'inflow') {
               txSold += q;
+              if (isAfterManual) txSoldAfterManual += q;
             }
           }
         } catch (_) {}
@@ -3094,7 +3226,22 @@ extension ApplyRemoteOp on Repo {
             (txReturned - moveReturnsSum) > 0 ? (txReturned - moveReturnsSum) : 0.0;
 
         double? reconciledQty;
-        if (moves.isNotEmpty) {
+        if (!hasAdjust && latestManualQty != null && latestManualOpMs > 0) {
+          final missingSoldAfter = (txSoldAfterManual - moveSalesAfterManual) > 0
+              ? (txSoldAfterManual - moveSalesAfterManual)
+              : 0.0;
+          final missingRetAfter =
+              (txReturnedAfterManual - moveReturnsAfterManual) > 0
+                  ? (txReturnedAfterManual - moveReturnsAfterManual)
+                  : 0.0;
+          final target = latestManualQty +
+              netMovesAfterManual -
+              missingSoldAfter +
+              missingRetAfter;
+          if ((currentQty - target).abs() > 0.0001) {
+            reconciledQty = target;
+          }
+        } else if (moves.isNotEmpty) {
           if (initialCreateQty != null || hasAdjust) {
             final target = running - missingSold + missingReturned;
             if ((currentQty - target).abs() > 0.0001) {
@@ -3109,8 +3256,7 @@ extension ApplyRemoteOp on Repo {
           if ((currentQty - target).abs() > 0.0001) {
             reconciledQty = target;
           }
-        } else if (initialCreateQty == null &&
-            latestOpQty != null &&
+        } else if (latestOpQty != null &&
             (txSold + txReturned) <= 0.0001 &&
             (currentQty - latestOpQty).abs() > 0.0001) {
           reconciledQty = latestOpQty;
@@ -3130,6 +3276,454 @@ extension ApplyRemoteOp on Repo {
       }
     } catch (_) {}
     return fixed;
+  }
+
+  /// شفاء ذاتي فوري وتلقائي لأي أصناف أو تعارضات وهمية نتجت عن فصل معرّفات 64-بت عالمية (Snowflake >= 1000000000).
+  /// يعيد ربط كافة الفواتير وحركات المخزون بالمعرّف الأصلي، ويستعيد بيانات الصنف الأصلي وكميته الصحيحة،
+  /// ويحذف الأصناف المكررة وإشعارات التعارض الوهمية محلياً وسحابياً.
+  static Future<int> autoHealFalseItemIdSplits(
+    DatabaseExecutor db, {
+    Repo? repo,
+  }) async {
+    var healed = 0;
+    try {
+      final splitToOrig = <int, int>{};
+      final conflictKeysToRemove = <String>{};
+
+      // 1. فحص سجل العمليات عن أي صنف مفصول يحمل __reassigned_from_id لمعرّف 64-بت عالمي
+      try {
+        final reassignedOps = await db.query(
+          'operations',
+          columns: ['entity_id', 'payload'],
+          where: "entity_type = 'item' AND payload LIKE '%__reassigned_from_id%'",
+        );
+        for (final r in reassignedOps) {
+          final splitId = int.tryParse('${r['entity_id'] ?? ''}'.trim());
+          final rawPayload = '${r['payload'] ?? ''}'.trim();
+          if (splitId == null || splitId < 1000000000 || rawPayload.isEmpty) {
+            continue;
+          }
+          try {
+            final decoded = jsonDecode(rawPayload);
+            if (decoded is Map) {
+              final origId =
+                  (decoded['__reassigned_from_id'] as num?)?.toInt() ??
+                      int.tryParse('${decoded['__reassigned_from_id'] ?? ''}');
+              if (origId != null &&
+                  origId >= 1000000000 &&
+                  origId != splitId) {
+                splitToOrig[splitId] = origId;
+              }
+            }
+          } catch (_) {}
+        }
+      } catch (_) {}
+
+      // 2. فحص جدول sync_meta عن أي تحويلات item_id_remap لمعرّفات 64-بت
+      try {
+        final remaps = await db.query(
+          'sync_meta',
+          where: "key LIKE 'item_id_remap:%'",
+        );
+        for (final r in remaps) {
+          final k = '${r['key'] ?? ''}'.trim();
+          final v = '${r['value'] ?? ''}'.trim();
+          final parts = k.split(':');
+          final origId = parts.length >= 3 ? int.tryParse(parts.last) : null;
+          final splitId = int.tryParse(v);
+          if (origId != null &&
+              splitId != null &&
+              origId >= 1000000000 &&
+              splitId >= 1000000000 &&
+              origId != splitId) {
+            splitToOrig[splitId] = origId;
+          }
+        }
+      } catch (_) {}
+
+      // 3. فحص سجلات التعارض في settings عن أي تعارض يخص معرّفات 64-بت عالمية
+      try {
+        final conflictRows = await db.query(
+          'settings',
+          where: "key LIKE 'item_conflict:%'",
+        );
+        for (final r in conflictRows) {
+          final k = '${r['key'] ?? ''}'.trim();
+          final v = '${r['value'] ?? ''}'.trim();
+          final c = OfflineItemConflict.tryParseJson(v, fallbackKey: k);
+          if (c == null) continue;
+          final id1 = c.item1Id;
+          final id2 = c.item2Id;
+          final origColliding = c.originalCollidingId ?? 0;
+          final isFalse64BitSplit = origColliding >= 1000000000 ||
+              (id1 >= 1000000000 &&
+                  id2 >= 1000000000 &&
+                  (c.conflictType == 'id' ||
+                      c.conflictType == 'id_and_sku' ||
+                      splitToOrig.containsKey(id1) ||
+                      splitToOrig.containsKey(id2) ||
+                      (id1 & 0xFF) != 0 ||
+                      (id2 & 0xFF) != 0));
+          if (!isFalse64BitSplit) continue;
+          conflictKeysToRemove.add(k);
+          if (id1 >= 1000000000 && id2 >= 1000000000 && id1 != id2) {
+            int origId;
+            int splitId;
+            if (origColliding >= 1000000000 &&
+                (origColliding == id1 || origColliding == id2)) {
+              origId = origColliding;
+              splitId = (id1 == origId) ? id2 : id1;
+            } else if (splitToOrig.containsKey(id2)) {
+              splitId = id2;
+              origId = id1;
+            } else if (splitToOrig.containsKey(id1)) {
+              splitId = id1;
+              origId = id2;
+            } else if ((id2 & 0xFF) != 0 && (id1 & 0xFF) == 0) {
+              origId = id1;
+              splitId = id2;
+            } else if ((id1 & 0xFF) != 0 && (id2 & 0xFF) == 0) {
+              origId = id2;
+              splitId = id1;
+            } else {
+              origId = id1 < id2 ? id1 : id2;
+              splitId = id1 < id2 ? id2 : id1;
+            }
+            splitToOrig[splitId] = origId;
+          }
+        }
+      } catch (_) {}
+
+      // 4. فحص أي أصناف يتيمة وُلدت بترقيم متسلسل MAX(id)+1 فوق معرّف 64-بت ((id & 255) != 0)
+      try {
+        final seqItems = await db.query(
+          'items',
+          where: 'id >= 1000000000 AND (id & 255) != 0',
+        );
+        for (final sRow in seqItems) {
+          final sId = (sRow['id'] as num?)?.toInt();
+          if (sId == null || splitToOrig.containsKey(sId)) continue;
+          final sSku = '${sRow['sku'] ?? ''}'.trim();
+          final sCreated = '${sRow['created_at'] ?? ''}'.trim();
+          List<Map<String, Object?>> matches = const [];
+          if (sCreated.isNotEmpty) {
+            matches = await db.query(
+              'items',
+              columns: ['id'],
+              where:
+                  'id >= 1000000000 AND (id & 255) = 0 AND id != ? AND created_at = ?',
+              whereArgs: [sId, sCreated],
+              limit: 1,
+            );
+          }
+          if (matches.isEmpty && sSku.isNotEmpty) {
+            matches = await db.query(
+              'items',
+              columns: ['id'],
+              where:
+                  'id >= 1000000000 AND (id & 255) = 0 AND id != ? AND LOWER(TRIM(sku)) = LOWER(TRIM(?))',
+              whereArgs: [sId, sSku],
+              limit: 1,
+            );
+          }
+          if (matches.isNotEmpty) {
+            final mId = (matches.first['id'] as num?)?.toInt();
+            if (mId != null && mId != sId) {
+              splitToOrig[sId] = mId;
+            }
+          }
+        }
+      } catch (_) {}
+
+      if (splitToOrig.isEmpty && conflictKeysToRemove.isEmpty) {
+        return 0;
+      }
+
+      final tableInfo = await db.rawQuery('PRAGMA table_info(items)');
+      final itemCols = {for (final c in tableInfo) '${c['name']}'};
+      final nowIso = DateTime.now().toIso8601String();
+      final localSuffixRe = RegExp(r'\s*\(محلي\s+\d+\)\s*$');
+
+      for (final entry in splitToOrig.entries) {
+        final splitId = entry.key;
+        var origId = entry.value;
+        var guard = 0;
+        while (splitToOrig.containsKey(origId) &&
+            splitToOrig[origId] != origId &&
+            guard++ < 8) {
+          origId = splitToOrig[origId]!;
+        }
+        if (origId == splitId) continue;
+
+        // أ) حذف حركات التسوية الوهمية التي أضافها _healItemNameConflict عند الدمج الخاطئ
+        await db.delete(
+          'stock_moves',
+          where:
+              "(item_id = ? OR item_id = ?) AND notes LIKE 'تسوية تلقائية لدمج رصيد صنف مكرر%'",
+          whereArgs: [origId, splitId],
+        );
+
+        // ب) استعادة نوع وكمية أي حركة تسوية يدوية (adjust) حوّلها _healItemNameConflict إلى شراء/بيع
+        try {
+          final mutatedMoves = await db.query(
+            'stock_moves',
+            columns: ['id', 'kind'],
+            where:
+                "(item_id = ? OR item_id = ?) AND notes LIKE 'تسوية كمية من شاشة المخزون%' AND kind != 'adjust'",
+            whereArgs: [origId, splitId],
+          );
+          for (final mm in mutatedMoves) {
+            final moveId = mm['id'];
+            if (moveId == null) continue;
+            final moveOps = await db.query(
+              'operations',
+              columns: ['payload'],
+              where: "entity_type = 'stockMove' AND entity_id = ?",
+              whereArgs: ['$moveId'],
+              orderBy: 'version DESC, timestamp DESC',
+              limit: 1,
+            );
+            if (moveOps.isNotEmpty) {
+              final dec = jsonDecode('${moveOps.first['payload'] ?? ''}');
+              if (dec is Map && dec['kind'] == 'adjust' && dec['quantity'] != null) {
+                await db.update(
+                  'stock_moves',
+                  {
+                    'kind': 'adjust',
+                    'quantity': (dec['quantity'] as num).toDouble(),
+                  },
+                  where: 'id = ?',
+                  whereArgs: [moveId],
+                );
+              }
+            }
+          }
+        } catch (_) {}
+
+        // ج) إعادة توجيه كافة حركات المخزون وسطور الفواتير من المعرف المفصول إلى المعرف الأصلي
+        await db.update(
+          'stock_moves',
+          {'item_id': origId},
+          where: 'item_id = ?',
+          whereArgs: [splitId],
+        );
+        await db.update(
+          'transaction_items',
+          {'item_id': origId},
+          where: 'item_id = ?',
+          whereArgs: [splitId],
+        );
+
+        // د) بناء الصف الصحيح للصنف الأصلي من سجل عملياته الأصلي والصفين المحليين
+        final origRows = await db.query(
+          'items',
+          where: 'id = ?',
+          whereArgs: [origId],
+          limit: 1,
+        );
+        final splitRows = await db.query(
+          'items',
+          where: 'id = ?',
+          whereArgs: [splitId],
+          limit: 1,
+        );
+        final origOps = await db.query(
+          'operations',
+          columns: ['op_type', 'payload', 'version', 'timestamp'],
+          where: "entity_type = 'item' AND entity_id = ?",
+          whereArgs: ['$origId'],
+          orderBy: 'version ASC, timestamp ASC',
+        );
+
+        final merged = <String, Object?>{};
+        if (splitRows.isNotEmpty) {
+          merged.addAll(splitRows.first);
+        }
+        if (origRows.isNotEmpty) {
+          for (final kv in origRows.first.entries) {
+            if (kv.value != null && '${kv.value}'.trim().isNotEmpty) {
+              merged[kv.key] = kv.value;
+            }
+          }
+        }
+
+        String? createOpName;
+        String? latestOpName;
+        for (final opRow in origOps) {
+          final opType = '${opRow['op_type'] ?? ''}'.trim();
+          if (opType == 'delete') continue;
+          final rawPayload = '${opRow['payload'] ?? ''}'.trim();
+          if (rawPayload.isEmpty) continue;
+          try {
+            final dec = jsonDecode(rawPayload);
+            if (dec is Map) {
+              final opName = '${dec['name'] ?? ''}'.trim();
+              if (opType == 'create' && opName.isNotEmpty && createOpName == null) {
+                createOpName = opName;
+              }
+              if (opName.isNotEmpty) {
+                latestOpName = opName;
+              }
+              for (final entryKv in dec.entries) {
+                final k = '${entryKv.key}';
+                if (!itemCols.contains(k) || k == 'id') continue;
+                if (entryKv.value != null) {
+                  merged[k] = entryKv.value;
+                }
+              }
+            }
+          } catch (_) {}
+        }
+
+        // اختيار الاسم الأحدث إذا كان أحد الصفين يحمل اسم التأسيس القديم والآخر يحمل الاسم المعدّل
+        final origCleanName = origRows.isNotEmpty
+            ? '${origRows.first['name'] ?? ''}'.replaceAll(localSuffixRe, '').trim()
+            : '';
+        final splitCleanName = splitRows.isNotEmpty
+            ? '${splitRows.first['name'] ?? ''}'.replaceAll(localSuffixRe, '').trim()
+            : '';
+        if (latestOpName != null && latestOpName.isNotEmpty) {
+          merged['name'] = latestOpName.replaceAll(localSuffixRe, '').trim();
+        }
+        if (createOpName != null &&
+            origCleanName.isNotEmpty &&
+            splitCleanName.isNotEmpty &&
+            origCleanName.toLowerCase() != splitCleanName.toLowerCase()) {
+          if (origCleanName.toLowerCase() == createOpName.toLowerCase() &&
+              splitCleanName.toLowerCase() != createOpName.toLowerCase()) {
+            merged['name'] = splitCleanName;
+          } else if (splitCleanName.toLowerCase() == createOpName.toLowerCase() &&
+              origCleanName.toLowerCase() != createOpName.toLowerCase()) {
+            merged['name'] = origCleanName;
+          }
+        }
+
+        // حذف الصف المفصول أولاً لمنع أي تصادم على الفهارس الفريدة (name / plu)
+        await db.delete('items', where: 'id = ?', whereArgs: [splitId]);
+
+        if (merged.isNotEmpty) {
+          final cleanRow = <String, Object?>{
+            for (final kv in merged.entries)
+              if (itemCols.contains(kv.key)) kv.key: kv.value,
+          };
+          cleanRow['id'] = origId;
+          if (cleanRow['name'] is String) {
+            cleanRow['name'] =
+                (cleanRow['name'] as String).replaceAll(localSuffixRe, '').trim();
+          }
+          if (itemCols.contains('is_deleted')) cleanRow['is_deleted'] = 0;
+          if (itemCols.contains('is_active')) cleanRow['is_active'] = 1;
+          if (itemCols.contains('deleted_at')) cleanRow['deleted_at'] = '';
+          if (itemCols.contains('updated_at')) cleanRow['updated_at'] = nowIso;
+          await db.insert(
+            'items',
+            cleanRow,
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        }
+
+        // هـ) تطهير العمليات الوهمية الخاصة بالمعرف المفصول وسلة المهملات والـ remap
+        try {
+          await db.delete(
+            'sync_queue',
+            where:
+                "operation_id IN (SELECT id FROM operations WHERE entity_type = 'item' AND entity_id = ?)",
+            whereArgs: ['$splitId'],
+          );
+          await db.delete(
+            'operations',
+            where: "entity_type = 'item' AND entity_id = ?",
+            whereArgs: ['$splitId'],
+          );
+          await db.delete(
+            'sync_meta',
+            where: "key LIKE ? OR value = ?",
+            whereArgs: ['item_id_remap:%:$origId', '$splitId'],
+          );
+          await db.delete(
+            'trash',
+            where:
+                "store = 'items' AND (payload LIKE ? OR payload LIKE ?)",
+            whereArgs: ['%"id":$origId%', '%"id":$splitId%'],
+          );
+        } catch (_) {}
+
+        final cKey1 =
+            'item_conflict:${origId < splitId ? origId : splitId}_${origId < splitId ? splitId : origId}';
+        conflictKeysToRemove.add(cKey1);
+        healed++;
+      }
+
+      // 5. حذف كافة سجلات وإشعارات التعارض الوهمية المرتبطة بالمعرفات المفصولة
+      for (final cKey in conflictKeysToRemove) {
+        await db.delete('settings', where: 'key = ?', whereArgs: [cKey]);
+        await db.delete(
+          'notifications',
+          where: "entity_type = 'item_conflict' AND entity_id = ?",
+          whereArgs: [cKey],
+        );
+        try {
+          await db.delete(
+            'sync_queue',
+            where:
+                "operation_id IN (SELECT id FROM operations WHERE entity_type = 'setting' AND entity_id = ?)",
+            whereArgs: [cKey],
+          );
+        } catch (_) {}
+      }
+
+      // 6. إعادة مطابقة أرصدة المخزون فوراً بعد استعادة الحركات والفواتير للمعرفات الأصلية
+      await reconcileInventoryQuantities(db);
+
+      // 7. دفع حالة التصحيح للسحابة (حذف المعرفات المفصولة وتثبيت المعرفات الأصلية) إن توفر repo
+      if (repo != null && healed > 0) {
+        try {
+          for (final entry in splitToOrig.entries) {
+            final splitId = entry.key;
+            var origId = entry.value;
+            while (splitToOrig.containsKey(origId) &&
+                splitToOrig[origId] != origId) {
+              origId = splitToOrig[origId]!;
+            }
+            await repo.queueOperation(
+              entityType: EntityKind.item,
+              entityId: '$splitId',
+              opType: OpKind.delete_,
+              payload: {
+                'id': splitId,
+                'is_deleted': 1,
+                'deleted_at': nowIso,
+                '__conflict_resolved': true,
+              },
+              executor: db,
+            );
+            final origAfter = await db.query(
+              'items',
+              where: 'id = ?',
+              whereArgs: [origId],
+              limit: 1,
+            );
+            if (origAfter.isNotEmpty) {
+              final payload = Map<String, Object?>.from(origAfter.first)
+                ..['id'] = origId
+                ..['__qty_changed'] = 1
+                ..['__reconciled'] = true
+                ..['__conflict_resolved'] = true;
+              await repo.queueOperation(
+                entityType: EntityKind.item,
+                entityId: '$origId',
+                opType: OpKind.update,
+                payload: payload,
+                executor: db,
+              );
+            }
+          }
+        } catch (_) {}
+      }
+    } catch (e) {
+      debugPrint('autoHealFalseItemIdSplits error: $e');
+    }
+    return healed;
   }
 
   /// (PR-3+) تشغيل الشفاء الذاتي للأصناف العالقة بدون قسم برمجياً أو في الاختبارات

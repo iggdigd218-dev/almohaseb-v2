@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:sqflite/sqflite.dart';
 
 import 'db_init.dart';
@@ -23,9 +24,24 @@ class AppDatabase {
 
   static Database? _db;
   static Future<Database>? _opening;
+  static int _openGeneration = 0;
+  static Future<void> _switchChain = Future<void>.value();
+  static Future<void>? _backupCopyLock;
   static String _activeWorkspaceId = defaultWorkspaceIdConst;
   static bool _isTestOverride = false;
-  static const int _version = 30;
+  static const int _version = 31;
+
+  /// آخر أخطاء إصلاح المخطط المسجلة (لتفادي الابتلاع الصامت للأخطاء البنيوية).
+  static final List<String> lastSchemaErrors = <String>[];
+
+  static void _recordSchemaError(String context, Object error) {
+    final msg = '[$context] $error';
+    debugPrint('[AppDatabase] Schema error: $msg');
+    lastSchemaErrors.add(msg);
+    if (lastSchemaErrors.length > 50) {
+      lastSchemaErrors.removeAt(0);
+    }
+  }
 
   /// مفتاح التخزين الدائم للمنشأة النشطة في SharedPreferences
   static const String kPrefActiveWorkspaceId = 'nexora_active_workspace_id';
@@ -95,80 +111,128 @@ class AppDatabase {
     _isTestOverride = true;
   }
 
-  Future<Database> get database {
-    if (_db != null) {
-      if (_db!.isOpen) return Future.value(_db!);
-      if (!_isTestOverride) {
-        _db = null;
-        _opening = null;
-      } else {
-        return Future.value(_db!);
+  Future<Database> get database async {
+    if (_backupCopyLock != null) {
+      await _backupCopyLock;
+    }
+    while (true) {
+      if (_db != null) {
+        if (_db!.isOpen) return _db!;
+        if (!_isTestOverride) {
+          _db = null;
+          _opening = null;
+        } else {
+          return _db!;
+        }
+      }
+      final existingOpen = _opening;
+      if (existingOpen != null) {
+        final db = await existingOpen;
+        if (db.isOpen && identical(_db, db)) return db;
+        continue;
+      }
+      final gen = _openGeneration;
+      final fut = () async {
+        if (_activeWorkspaceId == defaultWorkspaceIdConst && !_isTestOverride) {
+          try {
+            final prefs = await SharedPreferences.getInstance();
+            final saved = (prefs.getString(kPrefActiveWorkspaceId) ?? '').trim();
+            if (saved.isNotEmpty && saved != defaultWorkspaceIdConst) {
+              _activeWorkspaceId = saved;
+            }
+          } catch (_) {}
+        }
+        final targetWs = _activeWorkspaceId;
+        final db = await _openDb(targetWs);
+        if (gen != _openGeneration) {
+          // وقع إغلاق أو تبديل لمساحة العمل أثناء الفتح — نغلق الاتصال البائد فوراً.
+          try {
+            if (db.isOpen) await db.close();
+          } catch (_) {}
+          throw StateError('db-open-superseded');
+        }
+        _db = db;
+        return db;
+      }();
+      _opening = fut;
+      try {
+        return await fut;
+      } catch (e, st) {
+        if (identical(_opening, fut)) {
+          _opening = null;
+        }
+        if (e is StateError && e.message == 'db-open-superseded') {
+          continue;
+        }
+        Error.throwWithStackTrace(e, st);
       }
     }
-    if (_opening != null) return _opening!;
-    if (_activeWorkspaceId == defaultWorkspaceIdConst && !_isTestOverride) {
-      _opening = () async {
-        try {
-          final prefs = await SharedPreferences.getInstance();
-          final saved = (prefs.getString(kPrefActiveWorkspaceId) ?? '').trim();
-          if (saved.isNotEmpty && saved != defaultWorkspaceIdConst) {
-            _activeWorkspaceId = saved;
-          }
-        } catch (_) {}
-        try {
-          final db = await _openDb(_activeWorkspaceId);
-          _db = db;
-          return db;
-        } catch (e, st) {
-          _opening = null;
-          Error.throwWithStackTrace(e, st);
-        }
-      }();
-      return _opening!;
-    }
-    return _opening ??= _openDb(_activeWorkspaceId).then((db) {
-      _db = db;
-      return db;
-    }, onError: (Object e, StackTrace st) {
-      _opening = null;
-      Error.throwWithStackTrace(e, st);
+  }
+
+  /// تنفيذ عملية محمية بتسلسل التبديل لمنع التداخل بين فتح القواعد وإغلاقها أو نسخها.
+  static Future<T> _serializeSwitch<T>(Future<T> Function() action) {
+    final completer = Completer<T>();
+    _switchChain = _switchChain.then((_) async {
+      try {
+        completer.complete(await action());
+      } catch (e, st) {
+        completer.completeError(e, st);
+      }
+    });
+    return completer.future;
+  }
+
+  /// حارس نسخ احتياطي: يضمن عدم تداخل `wal_checkpoint(TRUNCATE)` مع فتح/إغلاق منافس.
+  static Future<T> runWithBackupCopyGuard<T>(Future<T> Function() action) {
+    return _serializeSwitch(() async {
+      final c = Completer<void>();
+      _backupCopyLock = c.future;
+      try {
+        return await action();
+      } finally {
+        _backupCopyLock = null;
+        c.complete();
+      }
     });
   }
 
   /// التبديل إلى قاعدة بيانات مساحة عمل محددة (`nexora_${workspaceId}.db`).
   /// يغلق الاتصال الحالي (إن لم يكن حقناً اختبارياً في الذاكرة) ويفتح القاعدة الخاصة بالمنشأة.
-  Future<Database?> openForWorkspace(String? workspaceId) async {
-    final targetWs = (workspaceId == null || workspaceId.trim().isEmpty)
-        ? defaultWorkspaceIdConst
-        : workspaceId.trim();
-    if (_isTestOverride && _db != null) {
-      _activeWorkspaceId = targetWs;
-      if (targetWs != defaultWorkspaceIdConst && _db!.isOpen) {
-        await ensureWorkspaceRow(_db!, targetWs);
+  Future<Database?> openForWorkspace(String? workspaceId) {
+    return _serializeSwitch(() async {
+      final targetWs = (workspaceId == null || workspaceId.trim().isEmpty)
+          ? defaultWorkspaceIdConst
+          : workspaceId.trim();
+      if (_isTestOverride && _db != null) {
+        _activeWorkspaceId = targetWs;
+        if (targetWs != defaultWorkspaceIdConst && _db!.isOpen) {
+          await ensureWorkspaceRow(_db!, targetWs);
+        }
+        return _db!;
       }
-      return _db!;
-    }
-    // حفظ المنشأة في SharedPreferences لضمان استمرارية فتحها عند إغلاق التطبيق وإعادة تشغيله
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      if (targetWs == defaultWorkspaceIdConst) {
-        await prefs.remove(kPrefActiveWorkspaceId);
-      } else {
-        await prefs.setString(kPrefActiveWorkspaceId, targetWs);
-      }
-    } catch (_) {}
+      // حفظ المنشأة في SharedPreferences لضمان استمرارية فتحها عند إغلاق التطبيق وإعادة تشغيله
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        if (targetWs == defaultWorkspaceIdConst) {
+          await prefs.remove(kPrefActiveWorkspaceId);
+        } else {
+          await prefs.setString(kPrefActiveWorkspaceId, targetWs);
+        }
+      } catch (_) {}
 
-    if (_db != null && _activeWorkspaceId == targetWs && _db!.isOpen) {
-      return _db!;
-    }
-    final hadOpenDb = _db != null || _opening != null;
-    await close();
-    await _preserveDefaultDbWorkspaceIfNeeded();
-    _activeWorkspaceId = targetWs;
-    if (!hadOpenDb) {
-      return null;
-    }
-    return database;
+      if (_db != null && _activeWorkspaceId == targetWs && _db!.isOpen) {
+        return _db!;
+      }
+      final hadOpenDb = _db != null || _opening != null;
+      await close();
+      await _preserveDefaultDbWorkspaceIfNeeded();
+      _openGeneration++;
+      _activeWorkspaceId = targetWs;
+      if (!hadOpenDb) {
+        return null;
+      }
+      return database;
+    });
   }
 
   /// إذا كانت القاعدة الافتراضية (`nexora.db`) تحتوي على منشأة مُعدّة (`sync.workspaceId != default`)
@@ -496,17 +560,27 @@ class AppDatabase {
         }
         // (3.98.39 / D1-D2) ترميم الأعمدة الحرجة في **كل** فتح — خارج بوابة
         // alreadyEnsured — فلا يتكرر عطل «العمود الناقص» على الأجهزة المُرقّاة.
-        await ensureLatestColumns(db);
+        await ensureLatestColumns(db, skipIfDatesHealedForVersion: true);
         await repairOwnerAdminStatus(db);
       },
     );
   }
 
   Future<void> close() async {
+    _openGeneration++;
+    final pending = _opening;
     final db = _db;
     _db = null;
     _opening = null;
     _isTestOverride = false;
+    if (pending != null) {
+      try {
+        final opened = await pending;
+        if (opened.isOpen) {
+          await opened.close();
+        }
+      } catch (_) {}
+    }
     if (db != null && db.isOpen) {
       try {
         await db.close();
@@ -514,8 +588,9 @@ class AppDatabase {
     }
   }
 
-  /// استبدال ملف قاعدة البيانات المحلية بأمان بملف مستخرج من حزمة (.nexora)
-  /// بعد إغلاق الاتصال وتنظيف ملفات WAL/SHM ثم إعادة فتح الاتصال وترميم المخطط.
+  /// استبدال ملف قاعدة البيانات المحلية ذرياً وبأمان بملف مستخرج من حزمة (.nexora)
+  /// مع فحص القاعدة الجديدة قبل الإغلاق، والاحتفاظ بنسخة تراجع (.restore_bak)
+  /// لاستعادتها تلقائياً في حال فشل الاستبدال أو الفتح.
   Future<Database> replaceDatabaseFile(
     File sourceDbFile, {
     String? workspaceId,
@@ -523,16 +598,43 @@ class AppDatabase {
     if (!await sourceDbFile.exists()) {
       throw StateError('ملف قاعدة البيانات المستخرج غير موجود.');
     }
-    final targetWs = (workspaceId != null && workspaceId.trim().isNotEmpty)
-        ? workspaceId.trim()
-        : _activeWorkspaceId;
-    String? currentPath;
-    if (_db != null) {
-      currentPath = _db!.path;
-    }
-    await close();
-    _activeWorkspaceId = targetWs;
+    Database? preCheckDb;
     try {
+      preCheckDb = await openDatabase(
+        sourceDbFile.path,
+        readOnly: true,
+        singleInstance: false,
+      );
+      final qc = await preCheckDb.rawQuery('PRAGMA quick_check');
+      if (qc.isNotEmpty) {
+        final status = '${qc.first.values.first ?? ''}'.trim().toLowerCase();
+        if (status.isNotEmpty && status != 'ok') {
+          throw StateError('فشل فحص سلامة قاعدة البيانات المستخرجة: $status');
+        }
+      }
+    } finally {
+      try {
+        await preCheckDb?.close();
+      } catch (_) {}
+    }
+
+    return _serializeSwitch(() async {
+      final targetWs = (workspaceId != null && workspaceId.trim().isNotEmpty)
+          ? workspaceId.trim()
+          : _activeWorkspaceId;
+      String? currentPath;
+      if (_db != null) {
+        currentPath = _db!.path;
+        if (_db!.isOpen) {
+          try {
+            await _db!.rawQuery('PRAGMA wal_checkpoint(TRUNCATE)');
+          } catch (_) {}
+        }
+      }
+      await close();
+      _openGeneration++;
+      _activeWorkspaceId = targetWs;
+
       final dir = await databaseDirectory();
       final targetPath = (currentPath != null &&
               currentPath.isNotEmpty &&
@@ -541,26 +643,84 @@ class AppDatabase {
           ? currentPath
           : p.join(dir, dbFileNameFor(targetWs));
 
-      // حذف ملفات الـ WAL و الـ SHM المؤقتة لمنع أي تعارض أو تلف بعد الاستبدال.
-      for (final suffix in ['-wal', '-shm', '-journal']) {
-        final walFile = File('$targetPath$suffix');
-        if (await walFile.exists()) {
-          try {
-            await walFile.delete();
-          } catch (_) {}
+      final targetFile = File(targetPath);
+      await targetFile.parent.create(recursive: true);
+      final rollbackFile = File('$targetPath.restore_bak');
+      final stagingFile = File('$targetPath.restore_tmp');
+      var hasRollback = false;
+
+      Future<void> cleanWalSidecars() async {
+        for (final suffix in ['-wal', '-shm', '-journal']) {
+          final walFile = File('$targetPath$suffix');
+          if (await walFile.exists()) {
+            try {
+              await walFile.delete();
+            } catch (_) {}
+          }
         }
       }
 
-      final targetFile = File(targetPath);
-      await targetFile.parent.create(recursive: true);
-      await sourceDbFile.copy(targetPath);
-      return await database;
-    } catch (_) {
       try {
-        await database;
-      } catch (_) {}
-      rethrow;
-    }
+        if (await rollbackFile.exists()) {
+          await rollbackFile.delete();
+        }
+        if (await stagingFile.exists()) {
+          await stagingFile.delete();
+        }
+        if (await targetFile.exists()) {
+          await targetFile.copy(rollbackFile.path);
+          hasRollback = true;
+        }
+
+        await sourceDbFile.copy(stagingFile.path);
+        final srcLen = await sourceDbFile.length();
+        final stgLen = await stagingFile.length();
+        if (stgLen <= 0 || stgLen != srcLen) {
+          throw StateError('عدم تطابق حجم ملف قاعدة البيانات المؤقت.');
+        }
+
+        await cleanWalSidecars();
+        if (await targetFile.exists()) {
+          await targetFile.delete();
+        }
+        await stagingFile.rename(targetPath);
+
+        final reopened = await database;
+        await reopened.rawQuery('SELECT count(*) FROM sqlite_master');
+        return reopened;
+      } catch (e) {
+        try {
+          await close();
+        } catch (_) {}
+        try {
+          if (await stagingFile.exists()) {
+            await stagingFile.delete();
+          }
+        } catch (_) {}
+        if (hasRollback && await rollbackFile.exists()) {
+          try {
+            await cleanWalSidecars();
+            if (await targetFile.exists()) {
+              await targetFile.delete();
+            }
+            await rollbackFile.copy(targetPath);
+          } catch (_) {}
+        }
+        try {
+          await database;
+        } catch (_) {}
+        rethrow;
+      } finally {
+        try {
+          if (await stagingFile.exists()) await stagingFile.delete();
+        } catch (_) {}
+        try {
+          if (hasRollback && await rollbackFile.exists()) {
+            await rollbackFile.delete();
+          }
+        } catch (_) {}
+      }
+    });
   }
 
   /// إنشاء كل الجداول — مستقل ليُستخدم في الاختبارات أيضًا.
@@ -884,64 +1044,29 @@ class AppDatabase {
   /// فآمنة للتكرار في كل إقلاع، وأي خطأ غير متوقع يُبتلع حتى لا يُسقط
   /// التطبيق عند الفتح (لا يُفترض أن يحدث، لكنه خط دفاع أخير).
   static Future<void> ensureFullSchema(Database db) async {
-    try {
-      await _ensureCoreSyncTables(db);
-    } catch (_) {}
-    try {
-      // ينشئ جداول الأعمال الناقصة (idempotent) ويتجاوز تعارض الجداول.
-      await createSchema(db);
-    } catch (_) {
-      // حتى لو فشل السكربت متعدد الجُمل، لا تنهار الباقي.
+    Future<void> runStep(String label, Future<void> Function() fn) async {
+      try {
+        await fn();
+      } catch (e) {
+        if (!_isAlreadyExistsError('$e')) {
+          _recordSchemaError(label, e);
+        }
+      }
     }
-    try {
-      // (دفعة 57) قواعد قديمة فُتحت بلا onUpgrade (نفس الرقم) لكن ناقصة
-      // أعمدة v21 — الهجرة idempotent فتصلح أي نقص عند كل فتح.
-      await migrateToV21(db);
-    } catch (_) {}
-    try {
-      // (دفعة 58) اجتثاث بقايا LAN عند كل فتح — idempotent بالكامل.
-      await migrateToV22(db);
-    } catch (_) {}
-    try {
-      // (2026-09-22) عمود الأب لشجرة الفئات — idempotent: قواعد قديمة
-      // أُنشئ جدولها قبل إضافة parent_id تُرقّى عند كل فتح.
-      await migrateToV23(db);
-    } catch (_) {}
-    try {
-      // (2026-09-22) عمود القسم — مُرقّى هنا أيضاً احتياطاً بعد إصلاح
-      // سلسلة onUpgrade أعلاه (قاعدة فُتحت بلا هجرة تبقى عاملة).
-      await migrateToV24(db);
-    } catch (_) {}
-    try {
-      // (2026-09-24) ترميم ذاتي صريح: إن تعذّرت الهجرتان لأي سبب (قاعدة
-      // مستوردة، هجرة فاشلة سابقاً، PRAGMA غير متاح) نضيف العمودين بـ ALTER
-      // مباشر داخل try/catch — لا انهيار عند الفتح، ولا استثناء في الواجهة.
-      await ensureItemCategoryColumns(db);
-    } catch (_) {}
-    try {
-      // (2026-09-24) أعمدة هوية الأقسام — نفس المنطق: ترميم مباشر إن
-      // تعذّرت الهجرة لأي سبب.
-      await ensureSectionColumns(db);
-    } catch (_) {}
-    try {
-      // (2026-09-24) عمود الترقيم السريع (PLU): ترميم ذاتي عند كل فتح —
-      // قاعدة مستوردة أو هجرة فاشلة تبقى عاملة، ويُرقّم ما بلا رقم فقط.
-      await migrateToV26(db);
-    } catch (_) {}
-    try {
-      // (R3) ترحيل الأرصدة القديمة: ترقية فواتير البيع الآجل أو الجزئي المسجلة
-      // تاريخياً بنوع revenue ولديها account_id إلى نوع debit.
-      await migrateToV27(db);
-    } catch (_) {}
-    try {
-      // (M3 - v29) عمود original_tx_id المفهرس لربط مرتجعات المبيعات بالفاتورة الأصلية.
-      await migrateToV29(db);
-    } catch (_) {}
-    try {
-      // (3.98.39 / D1-D2) عمود exclude_from_shortages + فهرس الأصناف
-      // + فهرس الفئات المركّب — idempotent تماماً.
-      await migrateToV30(db);
-    } catch (_) {}
+
+    await runStep('_ensureCoreSyncTables', () => _ensureCoreSyncTables(db));
+    await runStep('createSchema', () => createSchema(db));
+    await runStep('migrateToV21', () => migrateToV21(db));
+    await runStep('migrateToV22', () => migrateToV22(db));
+    await runStep('migrateToV23', () => migrateToV23(db));
+    await runStep('migrateToV24', () => migrateToV24(db));
+    await runStep('ensureItemCategoryColumns', () => ensureItemCategoryColumns(db));
+    await runStep('ensureSectionColumns', () => ensureSectionColumns(db));
+    await runStep('migrateToV26', () => migrateToV26(db));
+    await runStep('migrateToV27', () => migrateToV27(db));
+    await runStep('migrateToV29', () => migrateToV29(db));
+    await runStep('migrateToV30', () => migrateToV30(db));
+    await runStep('migrateToV31', () => migrateToV31(db));
     try {
       // (2026-09-26) أعمدة حالة الحذف والنشاط للأصناف (is_deleted, is_active)
       await _addColumn(db, 'items', 'is_deleted', 'INTEGER NOT NULL DEFAULT 0');
@@ -1228,12 +1353,16 @@ class AppDatabase {
   ) async {
     try {
       final cols = await db.rawQuery('PRAGMA table_info($table)');
+      if (cols.isEmpty) return;
       if (cols.any((c) => c['name'] == column)) return;
-    } catch (_) {}
+    } catch (e) {
+      _recordSchemaError('pragma_table_info:$table.$column', e);
+    }
     try {
       await db.execute('ALTER TABLE $table ADD COLUMN $column $type');
-    } catch (_) {
-      // العمود موجود أصلاً أو الجدول لم يُنشأ بعد — ليس خطأً قاتلاً.
+    } catch (e) {
+      if (_isAlreadyExistsError('$e')) return;
+      _recordSchemaError('alter:$table.$column', e);
     }
   }
 
@@ -1572,8 +1701,7 @@ class AppDatabase {
   static bool _isAlreadyExistsError(String msg) {
     final m = msg.toLowerCase();
     return m.contains('already exists') ||
-        m.contains('duplicate column') ||
-        m.contains('error code 1)');
+        m.contains('duplicate column');
   }
 
   /// يقسّم سكربت SQL إلى جُمل على الفواصل المنقوطة خارج الأقواس/النصوص.
@@ -1909,6 +2037,10 @@ class AppDatabase {
     // ====== v30: عمود استبعاد النواقص + فهرس الفئات المركّب (D1/D2/D4) ======
     if (from < 30) {
       await migrateToV30(db);
+    }
+    // ====== v31: توحيد قيود REFERENCES في item_categories و items ======
+    if (from < 31) {
+      await migrateToV31(db);
     }
     // ====== v17: ضمان المخطط الكامل عند كل فتح (إصلاح قواعد ويندوز الناقصة) ======
     // أي جدول ناقص من بناء سابق يُنشأ، والبذرة idempotent. هذا يغلق نهائيًا
@@ -2310,22 +2442,366 @@ class AppDatabase {
       await db.execute('DROP INDEX IF EXISTS idx_item_categories_name');
     } catch (_) {}
     try {
+      final rows = await db.query(
+        'sync_meta',
+        columns: ['value'],
+        where: 'key = ?',
+        whereArgs: ['schema_ensured_v'],
+        limit: 1,
+      );
+      final currentV = int.tryParse('${rows.isEmpty ? "" : rows.first["value"]}') ?? 0;
+      if (currentV < 30) {
+        await db.insert(
+          'sync_meta',
+          {'key': 'schema_ensured_v', 'value': '30'},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+    } catch (_) {}
+  }
+
+  /// (v31 — M1) توحيد قيود المفاتيح الأجنبية `REFERENCES` في جدولي `item_categories` و `items`
+  /// بين التثبيت الجديد وقواعد البيانات المُرقّاة التي أُضيفت لها الأعمدة عبر ALTER TABLE بلا REFERENCES.
+  static Future<void> migrateToV31(Database db) async {
+    await ensureItemCategoryColumns(db);
+    await _addColumn(db, 'items', 'section_id', 'INTEGER');
+    await _addColumn(db, 'items', 'category_id', 'INTEGER');
+    await _addColumn(
+      db,
+      'items',
+      'exclude_from_shortages',
+      'INTEGER NOT NULL DEFAULT 0',
+    );
+    await _addColumn(db, 'items', 'is_deleted', 'INTEGER NOT NULL DEFAULT 0');
+    await _addColumn(db, 'items', 'is_active', 'INTEGER NOT NULL DEFAULT 1');
+
+    bool hasFk(List<Map<String, Object?>> fks, String fromCol, String targetTable) {
+      return fks.any((row) =>
+          '${row['from'] ?? ''}'.toLowerCase() == fromCol.toLowerCase() &&
+          '${row['table'] ?? ''}'.toLowerCase() == targetTable.toLowerCase());
+    }
+
+    final catFks = await db.rawQuery('PRAGMA foreign_key_list(item_categories)');
+    final itemFks = await db.rawQuery('PRAGMA foreign_key_list(items)');
+    final needCatRebuild = !hasFk(catFks, 'parent_id', 'item_categories') ||
+        !hasFk(catFks, 'section_id', 'sections');
+    final needItemRebuild = !hasFk(itemFks, 'section_id', 'sections') ||
+        !hasFk(itemFks, 'category_id', 'item_categories');
+
+    try {
+      await db.execute('''
+        UPDATE item_categories
+        SET parent_id = NULL
+        WHERE parent_id IS NOT NULL
+          AND (parent_id = id OR parent_id NOT IN (SELECT id FROM item_categories))
+      ''');
+      await db.execute('''
+        UPDATE item_categories
+        SET section_id = NULL
+        WHERE section_id IS NOT NULL
+          AND section_id NOT IN (SELECT id FROM sections)
+      ''');
+      await db.execute('''
+        UPDATE items
+        SET category_id = NULL
+        WHERE category_id IS NOT NULL
+          AND category_id NOT IN (SELECT id FROM item_categories)
+      ''');
+      await db.execute('''
+        UPDATE items
+        SET section_id = NULL
+        WHERE section_id IS NOT NULL
+          AND section_id NOT IN (SELECT id FROM sections)
+      ''');
+    } catch (_) {}
+
+    if (!needCatRebuild && !needItemRebuild) {
+      await _markSchemaVerifiedAndEnsured(db);
+      return;
+    }
+
+    await db.execute('PRAGMA foreign_keys = OFF');
+    final fkCheckRows = await db.rawQuery('PRAGMA foreign_keys');
+    final fkStillOn = fkCheckRows.isNotEmpty &&
+        ((fkCheckRows.first.values.first as num?)?.toInt() ?? 0) == 1;
+    if (fkStillOn) {
+      // سنكمل البناء فور انتهاء المعاملة في onOpen عبر ensureLatestColumns.
+      return;
+    }
+
+    try {
+      await db.transaction((txn) async {
+        await txn.execute('''
+          UPDATE item_categories
+          SET parent_id = NULL
+          WHERE parent_id IS NOT NULL
+            AND (parent_id = id OR parent_id NOT IN (SELECT id FROM item_categories))
+        ''');
+        await txn.execute('''
+          UPDATE item_categories
+          SET section_id = NULL
+          WHERE section_id IS NOT NULL
+            AND section_id NOT IN (SELECT id FROM sections)
+        ''');
+        await txn.execute('''
+          UPDATE items
+          SET category_id = NULL
+          WHERE category_id IS NOT NULL
+            AND category_id NOT IN (SELECT id FROM item_categories)
+        ''');
+        await txn.execute('''
+          UPDATE items
+          SET section_id = NULL
+          WHERE section_id IS NOT NULL
+            AND section_id NOT IN (SELECT id FROM sections)
+        ''');
+
+        if (needCatRebuild) {
+          await txn.execute('DROP TABLE IF EXISTS item_categories_v31');
+          await txn.execute('''
+            CREATE TABLE item_categories_v31 (
+              id            INTEGER PRIMARY KEY AUTOINCREMENT,
+              workspace_id  TEXT NOT NULL DEFAULT 'default',
+              name          TEXT NOT NULL,
+              parent_id     INTEGER NULL REFERENCES item_categories(id) ON DELETE SET NULL,
+              section_id    INTEGER NULL REFERENCES sections(id) ON DELETE SET NULL,
+              icon_key      TEXT DEFAULT '',
+              color_hex     TEXT DEFAULT '',
+              image_path    TEXT DEFAULT '',
+              deleted_at    TEXT DEFAULT '',
+              deleted_by    INTEGER,
+              restore_op_id TEXT DEFAULT '',
+              created_at    TEXT NOT NULL DEFAULT '',
+              updated_at    TEXT NOT NULL DEFAULT ''
+            )
+          ''');
+          await txn.execute('''
+            INSERT INTO item_categories_v31 (
+              id, workspace_id, name, parent_id, section_id,
+              icon_key, color_hex, image_path,
+              deleted_at, deleted_by, restore_op_id, created_at, updated_at
+            )
+            SELECT
+              id,
+              COALESCE(workspace_id, 'default'),
+              name,
+              parent_id,
+              section_id,
+              COALESCE(icon_key, ''),
+              COALESCE(color_hex, ''),
+              COALESCE(image_path, ''),
+              COALESCE(deleted_at, ''),
+              deleted_by,
+              COALESCE(restore_op_id, ''),
+              COALESCE(created_at, ''),
+              COALESCE(updated_at, '')
+            FROM item_categories
+          ''');
+          await txn.execute('DROP TABLE item_categories');
+          await txn.execute(
+              'ALTER TABLE item_categories_v31 RENAME TO item_categories');
+          await txn.execute(
+            'CREATE UNIQUE INDEX IF NOT EXISTS idx_item_categories_parent_name '
+            'ON item_categories(COALESCE(parent_id, 0), name COLLATE NOCASE)',
+          );
+          await txn.execute(
+            'CREATE INDEX IF NOT EXISTS idx_item_cat_ws ON item_categories(workspace_id)',
+          );
+          await txn.execute(
+            'CREATE INDEX IF NOT EXISTS idx_item_cat_parent ON item_categories(parent_id)',
+          );
+          await txn.execute(
+            'CREATE INDEX IF NOT EXISTS idx_cat_section ON item_categories(section_id)',
+          );
+        }
+
+        if (needItemRebuild) {
+          await txn.execute('DROP TABLE IF EXISTS items_v31');
+          await txn.execute('''
+            CREATE TABLE items_v31 (
+              id            INTEGER PRIMARY KEY AUTOINCREMENT,
+              workspace_id  TEXT NOT NULL DEFAULT 'default',
+              name          TEXT NOT NULL,
+              category_id   INTEGER,
+              section_id    INTEGER NULL REFERENCES sections(id) ON DELETE SET NULL,
+              plu           INTEGER,
+              sku           TEXT DEFAULT '',
+              unit          TEXT DEFAULT 'حبة',
+              buy_price     REAL NOT NULL DEFAULT 0,
+              sell_price    REAL NOT NULL DEFAULT 0,
+              quantity      REAL NOT NULL DEFAULT 0,
+              min_quantity  REAL NOT NULL DEFAULT 0,
+              currency      TEXT NOT NULL DEFAULT 'YER',
+              category      TEXT DEFAULT '',
+              notes         TEXT DEFAULT '',
+              image         TEXT DEFAULT '',
+              archived      INTEGER NOT NULL DEFAULT 0,
+              is_deleted    INTEGER NOT NULL DEFAULT 0,
+              is_active     INTEGER NOT NULL DEFAULT 1,
+              exclude_from_shortages INTEGER NOT NULL DEFAULT 0,
+              deleted_at    TEXT DEFAULT '',
+              deleted_by    INTEGER,
+              restore_op_id TEXT DEFAULT '',
+              created_at    TEXT NOT NULL,
+              updated_at    TEXT NOT NULL,
+              FOREIGN KEY (category_id) REFERENCES item_categories (id) ON DELETE SET NULL
+            )
+          ''');
+          await txn.execute('''
+            INSERT INTO items_v31 (
+              id, workspace_id, name, category_id, section_id, plu, sku, unit,
+              buy_price, sell_price, quantity, min_quantity, currency, category,
+              notes, image, archived, is_deleted, is_active, exclude_from_shortages,
+              deleted_at, deleted_by, restore_op_id, created_at, updated_at
+            )
+            SELECT
+              id,
+              COALESCE(workspace_id, 'default'),
+              name,
+              category_id,
+              section_id,
+              plu,
+              COALESCE(sku, ''),
+              COALESCE(unit, 'حبة'),
+              COALESCE(buy_price, 0),
+              COALESCE(sell_price, 0),
+              COALESCE(quantity, 0),
+              COALESCE(min_quantity, 0),
+              COALESCE(currency, 'YER'),
+              COALESCE(category, ''),
+              COALESCE(notes, ''),
+              COALESCE(image, ''),
+              COALESCE(archived, 0),
+              COALESCE(is_deleted, 0),
+              COALESCE(is_active, 1),
+              COALESCE(exclude_from_shortages, 0),
+              COALESCE(deleted_at, ''),
+              deleted_by,
+              COALESCE(restore_op_id, ''),
+              created_at,
+              updated_at
+            FROM items
+          ''');
+          await txn.execute('DROP TABLE items');
+          await txn.execute('ALTER TABLE items_v31 RENAME TO items');
+          await txn.execute(
+              'CREATE INDEX IF NOT EXISTS idx_items_qty ON items(quantity)');
+          await txn.execute(
+              'CREATE INDEX IF NOT EXISTS idx_items_price ON items(sell_price)');
+          await txn.execute(
+              'CREATE INDEX IF NOT EXISTS idx_items_section ON items(section_id)');
+          await txn.execute(
+              'CREATE INDEX IF NOT EXISTS idx_items_plu ON items(plu)');
+          await txn.execute(
+              'CREATE INDEX IF NOT EXISTS idx_items_shortage ON items(exclude_from_shortages)');
+        }
+      });
+    } finally {
+      await db.execute('PRAGMA foreign_keys = ON');
+    }
+
+    final fkViolationsCat =
+        await db.rawQuery('PRAGMA foreign_key_check(item_categories)');
+    final fkViolationsItems =
+        await db.rawQuery('PRAGMA foreign_key_check(items)');
+    if (fkViolationsCat.isNotEmpty || fkViolationsItems.isNotEmpty) {
+      _recordSchemaError(
+        'migrateToV31:fk_check',
+        'FK violations cat=${fkViolationsCat.length}, items=${fkViolationsItems.length}',
+      );
+    }
+    await _markSchemaVerifiedAndEnsured(db);
+  }
+
+  /// التحقق من الأعمدة والجداول الحرجة قبل تسجيل `schema_ensured_v` (M10).
+  static Future<void> _markSchemaVerifiedAndEnsured(Database db) async {
+    try {
+      final checks = <({String table, List<String> cols})>[
+        (
+          table: 'item_categories',
+          cols: ['parent_id', 'section_id', 'deleted_at'],
+        ),
+        (
+          table: 'items',
+          cols: ['category_id', 'section_id', 'exclude_from_shortages'],
+        ),
+        (
+          table: 'transactions',
+          cols: ['original_tx_id'],
+        ),
+        (
+          table: 'operations',
+          cols: ['is_synced'],
+        ),
+      ];
+      for (final c in checks) {
+        final info = await db.rawQuery('PRAGMA table_info(${c.table})');
+        final names = info.map((r) => '${r['name']}').toSet();
+        for (final col in c.cols) {
+          if (!names.contains(col)) {
+            _recordSchemaError(
+              'verifySchema:${c.table}.$col',
+              'missing critical column $col on ${c.table}',
+            );
+            return;
+          }
+        }
+      }
       await db.insert(
         'sync_meta',
         {'key': 'schema_ensured_v', 'value': '$_version'},
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
-    } catch (_) {}
+    } catch (e) {
+      _recordSchemaError('verifySchema', e);
+    }
   }
 
   /// (3.98.39) شبكة أمان دائمة تُستدعى عند **كل فتح** خارج بوابة
-  /// `schema_ensured_v`: تضيف أي عمود حرج أُضيف للمخطط بعد إصدار قاعدة
-  /// المستخدم، فلا يبقى جهاز مُرقّى عاجزاً عن الحفظ أو عن استقبال المزامنة.
-  static Future<void> ensureLatestColumns(Database db) async {
+  /// `schema_ensured_v`: تضمن قيود REFERENCES في v31 وتشغل
+  /// ترميم التواريخ مرة واحدة لكل إصدار مخطط (M12) مع ضمان الأعمدة الحرجة.
+  static Future<void> ensureLatestColumns(
+    Database db, {
+    bool skipIfDatesHealedForVersion = false,
+  }) async {
     try {
       await migrateToV30(db);
-    } catch (_) {}
-    await _healCatalogDates(db);
+    } catch (e) {
+      if (!_isAlreadyExistsError('$e')) {
+        _recordSchemaError('ensureLatestColumns:v30', e);
+      }
+    }
+    try {
+      await migrateToV31(db);
+    } catch (e) {
+      if (!_isAlreadyExistsError('$e')) {
+        _recordSchemaError('ensureLatestColumns:v31', e);
+      }
+    }
+    var datesHealed = false;
+    if (skipIfDatesHealedForVersion) {
+      try {
+        final rows = await db.query(
+          'sync_meta',
+          columns: ['value'],
+          where: 'key = ?',
+          whereArgs: ['catalog_dates_healed_v'],
+          limit: 1,
+        );
+        datesHealed =
+            rows.isNotEmpty && '${rows.first['value'] ?? ''}' == '$_version';
+      } catch (_) {}
+    }
+    if (!datesHealed) {
+      await _healCatalogDates(db);
+      try {
+        await db.insert(
+          'sync_meta',
+          {'key': 'catalog_dates_healed_v', 'value': '$_version'},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      } catch (_) {}
+    }
   }
 
   /// ترميم أي قيم `created_at` أو `updated_at` فارغة أو غير صالحة في جدولي

@@ -110,12 +110,15 @@ class LogoutRequests {
   }) async {
     final em = email.trim().toLowerCase();
     if (em.isEmpty) throw StateError('لا يوجد بريد للمستخدم الحالي.');
+    await _ensureToken();
+    final callerUid = FirebaseAuthRest.currentUid;
     final id = 'lo_${DateTime.now().millisecondsSinceEpoch}_'
         '${em.hashCode.toUnsigned(32).toRadixString(36)}';
     await _putJson(
       '${_root(backendUrl, workspaceId)}/logout_requests/$id.json',
       {
         'id': id,
+        if (callerUid.isNotEmpty) 'uid': callerUid,
         'email': em,
         'name': name,
         'deviceId': repo.deviceId,

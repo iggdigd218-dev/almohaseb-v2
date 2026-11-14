@@ -283,18 +283,8 @@ final summaryProvider = FutureProvider<Summary>((ref) async {
     if (g == 'inflow') inflow += t.amount;
     if (g == 'outflow') outflow += t.amount;
 
-    final desc = t.description.trim();
-    if (desc.startsWith('دفعة مقدمة من فاتورة')) continue;
-    final isRet = desc.startsWith('مرتجع ') ||
-        t.category == 'مرتجع مبيعات' ||
-        t.notes.contains('[ORIG_TX:');
-    final isPosInvoice = (t.id != null && posTxIds.contains(t.id)) ||
-        desc.startsWith('فاتورة نقدية مدفوعة') ||
-        desc.startsWith('فاتورة مبيعات');
-    final isSale = !isRet &&
-        isPosInvoice &&
-        (t.type == OpType.revenue ||
-            (t.type == OpType.debit && t.accountKind != AccountKind.supplier));
+    final isRet = isSalesReturnTx(t);
+    final isSale = isSalesInvoiceTx(t, posTxIds: posTxIds);
     if (isSale) {
       salesByCur[t.currency] = (salesByCur[t.currency] ?? 0) + t.amount;
       totalSales += t.amount;
@@ -605,18 +595,8 @@ final txPageProvider = FutureProvider<TxPage>((ref) async {
     } else if (g == 'outflow') {
       outflow[t.currency] = (outflow[t.currency] ?? 0) + t.amount;
     }
-    final desc = t.description.trim();
-    if (desc.startsWith('دفعة مقدمة من فاتورة')) continue;
-    final isRet = desc.startsWith('مرتجع ') ||
-        t.category == 'مرتجع مبيعات' ||
-        t.notes.contains('[ORIG_TX:');
-    final isPosInvoice = (t.id != null && posTxIds.contains(t.id)) ||
-        desc.startsWith('فاتورة نقدية مدفوعة') ||
-        desc.startsWith('فاتورة مبيعات');
-    final isSale = !isRet &&
-        isPosInvoice &&
-        (t.type == OpType.revenue ||
-            (t.type == OpType.debit && t.accountKind != AccountKind.supplier));
+    final isRet = isSalesReturnTx(t);
+    final isSale = isSalesInvoiceTx(t, posTxIds: posTxIds);
     if (isSale) {
       sales[t.currency] = (sales[t.currency] ?? 0) + t.amount;
     } else if (isRet) {
@@ -754,12 +734,14 @@ class ReportData {
   final List<Account> accounts;
   final Map<int, double> balances;
   final Map<int, int> txCount;
+  final Set<int> posTxIds;
 
   const ReportData({
     required this.txs,
     required this.accounts,
     required this.balances,
     required this.txCount,
+    this.posTxIds = const {},
   });
 }
 
@@ -768,11 +750,15 @@ final reportDataProvider = FutureProvider<ReportData>((ref) async {
   final s = ref.watch(reportScopeProvider);
   final repo = ref.watch(repoProvider);
 
-  var txs = (await repo.transactions(
-    from: s.from,
+  final allUpToEnd = (await repo.transactions(
     to: s.to,
     accountId: s.accountId,
-  )).where((t) => s.currency == null || t.currency == s.currency).toList();
+  ))
+      .where((t) => s.currency == null || t.currency == s.currency)
+      .toList();
+
+  final preTxs = allUpToEnd.where((t) => t.date.isBefore(s.from)).toList();
+  var txs = allUpToEnd.where((t) => !t.date.isBefore(s.from)).toList();
 
   if (s.cashier != null && s.cashier!.isNotEmpty) {
     txs = txs.where((t) {
@@ -783,23 +769,52 @@ final reportDataProvider = FutureProvider<ReportData>((ref) async {
   }
 
   final accounts = await repo.accounts(includeArchived: true);
+  final currencies = await repo.currencies();
+  final posTxIds = await repo.posInvoiceTxIds();
+  final decByCur = <String, int>{
+    for (final c in currencies) c.code.trim().toUpperCase(): c.decimal,
+  };
 
-  // الرصيد ضمن النطاق = الافتتاحي + أثر عمليات النطاق فقط،
-  // تمامًا كما يفعل accountBalance(a, d.txs) في نسخة الويب.
+  double? sameCurEffect(Tx t, Account a) {
+    final tCur = t.currency.trim().toUpperCase();
+    final accCur = a.currency.trim().toUpperCase();
+    final sameCur = tCur.isEmpty || accCur.isEmpty || tCur == accCur;
+    if (t.type != OpType.transfer) {
+      if (!sameCur) return null;
+    } else {
+      if (t.fromId == a.id && !sameCur) return null;
+      if (t.toId == a.id && !sameCur && (t.rate <= 0 || t.rate == 1.0)) {
+        return null;
+      }
+    }
+    return t.effectOn(a.id!);
+  }
+
+  // الرصيد التراكمي حتى نهاية الفترة = الافتتاحي + عمليات ما قبل الفترة + عمليات الفترة
+  // مع عزل صارم للعملات وتقريب حسب منازل عملة كل حساب.
   final balances = <int, double>{};
   final counts = <int, int>{};
   for (final a in accounts) {
+    final id = a.id;
+    if (id == null) continue;
     var bal = a.openingBalance;
+    if (s.cashier == null || s.cashier!.isEmpty) {
+      for (final t in preTxs) {
+        final e = sameCurEffect(t, a);
+        if (e != null) bal += e;
+      }
+    }
     var n = 0;
     for (final t in txs) {
-      final e = t.effectOn(a.id!);
+      final e = sameCurEffect(t, a);
       if (e != null) {
         bal += e;
         n++;
       }
     }
-    balances[a.id!] = bal;
-    counts[a.id!] = n;
+    final dec = decByCur[a.currency.trim().toUpperCase()] ?? 2;
+    balances[id] = Fmt.roundMoney(bal, dec);
+    counts[id] = n;
   }
 
   return ReportData(
@@ -807,6 +822,7 @@ final reportDataProvider = FutureProvider<ReportData>((ref) async {
     accounts: accounts,
     balances: balances,
     txCount: counts,
+    posTxIds: posTxIds,
   );
 });
 

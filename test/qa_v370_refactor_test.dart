@@ -115,9 +115,28 @@ void main() {
       expect(p.canDeleteTx, isFalse);
       expect(p.canViewReports, isFalse);
       expect(p.isAdmin, isFalse);
-      // صف بلا خصم مع حذف مسموح.
-      await repo.upsertUserPermission(
-          email: 'cashier@nexora.app', role: 'cashier', canDeleteTx: true);
+      // محاولة العضو/الكاشير تعديل صلاحياته بنفسه تُرفض (SEC8 fail-closed).
+      await expectLater(
+        repo.upsertUserPermission(
+            email: 'cashier@nexora.app', role: 'cashier', canDeleteTx: true),
+        throwsStateError,
+      );
+      // صف مُزامَن من المدير بلا خصم مع حذف مسموح.
+      await db.insert(
+        'user_permissions',
+        {
+          'user_email': 'cashier@nexora.app',
+          'store_id': repo.requireWorkspaceId,
+          'role': 'cashier',
+          'can_discount': 0,
+          'can_delete_tx': 1,
+          'can_view_reports': 0,
+          'can_manage_items': 0,
+          'is_active': 1,
+          'updated_at': DateTime.now().millisecondsSinceEpoch,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
       p = await repo.effectivePermissions();
       expect(p.canDiscount, isFalse);
       expect(p.canDeleteTx, isTrue);

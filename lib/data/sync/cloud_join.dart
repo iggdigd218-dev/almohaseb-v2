@@ -1128,8 +1128,6 @@ class CloudJoin {
       'conversations',
       'messages',
       'users',
-      'trash',
-      'activity',
       'workspaces',
       'devices',
     ];
@@ -1414,6 +1412,11 @@ class CloudJoin {
         }
         if (bkpData != null &&
             (bkpData['accounts'] != null || bkpData['items'] != null)) {
+          if (snapshotCompactedTs <= 0) {
+            snapshotCompactedTs =
+                (backupRec?['compacted_through_ts'] as num?)?.toInt() ??
+                    DateTime.now().millisecondsSinceEpoch;
+          }
           if (snap == null) {
             snap = bkpData;
           } else {
@@ -1727,6 +1730,7 @@ class CloudJoin {
         canDeleteTx: memberPermStr.contains('delete_tx'),
         canViewReports: memberPermStr.contains('view_reports'),
         canManageItems: memberPermStr.contains('manage_items') || memberPermStr.contains('items'),
+        skipAuthCheck: true,
       );
     } catch (_) {}
 
@@ -1822,6 +1826,11 @@ class CloudJoin {
     await db.delete('sync_meta',
         where: "key LIKE 'last_synced_cursor%' OR key LIKE 'lastCloudTs:%' "
             "OR key LIKE 'lastRosterPush:%' OR key LIKE 'lastLanTs:%'");
+    if (snapshotCompactedTs <= 0 &&
+        (((snap['accounts'] as List?)?.isNotEmpty ?? false) ||
+            ((snap['items'] as List?)?.isNotEmpty ?? false))) {
+      snapshotCompactedTs = DateTime.now().millisecondsSinceEpoch;
+    }
     if (snapshotCompactedTs > 0) {
       final safeCursor =
           snapshotCompactedTs > 60000 ? snapshotCompactedTs - 60000 : 0;
@@ -1834,6 +1843,11 @@ class CloudJoin {
         await db.insert(
           'sync_meta',
           {'key': 'lastCloudTs:$workspaceId', 'value': '$safeCursor'},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        await db.insert(
+          'sync_meta',
+          {'key': 'healedCompactedTs:$workspaceId', 'value': '$snapshotCompactedTs'},
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
       }
@@ -2176,6 +2190,7 @@ class CloudJoin {
             canViewReports: permStr.contains('view_reports'),
             canManageItems: permStr.contains('manage_items') || permStr.contains('items') || permStr.contains('edit_tx') || roleGrantsAdvanced(role),
             sync: false,
+            skipAuthCheck: true,
           );
         }
       } catch (_) {}
@@ -3236,9 +3251,29 @@ class CloudJoin {
         final onlyOurs =
             await _workspaceHasOnlyOurDevice(url, oldLocalWs, ourId);
         if (onlyOurs) {
+          final encOldWs = Uri.encodeComponent(oldLocalWs);
+          final oldWsBase = '$root/workspaces/$encOldWs';
+          for (final sub in const [
+            'operations.json',
+            'roster.json',
+            'devices.json',
+            'invites.json',
+            'joinRequests.json',
+            'logout_requests.json',
+            'evictions.json',
+            'media.json',
+            'revoked_devices.json',
+            'ejected_devices.json',
+            'security_log.json',
+            'meta.json',
+            'members.json',
+          ]) {
+            try {
+              await _delete('$oldWsBase/$sub');
+            } catch (_) {}
+          }
           try {
-            await _delete(
-                '$root/workspaces/${Uri.encodeComponent(oldLocalWs)}.json');
+            await _delete('$root/workspaces/$encOldWs.json');
           } catch (_) {}
         } else {
           // إذا كان عضواً في مؤسسة سابقة، نعزله منها رسمياً
@@ -3755,7 +3790,18 @@ class CloudJoin {
       try {
         final snap =
             await buildWorkspaceSnapshot(repo, hostDeviceId: ourOwnDeviceId);
-        final snapTs = DateTime.now().millisecondsSinceEpoch;
+        var snapTs = DateTime.now().millisecondsSinceEpoch;
+        final dbSnap = await repo.database;
+        if (dbSnap.isOpen) {
+          try {
+            final maxOpRows = await dbSnap.rawQuery(
+              'SELECT MAX(CAST(server_time AS INTEGER)) AS m FROM operations',
+            );
+            final maxOpTs =
+                (maxOpRows.firstOrNull?['m'] as num?)?.toInt() ?? 0;
+            if (maxOpTs > snapTs) snapTs = maxOpTs;
+          } catch (_) {}
+        }
         final snapPayload = {
           'createdAt': now,
           'hostDeviceId': ourOwnDeviceId,
@@ -3765,9 +3811,8 @@ class CloudJoin {
         await _putJson(
           '$root/joinSnapshot.json',
           snapPayload,
-          timeout: const Duration(seconds: 25),
+          timeout: const Duration(seconds: 60),
         );
-        final dbSnap = await repo.database;
         if (dbSnap.isOpen) {
           await dbSnap.insert(
             'sync_meta',
@@ -3783,9 +3828,13 @@ class CloudJoin {
       }
     }
 
-    final snapshotFuture = uploadJoinSnapshotOnly();
-    unawaited(snapshotFuture);
     unawaited(cleanCloudExpulsionOperations());
+    // رفع اللقطة الكاملة للمنشأة أولاً قبل إرسال إشارة approved لضمان استلام العضو للنسخة الفورية
+    // وعدم دخوله في إعادة تشغيل العمليات التاريخية من الصفر.
+    await uploadJoinSnapshotOnly().timeout(
+      const Duration(seconds: 45),
+      onTimeout: () {},
+    );
 
     await Future.wait<void>([
       writeApprovedSignal(),
@@ -3825,13 +3874,6 @@ class CloudJoin {
       ])
         _delete('$root/$node/$encApproved.json').catchError((_) {}),
     ]);
-
-    // نافذة انتظار قصيرة غير معطّلة (600ms) تضمن اكتمال اللقطة فوراً في الشبكات السريعة
-    // والاختبارات دون تأخير إغلاق نافذة المدير في قواعد البيانات الضخمة.
-    await snapshotFuture.timeout(
-      const Duration(milliseconds: 600),
-      onTimeout: () {},
-    );
   }
 
   /// ══ (2026-09-22 — توجيه العمليات بين الأجهزة) ══

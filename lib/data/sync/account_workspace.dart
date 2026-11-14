@@ -3806,7 +3806,21 @@ class AccountWorkspace {
     if (backendUrl.trim().isNotEmpty) {
       final root = _trimSlashes(backendUrl);
       final encWs = Uri.encodeComponent(cleanWs);
+      final wsBase = '$root/workspaces/$encWs';
       final paths = <String>[
+        '$wsBase/operations.json',
+        '$wsBase/roster.json',
+        '$wsBase/devices.json',
+        '$wsBase/invites.json',
+        '$wsBase/joinRequests.json',
+        '$wsBase/logout_requests.json',
+        '$wsBase/evictions.json',
+        '$wsBase/media.json',
+        '$wsBase/revoked_devices.json',
+        '$wsBase/ejected_devices.json',
+        '$wsBase/security_log.json',
+        '$wsBase/meta.json',
+        '$wsBase/members.json',
         '$root/workspaces/$encWs.json',
         '$root/workspaces/_registry/subscriptions_index/$encWs.json',
         '$root/workspaces/_registry/license_hub/licenses/$encWs.json',

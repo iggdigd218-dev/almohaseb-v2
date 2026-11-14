@@ -753,7 +753,6 @@ class _VoucherFormState extends ConsumerState<_VoucherForm> {
                         initialDate: _date,
                         firstDate: DateTime(2015),
                         lastDate: DateTime(2100),
-                        locale: const Locale('ar'),
                       );
                       if (d != null) setState(() => _date = d);
                     },

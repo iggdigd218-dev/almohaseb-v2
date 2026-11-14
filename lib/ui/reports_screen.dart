@@ -94,7 +94,7 @@ class ReportsScreen extends ConsumerWidget {
             loading: () => const Center(child: CircularProgressIndicator()),
             error: (e, _) => EmptyState(
               icon: Icons.error_outline,
-              title: 'تعذّر بناء التقرير',
+              title: context.tr('تعذّر بناء التقرير'),
               message: '$e',
             ),
             data: (d) {
@@ -123,10 +123,10 @@ class ReportsScreen extends ConsumerWidget {
               if (tab == ReportTab.categories) {
                 return FeatureGate(
                   featureKey: 'categories',
-                  featureName: 'التصنيفات',
-                  description:
-                      'صنّف حساباتك وأصنافك واستعرض تقارير مجمّعة لكل '
-                      'تصنيف بضغطة واحدة.',
+                  featureName: context.tr('التصنيفات'),
+                  description: context.tr(
+                    'صنّف حساباتك وأصنافك واستعرض تقارير مجمّعة لكل تصنيف بضغطة واحدة.',
+                  ),
                   child: view,
                 );
               }
@@ -260,7 +260,7 @@ class _ScopeBar extends ConsumerWidget {
                     if (tab == ReportTab.period) ...[
                       const SizedBox(height: 14),
                       Text(
-                        'وحدة تجميع الفترة',
+                        ctx.tr('وحدة تجميع الفترة'),
                         style: TextStyle(
                           fontSize: 12.5,
                           fontWeight: FontWeight.w800,
@@ -274,7 +274,7 @@ class _ScopeBar extends ConsumerWidget {
                         children: PeriodUnit.values.map((u) {
                           return ChoiceChip(
                             selected: unit == u,
-                            label: Text(u.label),
+                            label: Text(ctx.tr(u.label)),
                             onSelected: (_) => rref
                                 .read(periodUnitProvider.notifier)
                                 .state = u,
@@ -284,7 +284,7 @@ class _ScopeBar extends ConsumerWidget {
                     ],
                     const SizedBox(height: 14),
                     Text(
-                      'فترات سريعة',
+                      ctx.tr('فترات سريعة'),
                       style: TextStyle(
                         fontSize: 12.5,
                         fontWeight: FontWeight.w800,
@@ -297,7 +297,7 @@ class _ScopeBar extends ConsumerWidget {
                       runSpacing: 8,
                       children: [
                         ActionChip(
-                          label: const Text('اليوم'),
+                          label: Text(ctx.tr('اليوم')),
                           onPressed: () {
                             final n = DateTime.now();
                             setScope(
@@ -310,7 +310,7 @@ class _ScopeBar extends ConsumerWidget {
                           },
                         ),
                         ActionChip(
-                          label: const Text('هذا الشهر'),
+                          label: Text(ctx.tr('هذا الشهر')),
                           onPressed: () {
                             final n = DateTime.now();
                             setScope(
@@ -323,7 +323,7 @@ class _ScopeBar extends ConsumerWidget {
                           },
                         ),
                         ActionChip(
-                          label: const Text('آخر ٣٠ يومًا'),
+                          label: Text(ctx.tr('آخر ٣٠ يومًا')),
                           onPressed: () {
                             final n = DateTime.now();
                             setScope(
@@ -336,7 +336,7 @@ class _ScopeBar extends ConsumerWidget {
                           },
                         ),
                         ActionChip(
-                          label: const Text('هذه السنة'),
+                          label: Text(ctx.tr('هذه السنة')),
                           onPressed: () {
                             final n = DateTime.now();
                             setScope(
@@ -353,11 +353,11 @@ class _ScopeBar extends ConsumerWidget {
                     ListTile(
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.currency_exchange),
-                      title: const Text(
-                        'العملة',
-                        style: TextStyle(fontWeight: FontWeight.w700),
+                      title: Text(
+                        ctx.tr('العملة'),
+                        style: const TextStyle(fontWeight: FontWeight.w700),
                       ),
-                      subtitle: Text(scope.currency ?? 'كل العملات'),
+                      subtitle: Text(scope.currency ?? ctx.tr('كل العملات')),
                       trailing: const Icon(Icons.chevron_left),
                       onTap: () async {
                         final v = await showModalBottomSheet<String>(
@@ -367,7 +367,7 @@ class _ScopeBar extends ConsumerWidget {
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 ListTile(
-                                  title: const Text('كل العملات'),
+                                  title: Text(ctx.tr('كل العملات')),
                                   onTap: () => Navigator.pop(ctx, ''),
                                 ),
                                 for (final c in currencies)
@@ -390,18 +390,18 @@ class _ScopeBar extends ConsumerWidget {
                     ListTile(
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.person_outline),
-                      title: const Text(
-                        'الحساب',
-                        style: TextStyle(fontWeight: FontWeight.w700),
+                      title: Text(
+                        ctx.tr('الحساب'),
+                        style: const TextStyle(fontWeight: FontWeight.w700),
                       ),
                       subtitle: Text(
                         scope.accountId == null
-                            ? 'كل الحسابات'
+                            ? ctx.tr('كل الحسابات')
                             : (accounts
                                     .where((a) => a.id == scope.accountId)
                                     .firstOrNull
                                     ?.name ??
-                                'حساب'),
+                                ctx.tr('حساب')),
                       ),
                       trailing: const Icon(Icons.chevron_left),
                       onTap: () async {
@@ -412,7 +412,7 @@ class _ScopeBar extends ConsumerWidget {
                               shrinkWrap: true,
                               children: [
                                 ListTile(
-                                  title: const Text('كل الحسابات'),
+                                  title: Text(ctx.tr('كل الحسابات')),
                                   onTap: () => Navigator.pop(ctx, -1),
                                 ),
                                 for (final a in accounts)
@@ -435,14 +435,14 @@ class _ScopeBar extends ConsumerWidget {
                     ListTile(
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.badge_outlined),
-                      title: const Text(
-                        'الكاشير / الموظف',
-                        style: TextStyle(fontWeight: FontWeight.w700),
+                      title: Text(
+                        ctx.tr('الكاشير / الموظف'),
+                        style: const TextStyle(fontWeight: FontWeight.w700),
                       ),
                       subtitle: Text(
                         scope.cashier == null
-                            ? 'كل الكاشيرات'
-                            : 'الكاشير: ${scope.cashier}',
+                            ? ctx.tr('كل الكاشيرات')
+                            : ctx.tr('الكاشير: ${scope.cashier}'),
                       ),
                       trailing: const Icon(Icons.chevron_left),
                       onTap: () async {
@@ -454,7 +454,7 @@ class _ScopeBar extends ConsumerWidget {
                               children: [
                                 ListTile(
                                   leading: const Icon(Icons.people_outline),
-                                  title: const Text('كل الكاشيرات والموظفين'),
+                                  title: Text(ctx.tr('كل الكاشيرات والموظفين')),
                                   onTap: () => Navigator.pop(ctx, ''),
                                 ),
                                 for (final u in userList)
@@ -463,7 +463,7 @@ class _ScopeBar extends ConsumerWidget {
                                         const Icon(Icons.person_pin_outlined),
                                     title: Text(u.name),
                                     subtitle: Text(
-                                      '${u.role.label} • ${u.active ? "نشط" : "معطل"}',
+                                      '${ctx.tr(u.role.label)} • ${ctx.tr(u.active ? "نشط" : "معطل")}',
                                     ),
                                     onTap: () => Navigator.pop(ctx, u.name),
                                   ),
@@ -484,7 +484,7 @@ class _ScopeBar extends ConsumerWidget {
                       width: double.infinity,
                       child: FilledButton(
                         onPressed: () => Navigator.pop(ctx),
-                        child: const Text('تطبيق الفلاتر والعرض'),
+                        child: Text(ctx.tr('تطبيق الفلاتر والعرض')),
                       ),
                     ),
                   ],
@@ -641,36 +641,61 @@ class _ScopeBar extends ConsumerWidget {
 }
 
 /// بناء جدول تفصيلي مخصص عند النقر على إحدى البطاقات الإحصائية الأربع في شبكة (2×2).
+CurrencyDef _reportCurrencyDef(List<CurrencyDef> currencies, String code) {
+  final upper = code.trim().toUpperCase();
+  return currencies.firstWhere(
+    (c) => c.code.trim().toUpperCase() == upper,
+    orElse: () => CurrencyDef(
+      code,
+      code,
+      code,
+      currencies.isNotEmpty ? currencies.first.decimal : 2,
+    ),
+  );
+}
+
+String _fmtCurAmount(
+  List<CurrencyDef> currencies,
+  String code,
+  double value, {
+  bool withSymbol = false,
+}) {
+  final c = _reportCurrencyDef(currencies, code);
+  final formatted = Fmt.moneyFor(value, c);
+  return withSymbol && c.symbol.isNotEmpty ? '$formatted ${c.symbol}' : formatted;
+}
+
+String _fmtMultiCurrencyMap(
+  List<CurrencyDef> currencies,
+  Map<String, double> byCur,
+) {
+  final entries = byCur.entries
+      .where((e) => !Fmt.isZeroMoney(e.value))
+      .toList();
+  if (entries.isEmpty) {
+    final fallbackDec = currencies.isNotEmpty ? currencies.first.decimal : 0;
+    return Fmt.money(0, fallbackDec);
+  }
+  return entries
+      .map((e) => _fmtCurAmount(currencies, e.key, e.value, withSymbol: true))
+      .join(' · ');
+}
+
 ReportTable buildCardDetailTable(
   ReportSummaryCard card,
   ReportData d,
   List<CurrencyDef> currencies, {
   List<(String, String)> baseSummary = const [],
 }) {
-  String sym(String code) => currencies
-      .firstWhere(
-        (c) => c.code == code,
-        orElse: () => CurrencyDef(code, code, code, 0),
-      )
-      .symbol;
-  String cname(String code) => currencies
-      .firstWhere(
-        (c) => c.code == code,
-        orElse: () => CurrencyDef(code, code, code, 0),
-      )
-      .name;
+  String sym(String code) => _reportCurrencyDef(currencies, code).symbol;
+  String cname(String code) => _reportCurrencyDef(currencies, code).name;
   final byId = {for (final a in d.accounts) a.id!: a};
 
   switch (card) {
     case ReportSummaryCard.sales:
       final salesTxs = d.txs.where((t) {
-        final isRet = t.description.trim().startsWith('مرتجع ') ||
-            t.category == 'مرتجع مبيعات' ||
-            t.notes.contains('[ORIG_TX:');
-        final isSale = !isRet &&
-            (t.type == OpType.revenue ||
-                (t.type == OpType.debit &&
-                    t.accountKind != AccountKind.supplier));
+        final isRet = isSalesReturnTx(t);
+        final isSale = isSalesInvoiceTx(t, posTxIds: d.posTxIds);
         return isSale || isRet;
       }).toList()
         ..sort((a, b) => b.date.compareTo(a.date));
@@ -683,7 +708,7 @@ ReportTable buildCardDetailTable(
                 t.type.label,
                 t.resolvedPartyName(byId[t.accountId]),
                 t.description.isEmpty ? t.type.label : t.description,
-                Fmt.money(t.amount),
+                _fmtCurAmount(currencies, t.currency, t.amount),
                 sym(t.currency),
               ],
             )
@@ -705,7 +730,7 @@ ReportTable buildCardDetailTable(
               (a) => [
                 '${a.kind.icon} ${a.name}',
                 a.kind.label,
-                Fmt.money(d.balances[a.id!] ?? 0),
+                _fmtCurAmount(currencies, a.currency, d.balances[a.id!] ?? 0),
                 sym(a.currency),
               ],
             )
@@ -727,7 +752,8 @@ ReportTable buildCardDetailTable(
               (a) => [
                 '${a.kind.icon} ${a.name}',
                 a.kind.label,
-                Fmt.money((d.balances[a.id!] ?? 0).abs()),
+                _fmtCurAmount(
+                    currencies, a.currency, (d.balances[a.id!] ?? 0).abs()),
                 sym(a.currency),
               ],
             )
@@ -753,9 +779,9 @@ ReportTable buildCardDetailTable(
             .map(
               (e) => [
                 '${cname(e.key)} (${sym(e.key)})',
-                Fmt.money(e.value[0]),
-                Fmt.money(e.value[1]),
-                Fmt.money(e.value[2]),
+                _fmtCurAmount(currencies, e.key, e.value[0]),
+                _fmtCurAmount(currencies, e.key, e.value[1]),
+                _fmtCurAmount(currencies, e.key, e.value[2]),
               ],
             )
             .toList(),
@@ -764,25 +790,15 @@ ReportTable buildCardDetailTable(
   }
 }
 
-/// يبني جدول التقرير المطلوب — منطق منقول من دوال `r*` في نسخة الويب.
+/// يبني جدول التقرير المطلوب — مع فصل صارم للعملات والأرباح التشغيلية عن التدفقات النقدية.
 ReportTable buildReport(
   ReportTab tab,
   ReportData d,
   List<CurrencyDef> currencies,
   PeriodUnit unit,
 ) {
-  String sym(String code) => currencies
-      .firstWhere(
-        (c) => c.code == code,
-        orElse: () => CurrencyDef(code, code, code, 0),
-      )
-      .symbol;
-  String cname(String code) => currencies
-      .firstWhere(
-        (c) => c.code == code,
-        orElse: () => CurrencyDef(code, code, code, 0),
-      )
-      .name;
+  String sym(String code) => _reportCurrencyDef(currencies, code).symbol;
+  String cname(String code) => _reportCurrencyDef(currencies, code).name;
 
   switch (tab) {
     case ReportTab.summary:
@@ -797,43 +813,42 @@ ReportTable buildReport(
         }
         e[2] += bal;
       }
-      var tRec = 0.0, tPay = 0.0, tNet = 0.0;
+      final recByCur = <String, double>{};
+      final payByCur = <String, double>{};
+      final netByCur = <String, double>{};
       final rows = per.entries.map((e) {
-        tRec += e.value[0];
-        tPay += e.value[1];
-        tNet += e.value[2];
+        recByCur[e.key] = e.value[0];
+        payByCur[e.key] = e.value[1];
+        netByCur[e.key] = e.value[2];
         return [
           '${cname(e.key)} (${sym(e.key)})',
-          Fmt.money(e.value[0]),
-          Fmt.money(e.value[1]),
-          Fmt.money(e.value[2]),
+          _fmtCurAmount(currencies, e.key, e.value[0]),
+          _fmtCurAmount(currencies, e.key, e.value[1]),
+          _fmtCurAmount(currencies, e.key, e.value[2]),
         ];
       }).toList();
-      var tSales = 0.0;
+      final salesByCur = <String, double>{};
       for (final t in d.txs) {
-        final isRet = t.description.trim().startsWith('مرتجع ') ||
-            t.category == 'مرتجع مبيعات' ||
-            t.notes.contains('[ORIG_TX:');
-        final isSale = !isRet &&
-            (t.type == OpType.revenue ||
-                (t.type == OpType.debit &&
-                    t.accountKind != AccountKind.supplier));
+        final isRet = isSalesReturnTx(t);
+        final isSale = isSalesInvoiceTx(t, posTxIds: d.posTxIds);
         if (isSale) {
-          tSales += t.amount;
+          salesByCur[t.currency] = (salesByCur[t.currency] ?? 0.0) + t.amount;
         } else if (isRet) {
-          tSales -= t.amount;
+          salesByCur[t.currency] = (salesByCur[t.currency] ?? 0.0) - t.amount;
         }
       }
-      tSales = tSales.clamp(0.0, double.infinity);
-      // (المتطلب 4-ب) 4 بطاقات إحصائية فقط (عدد العمليات مدمج كعنصر فرعي داخل إجمالي المبيعات).
+      for (final cur in salesByCur.keys.toList()) {
+        salesByCur[cur] = (salesByCur[cur] ?? 0.0).clamp(0.0, double.infinity);
+      }
+      // (المتطلب 4-ب) 4 بطاقات إحصائية فقط (بدون جمع أرقام بعملات مختلفة).
       return ReportTable(
         headers: const ['العملة', 'مستحق لنا', 'مستحق علينا', 'الصافي'],
         rows: rows,
         summary: [
-          ('إجمالي المبيعات', Fmt.money(tSales)),
-          ('إجمالي المستحق لنا', Fmt.money(tRec)),
-          ('إجمالي المستحق علينا', Fmt.money(tPay)),
-          ('صافي الرصيد', Fmt.money(tNet)),
+          ('إجمالي المبيعات', _fmtMultiCurrencyMap(currencies, salesByCur)),
+          ('إجمالي المستحق لنا', _fmtMultiCurrencyMap(currencies, recByCur)),
+          ('إجمالي المستحق علينا', _fmtMultiCurrencyMap(currencies, payByCur)),
+          ('صافي الرصيد', _fmtMultiCurrencyMap(currencies, netByCur)),
         ],
       );
 
@@ -859,7 +874,7 @@ ReportTable buildReport(
                     ? 'تحويل'
                     : t.resolvedPartyName(byId[t.accountId]),
                 t.description,
-                Fmt.money(t.amount),
+                _fmtCurAmount(currencies, t.currency, t.amount),
                 sym(t.currency),
                 t.reference,
               ],
@@ -868,22 +883,27 @@ ReportTable buildReport(
       );
 
     case ReportTab.categories:
-      final cat = <String, List<double>>{}; // [عدد, رصيد]
+      final cat = <(String, String), (int, double)>{};
       for (final a in d.accounts) {
         final key = a.category.trim().isEmpty ? 'بدون تصنيف' : a.category;
-        final e = cat.putIfAbsent(key, () => [0, 0]);
-        e[0] += 1;
-        e[1] += d.balances[a.id!] ?? 0;
+        final curKey = (key, a.currency);
+        final prev = cat[curKey] ?? (0, 0.0);
+        cat[curKey] = (prev.$1 + 1, prev.$2 + (d.balances[a.id!] ?? 0));
       }
       return ReportTable(
-        headers: const ['التصنيف', 'عدد الحسابات', 'إجمالي الرصيد'],
+        headers: const ['التصنيف', 'العملة', 'عدد الحسابات', 'إجمالي الرصيد'],
         rows: cat.entries
-            .map((e) => [e.key, '${e.value[0].toInt()}', Fmt.money(e.value[1])])
+            .map((e) => [
+                  e.key.$1,
+                  sym(e.key.$2),
+                  '${e.value.$1}',
+                  _fmtCurAmount(currencies, e.key.$2, e.value.$2),
+                ])
             .toList(),
       );
 
     case ReportTab.period:
-      final buckets = <String, List<double>>{};
+      final buckets = <(String, String), List<double>>{};
       for (final t in d.txs) {
         final day = DateTime.utc(t.date.year, t.date.month, t.date.day);
         final key = switch (unit) {
@@ -895,15 +915,20 @@ ReportTable buildReport(
             '${t.date.year}/${t.date.month.toString().padLeft(2, '0')}',
           PeriodUnit.year => '${t.date.year}',
         };
-        final e = buckets.putIfAbsent(key, () => [0, 0]);
+        final e = buckets.putIfAbsent((key, t.currency), () => [0, 0]);
         final g = opGroup(t.type);
         if (g == 'inflow') e[0] += t.amount;
         if (g == 'outflow') e[1] += t.amount;
       }
-      final keys = buckets.keys.toList()..sort();
+      final keys = buckets.keys.toList()
+        ..sort((a, b) {
+          final p = a.$1.compareTo(b.$1);
+          return p != 0 ? p : a.$2.compareTo(b.$2);
+        });
       return ReportTable(
         headers: const [
           'الفترة',
+          'العملة',
           'الإيرادات/القبض',
           'المصروفات/الصرف',
           'الصافي',
@@ -911,10 +936,11 @@ ReportTable buildReport(
         rows: keys
             .map(
               (k) => [
-                k,
-                Fmt.money(buckets[k]![0]),
-                Fmt.money(buckets[k]![1]),
-                Fmt.money(buckets[k]![0] - buckets[k]![1]),
+                k.$1,
+                sym(k.$2),
+                _fmtCurAmount(currencies, k.$2, buckets[k]![0]),
+                _fmtCurAmount(currencies, k.$2, buckets[k]![1]),
+                _fmtCurAmount(currencies, k.$2, buckets[k]![0] - buckets[k]![1]),
               ],
             )
             .toList(),
@@ -929,7 +955,7 @@ ReportTable buildReport(
                 '${a.kind.icon} ${a.name}',
                 a.kind.label,
                 '${d.txCount[a.id!] ?? 0}',
-                Fmt.money(d.balances[a.id!] ?? 0),
+                _fmtCurAmount(currencies, a.currency, d.balances[a.id!] ?? 0),
                 sym(a.currency),
               ],
             )
@@ -958,63 +984,116 @@ ReportTable buildReport(
               (e) => [
                 '${cname(e.key)} (${sym(e.key)})',
                 '${e.value[2].toInt()}',
-                Fmt.money(e.value[0]),
-                Fmt.money(e.value[1]),
-                Fmt.money(e.value[0] - e.value[1]),
+                _fmtCurAmount(currencies, e.key, e.value[0]),
+                _fmtCurAmount(currencies, e.key, e.value[1]),
+                _fmtCurAmount(currencies, e.key, e.value[0] - e.value[1]),
               ],
             )
             .toList(),
       );
 
     case ReportTab.pl:
-      var revenue = 0.0,
-          expense = 0.0,
-          receivable = 0.0,
-          payable = 0.0,
-          totalSales = 0.0;
+      final salesByCur = <String, double>{};
+      final opRevenueByCur = <String, double>{};
+      final opExpenseByCur = <String, double>{};
+      final cashInByCur = <String, double>{};
+      final cashOutByCur = <String, double>{};
+      final receivableByCur = <String, double>{};
+      final payableByCur = <String, double>{};
+      final seenCurs = <String>{};
+
       for (final t in d.txs) {
-        final isRet = t.description.trim().startsWith('مرتجع ') ||
-            t.category == 'مرتجع مبيعات' ||
-            t.notes.contains('[ORIG_TX:');
-        final isSale = !isRet &&
-            (t.type == OpType.revenue ||
-                (t.type == OpType.debit &&
-                    t.accountKind != AccountKind.supplier));
+        final cur = t.currency;
+        seenCurs.add(cur);
+        final isRet = isSalesReturnTx(t);
+        final isSale = isSalesInvoiceTx(t, posTxIds: d.posTxIds);
         if (isSale) {
-          totalSales += t.amount;
+          salesByCur[cur] = (salesByCur[cur] ?? 0.0) + t.amount;
         } else if (isRet) {
-          totalSales -= t.amount;
+          salesByCur[cur] = (salesByCur[cur] ?? 0.0) - t.amount;
         }
+        // فصل صارم بين الأرباح/الخسائر التشغيلية (revenue - expense) والتدفقات النقدية (inflow/outflow)
         switch (t.type) {
-          case OpType.revenue || OpType.inflow:
-            revenue += t.amount;
-          case OpType.expense || OpType.outflow:
-            expense += t.amount;
+          case OpType.revenue:
+            opRevenueByCur[cur] = (opRevenueByCur[cur] ?? 0.0) + t.amount;
+          case OpType.expense:
+            opExpenseByCur[cur] = (opExpenseByCur[cur] ?? 0.0) + t.amount;
+          case OpType.inflow:
+            cashInByCur[cur] = (cashInByCur[cur] ?? 0.0) + t.amount;
+          case OpType.outflow:
+            cashOutByCur[cur] = (cashOutByCur[cur] ?? 0.0) + t.amount;
           case OpType.debit:
-            receivable += t.amount;
+            receivableByCur[cur] = (receivableByCur[cur] ?? 0.0) + t.amount;
           case OpType.credit:
-            payable += t.amount;
+            payableByCur[cur] = (payableByCur[cur] ?? 0.0) + t.amount;
           default:
             break;
         }
       }
-      totalSales = totalSales.clamp(0.0, double.infinity);
-      final profit = revenue - expense;
+      final opProfitByCur = <String, double>{};
+      for (final cur in seenCurs) {
+        salesByCur[cur] = (salesByCur[cur] ?? 0.0).clamp(0.0, double.infinity);
+        opProfitByCur[cur] =
+            (opRevenueByCur[cur] ?? 0.0) - (opExpenseByCur[cur] ?? 0.0);
+      }
+
+      final plRows = <List<String>>[];
+      if (seenCurs.length <= 1) {
+        plRows.addAll([
+          ['إجمالي المبيعات', _fmtMultiCurrencyMap(currencies, salesByCur)],
+          [
+            'الإيرادات التشغيلية',
+            _fmtMultiCurrencyMap(currencies, opRevenueByCur),
+          ],
+          [
+            'المصروفات التشغيلية',
+            _fmtMultiCurrencyMap(currencies, opExpenseByCur),
+          ],
+          [
+            'صافي الربح التشغيلي',
+            _fmtMultiCurrencyMap(currencies, opProfitByCur),
+          ],
+          [
+            'التدفقات النقدية (القبض)',
+            _fmtMultiCurrencyMap(currencies, cashInByCur),
+          ],
+          [
+            'التدفقات النقدية (الصرف)',
+            _fmtMultiCurrencyMap(currencies, cashOutByCur),
+          ],
+        ]);
+      } else {
+        for (final cur in seenCurs) {
+          final cSym = sym(cur);
+          plRows.addAll([
+            ['إجمالي المبيعات ($cSym)', _fmtCurAmount(currencies, cur, salesByCur[cur] ?? 0, withSymbol: true)],
+            ['الإيرادات التشغيلية ($cSym)', _fmtCurAmount(currencies, cur, opRevenueByCur[cur] ?? 0, withSymbol: true)],
+            ['المصروفات التشغيلية ($cSym)', _fmtCurAmount(currencies, cur, opExpenseByCur[cur] ?? 0, withSymbol: true)],
+            ['صافي الربح التشغيلي ($cSym)', _fmtCurAmount(currencies, cur, opProfitByCur[cur] ?? 0, withSymbol: true)],
+            ['التدفقات النقدية (القبض) ($cSym)', _fmtCurAmount(currencies, cur, cashInByCur[cur] ?? 0, withSymbol: true)],
+            ['التدفقات النقدية (الصرف) ($cSym)', _fmtCurAmount(currencies, cur, cashOutByCur[cur] ?? 0, withSymbol: true)],
+          ]);
+        }
+      }
       return ReportTable(
         headers: const ['البند', 'المبلغ'],
-        rows: [
-          ['إجمالي المبيعات', Fmt.money(totalSales)],
-          ['إجمالي الإيرادات', Fmt.money(revenue)],
-          ['إجمالي المصروفات', Fmt.money(expense)],
-          ['صافي الأرباح / الخسائر', Fmt.money(profit)],
-        ],
+        rows: plRows,
         summary: [
-          ('إجمالي المبيعات', Fmt.money(totalSales)),
-          ('الإيرادات', Fmt.money(revenue)),
-          ('المصروفات', Fmt.money(expense)),
-          ('صافي الربح/الخسارة', Fmt.money(profit)),
-          ('ذمم مستحقة لنا', Fmt.money(receivable)),
-          ('ذمم مستحقة علينا', Fmt.money(payable)),
+          ('إجمالي المبيعات', _fmtMultiCurrencyMap(currencies, salesByCur)),
+          (
+            'الإيرادات التشغيلية',
+            _fmtMultiCurrencyMap(currencies, opRevenueByCur),
+          ),
+          (
+            'المصروفات التشغيلية',
+            _fmtMultiCurrencyMap(currencies, opExpenseByCur),
+          ),
+          (
+            'صافي الربح التشغيلي',
+            _fmtMultiCurrencyMap(currencies, opProfitByCur),
+          ),
+          ('ذمم مستحقة لنا', _fmtMultiCurrencyMap(currencies, receivableByCur)),
+          ('ذمم مستحقة علينا', _fmtMultiCurrencyMap(currencies, payableByCur)),
         ],
       );
 
@@ -1035,7 +1114,7 @@ ReportTable buildReport(
               (e) => [
                 '${e.key + 1}',
                 '${e.value.$1.kind.icon} ${e.value.$1.name}',
-                Fmt.money(e.value.$2),
+                _fmtCurAmount(currencies, e.value.$1.currency, e.value.$2),
                 sym(e.value.$1.currency),
               ],
             )
@@ -1060,7 +1139,12 @@ ReportTable buildReport(
                 '${e.key + 1}',
                 '${e.value.$1.kind.icon} ${e.value.$1.name}',
                 '${e.value.$2}',
-                Fmt.money(d.balances[e.value.$1.id!] ?? 0),
+                _fmtCurAmount(
+                  currencies,
+                  e.value.$1.currency,
+                  d.balances[e.value.$1.id!] ?? 0,
+                  withSymbol: true,
+                ),
               ],
             )
             .toList(),
@@ -1075,9 +1159,9 @@ ReportTable buildReport(
         if (limit != null && limit > 0 && bal.abs() > limit) {
           rows.add([
             '${a.kind.icon} ${a.name}',
-            Fmt.money(bal),
-            Fmt.money(limit),
-            Fmt.money(bal.abs() - limit),
+            _fmtCurAmount(currencies, a.currency, bal),
+            _fmtCurAmount(currencies, a.currency, limit),
+            _fmtCurAmount(currencies, a.currency, bal.abs() - limit),
             sym(a.currency),
           ]);
         }
@@ -1193,7 +1277,7 @@ class _ReportView extends ConsumerWidget {
                         selected: ref.watch(periodUnitProvider) == u,
                         onSelected: (_) =>
                             ref.read(periodUnitProvider.notifier).state = u,
-                        label: Text(u.label),
+                        label: Text(context.tr(u.label)),
                       ),
                     ),
                   )
@@ -1215,7 +1299,7 @@ class _ReportView extends ConsumerWidget {
                     children: table.summary
                         .map(
                           (e) => StatCard(
-                            title: e.$1,
+                            title: context.tr(e.$1),
                             value: e.$2,
                             icon: Icons.analytics_outlined,
                             color: AppColors.primaryOf(context),
@@ -1312,12 +1396,18 @@ class _ReportView extends ConsumerWidget {
   }
 
   Future<void> _copyCsv(BuildContext context, ReportTable t) async {
-    final b = StringBuffer()..writeln(t.headers.join(','));
+    final l10n = context.l10n;
+    final trHeaders = t.headers.map(l10n.text).toList();
+    final b = StringBuffer()..writeln(trHeaders.join(','));
     for (final r in t.rows) {
-      b.writeln(r.map((c) => '"${c.replaceAll('"', '""')}"').join(','));
+      b.writeln(
+        r.map((c) => '"${l10n.text(c).replaceAll('"', '""')}"').join(','),
+      );
     }
     await Clipboard.setData(ClipboardData(text: b.toString()));
-    if (context.mounted) showSnack(context, 'تم نسخ التقرير بصيغة CSV ✅');
+    if (context.mounted) {
+      showSnack(context, l10n.text('تم نسخ التقرير بصيغة CSV ✅'));
+    }
   }
 
   Future<void> _exportPdf(
@@ -1326,6 +1416,14 @@ class _ReportView extends ConsumerWidget {
     ReportTable t, {
     bool stamp = false,
   }) async {
+    final l10n = context.l10n;
+    final titleText = l10n.text(tab.label);
+    final issuedText = l10n.text('تاريخ الإصدار: ${Fmt.dateTime(DateTime.now())}');
+    final summaryItems = t.summary.map((e) => (l10n.text(e.$1), e.$2)).toList();
+    final trHeaders = t.headers.map(l10n.text).toList();
+    final trRows = t.rows.map((r) => r.map(l10n.text).toList()).toList();
+    final pdfDir = l10n.isEn ? pw.TextDirection.ltr : pw.TextDirection.rtl;
+
     // (2026-09-24) تحميل موحّد عبر خدمة الخطوط: مصدر واحد، تخزين مؤقت،
     // ورسالة خطأ صريحة إن تعذّر التحميل بدل PDF صامت بلا حروف عربية.
     final fonts = await PdfFonts.load();
@@ -1333,17 +1431,17 @@ class _ReportView extends ConsumerWidget {
     final bold = fonts.bold;
 
     final doc = pw.Document(
-    // الثيم على المستند نفسه: يضمن الخط العربي لأي صفحة تُضاف لاحقاً
-    // حتى لو لم تُعيّن pageTheme صراحةً.
-    theme: fonts.theme,
-  );
+      // الثيم على المستند نفسه: يضمن الخط العربي لأي صفحة تُضاف لاحقاً
+      // حتى لو لم تُعيّن pageTheme صراحةً.
+      theme: fonts.theme,
+    );
     doc.addPage(
       pw.MultiPage(
         // (دفعة 65-ب) طبقة خلفية على **كل** صفحة: ختم مائي مائل بنص
         // التطبيق، شفاف فلا يحجب الأرقام ويظهر في الطباعة والمشاركة معاً.
         pageTheme: pw.PageTheme(
           pageFormat: PdfPageFormat.a4,
-          textDirection: pw.TextDirection.rtl,
+          textDirection: pdfDir,
           theme: pw.ThemeData.withFont(base: regular, bold: bold),
           margin: const pw.EdgeInsets.all(28),
           buildBackground: stamp
@@ -1359,21 +1457,21 @@ class _ReportView extends ConsumerWidget {
               : null,
         ),
         build: (ctx) => [
-          pw.Text(tab.label, style: pw.TextStyle(fontSize: 18, font: bold)),
+          pw.Text(titleText, style: pw.TextStyle(fontSize: 18, font: bold)),
           pw.SizedBox(height: 4),
           pw.Text(
-            'تاريخ الإصدار: ${Fmt.dateTime(DateTime.now())}',
+            issuedText,
             style: const pw.TextStyle(
               fontSize: 9,
               color: PdfColor.fromInt(0xFF5B6B83),
             ),
           ),
           pw.SizedBox(height: 12),
-          if (t.summary.isNotEmpty) ...[
+          if (summaryItems.isNotEmpty) ...[
             pw.Wrap(
               spacing: 8,
               runSpacing: 8,
-              children: t.summary
+              children: summaryItems
                   .map(
                     (e) => pw.Container(
                       width: 120,
@@ -1400,14 +1498,15 @@ class _ReportView extends ConsumerWidget {
             pw.SizedBox(height: 14),
           ],
           pw.TableHelper.fromTextArray(
-            headers: t.headers,
-            data: t.rows,
+            headers: trHeaders,
+            data: trRows,
             headerStyle: pw.TextStyle(font: bold, fontSize: 10),
             cellStyle: const pw.TextStyle(fontSize: 9),
             headerDecoration: const pw.BoxDecoration(
               color: PdfColor.fromInt(0xFFE8F0FF),
             ),
-            cellAlignment: pw.Alignment.centerRight,
+            cellAlignment:
+                l10n.isEn ? pw.Alignment.centerLeft : pw.Alignment.centerRight,
             border: pw.TableBorder.all(
               color: const PdfColor.fromInt(0xFFE2E8F2),
               width: .5,

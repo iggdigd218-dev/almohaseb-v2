@@ -1323,6 +1323,11 @@ Future<void> showTxDetails(
               st['account.name'] ??
               tx.cashierName)
           .trim();
+      final curs = await repo.currencies();
+      final txCur = curs.firstWhere(
+        (c) => c.code.toUpperCase() == tx.currency.trim().toUpperCase(),
+        orElse: () => CurrencyDef(tx.currency, tx.currency, tx.currency, 0),
+      );
       final built = await buildThermalInvoiceDocument(
         tx: tx,
         account: resolvedAccount,
@@ -1333,6 +1338,8 @@ Future<void> showTxDetails(
         sellerOrDevice: sellerIdentity,
         logoPath: logoPath,
         logoBase64: logoBase64,
+        currencySymbol: txCur.symbol,
+        currencyDecimals: txCur.decimal,
         stamp: stamp,
       );
       await Printing.layoutPdf(

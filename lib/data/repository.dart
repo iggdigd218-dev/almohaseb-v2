@@ -267,6 +267,12 @@ class Repo {
       }
       unawaited(authSvc.restoreSession());
     } catch (_) {}
+
+    // شفاء ذاتي فوري لأي أصناف أو تعارضات وهمية ناتجة عن فصل معرفات 64-بت ومطابقة أرصدة المخزون
+    try {
+      await ApplyRemoteOp.autoHealFalseItemIdSplits(db, repo: this);
+      await ApplyRemoteOp.reconcileInventoryQuantities(db);
+    } catch (_) {}
   }
 
   String? get deviceId => _deviceId;
@@ -2723,7 +2729,10 @@ class Repo {
     final db = await _db;
     final dec = await _decimalsOf(originalTx.currency);
     final rawTotal = validLines.fold<double>(0, (s, l) => s + l.total);
-    final returnAmount = Fmt.roundMoney(rawTotal, dec);
+    if (rawTotal <= 0 || !rawTotal.isFinite) {
+      throw ArgumentError('إجمالي قيمة المرتجع يجب أن يكون أكبر من صفر.');
+    }
+    var returnAmount = Fmt.roundMoney(rawTotal, dec);
     final nowDt = DateTime.now();
     final nowIso = nowDt.toIso8601String();
     final origRef = originalTx.reference.trim().isNotEmpty
@@ -2768,19 +2777,36 @@ class Repo {
             "(deleted_at IS NULL OR deleted_at = '') AND (original_tx_id = ? OR notes LIKE ?)",
         whereArgs: ['${originalTx.id}', '%[ORIG_TX:${originalTx.id}]%'],
       );
+      final prevReturnedAmount = prevReturnTxs.fold<double>(
+        0.0,
+        (sum, r) => sum + ((r['amount'] as num?)?.toDouble() ?? 0.0),
+      );
+      var effectiveLines = validLines;
+
       if (origItemRows.isNotEmpty) {
         final soldById = <int, double>{};
         final soldByName = <String, double>{};
+        final origPriceById = <int, double>{};
+        final origPriceByName = <String, double>{};
+        var origGrossTotal = 0.0;
         for (final r in origItemRows) {
           final l = InvoiceLine.fromMap(r);
+          origGrossTotal += l.total;
           final nameKey = l.name.trim().toLowerCase();
           if (l.itemId != null) {
             soldById[l.itemId!] = (soldById[l.itemId!] ?? 0.0) + l.quantity;
+            origPriceById[l.itemId!] = l.unitPrice;
           }
           if (nameKey.isNotEmpty) {
             soldByName[nameKey] = (soldByName[nameKey] ?? 0.0) + l.quantity;
+            origPriceByName[nameKey] = l.unitPrice;
           }
         }
+
+        final discountRatio = (origGrossTotal > originalTx.amount + Fmt.moneyEpsilon &&
+                origGrossTotal > 0)
+            ? (originalTx.amount / origGrossTotal).clamp(0.0, 1.0)
+            : 1.0;
 
         final returnedById = <int, double>{};
         final returnedByName = <String, double>{};
@@ -2811,6 +2837,8 @@ class Repo {
 
         final reqById = <int, double>{};
         final reqByName = <String, double>{};
+        final adjusted = <InvoiceLine>[];
+        var computedReturnSum = 0.0;
         for (final line in validLines) {
           final nameKey = line.name.trim().toLowerCase();
           final hasIdMatch =
@@ -2844,22 +2872,58 @@ class Repo {
               );
             }
           }
+
+          final origGrossUnit = hasIdMatch
+              ? (origPriceById[line.itemId!] ?? line.unitPrice)
+              : (origPriceByName[nameKey] ?? line.unitPrice);
+          if (line.unitPrice > origGrossUnit + Fmt.moneyEpsilon) {
+            throw ArgumentError(
+              'سعر الوحدة المرتجع للصنف "${line.name}" يتجاوز سعر بيعه الأصلي في الفاتورة #$origRef.',
+            );
+          }
+          var effUnitPrice = line.unitPrice;
+          if (discountRatio < 1.0 - 1e-6) {
+            final expectedNetUnit = origGrossUnit * discountRatio;
+            if ((line.unitPrice - origGrossUnit).abs() <= Fmt.moneyEpsilon ||
+                line.unitPrice > expectedNetUnit + 0.01) {
+              effUnitPrice = expectedNetUnit;
+            }
+          }
+          adjusted.add(InvoiceLine(
+            itemId: line.itemId,
+            name: line.name,
+            unit: line.unit,
+            quantity: line.quantity,
+            unitPrice: effUnitPrice,
+          ));
+          computedReturnSum += line.quantity * effUnitPrice;
         }
-      } else {
-        final prevReturnedAmount = prevReturnTxs.fold<double>(
-          0.0,
-          (sum, r) => sum + ((r['amount'] as num?)?.toDouble() ?? 0.0),
+        effectiveLines = adjusted;
+        returnAmount = Fmt.roundMoney(computedReturnSum, dec);
+      }
+
+      // سقف التراكم المالي للمرتجعات: يسري على الفواتير المفصلة والمجمّعة معاً.
+      final maxRemainingAmount =
+          (originalTx.amount - prevReturnedAmount).clamp(0.0, double.infinity);
+      final roundingSlop = dec == 0 ? 1.0 : 0.02;
+      if (prevReturnedAmount + returnAmount > originalTx.amount + roundingSlop) {
+        throw StateError(
+          'إجمالي قيمة المرتجعات يتجاوز قيمة الفاتورة الأصلية #$origRef.',
         );
-        if (prevReturnedAmount + returnAmount > originalTx.amount + 1e-6) {
-          throw StateError(
-            'إجمالي قيمة المرتجعات يتجاوز قيمة الفاتورة الأصلية #$origRef.',
-          );
-        }
+      }
+      if (returnAmount > maxRemainingAmount) {
+        returnAmount = Fmt.roundMoney(maxRemainingAmount, dec);
+      }
+      if (returnAmount <= 0 || !returnAmount.isFinite) {
+        throw StateError(
+          'إجمالي قيمة المرتجعات يتجاوز قيمة الفاتورة الأصلية #$origRef.',
+        );
       }
 
       // 1. إعادة الأصناف المرتجعة إلى المخزون والمبيعات
       final resolvedLines = <InvoiceLine>[];
-      for (final line in validLines) {
+      for (final line in effectiveLines) {
+        final hadExplicitItemId = line.itemId != null;
         int? targetItemId = line.itemId;
         if (targetItemId != null) {
           final check = await txn.query(
@@ -2872,7 +2936,8 @@ class Repo {
           if (check.isEmpty) targetItemId = null;
         }
         // إن لم يكن للصنف معرّف مربوط في السطر، نبحث عنه بالاسم في جدول الأصناف
-        if (targetItemId == null && line.name.trim().isNotEmpty) {
+        // (ولا نعيد ربط صنف له معرف صريح مفقود بصنف آخر مختلف تطابق اسمه).
+        if (!hadExplicitItemId && targetItemId == null && line.name.trim().isNotEmpty) {
           final byName = await txn.query(
             'items',
             columns: ['id'],
@@ -3467,8 +3532,12 @@ class Repo {
     bool canManageItems = false,
     bool isActive = true,
     bool sync = true,
+    bool skipAuthCheck = false,
     DatabaseExecutor? executor,
   }) async {
+    if (!skipAuthCheck) {
+      await _ensureCan('manage_users');
+    }
     final em = email.trim().toLowerCase();
     if (em.isEmpty) return;
     final row = <String, Object?>{
@@ -3590,6 +3659,7 @@ class Repo {
     int? userId,
     String? deviceId,
   }) async {
+    await _ensureCan('manage_users');
     final em = email.trim().toLowerCase();
     final fullPerms = kPerms.map((p) => p.key).toSet();
     final full = fullPerms.join(',');
@@ -4502,10 +4572,34 @@ class Repo {
   }
 
   /// Failure to verify identity never grants privileges (fail closed).
+  /// يوحّد قرار الصلاحية مع `effectivePermissions()` (جدول `user_permissions`
+  /// ودور المستخدم الفعّال مع التحقق الصارم من حالة النشاط).
   Future<bool> can(String perm) async {
     try {
       final me = await currentUser().timeout(const Duration(seconds: 2));
-      return me != null && me.active && me.can(perm);
+      if (me == null || !me.active) return false;
+      final eff = await effectivePermissions().timeout(const Duration(seconds: 2));
+      if (!eff.isActive) return false;
+      if (eff.isAdmin) return true;
+      switch (perm) {
+        case 'can_discount':
+        case 'discount':
+          return eff.canDiscount;
+        case 'delete_tx':
+        case 'can_delete_tx':
+          return eff.canDeleteTx;
+        case 'view_reports':
+        case 'can_view_reports':
+          return eff.canViewReports;
+        case 'view_sales_summary':
+        case 'can_view_sales_summary':
+          return eff.canViewSalesSummary;
+        case 'manage_items':
+        case 'can_manage_items':
+          return eff.canManageItems;
+        default:
+          return me.can(perm);
+      }
     } catch (_) {
       return false;
     }
@@ -4602,6 +4696,7 @@ class Repo {
           canManageItems: effective.role == UserRole.admin ||
               (effective.permissions['edit_tx'] ?? false),
           isActive: effective.active,
+          skipAuthCheck: true,
           executor: txn,
         );
       } catch (_) {}
@@ -7051,6 +7146,8 @@ class Repo {
     'conversations',
     'messages',
     'activity',
+    'notifications',
+    'trash',
     'settings',
     'items',
     'stock_moves',
@@ -7077,6 +7174,8 @@ class Repo {
     'templates',
     'settings',
     'activity',
+    'notifications',
+    'trash',
   ];
 
   /// الجداول التي تعتمد على معرف SQLite ثابت عند نقل نسخة نكسورا.
@@ -7133,7 +7232,7 @@ class Repo {
   Future<Map<String, Object?>> exportForLocalBackup({
     bool withImages = false,
   }) =>
-      exportAll(withImages: false, localOnly: true);
+      exportAll(withImages: withImages, localOnly: true);
 
   /// هل يملك الحساب الحالي صلاحية التصدير والاستيراد (النسخ والاستعادة)؟
   /// محصور حصراً بحساب مدير المنشأة (Owner / Admin) والحساب الفردي المستقل،
@@ -7161,31 +7260,100 @@ class Repo {
     return latestTransactionTimeFromDb(db);
   }
 
+  /// نتيجة فحص أحدث نشاط في قاعدة البيانات مع بيان تعثر القراءة صراحةً (M8).
+  Future<({DateTime? latest, bool readFailed})> latestActivityInfo() async {
+    final db = await _db;
+    return latestActivityInfoFromDb(db);
+  }
+
+  /// استخراج تاريخ أحدث نشاط عبر استعلامات SQL MAX مباشرة لكل الجداول الحيوية (M8/M12).
+  static Future<({DateTime? latest, bool readFailed})> latestActivityInfoFromDb(
+    DatabaseExecutor db,
+  ) async {
+    DateTime? latest;
+    var anySuccess = false;
+    var anyFailure = false;
+
+    void consider(Object? rawVal) {
+      if (rawVal == null) return;
+      if (rawVal is int) {
+        if (rawVal > 1000000000000) {
+          final dt = DateTime.fromMillisecondsSinceEpoch(rawVal);
+          if (latest == null || dt.isAfter(latest!)) latest = dt;
+        }
+        return;
+      }
+      final s = '$rawVal'.trim();
+      if (s.isEmpty) return;
+      final asInt = int.tryParse(s);
+      if (asInt != null && asInt > 1000000000000) {
+        final dt = DateTime.fromMillisecondsSinceEpoch(asInt);
+        if (latest == null || dt.isAfter(latest!)) latest = dt;
+        return;
+      }
+      final parsed = safeParseNullableDateTime(s);
+      if (parsed != null && (latest == null || parsed.isAfter(latest!))) {
+        latest = parsed;
+      }
+    }
+
+    Future<void> probeMax(String sql) async {
+      try {
+        final rows = await db.rawQuery(sql);
+        anySuccess = true;
+        if (rows.isNotEmpty) {
+          for (final v in rows.first.values) {
+            consider(v);
+          }
+        }
+      } catch (_) {
+        anyFailure = true;
+      }
+    }
+
+    await probeMax(
+      "SELECT MAX(updated_at) AS u, MAX(created_at) AS c, MAX(date) AS d "
+      "FROM transactions WHERE COALESCE(deleted_at, '') = ''",
+    );
+    await probeMax(
+      "SELECT MAX(updated_at) AS u, MAX(created_at) AS c "
+      "FROM items WHERE COALESCE(deleted_at, '') = '' AND COALESCE(is_deleted, 0) = 0",
+    );
+    await probeMax(
+      "SELECT MAX(updated_at) AS u, MAX(created_at) AS c "
+      "FROM item_categories WHERE COALESCE(deleted_at, '') = ''",
+    );
+    await probeMax(
+      "SELECT MAX(updated_at) AS u, MAX(created_at) AS c "
+      "FROM accounts WHERE COALESCE(deleted_at, '') = ''",
+    );
+    await probeMax(
+      'SELECT MAX(timestamp) AS t, MAX(device_time) AS dt, '
+      "MAX(CAST(NULLIF(server_time, '') AS INTEGER)) AS st "
+      'FROM operations',
+    );
+    try {
+      final stRows = await db.rawQuery(
+        "SELECT value FROM settings WHERE key IN ('last_synced_cursor', 'cloud.lastUpdatedAt', 'subscription.updatedAt')",
+      );
+      anySuccess = true;
+      for (final r in stRows) {
+        consider(r['value']);
+      }
+    } catch (_) {
+      anyFailure = true;
+    }
+
+    final readFailed = !anySuccess || (anyFailure && latest == null);
+    return (latest: latest, readFailed: readFailed);
+  }
+
   /// استخراج تاريخ أحدث حركة من أي اتصال قاعدة بيانات مفتوح.
   static Future<DateTime?> latestTransactionTimeFromDb(
     DatabaseExecutor db,
   ) async {
-    try {
-      final rows = await db.rawQuery('''
-        SELECT date, created_at, updated_at
-        FROM transactions
-        WHERE COALESCE(deleted_at, '') = ''
-      ''');
-      DateTime? latest;
-      for (final r in rows) {
-        for (final col in ['updated_at', 'created_at', 'date']) {
-          final raw = '${r[col] ?? ''}'.trim();
-          if (raw.isEmpty) continue;
-          final parsed = safeParseNullableDateTime(raw);
-          if (parsed != null && (latest == null || parsed.isAfter(latest))) {
-            latest = parsed;
-          }
-        }
-      }
-      return latest;
-    } catch (_) {
-      return null;
-    }
+    final res = await latestActivityInfoFromDb(db);
+    return res.latest;
   }
 
   Future<Map<String, Object?>> exportAll({
@@ -7207,14 +7375,18 @@ class Repo {
     final data = <String, Object?>{};
     for (final t in backupTables) {
       try {
+        final exists = await db.rawQuery(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+          [t],
+        );
+        if (exists.isEmpty) continue;
         final rows = await db.query(t);
         if (t == 'settings') {
-          // منع تضمين الصور المرمزة base64 في النسخة الاحتياطية حفاظاً على حجم البيانات والسحابة
           data[t] = rows
               .where((r) =>
                   r['key'] != 'org.icon.b64' &&
                   r['key'] != 'logoBase64' &&
-                  r['key'] != 'logo')
+                  (withImages || r['key'] != 'logo'))
               .toList();
         } else {
           data[t] = rows;
@@ -7224,9 +7396,50 @@ class Repo {
       }
     }
 
-    // (قانون حجم البيانات) يُمنع تضمين الصور داخل النسخ الاحتياطية حفاظاً على
-    // صغر حجم البيانات والمساحة السحابية.
-    const images = <String, String>{};
+    // تضمين الصور والمرفقات عند طلب `withImages` صراحةً في التصدير/النسخ المحلي (M4).
+    final images = <String, String>{};
+    if (withImages) {
+      await MediaPaths.ensureDocsDir();
+      const maxSingleImageBytes = 10 * 1024 * 1024;
+      Future<void> collectPath(Object? raw) async {
+        final stored = '${raw ?? ''}'.trim();
+        if (stored.isEmpty || images.containsKey(stored)) return;
+        try {
+          final file = File(MediaPaths.toAbsolute(stored));
+          if (!await file.exists()) return;
+          final len = await file.length();
+          if (len <= 0 || len > maxSingleImageBytes) return;
+          final bytes = await file.readAsBytes();
+          if (bytes.isNotEmpty) {
+            images[stored] = base64Encode(bytes);
+          }
+        } catch (_) {}
+      }
+
+      for (final row in (data['transactions'] as List?) ?? const []) {
+        if (row is Map) {
+          await collectPath(row['attachment']);
+          await collectPath(row['image']);
+        }
+      }
+      for (final row in (data['accounts'] as List?) ?? const []) {
+        if (row is Map) await collectPath(row['image']);
+      }
+      for (final row in (data['items'] as List?) ?? const []) {
+        if (row is Map) await collectPath(row['image']);
+      }
+      for (final row in (data['item_categories'] as List?) ?? const []) {
+        if (row is Map) await collectPath(row['image_path']);
+      }
+      for (final row in (data['messages'] as List?) ?? const []) {
+        if (row is Map) await collectPath(row['media_path']);
+      }
+      for (final row in (data['settings'] as List?) ?? const []) {
+        if (row is Map && row['key'] == 'logo') {
+          await collectPath(row['value']);
+        }
+      }
+    }
 
     // بصمة المجموعة: معرّف جهاز المدير (المالك) يميّز كل مجموعة عن غيرها،
     // فلا تُستورد نسخة احتياطية صادرة من مجموعة أخرى.
@@ -7351,13 +7564,58 @@ class Repo {
 
         var imported = 0;
         for (final table in _importOrder) {
-          final rows = data[table];
-          if (rows == null) continue;
+          final rawRows = data[table];
+          if (rawRows == null) continue;
           final cols = await _columnsOf(txn, table);
           if (cols.isEmpty) {
             throw BackupImportException(
               'جدول غير مدعوم أثناء الاستعادة: $table',
             );
+          }
+
+          // ترتيب طوبولوجي لفئات الأصناف (الآباء قبل الأبناء) وتفريغ أي parent_id يتيم (M9)
+          var rows = rawRows;
+          Set<Object?>? knownCategoryIds;
+          if (table == 'item_categories' && rawRows.isNotEmpty) {
+            final byId = <int, Map<String, Object?>>{};
+            final noId = <Map<String, Object?>>[];
+            for (final r in rawRows) {
+              final rawId = r['id'];
+              final idVal = rawId is int ? rawId : int.tryParse('${rawId ?? ''}');
+              if (idVal != null) {
+                byId[idVal] = r;
+              } else {
+                noId.add(r);
+              }
+            }
+            knownCategoryIds = <Object?>{...byId.keys};
+            final sorted = <Map<String, Object?>>[];
+            final visited = <int>{};
+            final visiting = <int>{};
+            void visit(int cid) {
+              if (visited.contains(cid) || visiting.contains(cid)) return;
+              visiting.add(cid);
+              final row = byId[cid];
+              if (row != null) {
+                final rawParent = row['parent_id'] ?? row['parentId'];
+                final pid = rawParent is int
+                    ? rawParent
+                    : int.tryParse('${rawParent ?? ''}');
+                if (pid != null && pid != cid && byId.containsKey(pid)) {
+                  visit(pid);
+                }
+                visiting.remove(cid);
+                visited.add(cid);
+                sorted.add(row);
+              } else {
+                visiting.remove(cid);
+              }
+            }
+            for (final cid in byId.keys) {
+              visit(cid);
+            }
+            sorted.addAll(noId);
+            rows = sorted;
           }
 
           for (var index = 0; index < rows.length; index++) {
@@ -7392,6 +7650,13 @@ class Repo {
                 clean['section_id'] != null &&
                 !knownSectionIds.contains(clean['section_id'])) {
               clean['section_id'] = null;
+            }
+            if (table == 'item_categories' &&
+                clean['parent_id'] != null &&
+                (clean['parent_id'] == clean['id'] ||
+                    (knownCategoryIds != null &&
+                        !knownCategoryIds.contains(clean['parent_id'])))) {
+              clean['parent_id'] = null;
             }
             if (clean.isEmpty) {
               throw BackupImportException(
@@ -7534,8 +7799,13 @@ class Repo {
     Map<String, String> remap,
   ) {
     if (_isImageColumn(table, column) && value is String && value.isNotEmpty) {
-      // النسخة بلا صورة مضمّنة لا تترك مسار الهاتف القديم معطّلًا.
-      return remap[value] ?? '';
+      if (remap.containsKey(value)) {
+        return remap[value]!;
+      }
+      if (MediaPaths.exists(value)) {
+        return MediaPaths.toRelative(value);
+      }
+      return '';
     }
     if (value is bool) return value ? 1 : 0;
     if (value == null || value is String || value is num) return value;
@@ -7548,7 +7818,9 @@ class Repo {
   bool _isImageColumn(String table, String column) =>
       (table == 'transactions' &&
           (column == 'image' || column == 'attachment')) ||
-      ((table == 'accounts' || table == 'items') && column == 'image');
+      ((table == 'accounts' || table == 'items') && column == 'image') ||
+      (table == 'item_categories' && column == 'image_path') ||
+      (table == 'messages' && column == 'media_path');
 
   /// يتحقق من العلاقات التي لم يفرضها المخطط صراحةً.
   Future<void> _validateOptionalReferences(DatabaseExecutor db) async {
@@ -8101,80 +8373,67 @@ class Repo {
     return category_tree.getCategoryAndAllDescendantIds(categoryId, all);
   }
 
-  /// إضافة فئة أو تعديل اسمها مع تحديث اسم الفئة في الأصناف التابعة لها.
+  /// إضافة فئة أو تعديل اسمها مع تحديث اسم الفئة في الأصناف التابعة لها ذرّياً (M3).
   Future<int> saveItemCategory(ItemCategory category) async {
     await _ensureCan(category.id == null ? 'add_tx' : 'edit_tx');
     final name = category.name.trim();
     if (name.isEmpty) throw ArgumentError('اسم الفئة مطلوب');
 
     final db = await _db;
-    // (3.98.39 / D4) الفرادة داخل نطاق الأب نفسه فقط: يمكن أن تحمل فئتان
-    // فرعيتان تحت أبوين مختلفين الاسم ذاته («أخرى» مثلاً) بلا تعارض.
     final parentScope = category.parentId ?? 0;
-    final duplicate = await db.query(
-      'item_categories',
-      columns: ['id'],
-      where: 'name = ? COLLATE NOCASE AND id != ? AND COALESCE(parent_id, 0) = ? '
-          "AND (deleted_at IS NULL OR deleted_at = '')",
-      whereArgs: [name, category.id ?? -1, parentScope],
-      limit: 1,
-    );
-    if (duplicate.isNotEmpty) {
-      throw StateError(category.parentId == null
-          ? 'توجد فئة رئيسية بهذا الاسم مسبقًا'
-          : 'توجد فئة فرعية بهذا الاسم مسبقًا تحت نفس الفئة الأب');
-    }
-
-    // تنظيف أي فئات محذوفة سابقة بنفس الاسم داخل نفس نطاق الأب
-    await db.delete(
-      'item_categories',
-      where: 'name = ? COLLATE NOCASE AND id != ? AND COALESCE(parent_id, 0) = ? '
-          "AND deleted_at IS NOT NULL AND deleted_at != ''",
-      whereArgs: [name, category.id ?? -1, parentScope],
-    );
-
-    // إذا كانت الفئة فرعية (لها parentId)، ترث تلقائياً قسم الفئة الأب أو الجد لضمان اتساق الشجرة.
-    int? effectiveSectionId = category.sectionId;
-    if (category.parentId != null) {
-      var cursor = category.parentId;
-      for (var guard = 0; guard < 64 && cursor != null; guard++) {
-        final parentRows = await db.query(
-          'item_categories',
-          columns: ['section_id', 'parent_id'],
-          where: 'id = ?',
-          whereArgs: [cursor],
-          limit: 1,
-        );
-        if (parentRows.isEmpty) break;
-        final secId = parentRows.first['section_id'] as int?;
-        if (secId != null) {
-          effectiveSectionId = secId;
-          break;
-        }
-        cursor = parentRows.first['parent_id'] as int?;
-      }
-    }
-
+    final wsId = requireWorkspaceId;
+    final now = DateTime.now().toIso8601String();
     late final int id;
-    if (category.id == null) {
-      final now = DateTime.now().toIso8601String();
-      id = await db.insert('item_categories', {
-        'id': newGlobalId(),
-        'name': name,
-        if (category.parentId != null) 'parent_id': category.parentId,
-        if (effectiveSectionId != null) 'section_id': effectiveSectionId,
-        'icon_key': category.iconKey,
-        'color_hex': category.colorHex,
-        'image_path': category.imagePath,
-        'created_at': category.createdAt.toIso8601String(),
-        'updated_at': now,
-      });
-      await queueOperation(
-        entityType: EntityKind.itemCategory,
-        entityId: '$id',
-        opType: OpKind.create,
-        payload: {
-          'id': id,
+    var created = false;
+
+    await db.transaction((txn) async {
+      final duplicate = await txn.query(
+        'item_categories',
+        columns: ['id'],
+        where: 'name = ? COLLATE NOCASE AND id != ? AND COALESCE(parent_id, 0) = ? '
+            "AND (deleted_at IS NULL OR deleted_at = '')",
+        whereArgs: [name, category.id ?? -1, parentScope],
+        limit: 1,
+      );
+      if (duplicate.isNotEmpty) {
+        throw StateError(category.parentId == null
+            ? 'توجد فئة رئيسية بهذا الاسم مسبقًا'
+            : 'توجد فئة فرعية بهذا الاسم مسبقًا تحت نفس الفئة الأب');
+      }
+
+      await txn.delete(
+        'item_categories',
+        where: 'name = ? COLLATE NOCASE AND id != ? AND COALESCE(parent_id, 0) = ? '
+            "AND deleted_at IS NOT NULL AND deleted_at != ''",
+        whereArgs: [name, category.id ?? -1, parentScope],
+      );
+
+      int? effectiveSectionId = category.sectionId;
+      if (category.parentId != null) {
+        var cursor = category.parentId;
+        for (var guard = 0; guard < 64 && cursor != null; guard++) {
+          final parentRows = await txn.query(
+            'item_categories',
+            columns: ['section_id', 'parent_id'],
+            where: 'id = ?',
+            whereArgs: [cursor],
+            limit: 1,
+          );
+          if (parentRows.isEmpty) break;
+          final secId = parentRows.first['section_id'] as int?;
+          if (secId != null) {
+            effectiveSectionId = secId;
+            break;
+          }
+          cursor = parentRows.first['parent_id'] as int?;
+        }
+      }
+
+      if (category.id == null) {
+        created = true;
+        id = await txn.insert('item_categories', {
+          'id': newGlobalId(),
+          'workspace_id': wsId,
           'name': name,
           if (category.parentId != null) 'parent_id': category.parentId,
           if (effectiveSectionId != null) 'section_id': effectiveSectionId,
@@ -8183,44 +8442,56 @@ class Repo {
           'image_path': category.imagePath,
           'created_at': category.createdAt.toIso8601String(),
           'updated_at': now,
-        },
-      );
-      await logActivity('إضافة فئة أصناف: $name', 'item_category', '$id');
-      return id;
-    }
+        });
+        final rec = await newRecorder(txn);
+        await rec.record(
+          entityType: EntityKind.itemCategory,
+          entityId: '$id',
+          opType: OpKind.create,
+          payload: {
+            'id': id,
+            'workspace_id': wsId,
+            'name': name,
+            if (category.parentId != null) 'parent_id': category.parentId,
+            if (effectiveSectionId != null) 'section_id': effectiveSectionId,
+            'icon_key': category.iconKey,
+            'color_hex': category.colorHex,
+            'image_path': category.imagePath,
+            'created_at': category.createdAt.toIso8601String(),
+            'updated_at': now,
+          },
+        );
+        return;
+      }
 
-    id = category.id!;
-    final now = DateTime.now().toIso8601String();
-    final parentId = category.parentId;
-    // (2026-09-22) منع الدوران في الشجرة: الفئة لا تكون أباً لنفسها،
-    // ولا أباً لأحد أجدادها (مسار الأبناء حلقي ⇒ بيانات تالفة).
-    if (parentId != null) {
-      if (parentId == id) {
-        throw StateError('لا يمكن جعل الفئة أباً لنفسها');
-      }
-      var cursor = parentId;
-      for (var guard = 0; guard < 64; guard++) {
-        final row = await db.query('item_categories',
-            columns: ['parent_id'],
-            where: 'id = ?',
-            whereArgs: [cursor],
-            limit: 1);
-        if (row.isEmpty) break;
-        final up = row.first['parent_id'] as int?;
-        if (up == null) break;
-        if (up == id) {
-          throw StateError('لا يمكن جعل الفئة فرعاً لأحد فروعها');
+      id = category.id!;
+      final parentId = category.parentId;
+      if (parentId != null) {
+        if (parentId == id) {
+          throw StateError('لا يمكن جعل الفئة أباً لنفسها');
         }
-        cursor = up;
+        var cursor = parentId;
+        for (var guard = 0; guard < 64; guard++) {
+          final row = await txn.query('item_categories',
+              columns: ['parent_id'],
+              where: 'id = ?',
+              whereArgs: [cursor],
+              limit: 1);
+          if (row.isEmpty) break;
+          final up = row.first['parent_id'] as int?;
+          if (up == null) break;
+          if (up == id) {
+            throw StateError('لا يمكن جعل الفئة فرعاً لأحد فروعها');
+          }
+          cursor = up;
+        }
       }
-    }
-    // (2026-09-24) نقرأ القسم **السابق** قبل التحديث: قراءته بعد التحديث
-    // تعيد القسم الجديد نفسه فلا يحدث أي نقل (خطأ مقارنة صامت).
-    final prevRows = await db.query('item_categories',
-        columns: ['section_id'], where: 'id = ?', whereArgs: [id], limit: 1);
-    final prevSection =
-        prevRows.isEmpty ? null : prevRows.first['section_id'] as int?;
-    await db.transaction((txn) async {
+
+      final prevRows = await txn.query('item_categories',
+          columns: ['section_id'], where: 'id = ?', whereArgs: [id], limit: 1);
+      final prevSection =
+          prevRows.isEmpty ? null : prevRows.first['section_id'] as int?;
+
       await txn.update(
         'item_categories',
         {
@@ -8235,7 +8506,6 @@ class Repo {
         where: 'id = ?',
         whereArgs: [id],
       );
-      // (2026-09-24) نقل الفئة إلى قسم جديد ⇒ أصنافها وفئاتها الفرعية تتبعها.
       await txn.update(
         'items',
         <String, Object?>{
@@ -8316,6 +8586,10 @@ class Repo {
         }
       }
     });
+    if (created) {
+      await logActivity('إضافة فئة أصناف: $name', 'item_category', '$id');
+      return id;
+    }
     await logActivity('تعديل فئة أصناف: $name', 'item_category', '$id');
     return id;
   }
@@ -8447,7 +8721,7 @@ class Repo {
     return moved;
   }
 
-  /// يحذف الفئة فقط، ويفك ربط أصنافها لتبقى بيانات الأصناف محفوظة.
+  /// يحذف الفئة فقط، ويفك ربط أصنافها ويرقّي فئاتها الفرعية للجذر بأمان دون تعارض أسماء (M2).
   Future<void> deleteItemCategory(int id) async {
     await _ensureCan('delete_tx');
     final db = await _db;
@@ -8457,7 +8731,7 @@ class Repo {
       whereArgs: [id],
     );
     if (rows.isEmpty) return;
-    final name = rows.first['name'] as String;
+    final name = '${rows.first['name'] ?? ''}'.trim();
     final now = DateTime.now().toIso8601String();
     await db.transaction((txn) async {
       await txn.update(
@@ -8466,16 +8740,88 @@ class Repo {
         where: 'category_id = ?',
         whereArgs: [id],
       );
-      // (2026-09-22) الفئات الفرعية تُرقّى إلى الجذر بدل أن يمحوها
-      // قيد CASCADE — حذفُ فئة رئيسية لا يفقد فئاتها الفرعية.
-      await txn.update(
+
+      final rec = await newRecorder(txn);
+      final children = await txn.query(
         'item_categories',
-        {'parent_id': null, 'updated_at': now},
         where: 'parent_id = ?',
         whereArgs: [id],
       );
+      if (children.isNotEmpty) {
+        final existingRoots = await txn.query(
+          'item_categories',
+          columns: ['id', 'name', 'deleted_at'],
+          where: 'COALESCE(parent_id, 0) = 0 AND id != ?',
+          whereArgs: [id],
+        );
+        final activeRootNames = <String>{};
+        for (final r in existingRoots) {
+          final del = '${r['deleted_at'] ?? ''}'.trim();
+          final rName = '${r['name'] ?? ''}'.trim().toLowerCase();
+          if (del.isNotEmpty) {
+            await txn.delete(
+              'item_categories',
+              where: 'id = ?',
+              whereArgs: [r['id']],
+            );
+          } else if (rName.isNotEmpty) {
+            activeRootNames.add(rName);
+          }
+        }
+
+        for (final child in children) {
+          final childId = child['id'];
+          if (childId == null) continue;
+          var targetName = '${child['name'] ?? ''}'.trim();
+          final origLower = targetName.toLowerCase();
+          if (activeRootNames.contains(origLower)) {
+            final baseCandidate =
+                name.isNotEmpty ? '$targetName ($name)' : '$targetName (2)';
+            targetName = baseCandidate;
+            var suffix = 2;
+            while (activeRootNames.contains(targetName.toLowerCase())) {
+              targetName = '$baseCandidate ($suffix)';
+              suffix++;
+            }
+          }
+          activeRootNames.add(targetName.toLowerCase());
+          await txn.update(
+            'item_categories',
+            {
+              'parent_id': null,
+              'name': targetName,
+              'updated_at': now,
+            },
+            where: 'id = ?',
+            whereArgs: [childId],
+          );
+          if (targetName.toLowerCase() != origLower) {
+            await txn.update(
+              'items',
+              {'category': targetName, 'updated_at': now},
+              where: 'category_id = ?',
+              whereArgs: [childId],
+            );
+          }
+          await rec.record(
+            entityType: EntityKind.itemCategory,
+            entityId: '$childId',
+            opType: OpKind.update,
+            payload: {
+              'id': childId,
+              'name': targetName,
+              'parent_id': null,
+              'section_id': child['section_id'],
+              'icon_key': child['icon_key'],
+              'color_hex': child['color_hex'],
+              'image_path': child['image_path'],
+              'updated_at': now,
+            },
+          );
+        }
+      }
+
       await txn.delete('item_categories', where: 'id = ?', whereArgs: [id]);
-      final rec = await newRecorder(txn);
       await rec.record(
         entityType: EntityKind.itemCategory,
         entityId: '$id',
@@ -8494,6 +8840,9 @@ class Repo {
     bool includeDeleted = false,
   }) async {
     final db = await _db;
+    try {
+      await ApplyRemoteOp.autoHealFalseItemIdSplits(db, repo: this);
+    } catch (_) {}
     final where = <String>[];
     final args = <Object?>[];
     if (!includeArchived) where.add('i.archived = 0');
@@ -8876,6 +9225,9 @@ class Repo {
   /// جميع سجلات تعارض الأصناف المسجّلة (المعلقة والمعالجة).
   Future<List<OfflineItemConflict>> allItemConflicts() async {
     final db = await _db;
+    try {
+      await ApplyRemoteOp.autoHealFalseItemIdSplits(db, repo: this);
+    } catch (_) {}
     final rows = await db.query(
       'settings',
       where: "key LIKE 'item_conflict:%'",

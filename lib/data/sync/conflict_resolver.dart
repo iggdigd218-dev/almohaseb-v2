@@ -29,23 +29,33 @@ class ConflictResolver {
       return incoming.payload.isNotEmpty;
     }
 
-    // 3. الكيان موجود محلياً: الحسم الموحّد والحتمي (M4):
-    // الترتيب القياسي الموحّد لكسر التعادل في جميع الحالات:
-    // (أ) مقارنة رقم الإصدار (Version) إن اختلف وكان أحدهما متقدماً.
-    // (ب) مقارنة الطابع الزمني المرجعي (server_time إن توفر في الطرفين، وإلا الطابع المحلي).
-    // (ج) كسر التعادل الحتمي عبر مقارنة معرف الجهاز lexicographically (`deviceId.compareTo`).
+    // 3. الكيان موجود محلياً: الحسم الموحّد والحتمي المتطابق مع استعلام SQLite (S2):
+    // - إذا توفر وقت الخادم المرجعي server_time في الطرفين:
+    //   (أ) server_time الأحدث، ثم (ب) رقم الإصدار، ثم (ج) الطابع المحلي timestamp، ثم (د) id / deviceId.
+    // - في المسار المحلي/الاختباري بدون اكتمال server_time:
+    //   (أ) رقم الإصدار الأعلى، ثم (ب) server_time أو timestamp، ثم (ج) id / deviceId.
     final inServerMs = incoming.serverTimeMs;
     final locServerMs = localLatest?.serverTimeMs ?? 0;
 
     if (inServerMs > 0 && locServerMs > 0) {
-      if (incoming.version != localVersion) {
-        if (inServerMs != locServerMs) {
-          return inServerMs > locServerMs;
-        }
-        return incoming.version > localVersion;
-      }
       if (inServerMs != locServerMs) {
         return inServerMs > locServerMs;
+      }
+      if (incoming.version != localVersion) {
+        return incoming.version > localVersion;
+      }
+      final inTsMs =
+          DateTime.tryParse(incoming.timestamp)?.millisecondsSinceEpoch ?? 0;
+      final locTsMs =
+          DateTime.tryParse(localLatest?.timestamp ?? '')
+                  ?.millisecondsSinceEpoch ??
+              0;
+      if (inTsMs != locTsMs) {
+        return inTsMs > locTsMs;
+      }
+      final localId = localLatest?.id ?? '';
+      if (localId.isNotEmpty && incoming.id != localId) {
+        return incoming.id.compareTo(localId) > 0;
       }
       final localDevId = localLatest?.deviceId ?? '';
       if (localDevId.isNotEmpty && localDevId == incoming.deviceId) {
@@ -54,7 +64,7 @@ class ConflictResolver {
       return incoming.deviceId.compareTo(localDevId) <= 0;
     }
 
-    // مسار عدم اكتمال server_time في أحد الطرفين: نفس الترتيب القياسي الموحّد
+    // مسار عدم اكتمال server_time في أحد الطرفين
     if (incoming.version != localVersion) {
       return incoming.version > localVersion;
     }
@@ -80,6 +90,11 @@ class ConflictResolver {
     if (localDevId.isNotEmpty && localDevId == incoming.deviceId) {
       return true;
     }
-    return incoming.deviceId.compareTo(localDevId) <= 0;
+    final devCmp = incoming.deviceId.compareTo(localDevId);
+    if (devCmp != 0) {
+      return devCmp < 0;
+    }
+    final localId = localLatest?.id ?? '';
+    return incoming.id.compareTo(localId) >= 0;
   }
 }

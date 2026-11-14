@@ -50,6 +50,7 @@ class SyncEngine {
   Timer? _cloudPullTimer;
   bool _cloudPulling = false;
   bool _needsRepull = false;
+  Future<int>? _inFlightPull;
   int _generation = 0;
   bool _running = false;
   bool _started = false;
@@ -311,22 +312,8 @@ class SyncEngine {
       unawaited(_cloudTransport?.stopListening() ?? Future.value());
       _cloudTransport = null;
       _cloudUrl = null;
-      // تنظيف: صفوف cloud القديمة العالقة بلا خادم سحابي مهيأ — كانت تبقى
-      // «بانتظار الإرسال» للأبد وتظهر كمزامنات معلقة. نُعلمها synced.
-      try {
-        final db = await _db;
-        await db.update(
-          'sync_queue',
-          {
-            'status': 'synced',
-            'last_error': '',
-            'next_try_at': '',
-            'updated_at': DateTime.now().toIso8601String(),
-          },
-          where: "target = ? AND status IN ('pending','syncing','failed')",
-          whereArgs: [SyncTarget.cloud],
-        );
-      } catch (_) {}
+      // (S4) عند عدم جاهزية السحابة نُبقي صفوف الطابور 'pending' كما هي
+      // دون تزوير حالتها إلى 'synced' حتى لا تفقد عند تفعيل السحابة لاحقاً.
       return;
     }
     final db = await _db;
@@ -392,51 +379,16 @@ class SyncEngine {
     // استماع فوري SSE: أي عملية يكتبها جهاز آخر في السحابة تصلنا لحظياً
     // (السحب الدوري كل 45 ثانية يبقى شبكة أمان لو انقطعت القناة).
     _cloudTransport!.onCloudChanged = () {
-      if (_cloudPulling) {
+      if (_inFlightPull != null || _cloudPulling) {
         _needsRepull = true;
         return;
       }
-      Future(() async {
-        if (_cloudPulling) {
-          _needsRepull = true;
-          return;
-        }
-        _cloudPulling = true;
-        try {
-          // (3.71.0) تشخيص: دفعة SSE تُطلق دورة سحب مسجَّلة بدورها.
-          SyncDiagnostics.instance.pullStarted();
-          final applied =
-              await _cloudTransport?.pull(resolver: ConflictResolver()) ?? 0;
-          SyncDiagnostics.instance.pullFinished(
-            ok: true,
-            applied: applied,
-            context: 'SSE → transport.pull',
-          );
-          if (applied > 0) {
-            try {
-              onSyncActivity?.call();
-            } catch (_) {}
-          }
-          await _checkMemberPermissions();
-        } catch (e) {
-          SyncDiagnostics.instance.pullFinished(
-            ok: false,
-            error: e,
-            context: 'SSE → transport.pull',
-          );
-        } finally {
-          _cloudPulling = false;
-          SyncDiagnostics.instance.pullIdle();
-          if (_needsRepull && _started) {
-            _needsRepull = false;
-            Future.delayed(
-              const Duration(milliseconds: 120),
-              () => _cloudTransport?.onCloudChanged?.call(),
-            );
-          }
-        }
-      });
+      unawaited(_runSerializedPull(source: 'SSE'));
     };
+    try {
+      final q = await _ensureQueue();
+      await q.reconcileSyncedQueue(cloudReady: true);
+    } catch (_) {}
     unawaited(_cloudTransport!.startListening());
   }
 
@@ -707,88 +659,113 @@ class SyncEngine {
   }
 
   Future<void> _periodicCloudPull() async {
-    if (_cloudPulling || !_started) return;
-    if (_cloudTransport == null) {
-      try {
-        await _ensureCloudTransport();
-      } catch (_) {}
-    }
-    if (_cloudTransport == null) return;
-    // 🔒 انتهاء التجربة يوقف السحب السحابي الدوري أيضاً.
-    if (await _trialBlocked()) {
-      if (!SyncDiagnostics.instance.snapshot.lastPullOk &&
-          !SyncDiagnostics.instance.snapshot.downloadFaulted) {
-        SyncDiagnostics.instance.pullFinished(
-          ok: true,
-          applied: 0,
-          context: '_periodicCloudPull → trial check ok',
-        );
-      }
+    if (!_started) return;
+    if (_inFlightPull != null || _cloudPulling) {
+      _needsRepull = true;
+      await (_inFlightPull ?? Future<int>.value(0));
       return;
     }
+    await _runSerializedPull(source: '_periodicCloudPull');
+  }
 
-    // 🔒 التحقق الصارم من صلاحيات العضو ومساحة العمل قبل السحب
+  /// (S9) بوابة السحب الموحدة: تجمع SSE والسحب الدوري و`forceSyncNow` خلف قفل
+  /// تسلسلي واحد (`_inFlightPull`) وتفرض فحص التجربة وصلاحيات العضو في كل مسار.
+  Future<int> _runSerializedPull({
+    bool forceFullSync = false,
+    bool ignoreStartedFlag = false,
+    String source = '_periodicCloudPull',
+  }) async {
+    if (!ignoreStartedFlag && !_started) return 0;
+    final existing = _inFlightPull;
+    if (existing != null) {
+      _needsRepull = true;
+      return existing;
+    }
+    final completer = Completer<int>();
+    _inFlightPull = completer.future;
+    var applied = 0;
     try {
-      final q = await _ensureQueue();
-      final activeWs = await repo.activeWorkspaceId();
-      final t = _cloudTransport!;
-      final isExpelled = await repo.amIExpelled();
-      // (دفعة التدقيق) سقوط احتياطي إلى currentUser(): جهاز بلا مستخدم
-      // معيَّن في سجل الجهاز (deviceAssignedUser == null) لا يُرفض بلا
-      // دور — هوية is_me وصلاحياتها المحلية معتمدة حتى يحدد المدير دوره.
-      final user =
-          await repo.deviceAssignedUser() ?? await repo.currentUser();
-      final access = await q.verifyMemberAccess(
-        activeWorkspaceId: activeWs,
-        expectedWorkspaceId: t.workspaceId,
-        userRole: user?.role.code,
-        userPermissions: user?.permissions.entries
-            .where((e) => e.value)
-            .map((e) => e.key)
-            .toList(),
-        isExpelledOrRevoked: isExpelled,
-        isPushOperation: false,
-      );
-      if (access['allowed'] != true) {
-        if (isExpelled) {
-          unawaited(_checkMemberPermissions());
-        }
-        SyncDiagnostics.instance.pullFinished(
-          ok: false,
-          error: access['message'] ?? 'المزامنة متوقفة: المستخدم أو المنشأة غير مصرح بها.',
-          context: '_periodicCloudPull → verifyMemberAccess',
-        );
-        return;
+      if (_cloudTransport == null) {
+        try {
+          await _ensureCloudTransport();
+        } catch (_) {}
       }
-    } catch (_) {}
+      if (_cloudTransport == null) {
+        completer.complete(0);
+        return 0;
+      }
 
-    _cloudPulling = true;
-    try {
-      // (3.71.0) تشخيص: سهم الاستقبال يومض أثناء الدورة وتُسجَّل نتيجتها.
+      // 🔒 انتهاء التجربة يوقف السحب السحابي في جميع المسارات (SSE/دوري/فوري).
+      if (await _trialBlocked()) {
+        if (!SyncDiagnostics.instance.snapshot.lastPullOk &&
+            !SyncDiagnostics.instance.snapshot.downloadFaulted) {
+          SyncDiagnostics.instance.pullFinished(
+            ok: true,
+            applied: 0,
+            context: '$source → trial check ok',
+          );
+        }
+        completer.complete(0);
+        return 0;
+      }
+
+      // 🔒 التحقق الصارم من صلاحيات العضو ومساحة العمل قبل أي سحب (SSE/دوري/فوري).
+      try {
+        final q = await _ensureQueue();
+        final activeWs = await repo.activeWorkspaceId();
+        final t = _cloudTransport!;
+        final isExpelled = await repo.amIExpelled();
+        final user =
+            await repo.deviceAssignedUser() ?? await repo.currentUser();
+        final access = await q.verifyMemberAccess(
+          activeWorkspaceId: activeWs,
+          expectedWorkspaceId: t.workspaceId,
+          userRole: user?.role.code,
+          userPermissions: user?.permissions.entries
+              .where((e) => e.value)
+              .map((e) => e.key)
+              .toList(),
+          isExpelledOrRevoked: isExpelled,
+          isPushOperation: false,
+        );
+        if (access['allowed'] != true) {
+          if (isExpelled) {
+            unawaited(_checkMemberPermissions());
+          }
+          SyncDiagnostics.instance.pullFinished(
+            ok: false,
+            error: access['message'] ??
+                'المزامنة متوقفة: المستخدم أو المنشأة غير مصرح بها.',
+            context: '$source → verifyMemberAccess',
+          );
+          completer.complete(0);
+          return 0;
+        }
+      } catch (_) {}
+
+      _cloudPulling = true;
       SyncDiagnostics.instance.pullStarted();
       await AppDatabase.ensureWorkspaceRow(
           await _db, _cloudTransport!.workspaceId);
-      // مصالحة خفيفة لأي عمليات محلية لم يُؤكَّد رفعها بعد (Pending Ack Reconciliation)
       try {
         await _backfillMissedCloudOps();
         unawaited(processQueue());
       } catch (_) {}
-      final applied = await _cloudTransport!.pull(resolver: ConflictResolver());
+      applied = await _cloudTransport!.pull(
+        resolver: ConflictResolver(),
+        forceFullSync: forceFullSync,
+      );
       SyncDiagnostics.instance.pullFinished(
         ok: true,
         applied: applied,
-        context: '_periodicCloudPull → transport.pull',
+        context: '$source → transport.pull',
       );
       if (applied > 0) {
         try {
           onSyncActivity?.call();
         } catch (_) {}
       }
-      // (3.71.0) الصلاحيات المنتدبة تُفحص كل دورة (5 ثوانٍ): تعديل المدير
-      // يُنفذ على جهاز العضو فوراً ويُخطر به بدون إغلاق التطبيق وفتحه.
       await _checkMemberPermissions();
-      // سجل الأجهزة السحابي: يرى المدير أجهزة الأعضاء البعيدة (المنضمة عبر
-      // السحابة) ويعيّن لها مستخدمين، وتصل التعيينات/الحظر/الطرد للأعضاء.
       try {
         final t = _cloudTransport!;
         final db = await _db;
@@ -817,8 +794,6 @@ class SyncEngine {
         }
       } catch (_) {}
 
-      // (1) فحص تطابق الكتالوج محلياً دون إسقاط المؤشر أو سحب الشجرة كاملة (No Full Dumps)
-      // وتطهير الإشعارات القديمة بفاصل زمني هادئ (كل 3 دقائق).
       final now = DateTime.now();
       if (now.difference(_lastHeavyMaintenanceCheck) >=
           const Duration(minutes: 3)) {
@@ -832,20 +807,26 @@ class SyncEngine {
           await repo.purgeOldNotifications();
         } catch (_) {}
       }
+      completer.complete(applied);
+      return applied;
     } catch (e) {
-      // شبكة غائبة/خادم بعيد — المحاولة القادمة بعد الدورة التالية.
-      // (3.71.0) تشخيص: استثناء السحب يُصنَّف (كود/سحابة/شبكة) ويُعرض.
       SyncDiagnostics.instance.pullFinished(
         ok: false,
         error: e,
-        context: '_periodicCloudPull → transport.pull',
+        context: '$source → transport.pull',
       );
+      if (!completer.isCompleted) completer.complete(0);
+      return 0;
     } finally {
       _cloudPulling = false;
+      _inFlightPull = null;
       SyncDiagnostics.instance.pullIdle();
       if (_needsRepull && _started) {
         _needsRepull = false;
-        unawaited(_periodicCloudPull());
+        Future.delayed(
+          const Duration(milliseconds: 120),
+          () => _runSerializedPull(source: source),
+        );
       }
     }
   }
@@ -855,6 +836,10 @@ class SyncEngine {
   /// cloud (سُجّلت قبل ضبط السحابة أو أثناء تعطيلها) تُدرج pending الآن.
   Future<void> _backfillMissedCloudOps() async {
     final db = await _db;
+    try {
+      final q = await _ensureQueue();
+      await q.reconcileSyncedQueue(cloudReady: _cloudTransport != null);
+    } catch (_) {}
     final st = await repo.settings();
     final cloudOn =
         effectiveBackendUrl(st['cloudBackendUrl']).isNotEmpty &&
@@ -1053,38 +1038,15 @@ class SyncEngine {
       } catch (_) {}
     }
     final q = await _ensureQueue();
+    await q.reconcileSyncedQueue(cloudReady: _cloudTransport != null);
     await q.retryFailed();
     await processQueue();
-    if (deepReconcile && _cloudTransport != null) {
-      SyncDiagnostics.instance.pullStarted();
-      try {
-        final applied = await _cloudTransport!.pull(
-          resolver: ConflictResolver(),
-          forceFullSync: true,
-        );
-        SyncDiagnostics.instance.pullFinished(
-          ok: true,
-          applied: applied,
-          context: 'forceSyncNow → transport.pull',
-        );
-        if (applied > 0) {
-          try {
-            onSyncActivity?.call();
-          } catch (_) {}
-        }
-      } catch (e) {
-        SyncDiagnostics.instance.pullFinished(
-          ok: false,
-          error: e,
-          context: 'forceSyncNow → transport.pull',
-        );
-      } finally {
-        SyncDiagnostics.instance.pullIdle();
-      }
-    }
-    // (3.71.0) «إعادة المحاولة والفحص الآن» = دفع + سحب معاً: دورة سحب
-    // فورية تحدّث سهم الاستقبال وورقة التشخيص في نفس اللحظة.
-    await _periodicCloudPull();
+    // (S9) توجيه السحب عبر _runSerializedPull الموحّد لمنع التداخل وفحص الحماية.
+    await _runSerializedPull(
+      forceFullSync: deepReconcile,
+      ignoreStartedFlag: true,
+      source: 'forceSyncNow',
+    );
     // إذا كان الجهاز مستعداً للسحابة ولم يسبق تسجيل فشل، نحدّث مؤشر السحب عند نجاح تهيئة النقل
     if (_cloudTransport != null &&
         !SyncDiagnostics.instance.snapshot.lastPullOk &&

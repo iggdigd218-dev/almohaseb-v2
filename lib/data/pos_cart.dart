@@ -53,6 +53,7 @@ class PosDraft {
   final bool discountIsPercent;
   final String notesText;
   final String cashCustomerName;
+  final int currencyDecimals;
   final String? holdLabel;
   final DateTime? heldAt;
   final String? holdId;
@@ -66,6 +67,7 @@ class PosDraft {
     this.discountIsPercent = false,
     this.notesText = '',
     this.cashCustomerName = 'عميل نقدي',
+    this.currencyDecimals = 2,
     this.holdLabel,
     this.heldAt,
     this.holdId,
@@ -82,6 +84,7 @@ class PosDraft {
     bool? discountIsPercent,
     String? notesText,
     String? cashCustomerName,
+    int? currencyDecimals,
     String? holdLabel,
     DateTime? heldAt,
     String? holdId,
@@ -97,6 +100,7 @@ class PosDraft {
         discountIsPercent: discountIsPercent ?? this.discountIsPercent,
         notesText: notesText ?? this.notesText,
         cashCustomerName: cashCustomerName ?? this.cashCustomerName,
+        currencyDecimals: currencyDecimals ?? this.currencyDecimals,
         holdLabel: holdLabel ?? this.holdLabel,
         heldAt: heldAt ?? this.heldAt,
         holdId: holdId ?? this.holdId,
@@ -111,6 +115,7 @@ class PosDraft {
         'discountIsPercent': discountIsPercent,
         'notesText': notesText,
         'cashCustomerName': cashCustomerName,
+        'currencyDecimals': currencyDecimals,
         'holdLabel': holdLabel,
         'heldAt': heldAt?.toIso8601String(),
         'holdId': holdId,
@@ -134,6 +139,7 @@ class PosDraft {
       discountIsPercent: json['discountIsPercent'] as bool? ?? false,
       notesText: json['notesText'] as String? ?? '',
       cashCustomerName: json['cashCustomerName'] as String? ?? 'عميل نقدي',
+      currencyDecimals: (json['currencyDecimals'] as num?)?.toInt() ?? 2,
       holdLabel: json['holdLabel'] as String?,
       heldAt: json['heldAt'] != null
           ? DateTime.tryParse(json['heldAt'] as String)
@@ -145,23 +151,30 @@ class PosDraft {
   double get subtotal =>
       cart.values.fold<double>(0.0, (sum, e) => sum + e.total);
 
-  /// قيمة الخصم الفعلية وفق النمط: نسبة مئوية من المجموع أو مبلغ مقطوع.
-  double get discountValue {
+  /// قيمة الخصم الفعلية مقربة لمنازل العملة المعتمدة.
+  double discountValueFor([int? decimals]) {
+    final dec = decimals ?? currencyDecimals;
     final raw = Fmt.parseAmount(discountText) ?? 0.0;
     if (raw <= 0) return 0.0;
     if (discountIsPercent) {
       final pct = raw.clamp(0.0, 100.0);
       final disc = subtotal * pct / 100.0;
-      return (disc * 100).roundToDouble() / 100.0;
+      return Fmt.roundMoney(disc, dec);
     }
     final disc = raw.clamp(0.0, subtotal);
-    return (disc * 100).roundToDouble() / 100.0;
+    return Fmt.roundMoney(disc, dec);
   }
 
-  double get netTotal {
-    final net = (subtotal - discountValue).clamp(0.0, double.infinity);
-    return (net * 100).roundToDouble() / 100.0;
+  /// قيمة الخصم الفعلية وفق النمط: نسبة مئوية من المجموع أو مبلغ مقطوع.
+  double get discountValue => discountValueFor();
+
+  double netTotalFor([int? decimals]) {
+    final dec = decimals ?? currencyDecimals;
+    final net = (subtotal - discountValueFor(dec)).clamp(0.0, double.infinity);
+    return Fmt.roundMoney(net, dec);
   }
+
+  double get netTotal => netTotalFor();
 
   /// إجمالي الكميات الفعلية شاملة الأوزان والكسور العشرية بدقة.
   double get totalQuantity => cart.values.fold<double>(
@@ -301,6 +314,13 @@ class PosDraftNotifier extends StateNotifier<PosDraft> {
   }
 
   void setCustomer(int? id) => state = state.copyWith(customerId: id);
+  void setCurrencyDecimals(int decimals) {
+    final clamped = decimals < 0 ? 0 : (decimals > 6 ? 6 : decimals);
+    if (state.currencyDecimals != clamped) {
+      state = state.copyWith(currencyDecimals: clamped);
+    }
+  }
+
   void setPayment(String p) => state = state.copyWith(payment: p);
   void setPaid(String t) => state = state.copyWith(paidText: t);
   void setDiscount(String t) => state = state.copyWith(discountText: t);
