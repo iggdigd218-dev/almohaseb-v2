@@ -124,7 +124,8 @@ Future<Uint8List> buildVoucherPdf({
       ? const PdfColor.fromInt(0xFFFDECEA)
       : (isGreen ? const PdfColor.fromInt(0xFFEAF7EF) : soft);
 
-  final words = '${numberToWords(v.amount)} ${currency.name}';
+  final words =
+      '${numberToWords(v.amount)} ${cleanCurrencyNameForTafqeet(currency.name)}';
 
   pw.Widget line(String k, String val) => pw.Padding(
         padding: const pw.EdgeInsets.symmetric(vertical: 5),
@@ -229,9 +230,12 @@ Future<Uint8List> buildVoucherPdf({
                         style: const pw.TextStyle(fontSize: 9, color: muted),
                       ),
                     if (org.phone.isNotEmpty)
-                      pw.Text(
-                        org.phone,
-                        style: const pw.TextStyle(fontSize: 9, color: muted),
+                      pw.Directionality(
+                        textDirection: pw.TextDirection.ltr,
+                        child: pw.Text(
+                          org.phone,
+                          style: const pw.TextStyle(fontSize: 9, color: muted),
+                        ),
                       ),
                     if (org.email.isNotEmpty)
                       pw.Text(
@@ -280,7 +284,12 @@ Future<Uint8List> buildVoucherPdf({
             children: [
               infoCell('التاريخ', Fmt.date(v.date)),
               pw.SizedBox(width: 8),
-              infoCell('رقم السند', v.number),
+              infoCell(
+                  'رقم السند',
+                  v.number
+                      .trim()
+                      .replaceFirst(RegExp(r'^#+'), '')
+                      .replaceFirst(RegExp(r'#+$'), '')),
               pw.SizedBox(width: 8),
               infoCell('نوع السند', v.kind.label),
             ],
@@ -296,18 +305,18 @@ Future<Uint8List> buildVoucherPdf({
             ),
             child: pw.Column(
               children: [
-                line('اسم الحساب', account?.name ?? '—'),
+                line('اسم الحساب', v.resolvedPartyName(account)),
                 if (account != null && account.phone.isNotEmpty)
-                  line('رقم الهاتف', account.phone),
+                  line('رقم الهاتف', '\u202A${account.phone}\u202C'),
                 line('رقم الحساب', account?.id?.toString() ?? '—'),
-                if (v.statement.isNotEmpty) line('بيان العملية', v.statement),
+                if (v.statement.isNotEmpty) line('مقابل', v.statement),
                 line('العملة', '${currency.name} (${currency.symbol})'),
               ],
             ),
           ),
           if (items.isNotEmpty) ...[
             pw.Text(
-              'تفاصيل المشتريات',
+              'تفاصيل الأصناف',
               style: pw.TextStyle(fontSize: 13, font: bold, color: brand),
             ),
             pw.SizedBox(height: 8),
@@ -353,7 +362,7 @@ Future<Uint8List> buildVoucherPdf({
             pw.Align(
               alignment: pw.AlignmentDirectional.centerEnd,
               child: pw.Text(
-                'إجمالي المشتريات: ${Fmt.money(items.fold<double>(0, (sum, line) => sum + line.total), currency.decimal)} ${currency.symbol}',
+                'إجمالي قيمة الأصناف: ${Fmt.money(items.fold<double>(0, (sum, line) => sum + line.total), currency.decimal)} ${currency.symbol}',
                 style: pw.TextStyle(fontSize: 11, font: bold, color: brand),
               ),
             ),
@@ -380,7 +389,7 @@ Future<Uint8List> buildVoucherPdf({
                 ),
                 pw.SizedBox(height: 6),
                 pw.Text(
-                  'فقط: $words لا غير',
+                  'فقط $words لا غير',
                   style: pw.TextStyle(fontSize: 11, font: bold),
                 ),
               ],
@@ -459,14 +468,18 @@ String voucherText({
   required String orgName,
   List<InvoiceLine> items = const [],
 }) {
+  final cleanNum = v.number
+      .trim()
+      .replaceFirst(RegExp(r'^#+'), '')
+      .replaceFirst(RegExp(r'#+$'), '');
   final b = StringBuffer()
-    ..writeln('📄 ${v.kind.label} رقم ${v.number}')
+    ..writeln('📄 ${v.kind.label} رقم $cleanNum')
     ..writeln('التاريخ: ${Fmt.date(v.date)}')
-    ..writeln('الحساب: ${account?.name ?? '—'}')
+    ..writeln('الحساب: ${v.resolvedPartyName(account)}')
     ..writeln(
       'المبلغ: ${Fmt.money(v.amount, currency.decimal)} ${currency.symbol}',
     )
-    ..writeln('البيان: ${v.statement.isEmpty ? '—' : v.statement}');
+    ..writeln('مقابل: ${v.statement.isEmpty ? '—' : v.statement}');
   if (items.isNotEmpty) {
     b.writeln('تفاصيل المشتريات:');
     for (var i = 0; i < items.length; i++) {

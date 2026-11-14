@@ -19,6 +19,7 @@ import 'package:sqflite/sqflite.dart';
 
 import '../../core/database.dart';
 import '../../core/desktop_net.dart';
+import '../../core/item_conflict.dart';
 import '../repository.dart';
 import 'apply_remote.dart';
 import 'cloud_join.dart';
@@ -27,6 +28,7 @@ import 'device_id.dart';
 import 'firebase_auth_service.dart';
 import 'chat_hooks.dart';
 import 'operation.dart';
+import 'subscription_guard.dart';
 import 'sync_engine.dart';
 
 class CloudFirebaseTransport implements SyncTransport {
@@ -174,9 +176,28 @@ class CloudFirebaseTransport implements SyncTransport {
     return best;
   }
 
-  /// يحفظ المؤشر الزمني المحلي الدائم `last_synced_cursor` فوراً لمنع تكرار التنزيل.
+  /// يقرأ مفتاح آخر عملية متزامنة ضمن المؤشر المركب `last_synced_cursor_key`.
+  Future<String> getLastSyncedCursorKey() async {
+    final db = await _db;
+    try {
+      final rows = await db.query(
+        'sync_meta',
+        columns: ['value'],
+        where: 'key = ?',
+        whereArgs: ['last_synced_cursor_key:$workspaceId'],
+        limit: 1,
+      );
+      if (rows.isNotEmpty) {
+        return '${rows.first['value'] ?? ''}'.trim();
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  /// يحفظ المؤشر الزمني المركب المحلي الدائم `(last_synced_cursor, last_synced_cursor_key)` فوراً.
   Future<void> saveLastSyncedCursor(
     int cursorMs, {
+    String? cursorKey,
     DatabaseExecutor? executor,
   }) async {
     if (cursorMs <= 0) return;
@@ -197,6 +218,16 @@ class CloudFirebaseTransport implements SyncTransport {
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    if (cursorKey != null && cursorKey.trim().isNotEmpty) {
+      await target.insert(
+        'sync_meta',
+        {
+          'key': 'last_synced_cursor_key:$workspaceId',
+          'value': cursorKey.trim(),
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
     try {
       await target.insert(
         'settings',
@@ -209,19 +240,20 @@ class CloudFirebaseTransport implements SyncTransport {
     } catch (_) {}
   }
 
-  /// يبني معاملات استعلام الاستئناف الحصري بالمؤشر الزمني:
-  /// `.orderByChild('server_time').startAfter(last_synced_cursor)`
-  /// في واجهة REST يقابل `orderBy="server_time"&startAt=${last_synced_cursor + 1}`.
+  /// يبني معاملات استعلام الاستئناف بالمؤشر المركب `(server_time, operation_key)`:
+  /// يستخدم `startAt: '$lastSyncedCursor'` (شامل لنفس الملي ثانية `>=`) لمنع ضياع
+  /// العمليات المتزامنة التي تشترك في نفس `server_time`، مع الاعتماد على
+  /// التصفية المحلية وفحص `idempotentQ` عبر `operations.id` لمنع التكرار.
   static Map<String, String> buildCursorQueryParams({
     required int lastSyncedCursor,
     String indexField = 'server_ts',
     int limit = kPullPageSize,
     bool forRealtimeStream = false,
   }) {
-    final startAfterCursor = lastSyncedCursor > 0 ? lastSyncedCursor + 1 : 0;
+    final startAtCursor = lastSyncedCursor > 0 ? lastSyncedCursor : 0;
     return <String, String>{
       'orderBy': jsonEncode(indexField),
-      'startAt': '$startAfterCursor',
+      'startAt': '$startAtCursor',
       if (forRealtimeStream)
         'limitToLast': '1'
       else
@@ -251,15 +283,38 @@ class CloudFirebaseTransport implements SyncTransport {
     } on DatabaseException catch (_) {}
 
     final uri = Uri.parse(_opPath(op.id));
-    // 2. حظر تضمين الوسائط الثقيلة مع السماح بمرفقات الدردشة (preserveChatAttachment: true)
-    // عند الرفع إلى Firebase RTDB لكي تتمكن أجهزة الأعضاء من تنزيل المرفق وتجسيده محلياً،
-    // ثم تقليم file_b64 من جدول operations المحلي بعد تأكيد الرفع.
-    final cloudPayload = sanitizeOperationPayload(
-      op.payload,
-      entityType: op.entityType,
-      entityId: op.entityId,
-      preserveChatAttachment: true,
+    // 2. التحقق من صلاحية مزامنة الصور والوسائط على السحابة (مغلقة افتراضياً false إلا بتفعيل الأدمن).
+    final allowMediaSync =
+        (await repo.getSetting('allow_cloud_media_sync')) == '1' ||
+            SubscriptionGuard.lastState.features.allowCloudMediaSync;
+    if (!allowMediaSync &&
+        op.entityType == EntityKind.setting &&
+        op.entityId == 'org.icon.b64') {
+      // لا نرفع صورة الشعار للسحابة طالما مزامنة الوسائط مغلقة، ونكتفي بوسم العملية محلياً.
+      try {
+        await db.update(
+          'operations',
+          {'synced': 1, 'is_synced': 1},
+          where: 'id = ?',
+          whereArgs: [op.id],
+        );
+      } catch (_) {}
+      return;
+    }
+    final cloudPayload = Map<String, Object?>.from(
+      sanitizeOperationPayload(
+        op.payload,
+        entityType: op.entityType,
+        entityId: op.entityId,
+        preserveChatAttachment: allowMediaSync,
+      ),
     );
+    if (!allowMediaSync) {
+      final tb = cloudPayload['thumb_b64'];
+      if (tb is String && tb.trim().isNotEmpty) {
+        cloudPayload.remove('thumb_b64');
+      }
+    }
     final localSanitizedPayload = sanitizeOperationPayload(
       op.payload,
       entityType: op.entityType,
@@ -406,9 +461,12 @@ class CloudFirebaseTransport implements SyncTransport {
     // نقرأ المؤشر المحلي الدائم `last_synced_cursor` المعتمد على `server_time`،
     // ولا نطلب إلا العمليات الأحدث منه (`startAt = last_synced_cursor + 1`).
     final int lastCursorMs = resetCursor ? 0 : await getLastSyncedCursor();
+    final String lastCursorKey =
+        resetCursor ? '' : await getLastSyncedCursorKey();
     final r = resolver ?? ConflictResolver();
     int applied = 0;
     int maxTsMs = lastCursorMs;
+    String maxTsKey = lastCursorKey;
     int droppedOtherWs = 0;
     String droppedSample = '';
     final ourId = await ensureDeviceId(repo);
@@ -497,10 +555,14 @@ class CloudFirebaseTransport implements SyncTransport {
             0;
       }
 
-      // تصفية محلية إضافية صارمة: استئناف ما بعد `currentCursorMs` فقط (startAfter)
+      // تصفية محلية بالمؤشر المركب (server_time >= currentCursorMs):
+      // نسمح بمرور العمليات التي تحمل نفس الطابع الزمني `currentCursorMs` ليفحصها
+      // حاجز عدم التكرار `idempotentQ` عبر `operations.id`، فلا تسقط أي حركة متزامنة
+      // تشترك في نفس الملي ثانية على الخادم.
+      final int fetchedCount = entries.length;
       if (currentCursorMs > 0) {
         entries =
-            entries.where((e) => entryMs(e.value) > currentCursorMs).toList();
+            entries.where((e) => entryMs(e.value) >= currentCursorMs).toList();
       }
       if (entries.isEmpty) {
         hasMore = false;
@@ -582,7 +644,9 @@ class CloudFirebaseTransport implements SyncTransport {
               ? i + microBatchSize
               : entries.length;
           final chunk = entries.sublist(i, end);
-          await db.transaction((txn) async {
+          ItemConflictHooks.beginTransactionScope();
+          try {
+            await db.transaction((txn) async {
             for (final entry in chunk) {
               final v = entry.value;
               if (v is! Map) continue;
@@ -664,7 +728,12 @@ class CloudFirebaseTransport implements SyncTransport {
                 }
               }
             }
-          });
+            });
+            ItemConflictHooks.commitTransactionScope();
+          } catch (_) {
+            ItemConflictHooks.discardTransactionScope();
+            rethrow;
+          }
           if (end < entries.length) {
             await Future<void>.delayed(Duration.zero);
           }
@@ -886,18 +955,28 @@ class CloudFirebaseTransport implements SyncTransport {
       ownershipOps.clear();
 
       int pageMaxTs = 0;
+      String pageMaxKey = '';
       for (final entry in entries) {
         final ms = entryMs(entry.value);
-        if (ms > pageMaxTs) pageMaxTs = ms;
+        final keyStr = '${entry.key}';
+        if (ms > pageMaxTs ||
+            (ms == pageMaxTs && keyStr.compareTo(pageMaxKey) > 0)) {
+          pageMaxTs = ms;
+          pageMaxKey = keyStr;
+        }
       }
-      if (pageMaxTs > maxTsMs) {
+      if (pageMaxTs > maxTsMs ||
+          (pageMaxTs == maxTsMs &&
+              pageMaxKey.isNotEmpty &&
+              pageMaxKey.compareTo(maxTsKey) > 0)) {
         maxTsMs = pageMaxTs;
-        await saveLastSyncedCursor(maxTsMs);
+        maxTsKey = pageMaxKey;
+        await saveLastSyncedCursor(maxTsMs, cursorKey: maxTsKey);
       }
 
-      if (entries.length >= kPullPageSize && pageMaxTs > currentCursorMs) {
+      if (fetchedCount >= kPullPageSize && pageMaxTs >= currentCursorMs) {
         currentCursorMs =
-            (pageMaxTs - 1 > currentCursorMs) ? pageMaxTs - 1 : pageMaxTs;
+            pageMaxTs > currentCursorMs ? pageMaxTs : pageMaxTs + 1;
         hasMore = true;
       } else {
         hasMore = false;
@@ -911,8 +990,9 @@ class CloudFirebaseTransport implements SyncTransport {
       }
     }
 
-    if (maxTsMs > lastCursorMs) {
-      await saveLastSyncedCursor(maxTsMs);
+    if (maxTsMs > lastCursorMs ||
+        (maxTsMs == lastCursorMs && maxTsKey != lastCursorKey)) {
+      await saveLastSyncedCursor(maxTsMs, cursorKey: maxTsKey);
     }
 
     if (maxTsMs > lastCursorMs || applied > 0) {

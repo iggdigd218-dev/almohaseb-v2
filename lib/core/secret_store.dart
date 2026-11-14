@@ -24,12 +24,13 @@ class SecretStore {
   static Future<String> reveal(String stored) => TokenCipher.reveal(stored);
 
   /// للمقارنة في WHERE: يعيد الأشكال المقبولة لسرّ وارد صريح —
-  /// [الصريح كما ورد، المعمّى بصيغة enc2 الحتمية، المعمّى بصيغة enc1 التوافقية].
+  /// [الصريح كما ورد، المعمّى بصيغة enc3 الموثقة، المعمّى بصيغة enc2 الحتمية، المعمّى بصيغة enc1 التوافقية].
   static Future<List<String>> matchForms(String plain) async {
-    final p2 = await protect(plain);
-    if (p2 == plain) return [plain, plain];
+    final p3 = await protect(plain);
+    if (p3 == plain) return [plain, plain];
+    final p2 = await TokenCipher.protectLegacyV2(plain, deterministic: true);
     final p1 = await TokenCipher.protectLegacyV1(plain);
-    return <String>{plain, p2, p1}.toList();
+    return <String>{plain, p3, p2, p1}.toList();
   }
 
   /// تحقق زمني ثابت (Constant-Time Comparison) من تطابق السر الصريح مع القيمة المخزنة

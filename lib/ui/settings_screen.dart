@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/app_version.dart';
 import '../core/db_init.dart' show isDesktop;
 import '../core/factory_reset.dart';
+import '../core/l10n.dart';
 import '../core/models.dart';
 import '../core/security.dart';
 import '../core/sfx.dart';
@@ -384,6 +385,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    ref.watch(appLocaleProvider);
     final settings = ref.watch(settingsProvider);
     final currencies = ref.watch(currenciesProvider).valueOrNull ?? [];
 
@@ -471,7 +473,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                                       keyboardType: f.$4,
                                       maxLines: f.$5,
                                       decoration: InputDecoration(
-                                        labelText: f.$2,
+                                        labelText: context.tr(f.$2),
                                         prefixIcon: Icon(f.$3, size: 18),
                                         isDense: true,
                                       ),
@@ -1434,6 +1436,10 @@ class _SettingsHome extends ConsumerWidget {
     return ListView(
       padding: const EdgeInsets.fromLTRB(14, 14, 14, 40),
       children: [
+        const Padding(
+          padding: EdgeInsets.only(bottom: 10),
+          child: LanguageSelectorCard(),
+        ),
         for (final it in visibleItems)
           Padding(
             padding: const EdgeInsets.only(bottom: 10),
@@ -1460,11 +1466,11 @@ class _SettingsHome extends ConsumerWidget {
                     MaterialPageRoute(
                       builder: (_) => Scaffold(
                         appBar: AppBar(
-                          title: Text(it.$1),
+                          title: Text(context.tr(it.$1)),
                           actions: [
                             if (onSave != null)
                               IconButton(
-                                tooltip: 'حفظ التعديلات',
+                                tooltip: context.tr('حفظ التعديلات'),
                                 icon: const Icon(Icons.save_outlined),
                                 onPressed: saving ? null : onSave,
                               ),
@@ -1498,7 +1504,7 @@ class _SettingsHome extends ConsumerWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              it.$1,
+                              context.tr(it.$1),
                               style: const TextStyle(
                                 fontSize: 13.5,
                                 fontWeight: FontWeight.w800,
@@ -1506,7 +1512,7 @@ class _SettingsHome extends ConsumerWidget {
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              it.$2,
+                              context.tr(it.$2),
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
@@ -1519,7 +1525,9 @@ class _SettingsHome extends ConsumerWidget {
                         ),
                       ),
                       Icon(
-                        Icons.chevron_left,
+                        Directionality.of(context) == TextDirection.ltr
+                            ? Icons.chevron_right
+                            : Icons.chevron_left,
                         size: 20,
                         color: AppColors.text3Of(context),
                       ),
@@ -1552,30 +1560,9 @@ class _Collapsible extends StatelessWidget {
     this.initiallyExpanded = false,
   });
 
-  /// وصف سطر واحد لكل بطاقة — تصنيف واضح بلا حشو.
-  static const Map<String, String> _subs = {
-    'بيانات المؤسسة': 'اسم النشاط وبيانات المنشأة والعنوان',
-    'العملة والترقيم': 'العملة الافتراضية لكل العمليات والفواتير',
-    'المبيعات والسندات': 'خيارات الفواتير والبيع والسندات والتنبيهات',
-    'الأمان والخصوصية': 'قفل الشاشة والبصمة وحماية التطبيق',
-    'إعادة الضبط والحذف': 'حذف الحساب أو تهيئة المجموعة وإعادة الضبط',
-    'المزامنة وربط الأجهزة': 'حوّل الجهاز إلى مضيف مجموعة واربط الأجهزة',
-    'حساب المؤسسة (Google)': 'الهوية الدائمة للمنشأة وربط حساب Google',
-    'تفاصيل الاشتراك': 'حالة الترخيص والمقاعد وتاريخ الانتهاء',
-    'الانضمام إلى مؤسسة قائمة': 'انضم عبر QR أو رمز دعوة بموافقة المدير',
-    'إدارة الموظفين': 'مراجعة طلبات خروج ومغادرة أعضاء المجموعة',
-    'الدعم والمساعدة': 'التواصل المباشر مع الدعم الفني وخدمة العملاء',
-    'نسخة احتياطية محلية': 'نسخة داخل مجلد التطبيق على هذا الجهاز فقط',
-    'مغادرة المجموعة': 'طلب مغادرة بموافقة المدير وفك ارتباط نظيف',
-    'استرداد ملكية مساحة العمل': 'استرجاع ملكية منشأتك فوراً وبثّها للأجهزة',
-    'استرجاع الإدارة (صمام الأمان)': 'استعادة الإدارة خلال 24 ساعة من التسليم',
-    'النسخ الاحتياطي التلقائي': 'جدولة النسخ (كل ساعتين/يومياً) ووجهة Drive',
-  };
-
   @override
   Widget build(BuildContext context) {
     final c = color ?? AppColors.primaryOf(context);
-    final sub = _subs[title];
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
@@ -1607,19 +1594,10 @@ class _Collapsible extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        title,
+                        context.tr(title),
                         style: const TextStyle(
                             fontWeight: FontWeight.w800, fontSize: 15),
                       ),
-                      if (sub != null)
-                        Text(
-                          sub,
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            height: 1.4,
-                            color: AppColors.text3Of(context),
-                          ),
-                        ),
                     ],
                   ),
                 ),

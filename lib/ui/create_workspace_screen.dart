@@ -19,6 +19,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/accounting.dart';
 import '../core/cloud_config.dart';
+import '../core/security.dart';
 import '../core/sfx.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
@@ -123,7 +124,6 @@ class _CreateWorkspaceScreenState extends ConsumerState<CreateWorkspaceScreen> {
     // (هوية الهاتف) إذا أدخل رقمًا بدل البريد، نولّد بريدًا داخليًا معياريًا
     // لمصادقة Firebase ونحفظ الرقم في بيانات المنشأة وفهرس phones_index.
     final email = AccountWorkspace.authEmailForIdentifier(rawIdentifier);
-    final isPhoneIdentity = !AccountWorkspace.looksLikeEmail(rawIdentifier);
     final password = _passwordCtrl.text.trim();
     final storeName = _storeNameCtrl.text.trim();
     final rawPhone = _phoneCtrl.text.trim().replaceAll(RegExp(r'[^\d]'), '');
@@ -329,17 +329,23 @@ class _CreateWorkspaceScreenState extends ConsumerState<CreateWorkspaceScreen> {
         isAdditionalWorkspace: widget.isAdditionalWorkspace,
       );
 
-      // (هوية الهاتف) ربط الرقم بفهرس المنشأة السحابي بعد الإنشاء.
-      if (isPhoneIdentity && url.isNotEmpty) {
+      // (هوية الهاتف الموحدة) ربط الرقم بفهرس المنشأة السحابي دائماً كمعرّف دخول ثانٍ بجانب البريد.
+      if (fullPhone.isNotEmpty && url.isNotEmpty) {
         try {
+          final pwHash = password.trim().length >= 4
+              ? Security.hash(password.trim())
+              : '';
           await AccountWorkspace.bindPhoneWorkspace(
             backendUrl: url,
             phone: fullPhone,
             workspaceId:
                 await ref.read(repoProvider).activeWorkspaceId(),
             email: email,
+            passwordHash: pwHash,
           );
-        } catch (_) {}
+        } catch (e) {
+          debugPrint('bindPhoneWorkspace warning: $e');
+        }
       }
 
       // إعادة تشغيل محرك المزامنة وتحديث كافة الـ Providers للمنشأة الجديدة المعزولة
@@ -379,7 +385,6 @@ class _CreateWorkspaceScreenState extends ConsumerState<CreateWorkspaceScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final primary = AppColors.primaryOf(context);
     return Scaffold(
       appBar: AppBar(
         title: Text(
@@ -415,50 +420,6 @@ class _CreateWorkspaceScreenState extends ConsumerState<CreateWorkspaceScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: primary.withValues(alpha: 0.08),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(
-                          color: primary.withValues(alpha: 0.25),
-                        ),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(Icons.domain_add_rounded,
-                                  color: primary, size: 28),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Text(
-                                  widget.isAdditionalWorkspace
-                                      ? 'تأسيس منشأة إضافية بقاعدة بيانات معزولة'
-                                      : 'مرحباً بك! يرجى إكمال بيانات حسابك ومنشأتك للبدء',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w800,
-                                    fontSize: 15.5,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'سيتم إنشاء معرف منشأة فريد وقاعدة بيانات SQLite مستقلة ونظيفة كلياً، '
-                            'وتسجيلها سحابياً باسم بريدك الإلكتروني بحالة اشتراك غير مفعل حتى يتم الترخيص.',
-                            style: TextStyle(
-                              fontSize: 12.5,
-                              height: 1.55,
-                              color: AppColors.text2Of(context),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 20),
                     if (_errorMsg != null) ...[
                       Container(
                         padding: const EdgeInsets.all(12),

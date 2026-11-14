@@ -83,6 +83,8 @@ class SyncRecorder {
     }
   }
 
+  static int _lastRecordedMs = 0;
+
   /// يسجّل عملية في جدول operations + صفوف في sync_queue.
   /// يُستدعى داخل Transaction.
   Future<String> record({
@@ -93,9 +95,15 @@ class SyncRecorder {
     String parentOpId = '',
     int? version,
     List<String> extraTargets = const [], // مثلاً device:<id>
+    DateTime? explicitTime,
   }) async {
     final id = uuid();
-    final now = DateTime.now();
+    var nowMs = (explicitTime ?? DateTime.now()).millisecondsSinceEpoch;
+    if (nowMs <= _lastRecordedMs) {
+      nowMs = _lastRecordedMs + 1;
+    }
+    _lastRecordedMs = nowMs;
+    final now = DateTime.fromMillisecondsSinceEpoch(nowMs);
     final v = version ?? await nextVersion(entityType, entityId);
     // فحص صارم للحجم الخام قبل الإدراج: حمولة تتجاوز حد ناقل HTTP (8MB) لن
     // تُسلَّم أبداً — نرفضها هنا فتفشل معاملة الحفظ كلها (ACID) بدل

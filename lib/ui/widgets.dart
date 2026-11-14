@@ -3,9 +3,45 @@ import 'package:flutter/material.dart';
 import '../core/accounting.dart';
 import '../core/app_error_mapper.dart';
 import '../core/format.dart';
+import '../core/l10n.dart';
 import '../core/sfx.dart';
 import '../core/theme.dart';
 import '../core/words.dart';
+
+/// أيقونة مربع السهم الملونة الموحدة للمبالغ:
+/// - مربع أحمر بسهم أبيض للأسفل عند مديونية العميل («عليه»).
+/// - مربع أخضر بسهم أبيض للأعلى عند دائنية العميل («له»).
+class NatureArrowSquare extends StatelessWidget {
+  final bool isDebit;
+  final double size;
+  const NatureArrowSquare({
+    super.key,
+    required this.isDebit,
+    this.size = 24,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = isDebit ? const Color(0xFFEF4444) : const Color(0xFF10B981);
+    final icon = isDebit
+        ? Icons.keyboard_arrow_down_rounded
+        : Icons.keyboard_arrow_up_rounded;
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(size * 0.28),
+      ),
+      alignment: Alignment.center,
+      child: Icon(
+        icon,
+        size: size * 0.78,
+        color: Colors.white,
+      ),
+    );
+  }
+}
 
 /// شارة ملوّنة صغيرة.
 class Pill extends StatelessWidget {
@@ -29,7 +65,7 @@ class Pill extends StatelessWidget {
               const SizedBox(width: 4),
             ],
             Text(
-              text,
+              context.tr(text),
               style: TextStyle(
                 fontSize: 11.5,
                 fontWeight: FontWeight.w700,
@@ -41,9 +77,8 @@ class Pill extends StatelessWidget {
       );
 }
 
-/// عرض مبلغ الرصيد مع طبيعته (له/عليه) واللون المناسب.
-///
-/// الاتفاقية: موجب = «عليه» (مستحق لنا)، سالب = «له» (مستحق منا).
+/// عرض مبلغ الرصيد باللون الأسود (أو الأبيض في الوضع الليلي) مع طبيعته:
+/// «عليه» باللون الأحمر، و«له» باللون الأخضر.
 class BalanceText extends StatelessWidget {
   final double value;
   final CurrencyDef currency;
@@ -63,9 +98,11 @@ class BalanceText extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final zero = Fmt.isZeroMoney(value);
-    final color = zero
+    final amountColor =
+        zero ? Theme.of(context).hintColor : AppColors.textOf(context);
+    final natureColor = zero
         ? Theme.of(context).hintColor
-        : (value > 0 ? AppColors.green : AppColors.red);
+        : (value > 0 ? const Color(0xFFEF4444) : const Color(0xFF10B981));
     final nature = zero ? 'متساوٍ' : (value > 0 ? 'عليه' : 'له');
 
     if (hidden) {
@@ -74,7 +111,7 @@ class BalanceText extends StatelessWidget {
         style: TextStyle(
           fontSize: size,
           fontWeight: FontWeight.w800,
-          color: color,
+          color: amountColor,
         ),
       );
     }
@@ -88,7 +125,7 @@ class BalanceText extends StatelessWidget {
           style: TextStyle(
             fontSize: size,
             fontWeight: FontWeight.w800,
-            color: color,
+            color: amountColor,
           ),
         ),
         const SizedBox(width: 4),
@@ -97,12 +134,12 @@ class BalanceText extends StatelessWidget {
           style: TextStyle(
             fontSize: size * 0.68,
             fontWeight: FontWeight.w600,
-            color: color,
+            color: amountColor,
           ),
         ),
         if (showNature && !zero) ...[
           const SizedBox(width: 6),
-          Pill(nature, color: color),
+          Pill(nature, color: natureColor),
         ],
       ],
     );
@@ -161,7 +198,7 @@ class StatCard extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              title,
+                              context.tr(title),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
@@ -303,7 +340,7 @@ class SectionTitle extends StatelessWidget {
           children: [
             Expanded(
               child: Text(
-                title,
+                context.tr(title),
                 style:
                     const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
               ),
@@ -316,8 +353,10 @@ class SectionTitle extends StatelessWidget {
                   minimumSize: Size.zero,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
-                child:
-                    Text(actionLabel!, style: const TextStyle(fontSize: 12.5)),
+                child: Text(
+                  context.tr(actionLabel!),
+                  style: const TextStyle(fontSize: 12.5),
+                ),
               ),
           ],
         ),

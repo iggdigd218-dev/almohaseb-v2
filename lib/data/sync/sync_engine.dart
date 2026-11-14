@@ -648,6 +648,16 @@ class SyncEngine {
         if (approved) {
           final oldWs = await repo.activeWorkspaceId();
           stop();
+          // حذف إشارة الطرد المؤقتة من السحابة فور استلامها وتنفيذ الخروج حتى لا تسبب حلقة طرد متكررة
+          if (url.isNotEmpty && wsToCheck.isNotEmpty && ourId.isNotEmpty) {
+            try {
+              final root =
+                  '${url.replaceAll(RegExp(r'/+$'), '')}/workspaces/${Uri.encodeComponent(wsToCheck)}';
+              final encOur = Uri.encodeComponent(ourId);
+              await CloudJoin.deleteNode('$root/evictions/$encOur.json');
+              await CloudJoin.deleteNode('$root/roster/$encOur.json');
+            } catch (_) {}
+          }
           await repo.resetToStandaloneAfterExpulsion();
           await AccountWorkspace.removeWorkspaceFromLocalRegistry(
             oldWs,
@@ -758,6 +768,11 @@ class SyncEngine {
       SyncDiagnostics.instance.pullStarted();
       await AppDatabase.ensureWorkspaceRow(
           await _db, _cloudTransport!.workspaceId);
+      // مصالحة خفيفة لأي عمليات محلية لم يُؤكَّد رفعها بعد (Pending Ack Reconciliation)
+      try {
+        await _backfillMissedCloudOps();
+        unawaited(processQueue());
+      } catch (_) {}
       final applied = await _cloudTransport!.pull(resolver: ConflictResolver());
       SyncDiagnostics.instance.pullFinished(
         ok: true,

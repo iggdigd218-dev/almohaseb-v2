@@ -3,16 +3,19 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../core/accounting.dart';
 import '../core/app_version.dart';
+import '../core/category_tree.dart' as category_tree;
 import '../core/ids.dart';
 import '../core/database.dart';
 import '../core/device_names.dart';
 import '../core/format.dart';
+import '../core/item_conflict.dart';
 import '../core/secret_store.dart';
 import '../core/media_paths.dart';
 import '../core/models.dart';
@@ -32,6 +35,7 @@ import 'sync/recorder.dart';
 import 'sync/snapshot_apply.dart';
 import 'sync/sync_diagnostics.dart';
 import 'sync/sync_queue.dart';
+import 'daily_harvest_service.dart';
 import 'sync/workspace_service.dart';
 import '../core/cloud_config.dart';
 
@@ -336,10 +340,14 @@ class Repo {
         return groupId;
       }
     } catch (_) {}
-    final id = await ensureWorkspace(db, repo: this);
-    await AppDatabase.ensureWorkspaceRow(db, id);
-    _workspaceId = id;
-    return id;
+    try {
+      final id = await ensureWorkspace(db, repo: this);
+      await AppDatabase.ensureWorkspaceRow(db, id);
+      _workspaceId = id;
+      return id;
+    } catch (_) {
+      return _workspaceId ?? 'default';
+    }
   }
 
   /// ══ (2026-09-22 — توجيه العمليات) ══
@@ -1669,6 +1677,79 @@ class Repo {
         .toList();
   }
 
+  /// (3.98.40 / الملاحظة 2) جلب اقتراحات البيان/الوصف للعمليات:
+  /// تبدأ بالبحث بمطابقة البادئة أو الجزئية لما يكتبه المستخدم مع إعطاء
+  /// الأولوية للبيانات السابقة لنفس الحساب المحدد ثم الأكثر تكراراً واستخداماً.
+  Future<List<String>> transactionDescriptionSuggestions({
+    String query = '',
+    int? accountId,
+    int limit = 8,
+  }) async {
+    final db = await _db;
+    final q = query.trim();
+    final result = <String>[];
+    final seen = <String>{};
+
+    void addUnique(String val) {
+      final clean = val.trim();
+      if (clean.length >= 2 && !seen.contains(clean)) {
+        seen.add(clean);
+        result.add(clean);
+      }
+    }
+
+    // 1) الاقتراحات السابقة لنفس الحساب أولاً
+    if (accountId != null && accountId > 0) {
+      final whereParts = <String>[
+        "(account_id = ? OR from_id = ? OR to_id = ?)",
+        "COALESCE(deleted_at, '') = ''",
+        "TRIM(COALESCE(description, '')) <> ''",
+      ];
+      final args = <dynamic>[accountId, accountId, accountId];
+      if (q.isNotEmpty) {
+        whereParts.add("description LIKE ?");
+        args.add('%$q%');
+      }
+      final rows = await db.rawQuery('''
+        SELECT description, COUNT(*) as cnt
+        FROM transactions
+        WHERE ${whereParts.join(' AND ')}
+        GROUP BY description
+        ORDER BY cnt DESC, MAX(id) DESC
+        LIMIT ?
+      ''', [...args, limit]);
+      for (final r in rows) {
+        addUnique('${r['description'] ?? ''}');
+        if (result.length >= limit) return result;
+      }
+    }
+
+    // 2) الاقتراحات العامة لبقية العمليات (الأكثر تكراراً)
+    final wherePartsGen = <String>[
+      "COALESCE(deleted_at, '') = ''",
+      "TRIM(COALESCE(description, '')) <> ''",
+    ];
+    final argsGen = <dynamic>[];
+    if (q.isNotEmpty) {
+      wherePartsGen.add("description LIKE ?");
+      argsGen.add('%$q%');
+    }
+    final rowsGen = await db.rawQuery('''
+      SELECT description, COUNT(*) as cnt
+      FROM transactions
+      WHERE ${wherePartsGen.join(' AND ')}
+      GROUP BY description
+      ORDER BY cnt DESC, MAX(id) DESC
+      LIMIT ?
+    ''', [...argsGen, limit * 2]);
+    for (final r in rowsGen) {
+      addUnique('${r['description'] ?? ''}');
+      if (result.length >= limit) break;
+    }
+
+    return result;
+  }
+
   Future<void> updateTxImage(int id, String path) async {
     await _ensureCan('edit_tx');
     final db = await _db;
@@ -1930,7 +2011,10 @@ class Repo {
       }
 
       // حفظ العملية المرافقة (مثل الدفعة المقدمة في البيع الجزئي) داخل نفس المعاملة الذرية
+      // مع فارق زمني رتيب (+1ms) لضمان عدم تطابق الطابع الزمني وترتيب الرفع الحتمي.
       if (companionTx != null && companionTx.amount > 0) {
+        final compNowDt = nowDt.add(const Duration(milliseconds: 1));
+        final compNow = compNowDt.toIso8601String();
         var compRef = companionTx.reference.trim();
         if (compRef.isEmpty) {
           compRef = await _nextSequence(txn, 'counter_tx', table: 'transactions');
@@ -1942,7 +2026,8 @@ class Repo {
         final compMap = compToSave.toMap();
         compMap['workspace_id'] = requireWorkspaceId;
         compMap['id'] = newGlobalId();
-        compMap['updated_at'] = now;
+        compMap['created_at'] = compNow;
+        compMap['updated_at'] = compNow;
         final compId = await txn.insert('transactions', compMap);
         final compSaved = Map<String, Object?>.from(compMap)..['id'] = compId;
         await rec.record(
@@ -1950,6 +2035,7 @@ class Repo {
           entityId: '$compId',
           opType: OpKind.create,
           payload: compSaved..['items'] = const <Map<String, Object?>>[],
+          explicitTime: compNowDt,
         );
         await logActivityTx(
           txn,
@@ -2061,11 +2147,20 @@ class Repo {
     }
   }
 
-  /// ملخص المبيعات الفعلية لفواتير نقطة البيع فقط (نقدية + آجلة - مرتجعات) ضمن نطاق زمني محدد.
-  /// محمي بصلاحية `can_view_sales_summary`.
+  /// ملخص المبيعات الفعلية لفواتير نقطة البيع فقط (نقدية + آجلة - مرتجعات) ضمن نطاق زمني محدد
+  /// مع دعم الفلاتر المتعددة (القسم، الفئة، الصنف، الجهاز، الموظف، طريقة الدفع، نوع الفاتورة، العملة)
+  /// والمخطط الزمني والنسب المئوية. محمي بصلاحية `can_view_sales_summary`.
   Future<Map<String, dynamic>> posSalesSummary({
     DateTime? from,
     DateTime? to,
+    int? sectionId,
+    int? categoryId,
+    int? itemId,
+    String? deviceId,
+    int? userId,
+    String? paymentKind, // 'all' | 'cash' | 'credit'
+    String? invoiceType, // 'all' | 'sale' | 'return'
+    String? currency,
   }) async {
     final allowed = await can('can_view_sales_summary') ||
         (await effectivePermissions()).canViewSalesSummary;
@@ -2079,6 +2174,13 @@ class Repo {
         'netByCurrency': <String, double>{},
         'cashByCurrency': <String, double>{},
         'creditByCurrency': <String, double>{},
+        'timeline': <Map<String, Object?>>[],
+        'bySection': <Map<String, Object?>>[],
+        'byCategory': <Map<String, Object?>>[],
+        'byItem': <Map<String, Object?>>[],
+        'byDevice': <Map<String, Object?>>[],
+        'byUser': <Map<String, Object?>>[],
+        'invoices': <Map<String, Object?>>[],
       };
     }
     final db = await _db;
@@ -2111,6 +2213,76 @@ class Repo {
       'SELECT t.* FROM transactions t WHERE ${whereParts.join(' AND ')} ORDER BY t.date DESC, t.id DESC',
       args,
     );
+
+    // جلب بيانات الفهرسة المساعدة (الأقسام، الفئات، الأصناف، الأجهزة، المستخدمين، وبنود الفواتير)
+    final secRows = await db.query('sections');
+    final sectionNames = <int, String>{
+      for (final r in secRows)
+        if (r['id'] is int) r['id'] as int: '${r['name'] ?? 'عام'}',
+    };
+    final catRows = await db.query('item_categories',
+        where: "COALESCE(deleted_at,'') = ''");
+    final categoryNames = <int, String>{
+      for (final r in catRows)
+        if (r['id'] is int) r['id'] as int: '${r['name'] ?? 'عام'}',
+    };
+    final categorySection = <int, int?>{
+      for (final r in catRows)
+        if (r['id'] is int) r['id'] as int: r['section_id'] as int?,
+    };
+    final itemRows =
+        await db.query('items', where: "COALESCE(deleted_at,'') = ''");
+    final itemMeta = <int, Map<String, Object?>>{
+      for (final r in itemRows)
+        if (r['id'] is int) r['id'] as int: r,
+    };
+    final devRows = await db.query('devices',
+        where: "COALESCE(revoked_at,'') = '' AND COALESCE(expelled_at,'') = ''");
+    final deviceNames = <String, String>{
+      for (final r in devRows)
+        '${r['id'] ?? ''}': '${r['name'] ?? r['id'] ?? 'جهاز'}',
+    };
+    final usrRows =
+        await db.query('users', where: "COALESCE(deleted_at,'') = ''");
+    final userNames = <int, String>{
+      for (final r in usrRows)
+        if (r['id'] is int) r['id'] as int: '${r['name'] ?? 'موظف'}',
+    };
+    final accRows = await db.query('accounts');
+    final accountNames = <int, String>{
+      for (final r in accRows)
+        if (r['id'] is int) r['id'] as int: '${r['name'] ?? ''}',
+    };
+
+    final txIds = rows.map((r) => r['id']).whereType<int>().toList();
+    final linesByTx = <int, List<Map<String, Object?>>>{};
+    final opMetaByTx = <int, ({String deviceId, int? userId})>{};
+    if (txIds.isNotEmpty) {
+      final allLines = await db.query('transaction_items');
+      for (final l in allLines) {
+        final tid = l['tx_id'] as int?;
+        if (tid != null) {
+          (linesByTx[tid] ??= <Map<String, Object?>>[]).add(l);
+        }
+      }
+      try {
+        final txOpRows = await db.query(
+          'operations',
+          columns: ['entity_id', 'device_id', 'user_id'],
+          where: "entity_type = 'tx' AND op_type = 'create'",
+        );
+        for (final opRow in txOpRows) {
+          final tid = int.tryParse('${opRow['entity_id'] ?? ''}');
+          if (tid != null && !opMetaByTx.containsKey(tid)) {
+            opMetaByTx[tid] = (
+              deviceId: '${opRow['device_id'] ?? ''}',
+              userId: opRow['user_id'] as int?,
+            );
+          }
+        }
+      } catch (_) {}
+    }
+
     var invoiceCount = 0;
     var returnCount = 0;
     final grossByCur = <String, double>{};
@@ -2118,6 +2290,27 @@ class Repo {
     final netByCur = <String, double>{};
     final cashByCur = <String, double>{};
     final creditByCur = <String, double>{};
+    final allCurrencies = <String>{};
+
+    final singleDay = from != null &&
+        to != null &&
+        from.year == to.year &&
+        from.month == to.month &&
+        from.day == to.day;
+    final timelineMap =
+        <String, ({double sales, double returns, int count, int retCount})>{};
+    final sectionTotals = <int?, ({String name, double amount, int count})>{};
+    final categoryTotals = <int?, ({String name, double amount, int count})>{};
+    final itemTotals =
+        <int?, ({String name, double amount, double qty, int count})>{};
+    final deviceTotals = <String, ({String name, double amount, int count})>{};
+    final userTotals = <int?, ({String name, double amount, int count})>{};
+    final filteredInvoices = <Map<String, Object?>>[];
+
+    final filterPay = (paymentKind ?? 'all').trim();
+    final filterType = (invoiceType ?? 'all').trim();
+    final filterCur = (currency ?? '').trim();
+    final filterDev = (deviceId ?? '').trim();
 
     for (final r in rows) {
       final t = Tx.fromMap(r);
@@ -2125,25 +2318,262 @@ class Repo {
       final isRet = desc.startsWith('مرتجع ') ||
           t.category == 'مرتجع مبيعات' ||
           t.notes.contains('[ORIG_TX:');
+      final isSale = !isRet &&
+          (t.type == OpType.revenue ||
+              (t.type == OpType.debit &&
+                  t.accountKind != AccountKind.supplier));
+      if (!isRet && !isSale) continue;
+
+      allCurrencies.add(t.currency);
+      if (filterCur.isNotEmpty && filterCur != 'all' && t.currency != filterCur) {
+        continue;
+      }
+      final isCash =
+          t.type == OpType.revenue || t.type == OpType.outflow || t.accountId == null;
+      if (filterPay == 'cash' && !isCash) continue;
+      if (filterPay == 'credit' && isCash) continue;
+      if (filterType == 'sale' && isRet) continue;
+      if (filterType == 'return' && !isRet) continue;
+
+      final tid = t.id ?? 0;
+      final opInfo = opMetaByTx[tid];
+      final txDevId = (opInfo?.deviceId.isNotEmpty == true)
+          ? opInfo!.deviceId
+          : requireDeviceId;
+      final txUserId = opInfo?.userId ?? _currentUserId;
+      if (filterDev.isNotEmpty && filterDev != 'all' && txDevId != filterDev) {
+        continue;
+      }
+      if (userId != null && txUserId != userId) {
+        continue;
+      }
+
+      final txLines = linesByTx[tid] ?? const <Map<String, Object?>>[];
+      double effectiveAmount = t.amount;
+      final matchedLines = <Map<String, Object?>>[];
+
+      if (sectionId != null || categoryId != null || itemId != null) {
+        if (txLines.isEmpty) continue;
+        double matchedSum = 0;
+        for (final l in txLines) {
+          final lid = l['item_id'] as int?;
+          final im = lid != null ? itemMeta[lid] : null;
+          final lCatId = im?['category_id'] as int?;
+          final lSecId =
+              (im?['section_id'] as int?) ?? (lCatId != null ? categorySection[lCatId] : null);
+          if (itemId != null && lid != itemId) continue;
+          if (categoryId != null && lCatId != categoryId) continue;
+          if (sectionId != null && lSecId != sectionId) continue;
+          matchedLines.add(l);
+          final lineTotal = ((l['total'] as num?) ??
+                  (((l['quantity'] as num?) ?? 1) *
+                      ((l['unit_price'] as num?) ?? 0)))
+              .toDouble();
+          matchedSum += lineTotal;
+        }
+        if (matchedLines.isEmpty) continue;
+        effectiveAmount = matchedSum > 0 ? matchedSum : t.amount;
+      } else {
+        matchedLines.addAll(txLines);
+      }
+
       if (isRet) {
         returnCount++;
-        returnsByCur[t.currency] = (returnsByCur[t.currency] ?? 0) + t.amount;
-        netByCur[t.currency] = (netByCur[t.currency] ?? 0) - t.amount;
-      } else if (t.type == OpType.revenue ||
-          (t.type == OpType.debit && t.accountKind != AccountKind.supplier)) {
+        returnsByCur[t.currency] =
+            (returnsByCur[t.currency] ?? 0) + effectiveAmount;
+        netByCur[t.currency] = (netByCur[t.currency] ?? 0) - effectiveAmount;
+      } else {
         invoiceCount++;
-        grossByCur[t.currency] = (grossByCur[t.currency] ?? 0) + t.amount;
-        netByCur[t.currency] = (netByCur[t.currency] ?? 0) + t.amount;
-        if (t.type == OpType.revenue) {
-          cashByCur[t.currency] = (cashByCur[t.currency] ?? 0) + t.amount;
+        grossByCur[t.currency] =
+            (grossByCur[t.currency] ?? 0) + effectiveAmount;
+        netByCur[t.currency] = (netByCur[t.currency] ?? 0) + effectiveAmount;
+        if (isCash) {
+          cashByCur[t.currency] =
+              (cashByCur[t.currency] ?? 0) + effectiveAmount;
         } else {
-          creditByCur[t.currency] = (creditByCur[t.currency] ?? 0) + t.amount;
+          creditByCur[t.currency] =
+              (creditByCur[t.currency] ?? 0) + effectiveAmount;
         }
       }
+
+      final bucketKey = singleDay
+          ? '${t.date.hour.toString().padLeft(2, '0')}:00'
+          : '${t.date.year.toString().padLeft(4, '0')}-${t.date.month.toString().padLeft(2, '0')}-${t.date.day.toString().padLeft(2, '0')}';
+      final prevBucket = timelineMap[bucketKey] ??
+          (sales: 0.0, returns: 0.0, count: 0, retCount: 0);
+      timelineMap[bucketKey] = (
+        sales: prevBucket.sales + (isRet ? 0.0 : effectiveAmount),
+        returns: prevBucket.returns + (isRet ? effectiveAmount : 0.0),
+        count: prevBucket.count + (isRet ? 0 : 1),
+        retCount: prevBucket.retCount + (isRet ? 1 : 0),
+      );
+
+      final devLabel = deviceNames[txDevId] ??
+          (txDevId == requireDeviceId ? 'هذا الجهاز' : txDevId);
+      final prevDev =
+          deviceTotals[txDevId] ?? (name: devLabel, amount: 0.0, count: 0);
+      deviceTotals[txDevId] = (
+        name: devLabel,
+        amount: prevDev.amount + (isRet ? 0.0 : effectiveAmount),
+        count: prevDev.count + 1,
+      );
+
+      final usrLabel =
+          (txUserId != null ? userNames[txUserId] : null) ?? 'المدير / الكاشير';
+      final prevUsr =
+          userTotals[txUserId] ?? (name: usrLabel, amount: 0.0, count: 0);
+      userTotals[txUserId] = (
+        name: usrLabel,
+        amount: prevUsr.amount + (isRet ? 0.0 : effectiveAmount),
+        count: prevUsr.count + 1,
+      );
+
+      if (!isRet) {
+        if (matchedLines.isEmpty) {
+          final prevSec =
+              sectionTotals[null] ?? (name: 'عام', amount: 0.0, count: 0);
+          sectionTotals[null] = (
+            name: 'عام',
+            amount: prevSec.amount + effectiveAmount,
+            count: prevSec.count + 1,
+          );
+        } else {
+          for (final l in matchedLines) {
+            final lid = l['item_id'] as int?;
+            final im = lid != null ? itemMeta[lid] : null;
+            final lCatId = im?['category_id'] as int?;
+            final lSecId = (im?['section_id'] as int?) ??
+                (lCatId != null ? categorySection[lCatId] : null);
+            final qty = ((l['quantity'] as num?) ?? 1).toDouble();
+            final lineAmt = ((l['total'] as num?) ??
+                    (qty * ((l['unit_price'] as num?) ?? 0)))
+                .toDouble();
+            final secName =
+                (lSecId != null ? sectionNames[lSecId] : null) ?? 'عام';
+            final prevSec = sectionTotals[lSecId] ??
+                (name: secName, amount: 0.0, count: 0);
+            sectionTotals[lSecId] = (
+              name: secName,
+              amount: prevSec.amount + lineAmt,
+              count: prevSec.count + 1,
+            );
+            final catName =
+                (lCatId != null ? categoryNames[lCatId] : null) ?? 'عام';
+            final prevCat = categoryTotals[lCatId] ??
+                (name: catName, amount: 0.0, count: 0);
+            categoryTotals[lCatId] = (
+              name: catName,
+              amount: prevCat.amount + lineAmt,
+              count: prevCat.count + 1,
+            );
+            final itName = '${l['name'] ?? im?['name'] ?? 'صنف'}';
+            final prevIt = itemTotals[lid] ??
+                (name: itName, amount: 0.0, qty: 0.0, count: 0);
+            itemTotals[lid] = (
+              name: itName,
+              amount: prevIt.amount + lineAmt,
+              qty: prevIt.qty + qty,
+              count: prevIt.count + 1,
+            );
+          }
+        }
+      }
+
+      final accName = t.accountId != null
+          ? (accountNames[t.accountId!] ?? 'عميل نقدي')
+          : 'عميل نقدي';
+      final itemsSummary = matchedLines
+          .map((l) =>
+              '${l['name'] ?? 'صنف'} × ${((l['quantity'] as num?) ?? 1).toStringAsFixed(0)}')
+          .join('، ');
+      filteredInvoices.add({
+        'id': tid,
+        'reference': t.reference.isNotEmpty ? t.reference : '$tid',
+        'date': t.date.toIso8601String(),
+        'amount': effectiveAmount,
+        'currency': t.currency,
+        'isReturn': isRet,
+        'isCash': isCash,
+        'accountName': accName.isEmpty ? 'عميل نقدي' : accName,
+        'deviceName': devLabel,
+        'userName': usrLabel,
+        'description': t.description,
+        'itemsSummary': itemsSummary,
+      });
     }
+
     for (final k in netByCur.keys.toList()) {
       if ((netByCur[k] ?? 0) < 0) netByCur[k] = 0;
     }
+
+    final sortedBucketKeys = timelineMap.keys.toList()..sort();
+    double totalTimelineBase = 0;
+    for (final k in sortedBucketKeys) {
+      final b = timelineMap[k]!;
+      totalTimelineBase +=
+          filterType == 'return' ? b.returns : (b.sales + b.returns);
+    }
+    final timeline = <Map<String, Object?>>[
+      for (final k in sortedBucketKeys)
+        () {
+          final b = timelineMap[k]!;
+          final focusVal = filterType == 'return' ? b.returns : b.sales;
+          final pct = totalTimelineBase > 0
+              ? ((focusVal / totalTimelineBase) * 100.0).clamp(0.0, 100.0)
+              : 0.0;
+          return <String, Object?>{
+            'label': k,
+            'sales': b.sales,
+            'returns': b.returns,
+            'net': (b.sales - b.returns) < 0 ? 0.0 : (b.sales - b.returns),
+            'count': b.count,
+            'returnCount': b.retCount,
+            'percent': pct,
+          };
+        }(),
+    ];
+
+    List<Map<String, Object?>> buildRankedBreakdown<K>(
+      Map<K, ({String name, double amount, int count})> src,
+    ) {
+      final total =
+          src.values.fold<double>(0.0, (s, e) => s + (e.amount > 0 ? e.amount : 0));
+      final list = <Map<String, Object?>>[
+        for (final e in src.entries)
+          if (e.value.amount > 0 || e.value.count > 0)
+            {
+              'id': e.key,
+              'name': e.value.name,
+              'amount': e.value.amount,
+              'count': e.value.count,
+              'percent': total > 0
+                  ? ((e.value.amount / total) * 100.0).clamp(0.0, 100.0)
+                  : 0.0,
+            },
+      ];
+      list.sort(
+          (a, b) => ((b['amount'] as double)).compareTo(a['amount'] as double));
+      return list;
+    }
+
+    final totalItemAmt = itemTotals.values
+        .fold<double>(0.0, (s, e) => s + (e.amount > 0 ? e.amount : 0));
+    final byItemList = <Map<String, Object?>>[
+      for (final e in itemTotals.entries)
+        if (e.value.amount > 0 || e.value.count > 0)
+          {
+            'id': e.key,
+            'name': e.value.name,
+            'amount': e.value.amount,
+            'qty': e.value.qty,
+            'count': e.value.count,
+            'percent': totalItemAmt > 0
+                ? ((e.value.amount / totalItemAmt) * 100.0).clamp(0.0, 100.0)
+                : 0.0,
+          },
+    ]..sort(
+        (a, b) => ((b['amount'] as double)).compareTo(a['amount'] as double));
+
     return {
       'allowed': true,
       'invoiceCount': invoiceCount,
@@ -2153,6 +2583,45 @@ class Repo {
       'netByCurrency': netByCur,
       'cashByCurrency': cashByCur,
       'creditByCurrency': creditByCur,
+      'timeline': timeline,
+      'bySection': buildRankedBreakdown(sectionTotals),
+      'byCategory': buildRankedBreakdown(categoryTotals),
+      'byItem': byItemList,
+      'byDevice': buildRankedBreakdown(deviceTotals),
+      'byUser': buildRankedBreakdown(userTotals),
+      'invoices': filteredInvoices,
+      'availableCurrencies': allCurrencies.toList(),
+      'availableSections': [
+        for (final r in secRows)
+          if (r['id'] is int) {'id': r['id'], 'name': '${r['name'] ?? 'عام'}'},
+      ],
+      'availableCategories': [
+        for (final r in catRows)
+          if (r['id'] is int)
+            {
+              'id': r['id'],
+              'name': '${r['name'] ?? 'عام'}',
+              'sectionId': r['section_id'],
+            },
+      ],
+      'availableItems': [
+        for (final r in itemRows)
+          if (r['id'] is int)
+            {
+              'id': r['id'],
+              'name': '${r['name'] ?? ''}',
+              'categoryId': r['category_id'],
+              'sectionId': r['section_id'],
+            },
+      ],
+      'availableDevices': [
+        for (final r in devRows)
+          {'id': '${r['id'] ?? ''}', 'name': '${r['name'] ?? r['id'] ?? 'جهاز'}'},
+      ],
+      'availableUsers': [
+        for (final r in usrRows)
+          if (r['id'] is int) {'id': r['id'], 'name': '${r['name'] ?? 'موظف'}'},
+      ],
     };
   }
 
@@ -2554,7 +3023,7 @@ class Repo {
     final rows = await db.query('transactions',
         columns: ['date'], where: 'id = ?', whereArgs: [txId], limit: 1);
     if (rows.isEmpty) return;
-    final d = DateTime.tryParse('${rows.first['date']}');
+    final d = safeParseNullableDateTime(rows.first['date']);
     if (d == null) return;
     if (DateTime.now().difference(d).inDays >= days) {
       throw StateError('هذا السجل أقدم من $days يوماً ومقفل ضد التعديل والحذف. '
@@ -2563,8 +3032,8 @@ class Repo {
   }
 
   Future<void> deleteTx(int id) async {
-    await _ensureCan('delete_tx');
     await _ensureNotAuditLocked(id);
+    await _ensureCan('delete_tx');
     final db = await _db;
     final nowDt = DateTime.now();
     final now = nowDt.toIso8601String();
@@ -4882,6 +5351,25 @@ class Repo {
         );
       } catch (_) {}
     }
+    // إلغاء أي عمليات مزامنة معلقة قد تعيد رفع سجل الجهاز المزال أو إنشائه
+    try {
+      await db.delete(
+        'sync_queue',
+        where:
+            "operation_id IN (SELECT id FROM operations WHERE (entity_type = 'device' AND entity_id = ?) OR (entity_type = 'user' AND op_type != 'delete' AND entity_id = ?))",
+        whereArgs: [deviceId, '${userId ?? ''}'],
+      );
+      await db.delete(
+        'operations',
+        where:
+            "(entity_type = 'device' AND entity_id = ?) OR (entity_type = 'user' AND op_type != 'delete' AND entity_id = ?)",
+        whereArgs: [deviceId, '${userId ?? ''}'],
+      );
+    } catch (_) {}
+    // حفظ وسم الطرد محلياً في جدول الإعدادات لمنع إعادة إدراج العضو المطرود من نسخة سحابية قديمة في syncRoster
+    try {
+      await setSetting('deviceExpelled:$deviceId', now);
+    } catch (_) {}
     try {
       await queueOperation(
         entityType: EntityKind.setting,
@@ -4890,11 +5378,11 @@ class Repo {
         payload: {'key': 'deviceExpelled:$deviceId', 'value': now},
       );
     } catch (_) {}
-    // أثر تدقيقي: الطرد يبقى موثقاً في السجل.
+    // أثر تدقيقي: الإزالة تبقى موثقة في السجل.
     try {
       await db.insert('activity', {
         'text':
-            'طرد عضو نهائياً من المجموعة: ${name.isEmpty ? deviceId : name}',
+            'إزالة عضو من المجموعة: ${name.isEmpty ? deviceId : name}',
         'ref_type': 'expel',
         'ref_id': deviceId,
         'user_name': 'المدير',
@@ -5343,7 +5831,8 @@ class Repo {
       }
       // آخر ظهور: إن غاب طويلاً فقد يتأخر استلام العملية السيادية.
       final lastSeen = '${d['last_seen_at'] ?? ''}';
-      final seen = lastSeen.isEmpty ? null : DateTime.tryParse(lastSeen);
+      final seen =
+          lastSeen.isEmpty ? null : safeParseNullableDateTime(lastSeen);
       if (seen == null) {
         warnings.add('لم يُرصد اتصال حديث لهذا الجهاز — قد يتأخر استلام '
             'الإدارة حتى يفتح التطبيق ويتزامن.');
@@ -5374,7 +5863,7 @@ class Repo {
       final d = jsonDecode(raw);
       if (d is! Map) return false;
       if ('${d['previous_owner_device_id']}' != _deviceId) return false;
-      final at = DateTime.tryParse('${d['at']}');
+      final at = safeParseNullableDateTime(d['at']);
       if (at == null) return false;
       return DateTime.now().difference(at) < const Duration(hours: 24);
     } catch (_) {
@@ -5494,7 +5983,7 @@ class Repo {
   /// متى تُتاح التهيئة القادمة؟ null = متاحة الآن.
   Future<DateTime?> groupWipeAvailableAt() async {
     final st = await settings();
-    final last = DateTime.tryParse(st[_kLastGroupWipe] ?? '');
+    final last = safeParseNullableDateTime(st[_kLastGroupWipe]);
     if (last == null) return null;
     final next = last.add(const Duration(days: 30));
     return DateTime.now().isBefore(next) ? next : null;
@@ -6687,7 +7176,7 @@ class Repo {
         for (final col in ['updated_at', 'created_at', 'date']) {
           final raw = '${r[col] ?? ''}'.trim();
           if (raw.isEmpty) continue;
-          final parsed = DateTime.tryParse(raw);
+          final parsed = safeParseNullableDateTime(raw);
           if (parsed != null && (latest == null || parsed.isAfter(latest))) {
             latest = parsed;
           }
@@ -7584,9 +8073,8 @@ class Repo {
     return rows.map(ItemCategory.fromMap).toList();
   }
 
-  /// (2026-09-22) الشجرة كاملة: الفئات الرئيسية وفي كل واحدة أبناؤها
-  /// المباشرون — قراءة واحدة للجدول تُجمَّع في الذاكرة (بلا استعلامات
-  /// متتابعة لكل فئة).
+  /// (2026-09-22 / 3.98.41) الشجرة كاملة: الفئات الرئيسية وفي كل واحدة أبناؤها
+  /// وأحفادها شجرياً لأي عمق — قراءة واحدة للجدول تُجمَّع في الذاكرة.
   Future<List<ItemCategory>> itemCategoryTree() async {
     final all = await itemCategories();
     final roots = <ItemCategory>[];
@@ -7599,9 +8087,18 @@ class Repo {
         byParent.putIfAbsent(p, () => <ItemCategory>[]).add(c);
       }
     }
-    return roots
-        .map((r) => r.withChildren(byParent[r.id] ?? const []))
-        .toList();
+    ItemCategory attachChildren(ItemCategory node) {
+      final kids = byParent[node.id] ?? const <ItemCategory>[];
+      final resolvedKids = kids.map(attachChildren).toList();
+      return node.withChildren(resolvedKids);
+    }
+    return roots.map(attachChildren).toList();
+  }
+
+  /// (3.98.41) استخراج معرّف الفئة مضافاً إليه جميع معرّفات الفئات الأبناء والأحفاد التابعة لها شجرياً لأي عمق.
+  Future<Set<int>> getCategoryAndAllDescendantIds(int categoryId) async {
+    final all = await itemCategories();
+    return category_tree.getCategoryAndAllDescendantIds(categoryId, all);
   }
 
   /// إضافة فئة أو تعديل اسمها مع تحديث اسم الفئة في الأصناف التابعة لها.
@@ -7636,19 +8133,25 @@ class Repo {
       whereArgs: [name, category.id ?? -1, parentScope],
     );
 
-    // إذا كانت الفئة فرعية (لها parentId)، ترث تلقائياً قسم الفئة الأب لضمان اتساق الشجرة.
+    // إذا كانت الفئة فرعية (لها parentId)، ترث تلقائياً قسم الفئة الأب أو الجد لضمان اتساق الشجرة.
     int? effectiveSectionId = category.sectionId;
     if (category.parentId != null) {
-      final parentRows = await db.query(
-        'item_categories',
-        columns: ['section_id'],
-        where: 'id = ?',
-        whereArgs: [category.parentId],
-        limit: 1,
-      );
-      if (parentRows.isNotEmpty) {
-        effectiveSectionId =
-            (parentRows.first['section_id'] as int?) ?? effectiveSectionId;
+      var cursor = category.parentId;
+      for (var guard = 0; guard < 64 && cursor != null; guard++) {
+        final parentRows = await db.query(
+          'item_categories',
+          columns: ['section_id', 'parent_id'],
+          where: 'id = ?',
+          whereArgs: [cursor],
+          limit: 1,
+        );
+        if (parentRows.isEmpty) break;
+        final secId = parentRows.first['section_id'] as int?;
+        if (secId != null) {
+          effectiveSectionId = secId;
+          break;
+        }
+        cursor = parentRows.first['parent_id'] as int?;
       }
     }
 
@@ -7761,48 +8264,55 @@ class Repo {
         },
       );
 
-      // إذا تغيّر قسم فئة رئيسية، تتبعها جميع فئاتها الفرعية وأصناف تلك الفئات الفرعية تلقائياً.
+      // إذا تغيّر قسم الفئة، تتبعها جميع فئاتها الفرعية والأحفاد شجرياً لأي عمق وأصنافها تلقائياً.
       if (prevSection != effectiveSectionId) {
-        final childRows = await txn.query(
-          'item_categories',
-          where: "parent_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
-          whereArgs: [id],
-        );
-        for (final child in childRows) {
-          final childId = child['id'] as int;
-          await txn.update(
+        final queue = <int>[id];
+        final visited = <int>{id};
+        while (queue.isNotEmpty) {
+          final currentParentId = queue.removeLast();
+          final childRows = await txn.query(
             'item_categories',
-            {
-              'section_id': effectiveSectionId,
-              'updated_at': now,
-            },
-            where: 'id = ?',
-            whereArgs: [childId],
+            where: "parent_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
+            whereArgs: [currentParentId],
           );
-          await txn.update(
-            'items',
-            {
-              'section_id': effectiveSectionId,
-              'updated_at': now,
-            },
-            where: 'category_id = ?',
-            whereArgs: [childId],
-          );
-          await rec.record(
-            entityType: EntityKind.itemCategory,
-            entityId: '$childId',
-            opType: OpKind.update,
-            payload: {
-              'id': childId,
-              'name': child['name'],
-              'parent_id': id,
-              'section_id': effectiveSectionId,
-              'icon_key': child['icon_key'],
-              'color_hex': child['color_hex'],
-              'image_path': child['image_path'],
-              'updated_at': now,
-            },
-          );
+          for (final child in childRows) {
+            final childId = child['id'] as int;
+            if (!visited.add(childId)) continue;
+            queue.add(childId);
+            await txn.update(
+              'item_categories',
+              {
+                'section_id': effectiveSectionId,
+                'updated_at': now,
+              },
+              where: 'id = ?',
+              whereArgs: [childId],
+            );
+            await txn.update(
+              'items',
+              {
+                'section_id': effectiveSectionId,
+                'updated_at': now,
+              },
+              where: 'category_id = ?',
+              whereArgs: [childId],
+            );
+            await rec.record(
+              entityType: EntityKind.itemCategory,
+              entityId: '$childId',
+              opType: OpKind.update,
+              payload: {
+                'id': childId,
+                'name': child['name'],
+                'parent_id': currentParentId,
+                'section_id': effectiveSectionId,
+                'icon_key': child['icon_key'],
+                'color_hex': child['color_hex'],
+                'image_path': child['image_path'],
+                'updated_at': now,
+              },
+            );
+          }
         }
       }
     });
@@ -7872,18 +8382,20 @@ class Repo {
         categoryName = (catRows.first['name'] as String?) ?? 'عام';
         effectiveSectionId =
             (catRows.first['section_id'] as int?) ?? effectiveSectionId;
-        final pId = catRows.first['parent_id'] as int?;
-        if (effectiveSectionId == null && pId != null) {
+        var cursor = catRows.first['parent_id'] as int?;
+        for (var guard = 0;
+            guard < 64 && effectiveSectionId == null && cursor != null;
+            guard++) {
           final pRows = await db.query(
             'item_categories',
-            columns: ['section_id'],
+            columns: ['section_id', 'parent_id'],
             where: 'id = ?',
-            whereArgs: [pId],
+            whereArgs: [cursor],
             limit: 1,
           );
-          if (pRows.isNotEmpty) {
-            effectiveSectionId = pRows.first['section_id'] as int?;
-          }
+          if (pRows.isEmpty) break;
+          effectiveSectionId = pRows.first['section_id'] as int?;
+          cursor = pRows.first['parent_id'] as int?;
         }
       }
     }
@@ -8083,10 +8595,10 @@ class Repo {
   }) async {
     await _ensureCan(it.id == null ? 'add_tx' : 'edit_tx');
     final db = await _db;
-    // (سلامة المخزون) الكمية السالبة أو غير الصالحة تُرفض من البوابة نفسها —
-    // اتساقًا مع حارس addStockMove الذي يمنع أن يصير الرصيد سالبًا أبدًا.
-    if (!it.quantity.isFinite || it.quantity < 0) {
-      throw StateError('كمية الصنف لا يمكن أن تكون سالبة أو غير صالحة.');
+    // (سلامة المخزون) رفض القيم غير المنتهية فقط (NaN / Infinity) مع السماح
+    // بالكميات السالبة (مثل -1 عند البيع المتزامن أوفلاين أو البيع على المكشوف).
+    if (!it.quantity.isFinite) {
+      throw StateError('كمية الصنف غير صالحة.');
     }
     // فرادة الباركود/SKU ومنع الباركود اليدوي القصير (< 5 خانات / < 10000):
     final sku = it.sku.trim();
@@ -8106,9 +8618,25 @@ class Repo {
           whereArgs: it.id != null ? [sku, it.id] : [sku],
           limit: 1);
       if (dup.isNotEmpty) {
-        throw StateError(
-            'الباركود «$sku» مستخدم مسبقاً للصنف «${dup.first['name']}». '
-            'كل صنف يجب أن يملك باركوداً فريداً.');
+        var allowSharedBarcodeOnEdit = false;
+        if (it.id != null) {
+          final existingSelf = await db.query(
+            'items',
+            columns: ['sku'],
+            where: 'id = ?',
+            whereArgs: [it.id],
+            limit: 1,
+          );
+          if (existingSelf.isNotEmpty &&
+              '${existingSelf.first['sku'] ?? ''}'.trim() == sku) {
+            allowSharedBarcodeOnEdit = true;
+          }
+        }
+        if (!allowSharedBarcodeOnEdit) {
+          throw StateError(
+              'الباركود «$sku» مستخدم مسبقاً للصنف «${dup.first['name']}». '
+              'كل صنف يجب أن يملك باركوداً فريداً.');
+        }
       }
     }
     // (2026-09-22) القسم: إن لم يُحدَّد للصنف صراحةً نستمدّه من فئته،
@@ -8128,26 +8656,32 @@ class Repo {
         itemToSave = it.copyWith(sectionId: sid);
       }
     }
-    final thumbB64 = itemToSave.image.trim().isNotEmpty
-        ? await MediaPaths.encodeThumbBase64(itemToSave.image)
-        : '';
+    final allowMediaSync = (await getSetting('allow_cloud_media_sync')) == '1';
+    final thumbB64 =
+        (allowMediaSync && itemToSave.image.trim().isNotEmpty)
+            ? await MediaPaths.encodeThumbBase64(itemToSave.image)
+            : '';
     // (W-1 ذرّية) الحفظ وعملية المزامنة وحركة التسوية في معاملة واحدة:
     // لا يبقى صنف محفوظ بلا عملية مزامنة (فيظل شبحاً محلياً) والعكس.
     final isCreate = itemToSave.id == null;
-    // (سلسلة التدقيق) قراءة الكمية القديمة قبل التحديث لتوثيق أي تغيير
-    // بحركة تسوية مخزنية — تُقرأ خارج المعاملة ثم تُطبَّق داخلها.
+    // (سلسلة التدقيق) قراءة الكمية القديمة والصورة القديمة قبل التحديث لتوثيق أي تغيير
+    // بحركة تسوية مخزنية أو حذف ملف الصورة القديم عند إزالتها.
     double prevQty = itemToSave.quantity;
+    String prevImage = '';
     if (!isCreate) {
-      final prevQtyRow = await db.query('items',
-          columns: ['quantity'],
+      final prevRow = await db.query('items',
+          columns: ['quantity', 'image'],
           where: 'id = ?',
           whereArgs: [itemToSave.id],
           limit: 1);
-      if (prevQtyRow.isNotEmpty) {
+      if (prevRow.isNotEmpty) {
         prevQty =
-            ((prevQtyRow.first['quantity'] as num?) ?? prevQty).toDouble();
+            ((prevRow.first['quantity'] as num?) ?? prevQty).toDouble();
+        prevImage = '${prevRow.first['image'] ?? ''}'.trim();
       }
     }
+    final imageCleared =
+        !isCreate && prevImage.isNotEmpty && itemToSave.image.trim().isEmpty;
     if (isCreate && itemToSave.plu == null) {
       // (2026-09-24) رقم الترقيم السريع: يُعيَّن مرة واحدة عند الإضافة
       // من أعلى رقم موجود + 1، ثم يثبت للأبد (لا إعادة ترتيب ولا تدوير).
@@ -8159,6 +8693,43 @@ class Repo {
     ({int itemId, String name, double qty, double minQty})? lowStock;
     await db.transaction((txn) async {
       final rec = await newRecorder(txn);
+      String creatorName = '';
+      try {
+        final stRows = await txn.query(
+          'settings',
+          columns: ['key', 'value'],
+          where:
+              "key IN ('profile.owner_name', 'account.name', 'sync.deviceName')",
+        );
+        final stMap = <String, String>{
+          for (final r in stRows)
+            '${r['key'] ?? ''}'.trim(): '${r['value'] ?? ''}'.trim(),
+        };
+        for (final k in const [
+          'profile.owner_name',
+          'account.name',
+          'sync.deviceName',
+        ]) {
+          final name = (stMap[k] ?? '').trim();
+          if (isPlaceholderDeviceName(name)) continue;
+          creatorName = name;
+          break;
+        }
+        if (creatorName.isEmpty) {
+          final meRows = await txn.query(
+            'users',
+            columns: ['name'],
+            where: "is_me = 1 AND COALESCE(deleted_at,'') = ''",
+            limit: 1,
+          );
+          for (final r in meRows) {
+            final name = '${r['name'] ?? ''}'.trim();
+            if (isPlaceholderDeviceName(name)) continue;
+            creatorName = name;
+            break;
+          }
+        }
+      } catch (_) {}
       if (isCreate) {
         final newId = newGlobalId();
         id = await txn.insert(
@@ -8177,6 +8748,7 @@ class Repo {
         }
         final payload = itemToSave.toMap()..['id'] = id;
         if (thumbB64.isNotEmpty) payload['thumb_b64'] = thumbB64;
+        if (creatorName.isNotEmpty) payload['created_by_name'] = creatorName;
         await rec.record(
           entityType: EntityKind.item,
           entityId: '$id',
@@ -8190,7 +8762,13 @@ class Repo {
         final qtyChanged = (itemToSave.quantity - prevQty).abs() > 0.0001;
         final payload = Map<String, Object?>.from(map)
           ..['__qty_changed'] = qtyChanged ? 1 : 0;
-        if (thumbB64.isNotEmpty) payload['thumb_b64'] = thumbB64;
+        if (thumbB64.isNotEmpty) {
+          payload['thumb_b64'] = thumbB64;
+        } else if (imageCleared) {
+          payload['thumb_b64'] = '';
+          payload['image_cleared'] = 1;
+        }
+        if (creatorName.isNotEmpty) payload['created_by_name'] = creatorName;
         await rec.record(
           entityType: EntityKind.item,
           entityId: '$id',
@@ -8219,6 +8797,14 @@ class Repo {
         }
       }
     });
+    if (imageCleared && prevImage.isNotEmpty) {
+      try {
+        final f = File(MediaPaths.toAbsolute(prevImage));
+        if (f.existsSync()) {
+          await f.delete();
+        }
+      } catch (_) {}
+    }
     // تنبيه داخلي عند انخفاض المخزون عن حد التنبيه (بعد التزام العملية).
     if (lowStock != null) {
       await notify(
@@ -8283,6 +8869,439 @@ class Repo {
       });
     });
     await logActivity('حذف صنف', 'item', '$id');
+  }
+
+  // ==================== معالجة تعارض الأصناف والباركود (أوفلاين) ====================
+
+  /// جميع سجلات تعارض الأصناف المسجّلة (المعلقة والمعالجة).
+  Future<List<OfflineItemConflict>> allItemConflicts() async {
+    final db = await _db;
+    final rows = await db.query(
+      'settings',
+      where: "key LIKE 'item_conflict:%'",
+    );
+    final out = <OfflineItemConflict>[];
+    for (final r in rows) {
+      final k = '${r['key'] ?? ''}'.trim();
+      final v = '${r['value'] ?? ''}'.trim();
+      final c = OfflineItemConflict.tryParseJson(v, fallbackKey: k);
+      if (c != null) out.add(c);
+    }
+    out.sort(
+      (a, b) => safeParseDateTime(b.createdAt)
+          .compareTo(safeParseDateTime(a.createdAt)),
+    );
+    return out;
+  }
+
+  /// التعارضات المعلّقة التي تنتظر اتخاذ إجراء من المدير.
+  Future<List<OfflineItemConflict>> pendingItemConflicts() async {
+    final all = await allItemConflicts();
+    return all.where((c) => c.isPending).toList();
+  }
+
+  /// جلب سجل تعارض محدد بمفتاحه.
+  Future<OfflineItemConflict?> itemConflictByKey(
+    String conflictKey, {
+    DatabaseExecutor? executor,
+  }) async {
+    final ex = executor ?? await _db;
+    final normKey = conflictKey.startsWith('item_conflict:')
+        ? conflictKey
+        : 'item_conflict:$conflictKey';
+    final rows = await ex.query(
+      'settings',
+      where: 'key = ?',
+      whereArgs: [normKey],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return OfflineItemConflict.tryParseJson(
+      '${rows.first['value'] ?? ''}',
+      fallbackKey: normKey,
+    );
+  }
+
+  /// توليد باركود رقمي فريد غير مستخدم (6 خانات على الأقل، يبدأ من 100001).
+  Future<String> generateUniqueItemBarcode() async {
+    final db = await _db;
+    final rows = await db.query(
+      'items',
+      columns: ['sku'],
+      where: "sku IS NOT NULL AND TRIM(sku) != ''",
+    );
+    final used = <String>{};
+    var maxNum = 100000;
+    for (final r in rows) {
+      final s = '${r['sku'] ?? ''}'.trim();
+      if (s.isEmpty) continue;
+      used.add(s.toLowerCase());
+      final n = int.tryParse(s);
+      if (n != null && n >= 100000 && n < 999999999 && n > maxNum) {
+        maxNum = n;
+      }
+    }
+    var candidate = maxNum + 1;
+    while (used.contains('$candidate')) {
+      candidate++;
+    }
+    return '$candidate';
+  }
+
+  /// الخيار 1: تغيير باركود أحد الصنفين المتعارضين أو توليد باركود جديد له فوراً
+  /// لإنهاء الاشتراك في الباركود ومزامنة النتيجة للجهازين.
+  Future<String> resolveItemConflictChangeBarcode({
+    required String conflictKey,
+    int? targetItemId,
+    String? newBarcode,
+  }) async {
+    final conflict = await itemConflictByKey(conflictKey);
+    if (conflict == null) {
+      throw StateError('سجل التعارض غير موجود.');
+    }
+    final itemId = targetItemId ?? conflict.item2Id;
+    var cleanSku = (newBarcode ?? '').trim();
+    if (cleanSku.isEmpty) {
+      cleanSku = await generateUniqueItemBarcode();
+    } else {
+      final db = await _db;
+      final dup = await db.query(
+        'items',
+        columns: ['id', 'name'],
+        where:
+            "LOWER(TRIM(sku)) = LOWER(TRIM(?)) AND id != ? AND COALESCE(is_deleted, 0) = 0 AND COALESCE(deleted_at, '') = ''",
+        whereArgs: [cleanSku, itemId],
+        limit: 1,
+      );
+      if (dup.isNotEmpty) {
+        throw StateError(
+          'الباركود «$cleanSku» مستخدم بالفعل للصنف «${dup.first['name']}». اختر باركوداً آخر أو اضغط توليد تلقائي.',
+        );
+      }
+    }
+
+    final db = await _db;
+    final nowIso = DateTime.now().toIso8601String();
+    final resolved = conflict.copyWith(
+      status: 'resolved',
+      resolution: 'barcode_changed',
+      resolvedAt: nowIso,
+    );
+
+    await db.transaction((txn) async {
+      await txn.update(
+        'items',
+        {'sku': cleanSku, 'updated_at': nowIso},
+        where: 'id = ?',
+        whereArgs: [itemId],
+      );
+      final updatedRows = await txn.query(
+        'items',
+        where: 'id = ?',
+        whereArgs: [itemId],
+        limit: 1,
+      );
+      await txn.insert(
+        'settings',
+        {'key': resolved.key, 'value': resolved.toJson()},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.update(
+        'notifications',
+        {'seen': 1},
+        where: "entity_type = 'item_conflict' AND entity_id = ?",
+        whereArgs: [resolved.key],
+      );
+      try {
+        final rec = await newRecorder(txn);
+        if (updatedRows.isNotEmpty) {
+          final payload = Map<String, Object?>.from(updatedRows.first)
+            ..['id'] = itemId
+            ..['__qty_changed'] = 0
+            ..['__conflict_resolved'] = true;
+          await rec.record(
+            entityType: EntityKind.item,
+            entityId: '$itemId',
+            opType: OpKind.update,
+            payload: payload,
+          );
+        }
+        await rec.record(
+          entityType: EntityKind.setting,
+          entityId: resolved.key,
+          opType: OpKind.settings,
+          payload: {'key': resolved.key, 'value': resolved.toJson()},
+        );
+      } catch (_) {}
+    });
+
+    await logActivity(
+      'معالجة تعارض باركود الصنف #$itemId إلى $cleanSku',
+      'item',
+      '$itemId',
+    );
+    return cleanSku;
+  }
+
+  /// الخيار 2: دمج الصنفين في بطاقة صنف واحدة مع جمع كميتيهما وتوحيد جميع الفواتير والحركات المخزنية.
+  Future<int> resolveItemConflictMergeItems({
+    required String conflictKey,
+    int? keepItemId,
+    int? mergeFromItemId,
+  }) async {
+    final conflict = await itemConflictByKey(conflictKey);
+    if (conflict == null) {
+      throw StateError('سجل التعارض غير موجود.');
+    }
+    final keepId = keepItemId ?? conflict.item1Id;
+    final dropId = mergeFromItemId ??
+        (keepId == conflict.item1Id ? conflict.item2Id : conflict.item1Id);
+
+    final db = await _db;
+    final nowIso = DateTime.now().toIso8601String();
+    final dateStr = nowIso.split('T').first;
+    final resolved = conflict.copyWith(
+      status: 'resolved',
+      resolution: 'merged',
+      resolvedAt: nowIso,
+    );
+
+    await db.transaction((txn) async {
+      final keepRows = await txn.query(
+        'items',
+        where: 'id = ?',
+        whereArgs: [keepId],
+        limit: 1,
+      );
+      final dropRows = await txn.query(
+        'items',
+        where: 'id = ?',
+        whereArgs: [dropId],
+        limit: 1,
+      );
+      if (keepRows.isEmpty) {
+        throw StateError('الصنف الأساسي غير موجود.');
+      }
+      final keepQty = ((keepRows.first['quantity'] as num?) ?? 0).toDouble();
+      final dropQty = dropRows.isEmpty
+          ? 0.0
+          : ((dropRows.first['quantity'] as num?) ?? 0).toDouble();
+      final mergedQty = keepQty + dropQty;
+
+      // فحص الحركات المسجلة على الصنف المدمج قبل ترحيلها (بما فيها المبيعات السالبة والتسويات)
+      double recordedInMoves = 0.0;
+      if (dropRows.isNotEmpty) {
+        try {
+          final dropMoves = await txn.query(
+            'stock_moves',
+            columns: ['id', 'kind', 'quantity'],
+            where:
+                "item_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
+            whereArgs: [dropId],
+            orderBy: 'date ASC, created_at ASC, id ASC',
+          );
+          for (final m in dropMoves) {
+            final k = '${m['kind'] ?? ''}'.trim();
+            final q = ((m['quantity'] as num?) ?? 0).toDouble();
+            if (k == 'adjust') {
+              // تحويل التسوية المطلقة للصنف المدمج إلى فرق نسبي حتى لا تطمس رصيد الصنف الأساسي
+              final delta = q - recordedInMoves;
+              if (delta >= 0) {
+                await txn.update(
+                  'stock_moves',
+                  {'kind': StockKind.purchase.code, 'quantity': delta},
+                  where: 'id = ?',
+                  whereArgs: [m['id']],
+                );
+              } else {
+                await txn.update(
+                  'stock_moves',
+                  {'kind': StockKind.sale.code, 'quantity': -delta},
+                  where: 'id = ?',
+                  whereArgs: [m['id']],
+                );
+              }
+              recordedInMoves = q;
+            } else if (k == 'purchase' || k == 'return' || k == 'returnIn') {
+              recordedInMoves += q;
+            } else if (k == 'sale') {
+              recordedInMoves -= q;
+            }
+          }
+        } catch (e) {
+          debugPrint('resolveItemConflictMergeItems moves query error: $e');
+        }
+      }
+
+      // توحيد جميع الحركات المخزنية والفواتير إلى الصنف الموحّد
+      await txn.update(
+        'stock_moves',
+        {'item_id': keepId},
+        where: 'item_id = ?',
+        whereArgs: [dropId],
+      );
+      await txn.update(
+        'transaction_items',
+        {'item_id': keepId},
+        where: 'item_id = ?',
+        whereArgs: [dropId],
+      );
+
+      if (dropRows.isNotEmpty) {
+        // الرصيد التأسيسي غير المغطى بحركات = رصيد الصنف الحالي ناقص صافي حركاته
+        // (عندما يكون صافي الحركات سالباً بسبب مبيعات سابقة، فإن dropQty - recordedInMoves
+        // يعيد الرصيد التأسيسي الكامل قبل البيع فلا يُخصم البيع مرتين عند المطابقة،
+        // ولا يُضاعف الرصيد إن كانت الحركات موجبة أو تسوية).
+        final rawUncovered = dropQty - recordedInMoves;
+        final uncoveredQty = rawUncovered > 0 ? rawUncovered : 0.0;
+        if (uncoveredQty > 0) {
+          try {
+            await txn.insert('stock_moves', {
+              'workspace_id': requireWorkspaceId,
+              'item_id': keepId,
+              'kind': StockKind.purchase.code,
+              'quantity': uncoveredQty,
+              'unit_price': 0,
+              'notes':
+                  'دمج رصيد الصنف المكرر (${conflict.item2Name}) في (${conflict.item1Name})',
+              'date': dateStr,
+              'created_at': nowIso,
+            });
+          } catch (e) {
+            debugPrint('resolveItemConflictMergeItems insert move error: $e');
+          }
+        }
+      }
+
+      await txn.update(
+        'items',
+        {
+          'quantity': mergedQty,
+          'is_deleted': 0,
+          'is_active': 1,
+          'deleted_at': '',
+          'updated_at': nowIso,
+        },
+        where: 'id = ?',
+        whereArgs: [keepId],
+      );
+
+      if (dropRows.isNotEmpty) {
+        await txn.update(
+          'items',
+          {
+            'is_deleted': 1,
+            'is_active': 0,
+            'deleted_at': nowIso,
+            'updated_at': nowIso,
+          },
+          where: 'id = ?',
+          whereArgs: [dropId],
+        );
+      }
+
+      await txn.insert(
+        'settings',
+        {'key': resolved.key, 'value': resolved.toJson()},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.update(
+        'notifications',
+        {'seen': 1},
+        where: "entity_type = 'item_conflict' AND entity_id = ?",
+        whereArgs: [resolved.key],
+      );
+
+      try {
+        final rec = await newRecorder(txn);
+        final updatedKeep = await txn.query(
+          'items',
+          where: 'id = ?',
+          whereArgs: [keepId],
+          limit: 1,
+        );
+        if (updatedKeep.isNotEmpty) {
+          final payload = Map<String, Object?>.from(updatedKeep.first)
+            ..['id'] = keepId
+            ..['quantity'] = mergedQty
+            ..['__qty_changed'] = 1
+            ..['__conflict_resolved'] = true;
+          await rec.record(
+            entityType: EntityKind.item,
+            entityId: '$keepId',
+            opType: OpKind.update,
+            payload: payload,
+          );
+        }
+        if (dropRows.isNotEmpty) {
+          await rec.record(
+            entityType: EntityKind.item,
+            entityId: '$dropId',
+            opType: OpKind.delete_,
+            payload: {'id': dropId, 'deleted_at': nowIso, 'is_deleted': 1},
+          );
+        }
+        await rec.record(
+          entityType: EntityKind.setting,
+          entityId: resolved.key,
+          opType: OpKind.settings,
+          payload: {'key': resolved.key, 'value': resolved.toJson()},
+        );
+      } catch (_) {}
+    });
+
+    await logActivity(
+      'دمج الصنفين المتعارضين #$dropId في #$keepId',
+      'item',
+      '$keepId',
+    );
+    return keepId;
+  }
+
+  /// الخيار 3: اعتماد الفصل وإبقاء الصنفين منفصلين (مع إظهار نافذة اختيار فورية في POS عند قراءة باركود مشترك).
+  Future<void> resolveItemConflictKeepSeparate({
+    required String conflictKey,
+  }) async {
+    final conflict = await itemConflictByKey(conflictKey);
+    if (conflict == null) {
+      throw StateError('سجل التعارض غير موجود.');
+    }
+    final db = await _db;
+    final nowIso = DateTime.now().toIso8601String();
+    final resolved = conflict.copyWith(
+      status: 'resolved',
+      resolution: 'keep_separate',
+      resolvedAt: nowIso,
+    );
+
+    await db.transaction((txn) async {
+      await txn.insert(
+        'settings',
+        {'key': resolved.key, 'value': resolved.toJson()},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.update(
+        'notifications',
+        {'seen': 1},
+        where: "entity_type = 'item_conflict' AND entity_id = ?",
+        whereArgs: [resolved.key],
+      );
+      try {
+        final rec = await newRecorder(txn);
+        await rec.record(
+          entityType: EntityKind.setting,
+          entityId: resolved.key,
+          opType: OpKind.settings,
+          payload: {'key': resolved.key, 'value': resolved.toJson()},
+        );
+      } catch (_) {}
+    });
+
+    await logActivity(
+      'اعتماد فصل الصنفين المتعارضين #${conflict.item1Id} و #${conflict.item2Id}',
+      'item',
+      '${conflict.item1Id}',
+    );
   }
 
   Future<List<StockMove>> stockMoves({int? itemId, int limit = 200}) async {
@@ -8359,6 +9378,7 @@ class Repo {
       itemPayload['quantity'] = resultingQty;
       itemPayload['updated_at'] = now;
       itemPayload['__from_stock_move'] = id;
+      itemPayload['__stock_move_delta'] = delta;
       await rec.record(
         entityType: EntityKind.item,
         entityId: '${m.itemId}',
@@ -8461,6 +9481,7 @@ class Repo {
       itemPayload['quantity'] = newQty;
       itemPayload['updated_at'] = now;
       itemPayload['__from_stock_move_delete'] = id;
+      itemPayload['__stock_move_delta'] = -(m.kind.qtySign * m.quantity);
       await rec.record(
         entityType: EntityKind.item,
         entityId: '${m.itemId}',
@@ -9104,8 +10125,138 @@ class Repo {
         return await deviceName(this);
       }
       return devId.length > 10 ? devId.substring(0, 10) : devId;
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Repo.txCreatorDeviceName error: $e');
       return '';
     }
   }
+
+  /// استرجاع ملخص مختصر للأصناف المرتبطة بمجموعة عمليات (أول صنفين + «+N» للباقي).
+  Future<Map<int, String>> batchTxItemsSummary(Iterable<int> txIds) async {
+    final ids = txIds.where((id) => id > 0).toSet().toList();
+    if (ids.isEmpty) return const {};
+    final result = <int, String>{};
+    try {
+      final db = await _db;
+      final placeholders = List.filled(ids.length, '?').join(',');
+      final rows = await db.rawQuery(
+        'SELECT tx_id, name FROM transaction_items '
+        'WHERE tx_id IN ($placeholders) ORDER BY id ASC',
+        ids,
+      );
+      final grouped = <int, List<String>>{};
+      for (final r in rows) {
+        final txId = (r['tx_id'] as num?)?.toInt();
+        final name = '${r['name'] ?? ''}'.trim();
+        if (txId == null || name.isEmpty) continue;
+        grouped.putIfAbsent(txId, () => <String>[]).add(name);
+      }
+      for (final entry in grouped.entries) {
+        final names = entry.value;
+        if (names.isEmpty) continue;
+        if (names.length <= 2) {
+          result[entry.key] = names.join('، ');
+        } else {
+          final rest = names.length - 2;
+          result[entry.key] = '${names.take(2).join('، ')} +$rest';
+        }
+      }
+    } catch (e) {
+      debugPrint('Repo.batchTxItemsSummary error: $e');
+    }
+    return result;
+  }
+
+  /// استرجاع اسم الكاشير أو الجهاز المنفّذ لكل عملية ضمن القائمة دفعة واحدة.
+  Future<Map<int, String>> batchTxExecutors(List<Tx> txs) async {
+    if (txs.isEmpty) return const {};
+    final result = <int, String>{};
+    try {
+      final missingIds = <String>[];
+      for (final t in txs) {
+        final id = t.id;
+        if (id == null) continue;
+        final cashier = t.cashierName.trim();
+        if (cashier.isNotEmpty) {
+          result[id] = cashier;
+        } else {
+          missingIds.add('$id');
+        }
+      }
+      if (missingIds.isEmpty) return result;
+
+      final db = await _db;
+      final placeholders = List.filled(missingIds.length, '?').join(',');
+      final batch = await Future.wait<Object>([
+        db.query('devices', columns: ['id', 'name']),
+        deviceName(this),
+        db.rawQuery(
+          "SELECT entity_id, device_id FROM operations "
+          "WHERE entity_type = 'tx' AND entity_id IN ($placeholders) "
+          "ORDER BY timestamp ASC",
+          missingIds,
+        ),
+      ]);
+      final devRows = batch[0] as List<Map<String, Object?>>;
+      final myDevName = (batch[1] as String).trim();
+      final opRows = batch[2] as List<Map<String, Object?>>;
+
+      final devNameById = <String, String>{};
+      for (final r in devRows) {
+        final id = '${r['id'] ?? ''}'.trim();
+        final name = '${r['name'] ?? ''}'.trim();
+        if (id.isNotEmpty && name.isNotEmpty) {
+          devNameById[id] = name;
+        }
+      }
+      for (final r in opRows) {
+        final txId = int.tryParse('${r['entity_id'] ?? ''}');
+        if (txId == null || result.containsKey(txId)) continue;
+        final devId = '${r['device_id'] ?? ''}'.trim();
+        if (devId.isEmpty) continue;
+        final resolved = devNameById[devId] ??
+            (devId == _deviceId && myDevName.isNotEmpty
+                ? myDevName
+                : (devId.length > 10 ? devId.substring(0, 10) : devId));
+        if (resolved.isNotEmpty) {
+          result[txId] = resolved;
+        }
+      }
+
+      for (final t in txs) {
+        final id = t.id;
+        if (id == null) continue;
+        if ((result[id] ?? '').trim().isEmpty && myDevName.isNotEmpty) {
+          result[id] = myDevName;
+        }
+      }
+    } catch (e) {
+      debugPrint('Repo.batchTxExecutors error: $e');
+    }
+    return result;
+  }
+
+  /// تقييم ملخص الحصاد اليومي الذكي للمبيعات حسب صلاحية الجهاز (مدير / عضو).
+  Future<DailyHarvestSummary> evaluateDailyHarvest({
+    DateTime? date,
+    bool? isManagerOverride,
+  }) =>
+      DailyHarvestService.evaluate(
+        this,
+        date: date,
+        isManagerOverride: isManagerOverride,
+      );
+
+  /// فحص وإصدار إشعار الحصاد اليومي الذكي إذا لم يُعرض بعد لهذا اليوم.
+  Future<DailyHarvestSummary?> checkAndEmitDailyHarvest({
+    DateTime? date,
+    bool force = false,
+    bool? isManagerOverride,
+  }) =>
+      DailyHarvestService.checkAndNotify(
+        this,
+        date: date,
+        force: force,
+        isManagerOverride: isManagerOverride,
+      );
 }

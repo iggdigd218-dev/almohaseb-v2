@@ -8,12 +8,14 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/accounting.dart';
+import '../core/l10n.dart';
 import '../core/shell_nav.dart';
 import '../core/desktop.dart';
 import '../core/media_paths.dart';
 import '../core/models.dart';
 import '../core/app_version.dart';
 import '../core/theme.dart';
+import '../data/daily_harvest_service.dart';
 import '../data/providers.dart';
 import '../data/sync/device_registry.dart';
 import '../data/sync/cloud_join.dart';
@@ -64,7 +66,9 @@ import 'widgets.dart' show showSnack;
 import 'create_workspace_screen.dart' show showWorkspaceManagerDialog;
 import '../core/cloud_config.dart';
 import '../core/format.dart';
+import '../core/item_conflict.dart';
 import '../core/license_model.dart';
+import 'item_conflict_dialog.dart';
 
 /// كل شاشات التطبيق الاثنتي عشرة.
 enum AppScreen {
@@ -101,12 +105,14 @@ class HomeShell extends ConsumerStatefulWidget {
   ConsumerState<HomeShell> createState() => _HomeShellState();
 }
 
+/// التبويب الافتراضي عند فتح التطبيق (المتطلب 7-أ: قسم «العملاء»).
+const AppScreen kDefaultInitialHomeScreen = AppScreen.accounts;
+
 class _HomeShellState extends ConsumerState<HomeShell>
     with WidgetsBindingObserver {
-  AppScreen _screen = AppScreen.dashboard;
+  AppScreen _screen = kDefaultInitialHomeScreen;
 
-  // (3.70.0) لوحة التحكم مثبّتة كأول شاشة دائمة على كل المنصات —
-  // عند الإقلاع وبعد تجاوز شاشة القفل (أُلغي الإقلاع المباشر على POS).
+  // (المتطلب 7-أ) قسم «العملاء» (AppScreen.accounts) هو التبويب الافتراضي عند التشغيل.
 
   /// الشريط الجانبي المكتبي: مطوي (أيقونات) أو موسّع (أيقونات + عناوين).
   bool _railExtended = true;
@@ -221,6 +227,8 @@ class _HomeShellState extends ConsumerState<HomeShell>
       _consumeNotifyTap();
       // (3.98.34) إشعار دوري (كل يومين كحد أقصى) لإكمال هاتف/بريد الاسترداد.
       _maybeNudgeProfileCompletion();
+      // (المتطلب 2-ب) فحص وعرض إشعار الحصاد اليومي الذكي إن تحققت شروطه.
+      _maybeShowDailyHarvest();
     });
     // (دفعة 58) المستمع العالمي لطلبات الانضمام — للمدير فقط.
     _startGlobalJoinWatcher();
@@ -248,6 +256,9 @@ class _HomeShellState extends ConsumerState<HomeShell>
         ref.invalidate(itemCategoryTreeProvider);
         ref.invalidate(sectionsProvider);
         ref.invalidate(inventorySummaryProvider);
+        ref.invalidate(pendingItemConflictsProvider);
+        ref.invalidate(notificationsProvider);
+        ref.invalidate(unreadCountProvider);
         // التحقق من مستمع طلبات الانضمام في حال تغيرت مساحة العمل أو الصلاحيات
         _startGlobalJoinWatcher();
       });
@@ -313,9 +324,38 @@ class _HomeShellState extends ConsumerState<HomeShell>
         if (mounted) setState(() => _screen = AppScreen.inventory);
       } else {
         ref.read(navAppModeProvider.notifier).setMode(NavAppMode.ledger);
-        if (mounted) setState(() => _screen = AppScreen.dashboard);
+        if (mounted) setState(() => _screen = AppScreen.accounts);
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('HomeShell._applyStartupRouting error: $e');
+    }
+  }
+
+  /// (المتطلب 2-ب) فحص وعرض إشعار الحصاد اليومي الذكي عند توفر أصناف ومبيعات > 0.
+  Future<void> _maybeShowDailyHarvest() async {
+    if (Platform.environment.containsKey('FLUTTER_TEST')) return;
+    try {
+      await Future<void>.delayed(const Duration(milliseconds: 900));
+      if (!mounted) return;
+      final repo = ref.read(repoProvider);
+      final summary =
+          await DailyHarvestService.checkAndNotify(repo, enforceEndOfDay: true);
+      if (summary == null || !summary.shouldShow || !mounted) return;
+      ref.invalidate(notificationsProvider);
+      ref.invalidate(unreadCountProvider);
+      while (mounted && _isAnotherModalOpen) {
+        await Future<void>.delayed(const Duration(seconds: 1));
+      }
+      if (!mounted) return;
+      _modalBusy = true;
+      try {
+        await DailyHarvestService.showHarvestDialog(context, summary);
+      } finally {
+        _modalBusy = false;
+      }
+    } catch (e) {
+      debugPrint('HomeShell._maybeShowDailyHarvest error: $e');
+    }
   }
 
   /// يطلب إذن الإشعارات الرسمي للنظام عند الحاجة، ويوقف أي إشعار دائم في شريط النظام.
@@ -460,6 +500,13 @@ class _HomeShellState extends ConsumerState<HomeShell>
       case 'item' || 'stockMove' || 'itemCategory':
         _go(AppScreen.inventory);
         return true;
+      case 'item_conflict':
+        await showItemConflictResolutionDialog(
+          context,
+          ref,
+          conflictKey: id,
+        );
+        return true;
       case 'voucher':
         _go(AppScreen.vouchers);
         return true;
@@ -474,6 +521,14 @@ class _HomeShellState extends ConsumerState<HomeShell>
         return true;
       case 'cloud_alert':
         await showCloudAlertsSheet(context, ref);
+        return true;
+      case 'daily_harvest':
+        final repo = ref.read(repoProvider);
+        final parsed = safeParseDateTime(id, fallback: DateTime.now());
+        final summary = await DailyHarvestService.evaluate(repo, date: parsed);
+        if (mounted && summary.shouldShow) {
+          await DailyHarvestService.showHarvestDialog(context, summary);
+        }
         return true;
       case 'update_download':
         try {
@@ -618,6 +673,19 @@ class _HomeShellState extends ConsumerState<HomeShell>
         ref.read(repoProvider).notify(title: title, body: body, kind: 'info');
       } catch (_) {}
       _showTappableNotice(title, body);
+    };
+    ItemConflictHooks.onConflictDetected = (_) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        try {
+          ref.invalidate(pendingItemConflictsProvider);
+          ref.invalidate(notificationsProvider);
+          ref.invalidate(unreadCountProvider);
+          bump(ref);
+        } catch (e) {
+          debugPrint('ItemConflictHooks invalidate error: $e');
+        }
+      });
     };
   }
 
@@ -1016,6 +1084,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
     SyncEngine.onSyncDanger = null;
     ChatHooks.onChatMessage = null;
     ChatHooks.onMemberNotice = null;
+    ItemConflictHooks.onConflictDetected = null;
     ShellNav.request.removeListener(_onShellNavRequest);
     CloudControlService.instance.deviceNameNotifier
         .removeListener(_onRemoteDeviceRename);
@@ -1334,7 +1403,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
           children: [
             ListTile(
               leading: const Icon(Icons.receipt_long_outlined),
-              title: const Text('تسجيل عملية مالية'),
+              title: Text(ctx.tr('تسجيل عملية مالية')),
               onTap: () {
                 Navigator.pop(ctx);
                 openTxForm(context, ref);
@@ -1342,7 +1411,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
             ),
             ListTile(
               leading: const Icon(Icons.receipt_outlined),
-              title: const Text('سند قبض / صرف'),
+              title: Text(ctx.tr('سند قبض / صرف')),
               onTap: () {
                 Navigator.pop(ctx);
                 openVoucherForm(context, ref);
@@ -1350,7 +1419,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
             ),
             ListTile(
               leading: const Icon(Icons.person_add_alt_outlined),
-              title: const Text('حساب جديد'),
+              title: Text(ctx.tr('حساب جديد')),
               onTap: () {
                 Navigator.pop(ctx);
                 openAccountForm(context, ref);
@@ -1358,7 +1427,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
             ),
             ListTile(
               leading: const Icon(Icons.point_of_sale_outlined),
-              title: const Text('فتح نقطة البيع'),
+              title: Text(ctx.tr('فتح نقطة البيع')),
               onTap: () {
                 Navigator.pop(ctx);
                 _go(AppScreen.pos);
@@ -1581,7 +1650,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
                     for (var i = 0; i < entries.length; i++)
                       _RailTile(
                         icon: entries[i].$2,
-                        label: entries[i].$3,
+                        label: context.tr(entries[i].$3),
                         selected: i == selectedIdx,
                         extended: _railExtended,
                         onTap: () => _go(entries[i].$1),
@@ -1590,7 +1659,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
                     // «المزيد» يفتح القائمة الجانبية بكل الأقسام الأخرى.
                     _RailTile(
                       icon: Icons.apps_rounded,
-                      label: 'كل الأقسام',
+                      label: context.tr('كل الأقسام'),
                       selected: false,
                       extended: _railExtended,
                       onTap: () => _scaffoldKey.currentState?.openDrawer(),
@@ -1643,6 +1712,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
 
   @override
   Widget build(BuildContext context) {
+    ref.watch(appLocaleProvider);
     ref.watch(hideBalancesProvider);
     final desktop = isDesktopLayout(context);
 
@@ -1703,7 +1773,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
                   : '';
               Widget titleText;
               if (_screen != AppScreen.dashboard) {
-                titleText = Text(_screen.title, overflow: TextOverflow.ellipsis);
+                titleText = Text(context.tr(_screen.title), overflow: TextOverflow.ellipsis);
               } else {
                 final bizName =
                     (st['businessName'] ?? st['org.name'] ?? '').trim();
@@ -1714,7 +1784,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
                 } else if (devName != null && devName.isNotEmpty) {
                   titleText = Text(devName, overflow: TextOverflow.ellipsis);
                 } else {
-                  titleText = const Text('المحاسب');
+                  titleText = Text(context.tr('المحاسب'));
                 }
               }
               final defaultAppLogo = Image.asset(
@@ -1859,13 +1929,12 @@ class _HomeShellState extends ConsumerState<HomeShell>
                 );
               },
             ),
-            // قائمة الخيارات الإضافية (⋮) في الزاوية (تم نقل إعدادات المظهر إلى شاشة الإعدادات)
+            // قائمة الخيارات الإضافية (⋮) في الزاوية (تم نقل خيار إخفاء الأرصدة لجانب الرصيد في الرئيسية)
             Padding(
               padding: const EdgeInsetsDirectional.only(end: 6),
               child: Consumer(
                 builder: (ctx, rref, _) {
                   final isDark = Theme.of(ctx).brightness == Brightness.dark;
-                  final hidden = rref.watch(hideBalancesProvider);
 
                   return PopupMenuButton<String>(
                     tooltip: 'خيارات إضافية',
@@ -1884,55 +1953,35 @@ class _HomeShellState extends ConsumerState<HomeShell>
                     ),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                     onSelected: (val) {
-                      if (val == 'balances') {
-                        Sfx.tap();
-                        final next = !hidden;
-                        rref.read(hideBalancesProvider.notifier).state = next;
-                        unawaited(() async {
-                          try {
-                            await rref.read(repoProvider).setSetting(
-                                  'hideBalances',
-                                  next ? '1' : '0',
-                                );
-                          } catch (_) {}
-                        }());
-                      } else if (val == 'refresh') {
+                      if (val == 'refresh') {
                         bump(ref);
                         _refreshSync();
                         try {
                           ref.read(syncEngineProvider).forceSyncNow();
-                        } catch (_) {}
+                        } catch (e) {
+                          debugPrint('HomeShell refresh sync error: $e');
+                        }
                         _checkForAppUpdate();
                       }
                     },
-                    itemBuilder: (c) => [
+                    itemBuilder: (c) => const [
                       PopupMenuItem(
-                        value: 'balances',
+                        value: 'refresh',
                         child: Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(
-                              hidden ? Icons.visibility_outlined : Icons.visibility_off_outlined,
-                              size: 19,
-                              color: const Color(0xFF7C3AED),
+                            Icon(Icons.refresh_rounded, size: 19, color: Color(0xFF16A34A)),
+                            SizedBox(width: 10),
+                            Flexible(
+                              child: Text(
+                                'تحديث والتحقق من الإصدار',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
-                            const SizedBox(width: 10),
-                            Text(hidden ? 'إظهار الأرصدة' : 'إخفاء الأرصدة'),
                           ],
                         ),
                       ),
-                      if (desktop) ...[
-                        const PopupMenuDivider(),
-                        const PopupMenuItem(
-                          value: 'refresh',
-                          child: Row(
-                            children: [
-                              Icon(Icons.refresh_rounded, size: 19, color: Color(0xFF16A34A)),
-                              SizedBox(width: 10),
-                              Text('تحديث والتحقق من الإصدار'),
-                            ],
-                          ),
-                        ),
-                      ],
                     ],
                   );
                 },
@@ -1963,6 +2012,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
                 return const TrialCountdownBanner();
               },
             ),
+            if (_screen != AppScreen.inventory) const ItemConflictBanner(),
             Expanded(
               child: desktop
                   ? Row(
@@ -2045,7 +2095,7 @@ class _MarkedBottomBar extends ConsumerWidget {
           children: [
             Expanded(
               child: _BottomItem(
-                label: 'الرئيسية',
+                label: context.tr('الرئيسية'),
                 tone: AppTone.blue,
                 selected: currentScreen == AppScreen.dashboard,
                 icon: (sel, fg) => Icon(
@@ -2058,7 +2108,7 @@ class _MarkedBottomBar extends ConsumerWidget {
             ),
             Expanded(
               child: _BottomItem(
-                label: 'العملاء',
+                label: context.tr('العملاء'),
                 tone: AppTone.blue,
                 selected: currentScreen == AppScreen.accounts,
                 icon: (sel, fg) => Icon(
@@ -2076,7 +2126,7 @@ class _MarkedBottomBar extends ConsumerWidget {
             ),
             Expanded(
               child: _BottomItem(
-                label: 'الحركات',
+                label: context.tr('الحركات'),
                 tone: AppTone.green,
                 selected: currentScreen == AppScreen.transactions,
                 icon: (sel, fg) => _MarkedReceiptIcon(selected: sel),
@@ -2085,7 +2135,7 @@ class _MarkedBottomBar extends ConsumerWidget {
             ),
             Expanded(
               child: _BottomItem(
-                label: 'التقارير',
+                label: context.tr('التقارير'),
                 tone: AppTone.violet,
                 selected: currentScreen == AppScreen.reports,
                 icon: (sel, fg) => _MarkedBarChartIcon(selected: sel),
@@ -2345,7 +2395,7 @@ class _CenterOperationButton extends StatelessWidget {
             Transform.translate(
               offset: const Offset(0, -5),
               child: Text(
-                'عملية',
+                context.tr('عملية'),
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w800,
@@ -2443,14 +2493,14 @@ class _Drawer extends ConsumerWidget {
     final name = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('اسمك / اسم هذا الجهاز'),
+        title: Text(ctx.tr('اسمك / اسم هذا الجهاز')),
         content: TextField(
           controller: ctl,
           autofocus: true,
           maxLength: 30,
-          decoration: const InputDecoration(
-            hintText: 'مثال: أحمد — فرع الجملة',
-            helperText: 'يظهر أعلى الشاشة الرئيسية ولدى بقية أجهزة المجموعة',
+          decoration: InputDecoration(
+            hintText: ctx.tr('مثال: أحمد — فرع الجملة'),
+            helperText: ctx.tr('يظهر أعلى الشاشة الرئيسية ولدى بقية أجهزة المجموعة'),
             helperMaxLines: 2,
           ),
           onSubmitted: (v) => Navigator.pop(ctx, v),
@@ -2458,11 +2508,11 @@ class _Drawer extends ConsumerWidget {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('إلغاء'),
+            child: Text(ctx.tr('إلغاء')),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, ctl.text),
-            child: const Text('حفظ'),
+            child: Text(ctx.tr('حفظ')),
           ),
         ],
       ),
@@ -2504,7 +2554,7 @@ class _Drawer extends ConsumerWidget {
         builder: (ctx) => Padding(
           padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
           child: Text(
-            title,
+            ctx.tr(title),
             style: TextStyle(
               color: AppColors.text3Of(ctx),
               fontSize: 11,
@@ -2701,12 +2751,12 @@ class _Drawer extends ConsumerWidget {
     final dark = Theme.of(context).brightness == Brightness.dark;
 
     final (roleLabel, roleColor, roleIcon) = switch (effectiveRole) {
-      UserRole.admin => ('مدير النظام', Colors.amber.shade300, Icons.security),
-      UserRole.agent => ('وكيل المدير', Colors.greenAccent.shade200, Icons.verified_user),
-      UserRole.accountant => ('محاسب', Colors.lightBlueAccent, Icons.calculate),
-      UserRole.cashier => ('كاشير / مبيعات', Colors.orangeAccent.shade200, Icons.point_of_sale),
-      UserRole.dataentry => ('إدخال وجرد', Colors.tealAccent, Icons.edit_note),
-      UserRole.viewer => ('عرض فقط', Colors.blueGrey.shade100, Icons.visibility_outlined),
+      UserRole.admin => (context.tr('مدير النظام', 'System Admin'), Colors.amber.shade300, Icons.security),
+      UserRole.agent => (context.tr('وكيل المدير', 'Deputy Admin'), Colors.greenAccent.shade200, Icons.verified_user),
+      UserRole.accountant => (context.tr('محاسب', 'Accountant'), Colors.lightBlueAccent, Icons.calculate),
+      UserRole.cashier => (context.tr('كاشير / مبيعات', 'Cashier / Sales'), Colors.orangeAccent.shade200, Icons.point_of_sale),
+      UserRole.dataentry => (context.tr('إدخال وجرد', 'Data Entry & Inventory'), Colors.tealAccent, Icons.edit_note),
+      UserRole.viewer => (context.tr('عرض فقط', 'View Only'), Colors.blueGrey.shade100, Icons.visibility_outlined),
     };
 
     return Drawer(
@@ -2830,19 +2880,21 @@ class _Drawer extends ConsumerWidget {
                                     .watch(ownerDisplayNameProvider)
                                     .valueOrNull
                                     ?.trim();
-                                final customOwner =
-                                    (ownerName != null &&
-                                            ownerName.isNotEmpty &&
-                                            ownerName != 'المدير')
+                                final isOwnerOrStandalone =
+                                    wsMode != 'member';
+                                final label = isOwnerOrStandalone
+                                    ? (ownerName != null && ownerName.isNotEmpty
                                         ? ownerName
-                                        : null;
-                                final label =
-                                    (devName != null && devName.isNotEmpty)
-                                        ? devName
-                                        : (customOwner ??
-                                            (safeUserName.isNotEmpty
+                                        : (devName != null && devName.isNotEmpty
+                                            ? devName
+                                            : (safeUserName.isNotEmpty
                                                 ? safeUserName
-                                                : 'المحاسب'));
+                                                : 'المدير')))
+                                    : (devName != null && devName.isNotEmpty
+                                        ? devName
+                                        : (safeUserName.isNotEmpty
+                                            ? safeUserName
+                                            : 'المحاسب'));
                                 return Row(
                                   children: [
                                     Flexible(
@@ -3044,7 +3096,7 @@ class _Drawer extends ConsumerWidget {
                               const SizedBox(width: 6),
                               Flexible(
                                 child: Text(
-                                  'وضع المبيعات (POS)',
+                                  context.tr('وضع المبيعات (POS)'),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
@@ -3108,7 +3160,7 @@ class _Drawer extends ConsumerWidget {
                               const SizedBox(width: 6),
                               Flexible(
                                 child: Text(
-                                  'وضع المحاسبة',
+                                  context.tr('وضع المحاسبة'),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
@@ -3228,7 +3280,7 @@ class _Drawer extends ConsumerWidget {
                                 const SizedBox(width: 14),
                                 Expanded(
                                   child: Text(
-                                    'المساعد الذكي (Gemini)',
+                                    context.tr('المساعد الذكي (Gemini)'),
                                     style: TextStyle(
                                       fontSize: 14,
                                       fontWeight: FontWeight.w800,
@@ -3316,17 +3368,23 @@ class _Drawer extends ConsumerWidget {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  const Text(
-                                    'التحديثات',
-                                    style: TextStyle(
+                                  Text(
+                                    ctx.tr('التحديثات'),
+                                    style: const TextStyle(
                                       fontWeight: FontWeight.w800,
                                       fontSize: 13.5,
                                     ),
                                   ),
                                   Text(
                                     hasUpdate
-                                        ? 'يتوفر تحديث جديد: ${info?.latest}'
-                                        : '$appVersionLabel (محدث)',
+                                        ? ctx.tr(
+                                            'يتوفر تحديث جديد: ${info?.latest}',
+                                            'New update available: ${info?.latest}',
+                                          )
+                                        : ctx.tr(
+                                            '$appVersionLabel (محدث)',
+                                            '$appVersionLabel (Up to date)',
+                                          ),
                                     style: TextStyle(
                                       fontSize: 11,
                                       color: hasUpdate
@@ -3344,9 +3402,9 @@ class _Drawer extends ConsumerWidget {
                                   color: const Color(0xFFF59E0B),
                                   borderRadius: BorderRadius.circular(10),
                                 ),
-                                child: const Text(
-                                  'تحديث',
-                                  style: TextStyle(
+                                child: Text(
+                                  ctx.tr('تحديث'),
+                                  style: const TextStyle(
                                     color: Colors.white,
                                     fontSize: 10.5,
                                     fontWeight: FontWeight.w900,
@@ -3440,7 +3498,7 @@ class _DrawerTile extends StatelessWidget {
                 const SizedBox(width: 14),
                 Expanded(
                   child: Text(
-                    screen.title,
+                    context.tr(screen.title),
                     style: TextStyle(
                       fontSize: 14,
                       fontWeight: active ? FontWeight.w800 : FontWeight.w700,

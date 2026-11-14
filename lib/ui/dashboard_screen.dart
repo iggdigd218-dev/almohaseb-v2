@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/accounting.dart';
 import '../core/format.dart';
+import '../core/l10n.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
 import 'widgets.dart';
@@ -116,6 +117,13 @@ class DashboardScreen extends ConsumerWidget {
                     owedByUs: s.owedByUs,
                     salesByCurrency: s.salesByCurrency,
                     hidden: hidden,
+                    onToggleHidden: () {
+                      final next = !hidden;
+                      ref.read(hideBalancesProvider.notifier).state = next;
+                      ref
+                          .read(repoProvider)
+                          .setSetting('hideBalances', next ? '1' : '0');
+                    },
                   ),
                   const SizedBox(height: 18),
                   GridView.count(
@@ -159,6 +167,7 @@ class _CurrencyCard extends StatefulWidget {
   final Map<String, double> owedByUs; // مستحق علينا (له)
   final Map<String, double> salesByCurrency; // إجمالي المبيعات لكل عملة
   final bool hidden;
+  final VoidCallback? onToggleHidden;
   const _CurrencyCard({
     required this.currencies,
     required this.net,
@@ -166,6 +175,7 @@ class _CurrencyCard extends StatefulWidget {
     required this.owedByUs,
     this.salesByCurrency = const {},
     required this.hidden,
+    this.onToggleHidden,
   });
 
   @override
@@ -272,31 +282,62 @@ class _CurrencyCardState extends State<_CurrencyCard> {
                         ],
                       ),
                       const SizedBox(height: 3),
-                      // المبلغ البارز (صافي الرصيد لهذه العملة).
+                      // المبلغ البارز (صافي الرصيد لهذه العملة) + أيقونة عين مدمجة لإخفاء/إظهار الأرصدة بضغطة واحدة.
                       Row(
-                        crossAxisAlignment: CrossAxisAlignment.baseline,
-                        textBaseline: TextBaseline.alphabetic,
+                        crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
-                          Text(
-                            widget.hidden
-                                ? '••••••'
-                                : Fmt.money(netV, c.decimal),
-                            style: TextStyle(
-                              fontSize: 24,
-                              fontWeight: FontWeight.w900,
-                              color: AppColors.textOf(context),
-                              letterSpacing: .5,
+                          Expanded(
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.baseline,
+                              textBaseline: TextBaseline.alphabetic,
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    widget.hidden
+                                        ? '••••••'
+                                        : Fmt.money(netV, c.decimal),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 24,
+                                      fontWeight: FontWeight.w900,
+                                      color: AppColors.textOf(context),
+                                      letterSpacing: .5,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 7),
+                                Text(
+                                  c.symbol,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w800,
+                                    color: fg,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                          const SizedBox(width: 7),
-                          Text(
-                            c.symbol,
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w800,
-                              color: fg,
+                          if (widget.onToggleHidden != null)
+                            Material(
+                              color: badgeBg,
+                              borderRadius: BorderRadius.circular(10),
+                              child: InkWell(
+                                key: const ValueKey('toggle_hide_balances_btn'),
+                                borderRadius: BorderRadius.circular(10),
+                                onTap: widget.onToggleHidden,
+                                child: Padding(
+                                  padding: const EdgeInsets.all(6),
+                                  child: Icon(
+                                    widget.hidden
+                                        ? Icons.visibility_outlined
+                                        : Icons.visibility_off_outlined,
+                                    size: 18,
+                                    color: fg,
+                                  ),
+                                ),
+                              ),
                             ),
-                          ),
                         ],
                       ),
                       const SizedBox(height: 5),
@@ -304,7 +345,7 @@ class _CurrencyCardState extends State<_CurrencyCard> {
                         children: [
                           Expanded(
                             child: _AmountPill(
-                              label: 'لك',
+                              label: context.tr('لك'),
                               arrow: Icons.arrow_upward_rounded,
                               value: toUs,
                               currency: c,
@@ -315,7 +356,7 @@ class _CurrencyCardState extends State<_CurrencyCard> {
                           const SizedBox(width: 10),
                           Expanded(
                             child: _AmountPill(
-                              label: 'عليك',
+                              label: context.tr('عليك'),
                               arrow: Icons.arrow_downward_rounded,
                               value: byUs,
                               currency: c,
@@ -353,7 +394,7 @@ class _CurrencyCardState extends State<_CurrencyCard> {
         ),
         const SizedBox(height: 2),
         Text(
-          'اسحب البطاقة يميناً أو يساراً للتنقل بين العملات',
+          context.tr('اسحب البطاقة يميناً أو يساراً للتنقل بين العملات'),
           style: TextStyle(fontSize: 11, color: AppColors.text3Of(context)),
         ),
       ],
@@ -514,7 +555,7 @@ class _FeatureTile extends StatelessWidget {
               ),
               const SizedBox(height: 7),
               Text(
-                tile.label,
+                context.tr(tile.label),
                 style: TextStyle(
                   fontSize: big ? 13 : 12.5,
                   fontWeight: FontWeight.w800,
@@ -654,9 +695,15 @@ class _TxRow extends StatelessWidget {
       orElse: () => kDefaultCurrencies.first,
     );
     final acc = accounts.where((a) => a.id == tx.accountId).toList();
-    final name = acc.isEmpty
-        ? (tx.type == OpType.transfer ? 'تحويل' : '—')
-        : acc.first.name;
+    final rawAccName = acc.isEmpty ? '' : '${acc.first.name}'.trim();
+    final customCustName = '${tx.customCustomerName ?? ''}'.trim();
+    final name = rawAccName.isEmpty
+        ? (tx.type == OpType.transfer
+            ? context.tr('تحويل', 'Transfer')
+            : (customCustName.isNotEmpty
+                ? customCustName
+                : context.tr('عميل نقدي')))
+        : rawAccName;
     final group = opGroup(tx.type);
     final color = group == 'inflow'
         ? AppColors.greenOf(context)
@@ -683,7 +730,7 @@ class _TxRow extends StatelessWidget {
         style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
       ),
       subtitle: Text(
-        '${tx.type.label} · ${Fmt.date(tx.date)}'
+        '${context.tr(tx.type.label)} · ${Fmt.date(tx.date)}'
         '${tx.description.isEmpty ? '' : ' · ${tx.description}'}',
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
@@ -694,7 +741,7 @@ class _TxRow extends StatelessWidget {
         style: TextStyle(
           fontSize: 16.5,
           fontWeight: FontWeight.w800,
-          color: color,
+          color: AppColors.textOf(context),
         ),
       ),
     );

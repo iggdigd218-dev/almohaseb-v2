@@ -8,6 +8,7 @@ import 'theme.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'accounting.dart';
+import 'device_names.dart';
 import 'format.dart';
 import 'media_paths.dart';
 import 'models.dart';
@@ -63,23 +64,29 @@ class ReceiptData {
     String cashierName,
     Map<String, String> settings,
   ) {
-    final c = cashierName.trim();
+    // 1) تنظيف الاسم المخزن من أي لاحقة قديمة مثل (I) أو (A)
+    var c = cashierName.trim().replaceAll(RegExp(r'\s*\([A-Za-z0-9]\)\s*$'), '').trim();
+
+    final ownerName = (settings['profile.owner_name'] ?? '').trim();
     final devName = (settings['sync.deviceName'] ?? '').trim();
-    final rawDevId = (settings['sync.deviceId'] ?? '').trim();
-    final devCode = Fmt.singleLetterDevicePrefix(
-      rawDevId,
-      configuredPrefix: settings['devicePrefix'],
-    );
-    if (c.isNotEmpty && devCode.isNotEmpty && !c.contains('($devCode)')) {
-      return '$c ($devCode)';
+    final accountName = (settings['account.name'] ?? '').trim();
+
+    // 2) إذا كان الاسم المخزن مكاناً شاغراً أو اسم جهاز قديم غير مخصص، نستبدله بالاسم الموحد المعتمد
+    if (c.isEmpty || isPlaceholderDeviceName(c) || c.contains('المدير') || c.contains('المحاسب')) {
+      if (ownerName.isNotEmpty && isCustomDeviceName(ownerName)) {
+        c = ownerName;
+      } else if (devName.isNotEmpty && isCustomDeviceName(devName)) {
+        c = devName;
+      } else if (accountName.isNotEmpty && isCustomDeviceName(accountName)) {
+        c = accountName;
+      } else if (ownerName.isNotEmpty) {
+        c = ownerName;
+      } else if (devName.isNotEmpty) {
+        c = devName;
+      }
     }
+
     if (c.isNotEmpty) return c;
-    if (devName.isNotEmpty) {
-      return devCode.isNotEmpty && !devName.contains('($devCode)')
-          ? '$devName ($devCode)'
-          : devName;
-    }
-    if (devCode.isNotEmpty) return 'الموظف ($devCode)';
     return 'الموظف';
   }
 
@@ -101,7 +108,7 @@ class ReceiptData {
                     : 'فاتورة مبيع آجل')
                 : tx.type.label),
         number: tx.reference,
-        accountName: account?.name ?? 'عميل نقدي',
+        accountName: tx.resolvedPartyName(account),
         accountPhone: account?.phone ?? '',
         amount: tx.amount,
         currency: currency,
@@ -176,24 +183,34 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   const cardW = w - outerPad * 2;
   const pad = outerPad + 32.0; // 46.0 من حافة الصورة
 
-  // استخراج المبلغ المدفوع والمتبقي في حال البيع الجزئي بجميع الصيغ المعتمدة
+  // استخراج المبلغ المدفوع والمتبقي والخصم بجميع الصيغ المعتمدة
   String? paidVal;
   String? remainVal;
+  String? discountVal;
   final extraNotes = <String>[];
   final paidRegex = RegExp(r'^المبلغ المدفوع(?:\s*مقدماً)?\s*:\s*(.+)$');
   final remainRegex = RegExp(
     r'^(?:المبلغ\s+)?المتبقي(?:\s*\(آجل\)|\s*آجل)?\s*:\s*(.+)$',
   );
+  final discountRegex = RegExp(r'^(?:قيمة\s+)?الخصم\s*:\s*(.+)$');
+  final paymentWayRegex = RegExp(r'^طريقة الدفع\s*:\s*(.+)$');
+
   for (final l in d.notes.split('\n')) {
     final t = l.trim();
     if (t.isEmpty) continue;
     if (t.startsWith('[ORIG_TX:')) continue;
     final paidMatch = paidRegex.firstMatch(t);
     final remainMatch = remainRegex.firstMatch(t);
+    final discountMatch = discountRegex.firstMatch(t);
     if (paidMatch != null) {
       paidVal = paidMatch.group(1)?.trim();
     } else if (remainMatch != null) {
       remainVal = remainMatch.group(1)?.trim();
+    } else if (discountMatch != null) {
+      discountVal = discountMatch.group(1)?.trim();
+    } else if (d.items.isNotEmpty && paymentWayRegex.hasMatch(t)) {
+      // في فواتير المبيعات طريقة الدفع موضحة في شارة المبلغ والعنوان فلا نكررها في الترويسة
+      continue;
     } else {
       extraNotes.add(t);
     }
@@ -235,7 +252,25 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     }
   }
 
-  final rawStmt = d.statement.trim();
+  // تنظيف البيان واستخراج الخصم إن وُجد مضمناً في وصف العملية
+  var rawStmt = d.statement.trim();
+  if (d.items.isNotEmpty && rawStmt.isNotEmpty) {
+    final stmtParts = <String>[];
+    for (final part in rawStmt.split(RegExp(r'\s*—\s*|\s*-\s*(?=الخصم|طريقة الدفع)'))) {
+      final p = part.trim();
+      if (p.isEmpty) continue;
+      final dm = discountRegex.firstMatch(p);
+      if (dm != null) {
+        discountVal ??= dm.group(1)?.trim();
+        continue;
+      }
+      if (paymentWayRegex.hasMatch(p)) continue;
+      if (RegExp(r'^فاتورة\s+(?:نقدية|مبيعات|مبيع)').hasMatch(p)) continue;
+      stmtParts.add(p);
+    }
+    rawStmt = stmtParts.join(' — ').trim();
+  }
+
   final combinedNotes = extraNotes.join(' — ').trim();
   final String fullStatement;
   if (rawStmt.isNotEmpty &&
@@ -247,7 +282,26 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   } else if (combinedNotes.isNotEmpty) {
     fullStatement = combinedNotes;
   } else {
-    fullStatement = d.title;
+    fullStatement = d.items.isNotEmpty ? '' : d.title;
+  }
+
+  final itemsTotal =
+      d.items.fold<double>(0, (sum, line) => sum + line.total);
+  if ((discountVal == null || discountVal.isEmpty) &&
+      d.items.isNotEmpty &&
+      itemsTotal > d.amount + 0.009) {
+    discountVal =
+        '${Fmt.money(itemsTotal - d.amount, d.currency.decimal)} ${d.currency.symbol}';
+  } else if (discountVal != null &&
+      discountVal.isNotEmpty &&
+      !discountVal.contains(d.currency.symbol)) {
+    final parsedDisc = Fmt.parseAmount(discountVal);
+    if (parsedDisc != null && parsedDisc > 0) {
+      discountVal =
+          '${Fmt.money(parsedDisc, d.currency.decimal)} ${d.currency.symbol}';
+    } else if (parsedDisc != null && parsedDisc <= 0) {
+      discountVal = null;
+    }
   }
 
   const headerH = 152.0;
@@ -258,7 +312,6 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   const tableHeaderH = 46.0;
   const tableRowH = 48.0;
   const tableFooterH = 52.0;
-  const datePhoneBarH = 52.0;
   const footerH = 74.0;
 
   final hasPartialBar =
@@ -279,11 +332,9 @@ Future<String> buildReceiptImage(ReceiptData d) async {
       metaH +
       20.0 + // مسافة أعلى شبكة المبلغ والرصيد
       midGridH +
-      20.0 + // مسافة أعلى قسم البيان / جدول الأصناف
+      20.0 + // مسافة أعلى قسم مقابل / جدول الأصناف
       statementSectionH +
       (hasPartialBar ? (14.0 + partialBarH) : 0.0) +
-      14.0 + // مسافة أعلى شريط التاريخ ورقم الهاتف (قبل العنصر الأخير مباشرة)
-      datePhoneBarH +
       20.0 + // مسافة أعلى الخط المنقط والتذييل
       footerH;
 
@@ -298,7 +349,6 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   const green = Color(0xFF15803D); // أخضر «له»
   const red = Color(0xFFB91C1C); // أحمر «عليه»
   const skyDark = Color(0xFF0284C7); // سماوي جذاب رئيسي
-  const skyBright = Color(0xFF0EA5E9); // سماوي مشرق
 
   // خلفية خارجية ناعمة جداً
   canvas.drawRect(
@@ -386,17 +436,17 @@ Future<String> buildReceiptImage(ReceiptData d) async {
       circleCenterY - 26,
       38,
       skyDark,
-       bold: true,
+      bold: true,
       center: true,
     );
   }
 
-  // --- يمين الترويسة: اسم المنشأة + العنوان والهاتف ---
+  // --- يمين الترويسة: اسم المنشأة (بدون رمز الصاعقة) + العنوان والهاتف باتجاه LTR ---
   const rightSideMaxW = (cardW / 2) - circleRadius - 48.0;
   final orgTitle = d.orgName.isEmpty ? 'المحاسب' : d.orgName;
   _text(
     canvas,
-    '⚡ $orgTitle',
+    orgTitle,
     w - pad,
     outerPad + 28,
     30,
@@ -409,8 +459,9 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   final addrPart = d.orgAddress.trim().isNotEmpty
       ? '📍 ${d.orgAddress.trim()}'
       : '📍 المركز الرئيسي';
-  final phonePart =
-      d.orgPhone.trim().isNotEmpty ? 'هاتف: ${d.orgPhone.trim()}' : '';
+  final phonePart = d.orgPhone.trim().isNotEmpty
+      ? 'هاتف: ${_formatLtrPhone(d.orgPhone.trim())}'
+      : '';
   final subHeaderRight =
       phonePart.isNotEmpty ? '$addrPart   •   $phonePart' : addrPart;
 
@@ -426,52 +477,23 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     maxWidth: rightSideMaxW,
   );
 
-  // --- يسار الترويسة: شارة نوع السند + الرقم المرجعي بالأصفر + التاريخ والوقت ---
-  final badgeLabel =
-      d.title.trim().isEmpty ? 'سند قيد إلكتروني' : d.title.trim();
-  const badgeW = 210.0;
-  const badgeH = 38.0;
-  final badgeRect = RRect.fromRectAndRadius(
-    const Rect.fromLTWH(pad, outerPad + 18, badgeW, badgeH),
-    const Radius.circular(10),
-  );
-  canvas.drawRRect(
-    badgeRect,
-    Paint()..color = Colors.white.withValues(alpha: 0.18),
-  );
-  canvas.drawRRect(
-    badgeRect,
-    Paint()
-      ..color = Colors.white.withValues(alpha: 0.42)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2,
-  );
-  _text(
-    canvas,
-    badgeLabel,
-    pad + badgeW / 2,
-    outerPad + 23,
-    19,
-    Colors.white,
-    bold: true,
-    center: true,
-    maxWidth: badgeW - 16,
-  );
-
-  final formattedNum = d.number.trim().isEmpty
-      ? '#—'
-      : (d.number.trim().startsWith('#')
-          ? d.number.trim()
-          : '#${d.number.trim()}');
+  // --- يسار الترويسة: الرقم المرجعي صافياً (بدون # وبدون الشارة المكررة) + التاريخ والوقت ---
+  final cleanNum = d.number
+      .trim()
+      .replaceFirst(RegExp(r'^#+'), '')
+      .replaceFirst(RegExp(r'#+$'), '')
+      .trim();
+  final formattedNum = cleanNum.isEmpty ? '—' : cleanNum;
   _text(
     canvas,
     formattedNum,
     pad,
-    outerPad + 60,
-    27,
+    outerPad + 34,
+    28,
     const Color(0xFFFDE047),
     bold: true,
     alignStart: true,
+    textDirection: TextDirection.ltr,
     maxWidth: rightSideMaxW,
   );
 
@@ -480,8 +502,8 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     canvas,
     dtFormatted,
     pad,
-    outerPad + 102,
-    18,
+    outerPad + 84,
+    19,
     Colors.white.withValues(alpha: 0.95),
     bold: true,
     alignStart: true,
@@ -501,7 +523,7 @@ Future<String> buildReceiptImage(ReceiptData d) async {
 
   var y = outerPad + headerH + 22.0;
 
-  // ===== 2) صف بيانات العميل (Metadata Row) مطابق للصورة المرجعية =====
+  // ===== 2) صف بيانات العميل (Metadata Row) =====
   final metaBox = RRect.fromRectAndRadius(
     Rect.fromLTWH(pad, y, w - pad * 2, metaH),
     const Radius.circular(14),
@@ -537,8 +559,9 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     maxWidth: (w - pad * 2) * 0.62,
   );
 
-  final phoneDisplay =
-      d.accountPhone.trim().isEmpty ? '—' : d.accountPhone.trim();
+  final phoneDisplay = d.accountPhone.trim().isEmpty
+      ? '—'
+      : _formatLtrPhone(d.accountPhone.trim());
   _text(
     canvas,
     'رقم الهاتف',
@@ -558,6 +581,7 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     skyDark,
     bold: true,
     alignStart: true,
+    textDirection: TextDirection.ltr,
     maxWidth: (w - pad * 2) * 0.34,
   );
 
@@ -595,7 +619,7 @@ Future<String> buildReceiptImage(ReceiptData d) async {
       ..strokeWidth = 1.6,
   );
 
-  // شارة «عليه (مدين)» / «له (دائن)» في الزاوية العلوية اليمنى لصندوق المبلغ كما في الصورة
+  // شارة «عليه (مدين)» / «له (دائن)» في الزاوية العلوية اليمنى لصندوق المبلغ
   final statusPillText = d.isCashSale
       ? 'مدفوع نقداً'
       : (d.isDebit ? 'عليه (مدين)' : 'له (دائن)');
@@ -635,8 +659,8 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     maxWidth: rightBoxW - 280,
   );
 
-  // كبسولة التفقيط في منتصف أسفل صندوق المبلغ
-  final tafqeetText = 'فقط ${numberToWords(d.amount)} ${d.currency.name} لا غير';
+  // كبسولة التفقيط في منتصف أسفل صندوق المبلغ (باستخدام دالة التفقيط المركزية الموحدة بدون الـ التعريف)
+  final tafqeetText = tafqeet(d.amount, currencyName: d.currency.name);
   final tafqeetW = (rightBoxW - 80).clamp(260.0, rightBoxW - 36);
   final tafqeetBox = RRect.fromRectAndRadius(
     Rect.fromLTWH(
@@ -660,7 +684,7 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     maxWidth: tafqeetW - 24,
   );
 
-  // الصندوق الأيسر: الرصيد بعد العملية (#F1F5F9) مطابق للصورة المرجعية
+  // الصندوق الأيسر: الرصيد بعد العملية (#F1F5F9)
   final leftBox = RRect.fromRectAndRadius(
     Rect.fromLTWH(leftBoxX, y, leftBoxW, midGridH),
     const Radius.circular(16),
@@ -709,7 +733,6 @@ Future<String> buildReceiptImage(ReceiptData d) async {
       final balNumStr =
           '${Fmt.money(b.abs(), d.currency.decimal)} ${d.currency.symbol}';
 
-      // رسم قيمة الرصيد وبجانبها يميناً شارة «عليه» / «له» كما في الصورة المرجعية
       const pillW = 68.0;
       const pillH = 36.0;
       const centerGroupX = leftBoxX + leftBoxW / 2;
@@ -756,9 +779,8 @@ Future<String> buildReceiptImage(ReceiptData d) async {
 
   y += midGridH + 20.0;
 
-  // ===== 4) قسم البيان: إما شريط البيان الموحد أو جدول المنتجات المتمدد في فواتير المبيعات =====
+  // ===== 4) قسم مقابل: إما شريط «مقابل:» في أقصى اليمين أو جدول المنتجات في فواتير المبيعات =====
   if (d.items.isEmpty) {
-    // شريط البيان للسندات العادية (مطابق للصورة المرجعية)
     final statementBox = RRect.fromRectAndRadius(
       Rect.fromLTWH(pad, y, w - pad * 2, singleStatementH),
       const Radius.circular(14),
@@ -774,18 +796,18 @@ Future<String> buildReceiptImage(ReceiptData d) async {
 
     _text(
       canvas,
-      'البيان: $fullStatement',
-      w / 2,
+      'مقابل: $fullStatement',
+      w - pad - 24,
       y + 16,
       23,
       const Color(0xFF334155),
       bold: true,
-      center: true,
-      maxWidth: w - pad * 2 - 40,
+      alignEnd: true,
+      maxWidth: w - pad * 2 - 48,
     );
     y += singleStatementH;
   } else {
-    // في فواتير المبيعات/المرتجعات: يظهر البيان والأصناف داخل جدول واضح متناسب العرض والارتفاع
+    // في فواتير المبيعات/المرتجعات: عنوان نظيف ومختصر بدون تداخل
     const tw = w - pad * 2;
     final tableOuter = RRect.fromRectAndRadius(
       Rect.fromLTWH(pad, y, tw, statementSectionH),
@@ -796,21 +818,23 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     canvas.save();
     canvas.clipRRect(tableOuter);
 
-    // 4.أ) شريط عنوان البيان أعلى الجدول باللون السماوي الفاتح
+    // 4.أ) شريط عنوان الجدول العلوي باللون السماوي الفاتح
     canvas.drawRect(
       Rect.fromLTWH(pad, y, tw, tableTitleH),
       Paint()..color = const Color(0xFFE0F2FE),
     );
+    final rightTableHeaderTitle =
+        fullStatement.isNotEmpty ? 'مقابل: $fullStatement' : 'تفاصيل الأصناف';
     _text(
       canvas,
-      'البيان (تفاصيل الأصناف): $fullStatement',
+      rightTableHeaderTitle,
       w - pad - 20,
       y + 10,
       20,
       const Color(0xFF0369A1),
       bold: true,
       alignEnd: true,
-      maxWidth: tw * 0.72,
+      maxWidth: tw * 0.68,
     );
     _text(
       canvas,
@@ -903,7 +927,6 @@ Future<String> buildReceiptImage(ReceiptData d) async {
         Rect.fromLTWH(pad, y, tw, tableRowH),
         Paint()..color = rowBg,
       );
-      // خط أفقي فاصل بين الصفوف
       canvas.drawRect(
         Rect.fromLTWH(pad, y + tableRowH - 1, tw, 1),
         Paint()..color = const Color(0xFFE2E8F0),
@@ -974,33 +997,62 @@ Future<String> buildReceiptImage(ReceiptData d) async {
       );
     }
 
-    // 4.د) شريط إجمالي الجدول السفلي
-    final itemsTotal =
-        d.items.fold<double>(0, (sum, line) => sum + line.total);
+    // 4.د) شريط الإجماليات والخصم أسفل الجدول
     canvas.drawRect(
       Rect.fromLTWH(pad, y, tw, tableFooterH),
       Paint()..color = const Color(0xFFF1F5F9),
     );
-    _text(
-      canvas,
-      'إجمالي قيمة الأصناف',
-      w - pad - 20,
-      y + 12,
-      21,
-      ink,
-      bold: true,
-      alignEnd: true,
-    );
-    _text(
-      canvas,
-      '${Fmt.money(itemsTotal, d.currency.decimal)} ${d.currency.symbol}',
-      pad + 24,
-      y + 10,
-      23,
-      skyDark,
-      bold: true,
-      alignStart: true,
-    );
+    if (discountVal != null && discountVal.isNotEmpty) {
+      // عرض إجمالي قيمة الأصناف يميناً والخصم في خانة مستقلة واضحة بجواره يساراً
+      canvas.drawLine(
+        Offset(pad + tw * 0.45, y),
+        Offset(pad + tw * 0.45, y + tableFooterH),
+        gridPaint,
+      );
+      _text(
+        canvas,
+        'إجمالي قيمة الأصناف: ${Fmt.money(itemsTotal, d.currency.decimal)} ${d.currency.symbol}',
+        w - pad - 20,
+        y + 11,
+        20,
+        ink,
+        bold: true,
+        alignEnd: true,
+        maxWidth: tw * 0.52,
+      );
+      _text(
+        canvas,
+        'الخصم: $discountVal',
+        pad + 24,
+        y + 11,
+        20,
+        red,
+        bold: true,
+        alignStart: true,
+        maxWidth: tw * 0.42,
+      );
+    } else {
+      _text(
+        canvas,
+        'إجمالي قيمة الأصناف',
+        w - pad - 20,
+        y + 12,
+        21,
+        ink,
+        bold: true,
+        alignEnd: true,
+      );
+      _text(
+        canvas,
+        '${Fmt.money(itemsTotal, d.currency.decimal)} ${d.currency.symbol}',
+        pad + 24,
+        y + 10,
+        23,
+        skyDark,
+        bold: true,
+        alignStart: true,
+      );
+    }
     y += tableFooterH;
 
     canvas.restore();
@@ -1055,48 +1107,9 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     y += partialBarH;
   }
 
-  // ===== شريط التاريخ ورقم الهاتف قبل العنصر الأخير مباشرة =====
-  y += 14.0;
-  final dpBox = RRect.fromRectAndRadius(
-    Rect.fromLTWH(pad, y, w - pad * 2, datePhoneBarH),
-    const Radius.circular(12),
-  );
-  canvas.drawRRect(dpBox, Paint()..color = const Color(0xFFF8FAFC));
-  canvas.drawRRect(
-    dpBox,
-    Paint()
-      ..color = line
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2,
-  );
-  _text(
-    canvas,
-    '📅 التاريخ: $dtFormatted',
-    w - pad - 20,
-    y + 12,
-    19,
-    ink,
-    bold: true,
-    alignEnd: true,
-  );
-  final effectivePhone = d.orgPhone.trim().isNotEmpty
-      ? d.orgPhone.trim()
-      : (d.accountPhone.trim().isNotEmpty ? d.accountPhone.trim() : '—');
-  _text(
-    canvas,
-    '📞 رقم الهاتف: $effectivePhone',
-    pad + 20,
-    y + 12,
-    19,
-    skyDark,
-    bold: true,
-    alignStart: true,
-  );
-  y += datePhoneBarH;
-
   y += 20.0;
 
-  // ===== 5) الخط المنقط وشريط التذييل السفلي (Footer Bar) مطابق للصورة المرجعية =====
+  // ===== 5) الخط المنقط وشريط التذييل السفلي (الموظف يميناً وسند آلي يساراً فقط) =====
   final dashPaint = Paint()
     ..color = const Color(0xFFCBD5E1)
     ..strokeWidth = 1.8;
@@ -1114,7 +1127,6 @@ Future<String> buildReceiptImage(ReceiptData d) async {
       d.sellerOrDevice.trim().isEmpty ? 'الموظف' : d.sellerOrDevice.trim();
   final userLabel = 'الموظف: $sellerIdentity';
 
-  // كبسولة اسم الموظف في أقصى اليمين كما في الصورة المرجعية
   final userTp = TextPainter(
     text: TextSpan(
       text: userLabel,
@@ -1144,21 +1156,11 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     center: true,
   );
 
-  // فاصل عمودي وعبارة «شكراً لتعاملكم معنا» باللون السماوي الجذاب
-  _text(
-    canvas,
-    '|   شكراً لتعاملكم معنا',
-    w - pad - userPillW - 14,
-    y + 23,
-    20,
-    skyBright,
-    bold: true,
-    alignEnd: true,
-  );
-
-  final leftFooterNote = d.footer.trim().isEmpty
-      ? 'سند آلي لا يحتاج إلى ختم أو توقيع'
-      : d.footer.trim();
+  final rawFooter = d.footer.trim();
+  final leftFooterNote =
+      (rawFooter.isEmpty || rawFooter.contains('شكراً لتعاملكم'))
+          ? 'سند آلي لا يحتاج إلى ختم أو توقيع'
+          : rawFooter;
   _text(
     canvas,
     leftFooterNote,
@@ -1168,7 +1170,7 @@ Future<String> buildReceiptImage(ReceiptData d) async {
     muted,
     bold: true,
     alignStart: true,
-    maxWidth: w * 0.36,
+    maxWidth: w - pad * 2 - userPillW - 24,
   );
 
   final picture = recorder.endRecording();
@@ -1207,6 +1209,15 @@ Future<String> buildReceiptImage(ReceiptData d) async {
   return file.path;
 }
 
+/// يضمن عرض رقم الهاتف باتجاه LTR بحيث تبقى علامة (+) في أقصى اليسار بجوار مفتاح الدولة.
+String _formatLtrPhone(String raw) {
+  final t = raw
+      .replaceAll(RegExp(r'[\u200E\u200F\u202A-\u202E\u2066-\u2069]'), '')
+      .trim();
+  if (t.isEmpty) return '';
+  return '\u2066\u202A$t\u202C\u2069';
+}
+
 String _formatVoucherDateTime(DateTime dt) {
   final y = dt.year.toString().padLeft(4, '0');
   final m = dt.month.toString().padLeft(2, '0');
@@ -1234,6 +1245,7 @@ void _text(
   bool center = false,
   bool alignEnd = false,
   bool alignStart = false,
+  TextDirection textDirection = TextDirection.rtl,
   double? maxWidth,
 }) {
   final tp = TextPainter(
@@ -1247,8 +1259,12 @@ void _text(
         height: 1.35,
       ),
     ),
-    textDirection: TextDirection.rtl,
-    textAlign: center ? TextAlign.center : TextAlign.right,
+    textDirection: textDirection,
+    textAlign: center
+        ? TextAlign.center
+        : (textDirection == TextDirection.ltr
+            ? TextAlign.left
+            : TextAlign.right),
     maxLines: 2,
     ellipsis: '…',
   )..layout(maxWidth: maxWidth ?? 800);

@@ -51,6 +51,7 @@ class PlanFeatures {
   final bool multiBranch;
   final bool multiUser;
   final bool advancedInvoicing;
+  final bool allowCloudMediaSync;
 
   const PlanFeatures({
     required this.canUseCategories,
@@ -65,6 +66,7 @@ class PlanFeatures {
     this.multiBranch = true,
     this.multiUser = true,
     this.advancedInvoicing = true,
+    this.allowCloudMediaSync = false,
   });
 
   static const allOn = PlanFeatures(
@@ -80,6 +82,7 @@ class PlanFeatures {
     multiBranch: true,
     multiUser: true,
     advancedInvoicing: true,
+    allowCloudMediaSync: false,
   );
 
   /// فردي منتهي التجربة: يبقى التسجيل والحركات اليومية محلياً فقط.
@@ -96,6 +99,7 @@ class PlanFeatures {
     multiBranch: false,
     multiUser: false,
     advancedInvoicing: false,
+    allowCloudMediaSync: false,
   );
 
   factory PlanFeatures.fromMap(Map<String, dynamic>? m) {
@@ -118,6 +122,8 @@ class PlanFeatures {
       multiBranch: b('multi_branch', true),
       multiUser: b('multi_user', true),
       advancedInvoicing: b('advanced_invoicing', true),
+      allowCloudMediaSync:
+          b('allow_cloud_media_sync', b('cloud_media_sync', false)),
     );
   }
 
@@ -134,6 +140,7 @@ class PlanFeatures {
         'multi_branch': multiBranch,
         'multi_user': multiUser,
         'advanced_invoicing': advancedInvoicing,
+        'allow_cloud_media_sync': allowCloudMediaSync,
       };
 }
 
@@ -1123,6 +1130,10 @@ class SubscriptionGuard {
           ? workspaceId.trim()
           : repo.requireWorkspaceId.trim();
       await repo.setSetting('subscription.status', st.status);
+      await repo.setSetting(
+        'allow_cloud_media_sync',
+        st.features.allowCloudMediaSync ? '1' : '0',
+      );
       await repo.setSetting(
           'subCachedState',
           jsonEncode({

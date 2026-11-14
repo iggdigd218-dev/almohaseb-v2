@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/accounting.dart';
 import '../core/format.dart';
+import '../core/l10n.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
 import 'widgets.dart';
@@ -21,34 +22,34 @@ class CurrenciesScreen extends ConsumerWidget {
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (e, _) => EmptyState(
         icon: Icons.error_outline,
-        title: 'تعذّر تحميل العملات',
+        title: context.tr('تعذّر تحميل العملات', 'Failed to load currencies'),
         message: '$e',
       ),
       // (دفعة 58) سحب للأسفل = تحديث فوري للبيانات.
       data: (list) => RefreshIndicator(
         onRefresh: () async => bump(ref),
         child: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 14, 14, 96),
-        children: [
-          const SectionTitle('العملات'),
-          for (final c in list)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: _CurrencyCard(
-                currency: c,
-                isDefault: c.code == defaultCode,
+          padding: const EdgeInsets.fromLTRB(14, 14, 14, 96),
+          children: [
+            SectionTitle(context.tr('العملات')),
+            for (final c in list)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _CurrencyCard(
+                  currency: c,
+                  isDefault: c.code == defaultCode,
+                ),
               ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: () => _addCurrency(context, ref),
+              icon: const Icon(Icons.add),
+              label: Text(context.tr('إضافة عملة')),
             ),
-          const SizedBox(height: 10),
-          OutlinedButton.icon(
-            onPressed: () => _addCurrency(context, ref),
-            icon: const Icon(Icons.add),
-            label: const Text('إضافة عملة'),
-          ),
-          const SizedBox(height: 22),
-          const SectionTitle('🔄 تحويل العملات'),
-          _Converter(currencies: list, baseCode: defaultCode),
-        ],
+            const SizedBox(height: 22),
+            SectionTitle(context.tr('🔄 تحويل العملات', '🔄 Currency Converter')),
+            _Converter(currencies: list, baseCode: defaultCode),
+          ],
         ),
       ),
     );
@@ -240,8 +241,15 @@ class _CurrencyCardState extends ConsumerState<_CurrencyCard> {
                     ],
                   ),
                 ),
+                if (canEdit)
+                  IconButton(
+                    tooltip: context.tr('تعديل العملة'),
+                    onPressed: () => _editCurrencyDialog(context, c),
+                    icon: const Icon(Icons.edit_outlined, size: 20),
+                  ),
                 if (widget.isDefault)
-                  Pill('✓ الافتراضية', color: AppColors.greenOf(context))
+                  Pill(context.tr('✓ الافتراضية'),
+                      color: AppColors.greenOf(context))
                 else if (canEdit)
                   TextButton(
                     onPressed: () async {
@@ -253,7 +261,7 @@ class _CurrencyCardState extends ConsumerState<_CurrencyCard> {
                         showSnack(context, 'تم تعيين ${c.name} افتراضية');
                       }
                     },
-                    child: const Text('تعيين افتراضية'),
+                    child: Text(context.tr('تعيين افتراضية')),
                   ),
               ],
             ),
@@ -307,6 +315,96 @@ class _CurrencyCardState extends ConsumerState<_CurrencyCard> {
     );
   }
 
+  Future<void> _editCurrencyDialog(BuildContext context, CurrencyDef c) async {
+    final nameCtrl = TextEditingController(text: c.name);
+    final symbolCtrl = TextEditingController(text: c.symbol);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('تعديل العملة (${c.code})'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              DropdownButtonFormField<CurrencyDef>(
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: 'اختيار سريع من العملات المتاحة (اختياري)',
+                ),
+                items: kPresetCurrencies
+                    .map(
+                      (p) => DropdownMenuItem<CurrencyDef>(
+                        value: p,
+                        child: Text('${p.name} (${p.symbol})'),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (selected) {
+                  if (selected != null) {
+                    nameCtrl.text = selected.name;
+                    symbolCtrl.text = selected.symbol;
+                  }
+                },
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: nameCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'اسم العملة (مثل: محلي، الريال اليمني، ...)',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: symbolCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'رمز العملة (مثل: محلي، ر.ي، ر.س، ...)',
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('حفظ'),
+          ),
+        ],
+      ),
+    );
+
+    try {
+      if (ok != true) return;
+      final newName = nameCtrl.text.trim();
+      final newSymbol = symbolCtrl.text.trim();
+      if (newName.isEmpty) return;
+      final currentRate = Fmt.parseAmount(_rate.text) ?? c.rate;
+      await ref.read(repoProvider).saveCurrency(
+            CurrencyDef(
+              c.code,
+              newName,
+              newSymbol.isEmpty ? newName : newSymbol,
+              c.decimal,
+              currentRate <= 0 ? 1 : currentRate,
+            ),
+            rate: currentRate <= 0 ? 1 : currentRate,
+          );
+      bump(ref);
+      if (context.mounted) {
+        showSnack(context, 'تم تحديث بيانات العملة ✅');
+      }
+    } catch (e) {
+      if (context.mounted) showSnack(context, '$e', error: true);
+    } finally {
+      nameCtrl.dispose();
+      symbolCtrl.dispose();
+    }
+  }
+
   Future<void> _saveRate(String v) async {
     final n = Fmt.parseAmount(v);
     if (n == null || n <= 0) {
@@ -314,9 +412,6 @@ class _CurrencyCardState extends ConsumerState<_CurrencyCard> {
       return;
     }
     try {
-      // (دفعة التدقيق) الحفظ الموحد في جدول currencies عبر saveCurrency:
-      // فحص صلاحية manage_currencies + تعقيم السعر (موجب منتهٍ) + ختم
-      // المساحة — لا كتابة في مفتاح الإعدادات المتوازي.
       final c = widget.currency;
       await ref.read(repoProvider).saveCurrency(
             CurrencyDef(c.code, c.name, c.symbol, c.decimal),

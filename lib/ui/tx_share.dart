@@ -78,7 +78,11 @@ class TxShare {
         ? const <InvoiceLine>[]
         : await repo.transactionItems(tx.id!);
 
-    final rawRef = tx.reference.trim();
+    final rawRef = tx.reference
+        .trim()
+        .replaceFirst(RegExp(r'^#+'), '')
+        .replaceFirst(RegExp(r'#+$'), '')
+        .trim();
     final devicePrefix = Fmt.singleLetterDevicePrefix(
       st['sync.deviceId'] ?? '',
       configuredPrefix: st['devicePrefix'],
@@ -103,13 +107,13 @@ class TxShare {
     if (isPosInvoice) {
       final modeLabel = tx.type == OpType.revenue ? 'نقداً' : 'آجل';
       title =
-          '🧾 *فاتورة مبيعات ($modeLabel)*${refCode.isNotEmpty ? '  •  *#$refCode*' : ''}';
+          '🧾 *فاتورة مبيعات ($modeLabel)*${refCode.isNotEmpty ? '  •  *$refCode*' : ''}';
     } else if (tx.type == OpType.inflow) {
       title =
-          '🧾 *سند قبض وتوريد*${refCode.isNotEmpty ? '  •  *#$refCode*' : ''}';
+          '🧾 *سند قبض وتوريد*${refCode.isNotEmpty ? '  •  *$refCode*' : ''}';
     } else {
       title =
-          '${tx.type.icon} *${tx.type.label}*${refCode.isNotEmpty ? '  •  *#$refCode*' : ''}';
+          '${tx.type.icon} *${tx.type.label}*${refCode.isNotEmpty ? '  •  *$refCode*' : ''}';
     }
 
     final dateStr = (tx.date.hour == 0 && tx.date.minute == 0)
@@ -154,15 +158,18 @@ class TxShare {
           devicePrefix.isNotEmpty ? 'الموظف ($devicePrefix)' : 'الموظف';
     }
 
-    final orgPhone = (st['phone'] ?? account?.phone ?? '').trim();
     final footer = (st['voucherFooter'] ?? '').trim();
+    final cleanFooter =
+        (footer.isEmpty || footer.contains('شكراً لتعاملكم'))
+            ? 'سند آلي لا يحتاج إلى ختم أو توقيع'
+            : footer;
 
     final lines = <String>[
       if (org.isNotEmpty) '🏪 *$org*',
       title,
       '👨‍💼 الموظف: $sellerOrDevice',
-      '📅 التاريخ: $dateStr${orgPhone.isNotEmpty ? '  •  📞 الهاتف: $orgPhone' : ''}',
-      '🌿 ${footer.isNotEmpty ? footer : 'شكراً لتعاملكم معنا'}',
+      '📅 التاريخ: $dateStr',
+      cleanFooter,
     ];
     return lines.join('\n');
   }

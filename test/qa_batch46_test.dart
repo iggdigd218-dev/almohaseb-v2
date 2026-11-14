@@ -240,11 +240,11 @@ void main() {
       await db.update('users', {'is_me': 0});
       final nowIso = DateTime.now().toIso8601String();
       await db.insert('users', {
-        'name': 'محاسب الفرع',
-        'role': 'accountant',
+        'name': 'وكيل الفرع',
+        'role': 'agent',
         'is_me': 1,
         'active': 1,
-        // صلاحيات محاسب كاملة — ليختبر القفل التاريخي لا الصلاحيات.
+        // صلاحيات وكيل المدير — ليختبر القفل التاريخي لغير المالك.
         'permissions': 'add_tx,edit_tx,delete_tx,view_reports,export',
         'created_at': nowIso,
         'updated_at': nowIso,

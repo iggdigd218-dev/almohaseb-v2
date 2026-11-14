@@ -79,6 +79,7 @@ class WorkspaceInfo {
   final String ownerEmail;
   final String role; // 'owner' | 'member'
   final bool isCurrent;
+  final String passwordHash;
 
   const WorkspaceInfo({
     required this.workspaceId,
@@ -89,6 +90,7 @@ class WorkspaceInfo {
     this.ownerEmail = '',
     this.role = 'owner',
     this.isCurrent = false,
+    this.passwordHash = '',
   });
 
   Map<String, Object?> toJson() => {
@@ -99,6 +101,7 @@ class WorkspaceInfo {
         'phone': phone,
         'ownerEmail': ownerEmail,
         'role': role,
+        if (passwordHash.isNotEmpty) 'passwordHash': passwordHash,
       };
 
   factory WorkspaceInfo.fromJson(
@@ -127,6 +130,8 @@ class WorkspaceInfo {
           ? 'owner'
           : '${m['role'] ?? 'owner'}'.trim(),
       isCurrent: isCurrent,
+      passwordHash:
+          '${m['passwordHash'] ?? m['password_hash'] ?? ''}'.trim(),
     );
   }
 }
@@ -2729,13 +2734,20 @@ class AccountWorkspace {
       final raw =
           prefs.getString(FirebaseAuthRest.prefsWorkspacesListKey) ?? '[]';
       final list = <Map<String, dynamic>>[];
+      String preservedPwHash = info.passwordHash.trim();
       try {
         final decoded = jsonDecode(raw);
         if (decoded is List) {
           for (final item in decoded) {
             if (item is Map) {
               final map = Map<String, dynamic>.from(item);
-              if ('${map['workspaceId'] ?? ''}'.trim() != info.workspaceId &&
+              final itemWs = '${map['workspaceId'] ?? ''}'.trim();
+              if (itemWs == info.workspaceId && preservedPwHash.isEmpty) {
+                preservedPwHash =
+                    '${map['passwordHash'] ?? map['password_hash'] ?? ''}'
+                        .trim();
+              }
+              if (itemWs != info.workspaceId &&
                   '${map['role'] ?? ''}'.trim().toLowerCase() != 'member') {
                 list.add(map);
               }
@@ -2743,7 +2755,11 @@ class AccountWorkspace {
           }
         }
       } catch (_) {}
-      list.insert(0, info.toJson().map((k, v) => MapEntry(k, v)));
+      final entryMap = info.toJson().map((k, v) => MapEntry(k, v));
+      if (preservedPwHash.isNotEmpty) {
+        entryMap['passwordHash'] = preservedPwHash;
+      }
+      list.insert(0, entryMap);
       await prefs.setString(
         FirebaseAuthRest.prefsWorkspacesListKey,
         jsonEncode(list),
@@ -2926,6 +2942,22 @@ class AccountWorkspace {
     String currentWorkspaceId = '',
   }) async {
     final cleanFilter = (filterEmail ?? '').trim().toLowerCase();
+    final normFilterPhone = normalizePhone(cleanFilter);
+    bool matchesFilter(String ownerEmail, String phone) {
+      if (cleanFilter.isEmpty) return true;
+      if (ownerEmail.trim().toLowerCase() == cleanFilter) return true;
+      if (normFilterPhone.length >= 7) {
+        final normWsPhone = normalizePhone(phone);
+        if (normWsPhone.isNotEmpty &&
+            (normWsPhone == normFilterPhone ||
+                normWsPhone.endsWith(normFilterPhone) ||
+                normFilterPhone.endsWith(normWsPhone))) {
+          return true;
+        }
+      }
+      return false;
+    }
+
     final mapByWs = <String, WorkspaceInfo>{};
 
     // (Self-Healing) تنظيف مسودات المنشآت الوهمية الفارغة من القرص أولاً:
@@ -2954,17 +2986,19 @@ class AccountWorkspace {
           final ownerEmail =
               (item['ownerEmail'] ?? '').trim().toLowerCase();
           final defCurr = (item['defaultCurrency'] ?? 'YER').trim();
+          final wsPhone = (item['phone'] ?? '').trim();
           final info = WorkspaceInfo(
             workspaceId: wsId,
             storeName: storeName.isEmpty ? 'منشأة ($wsId)' : storeName,
             businessActivity: (item['businessActivity'] ?? '').trim(),
             defaultCurrency: defCurr.isEmpty ? 'YER' : defCurr,
-            phone: (item['phone'] ?? '').trim(),
+            phone: wsPhone,
             ownerEmail: ownerEmail,
             role: 'owner',
             isCurrent: wsId == currentWorkspaceId,
+            passwordHash: (item['passwordHash'] ?? '').trim(),
           );
-          if (cleanFilter.isEmpty || ownerEmail == cleanFilter) {
+          if (matchesFilter(ownerEmail, wsPhone)) {
             mapByWs[wsId] = info;
           }
         }
@@ -2990,9 +3024,6 @@ class AccountWorkspace {
                 info.role.trim().toLowerCase() == 'member') {
               continue;
             }
-            // (Self-Healing) استبعاد مسودات المنشآت الوهمية من السجل أيضاً:
-            // بلا اسم تجاري حقيقي، أو بادئة مسودة WS- مع الاسم الاحتياطي،
-            // أو مدخل لا يقابله ملف قاعدة بيانات فعلي على القرص.
             final sn = info.storeName.trim();
             final isDraftEntry = sn.isEmpty ||
                 sn == 'متجري' ||
@@ -3007,9 +3038,24 @@ class AccountWorkspace {
                 if (!dbFile.existsSync()) continue;
               } catch (_) {}
             }
-            if (cleanFilter.isEmpty ||
-                info.ownerEmail.toLowerCase() == cleanFilter) {
-              mapByWs.putIfAbsent(info.workspaceId, () => info);
+            if (matchesFilter(info.ownerEmail, info.phone)) {
+              final existing = mapByWs[info.workspaceId];
+              if (existing == null) {
+                mapByWs[info.workspaceId] = info;
+              } else if (existing.passwordHash.isEmpty &&
+                  info.passwordHash.isNotEmpty) {
+                mapByWs[info.workspaceId] = WorkspaceInfo(
+                  workspaceId: existing.workspaceId,
+                  storeName: existing.storeName,
+                  businessActivity: existing.businessActivity,
+                  defaultCurrency: existing.defaultCurrency,
+                  phone: existing.phone,
+                  ownerEmail: existing.ownerEmail,
+                  role: existing.role,
+                  isCurrent: existing.isCurrent,
+                  passwordHash: info.passwordHash,
+                );
+              }
             }
           }
         }
@@ -3017,6 +3063,39 @@ class AccountWorkspace {
     } catch (_) {}
 
     return mapByWs.values.toList();
+  }
+
+  /// التحقق الصارم من كلمة مرور منشأة محفوظة محلياً على الجهاز.
+  /// يعيد `true` إذا تطابقت كلمة المرور، و`false` إذا وُجدت بصمة كلمة مرور محلية ولم تتطابق،
+  /// و`null` إذا لم تكن هناك بصمة كلمة مرور مخزنة محلياً لهذه المنشأة.
+  static Future<bool?> verifyLocalWorkspacePassword(
+    String workspaceId,
+    String password,
+  ) async {
+    final cleanWs = workspaceId.trim();
+    final cleanPw = password.trim();
+    if (cleanWs.isEmpty || cleanPw.isEmpty) return false;
+
+    String storedHash = '';
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      storedHash = (prefs.getString('workspace_pw_hash.$cleanWs') ?? '').trim();
+    } catch (_) {}
+
+    if (storedHash.isEmpty) {
+      try {
+        final locals = await findLocalWorkspacesOnDevice();
+        for (final w in locals) {
+          if (w.workspaceId == cleanWs && w.passwordHash.trim().isNotEmpty) {
+            storedHash = w.passwordHash.trim();
+            break;
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (storedHash.isEmpty) return null;
+    return Security.verify(cleanPw, storedHash);
   }
 
   /// جلب كافة المنشآت المرتبطة بالمستخدم أو المحفوظة على هذا الجهاز (محلياً وسحابياً).
@@ -3329,6 +3408,17 @@ class AccountWorkspace {
     await repo.ensureSelfPermissionRow(roleCode: 'admin');
     await repo.restoreManagerOwnership(syncToCloud: false);
 
+    final cleanPassword = password.trim();
+    final pwHash =
+        cleanPassword.length >= 4 ? Security.hash(cleanPassword) : '';
+    if (pwHash.isNotEmpty) {
+      await repo.setSetting('account.passwordHash', pwHash);
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('workspace_pw_hash.$newWsId', pwHash);
+      } catch (_) {}
+    }
+
     final wsInfo = WorkspaceInfo(
       workspaceId: newWsId,
       storeName: cleanStore,
@@ -3338,6 +3428,7 @@ class AccountWorkspace {
       ownerEmail: email,
       role: 'owner',
       isCurrent: true,
+      passwordHash: pwHash,
     );
     await saveWorkspaceToLocalRegistry(wsInfo);
     await FirebaseAuthRest.saveWorkspaceSessionPrefs(
@@ -3348,13 +3439,6 @@ class AccountWorkspace {
       ownerUid: uid,
       displayName: displayName,
     );
-
-    final cleanPassword = password.trim();
-    final pwHash =
-        cleanPassword.length >= 6 ? Security.hash(cleanPassword) : '';
-    if (pwHash.isNotEmpty) {
-      await repo.setSetting('account.passwordHash', pwHash);
-    }
 
     // 4) تسجيل المنشأة في فايربيس باسم هذا البريد وبحالة اشتراك غير مفعل حتى يتم الترخيص
     if (backendUrl.isNotEmpty) {

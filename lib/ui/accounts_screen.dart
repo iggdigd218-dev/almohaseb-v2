@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/accounting.dart';
 import '../core/format.dart';
+import '../core/l10n.dart';
 import '../core/models.dart';
 import '../core/sfx.dart';
 import '../data/providers.dart';
@@ -45,15 +46,15 @@ class AccountsScreen extends ConsumerWidget {
               child: list.when(
                 skipLoadingOnReload: true,
                 skipLoadingOnRefresh: true,
-                loading: () => const Center(
+                loading: () => Center(
                   child: Padding(
-                    padding: EdgeInsets.all(24),
+                    padding: const EdgeInsets.all(24),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        CircularProgressIndicator(),
-                        SizedBox(height: 12),
-                        Text('جارٍ تحميل الحسابات…'),
+                        const CircularProgressIndicator(),
+                        const SizedBox(height: 12),
+                        Text(context.tr('جارٍ تحميل الحسابات…')),
                       ],
                     ),
                   ),
@@ -66,7 +67,7 @@ class AccountsScreen extends ConsumerWidget {
                       children: [
                         EmptyState(
                           icon: Icons.error_outline,
-                          title: 'تعذّر تحميل الحسابات',
+                          title: context.tr('تعذّر تحميل الحسابات'),
                           message: '$e'.length > 200
                               ? '${'$e'.substring(0, 200)}…'
                               : '$e',
@@ -75,28 +76,18 @@ class AccountsScreen extends ConsumerWidget {
                         FilledButton.icon(
                           onPressed: () => bump(ref),
                           icon: const Icon(Icons.refresh),
-                          label: const Text('إعادة المحاولة'),
+                          label: Text(context.tr('إعادة المحاولة')),
                         ),
                       ],
                     ),
                   ),
                 ),
                 data: (rawItems) {
-                  // تطبيق فلتر الرصيد (الكل، عليكم، لكم، مسدد)
-                  //
-                  // (دفعة الواجهات) الحكم على الرصيد يُحسب بمنازل عملة **كل
-                  // حساب** لا بهامش ثابت: حساب بعملة بلا منازل (ريال) برصيد
-                  // 0.4 كان يُصنّف «عليه» بالهامش الثابت، بينما البطاقة تعرضه
-                  // «0» — أي تناقض بين الفلتر وما يراه المستخدم. التقريب بمنازل
-                  // العملة يجعل الحكم مطابقاً للرقم المعروض، ويصحّ للحسابات
-                  // متعددة العملات لأن كل حساب يُقاس بعملته هو.
                   final decimals = <String, int>{
                     for (final c in curs)
                       c.code.trim().toUpperCase(): c.decimal,
                   };
                   final items = rawItems.where((it) {
-                    // الموجب = «عليه» (مدين، مستحق لنا) والسالب = «له»،
-                    // مطابقاً لـ accounting.dart و account_detail و Dashboard.
                     final dec =
                         decimals[it.account.currency.trim().toUpperCase()];
                     final bal = Fmt.roundMoney(it.balance, dec ?? 2);
@@ -118,17 +109,17 @@ class AccountsScreen extends ConsumerWidget {
                       title: filter.query.isEmpty &&
                               filter.kind == null &&
                               balanceFilter == _BalanceFilter.all
-                          ? 'لا توجد حسابات بعد'
-                          : 'لا نتائج مطابقة',
+                          ? context.tr('لا توجد حسابات بعد')
+                          : context.tr('لا نتائج مطابقة'),
                       message: filter.query.isEmpty &&
                               filter.kind == null &&
                               balanceFilter == _BalanceFilter.all
-                          ? 'أضف أول حساب لعميل أو مورد'
-                          : 'جرّب تغيير كلمة البحث أو الفلاتر',
+                          ? context.tr('أضف أول حساب لعميل أو مورد')
+                          : context.tr('جرّب تغيير كلمة البحث أو الفلاتر'),
                       action: FilledButton.icon(
                         onPressed: () => openAccountForm(context, ref),
                         icon: const Icon(Icons.person_add_alt_1_rounded),
-                        label: const Text('إضافة حساب جديد'),
+                        label: Text(context.tr('إضافة حساب جديد')),
                       ),
                     );
                   }
@@ -139,6 +130,7 @@ class AccountsScreen extends ConsumerWidget {
                       itemCount: items.length,
                       separatorBuilder: (_, __) => const SizedBox(height: 8),
                       itemBuilder: (_, i) => _AccountCard(
+                        index: i,
                         item: items[i],
                         currencies: curs,
                         hidden: hidden,
@@ -173,11 +165,13 @@ class _EnhancedFilterBar extends ConsumerStatefulWidget {
 
 class _EnhancedFilterBarState extends ConsumerState<_EnhancedFilterBar> {
   late final TextEditingController _searchCtrl;
+  bool _searchExpanded = false;
 
   @override
   void initState() {
     super.initState();
     _searchCtrl = TextEditingController(text: widget.filter.query);
+    _searchExpanded = widget.filter.query.isNotEmpty;
   }
 
   @override
@@ -197,129 +191,367 @@ class _EnhancedFilterBarState extends ConsumerState<_EnhancedFilterBar> {
     super.dispose();
   }
 
+  String _balanceFilterLabel(BuildContext context, _BalanceFilter bf) =>
+      switch (bf) {
+        _BalanceFilter.all => context.tr('الكل'),
+        _BalanceFilter.debt => context.tr('عليه'),
+        _BalanceFilter.credit => context.tr('له'),
+        _BalanceFilter.settled => context.tr('مسدد'),
+      };
+
+  String _summaryLabel(
+    BuildContext context,
+    AccountFilter filter,
+    List<CurrencyDef> currencies,
+    _BalanceFilter balanceFilter,
+  ) {
+    final parts = <String>[];
+    if (filter.currency != null) {
+      final c = currencies
+          .where((x) => x.code == filter.currency)
+          .firstOrNull;
+      parts.add(c != null ? '${context.tr(c.name)} ${c.flag}' : filter.currency!);
+    } else {
+      parts.add(context.tr('كل العملات'));
+    }
+    if (balanceFilter != _BalanceFilter.all) {
+      parts.add(_balanceFilterLabel(context, balanceFilter));
+    }
+    if (filter.kind != null) {
+      parts.add(context.tr(filter.kind!.label));
+    }
+    return parts.join(' • ');
+  }
+
+  Future<void> _openFilterSortSheet(
+    BuildContext context,
+    List<CurrencyDef> currencies,
+  ) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (sheetCtx) {
+        return Consumer(
+          builder: (ctx, rref, _) {
+            final f = rref.watch(accountFilterProvider);
+            final bf = rref.watch(_balanceFilterProvider);
+            final n = rref.read(accountFilterProvider.notifier);
+            final bNotifier = rref.read(_balanceFilterProvider.notifier);
+
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 18),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.tune_rounded,
+                          color: AppColors.primaryOf(ctx),
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            ctx.tr('تصفية وفرز العملاء والحسابات'),
+                            style:
+                                Theme.of(ctx).textTheme.titleMedium?.copyWith(
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () {
+                            n.state = const AccountFilter();
+                            bNotifier.state = _BalanceFilter.all;
+                            Navigator.pop(ctx);
+                          },
+                          child: Text(ctx.tr('إعادة ضبط')),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 16),
+                    Text(
+                      ctx.tr('العملة'),
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.text2Of(ctx),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        _chip(
+                          ctx,
+                          ctx.tr('كل العملات'),
+                          f.currency == null,
+                          () => n.state = f.copyWith(clearCurrency: true),
+                        ),
+                        for (final c in currencies)
+                          _chip(
+                            ctx,
+                            '${ctx.tr(c.name)} ${c.flag}',
+                            f.currency == c.code,
+                            () => n.state = f.copyWith(
+                              currency: f.currency == c.code ? null : c.code,
+                              clearCurrency: f.currency == c.code,
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    Text(
+                      ctx.tr('حالة الرصيد'),
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.text2Of(ctx),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        _chip(
+                          ctx,
+                          ctx.tr('الكل'),
+                          bf == _BalanceFilter.all,
+                          () => bNotifier.state = _BalanceFilter.all,
+                        ),
+                        _chip(
+                          ctx,
+                          ctx.tr('عليه'),
+                          bf == _BalanceFilter.debt,
+                          () => bNotifier.state = _BalanceFilter.debt,
+                          color: const Color(0xFFEF4444),
+                        ),
+                        _chip(
+                          ctx,
+                          ctx.tr('له'),
+                          bf == _BalanceFilter.credit,
+                          () => bNotifier.state = _BalanceFilter.credit,
+                          color: const Color(0xFF10B981),
+                        ),
+                        _chip(
+                          ctx,
+                          ctx.tr('مسدد'),
+                          bf == _BalanceFilter.settled,
+                          () => bNotifier.state = _BalanceFilter.settled,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    Text(
+                      ctx.tr('نوع الحساب'),
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.text2Of(ctx),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        _chip(
+                          ctx,
+                          ctx.tr('الكل'),
+                          f.kind == null,
+                          () => n.state = f.copyWith(clearKind: true),
+                        ),
+                        ...AccountKind.values.map((k) {
+                          return _chip(
+                            ctx,
+                            '${k.icon} ${ctx.tr(k.label)}',
+                            f.kind == k,
+                            () => n.state = f.copyWith(
+                              kind: f.kind == k ? null : k,
+                              clearKind: f.kind == k,
+                            ),
+                          );
+                        }),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: Text(ctx.tr('تم')),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final filter = widget.filter;
     final currencies = widget.currencies;
     final balanceFilter = widget.balanceFilter;
     final n = ref.read(accountFilterProvider.notifier);
-    final bNotifier = ref.read(_balanceFilterProvider.notifier);
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final hasActiveFilter = filter.currency != null ||
+        balanceFilter != _BalanceFilter.all ||
+        filter.kind != null;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 8, 14, 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
         children: [
-          // حقل البحث + زر إضافة حساب جديد
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  decoration: InputDecoration(
-                    hintText: 'بحث بالاسم أو الهاتف أو الملاحظات…',
-                    hintStyle: const TextStyle(fontSize: 13),
-                    prefixIcon: const Icon(Icons.search, size: 20),
-                    suffixIcon: filter.query.isEmpty
-                        ? null
-                        : IconButton(
-                            icon: const Icon(Icons.close, size: 18),
-                            onPressed: () {
-                              _searchCtrl.clear();
-                              n.state = filter.copyWith(query: '');
-                            },
-                          ),
-                    isDense: true,
-                    contentPadding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-                    filled: true,
-                    fillColor: isDark
-                        ? const Color(0xFF1E293B)
-                        : const Color(0xFFF1F5F9),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
+          if (_searchExpanded) ...[
+            Expanded(
+              child: TextField(
+                key: const ValueKey('accounts_search_field'),
+                autofocus: true,
+                controller: _searchCtrl,
+                style: const TextStyle(fontSize: 13.5),
+                decoration: InputDecoration(
+                  hintText: context.tr('بحث بالاسم أو الهاتف أو الملاحظات…'),
+                  hintStyle: const TextStyle(fontSize: 13),
+                  prefixIcon: const Icon(Icons.search, size: 19),
+                  suffixIcon: IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    tooltip: context.tr('إغلاق البحث'),
+                    onPressed: () {
+                      _searchCtrl.clear();
+                      n.state = filter.copyWith(query: '');
+                      setState(() => _searchExpanded = false);
+                    },
                   ),
-                  style: const TextStyle(fontSize: 13.5),
-                  controller: _searchCtrl,
-                  onChanged: (v) => n.state = filter.copyWith(query: v),
-                ),
-              ),
-              const SizedBox(width: 8),
-              FilledButton.icon(
-                style: FilledButton.styleFrom(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  shape: RoundedRectangleBorder(
+                  isDense: true,
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  filled: true,
+                  fillColor: isDark
+                      ? const Color(0xFF1E293B)
+                      : const Color(0xFFF1F5F9),
+                  border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
                   ),
                 ),
-                onPressed: () {
-                  Sfx.tap();
-                  openAccountForm(context, ref);
-                },
-                icon: const Icon(Icons.person_add_alt_1_rounded, size: 18),
-                label: const Text(
-                  'حساب جديد',
-                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800),
-                ),
+                onChanged: (v) => n.state = filter.copyWith(query: v),
               ),
-            ],
-          ),
-          const SizedBox(height: 7),
-          // فلاتر العملات وفلاتر الأرصدة
-          SizedBox(
-            height: 32,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              children: [
-                // فلتر نوع العملة
-                _chip(
-                  context,
-                  'كل العملات',
-                  filter.currency == null,
-                  () => n.state = filter.copyWith(clearCurrency: true),
-                ),
-                for (final c in currencies)
-                  _chip(
-                    context,
-                    '${c.name} ${c.flag}',
-                    filter.currency == c.code,
-                    () => n.state = filter.copyWith(
-                      currency: filter.currency == c.code ? null : c.code,
-                      clearCurrency: filter.currency == c.code,
+            ),
+          ] else ...[
+            Expanded(
+              child: InkWell(
+                key: const ValueKey('accounts_unified_filter_badge'),
+                borderRadius: BorderRadius.circular(12),
+                onTap: () {
+                  Sfx.tap();
+                  _openFilterSortSheet(context, currencies);
+                },
+                child: Container(
+                  height: 38,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  decoration: BoxDecoration(
+                    color: hasActiveFilter
+                        ? AppColors.primarySoftOf(context)
+                        : (isDark
+                            ? const Color(0xFF1E293B)
+                            : const Color(0xFFF1F5F9)),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: hasActiveFilter
+                          ? AppColors.primaryOf(context)
+                          : AppColors.borderOf(context),
                     ),
                   ),
-                const VerticalDivider(width: 14, indent: 4, endIndent: 4),
-                // فلاتر حالة الرصيد
-                _chip(
-                  context,
-                  'الكل',
-                  balanceFilter == _BalanceFilter.all,
-                  () => bNotifier.state = _BalanceFilter.all,
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.tune_rounded,
+                        size: 17,
+                        color: hasActiveFilter
+                            ? AppColors.primaryOf(context)
+                            : AppColors.text2Of(context),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '${context.tr('تصفية وفرز')}: ${_summaryLabel(context, filter, currencies, balanceFilter)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w800,
+                            color: hasActiveFilter
+                                ? AppColors.primaryOf(context)
+                                : AppColors.textOf(context),
+                          ),
+                        ),
+                      ),
+                      Icon(
+                        Icons.keyboard_arrow_down_rounded,
+                        size: 18,
+                        color: AppColors.text2Of(context),
+                      ),
+                    ],
+                  ),
                 ),
-                _chip(
-                  context,
-                  'عليكم',
-                  balanceFilter == _BalanceFilter.debt,
-                  () => bNotifier.state = _BalanceFilter.debt,
-                  color: const Color(0xFF10B981),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Material(
+              color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                key: const ValueKey('accounts_search_icon_badge'),
+                borderRadius: BorderRadius.circular(12),
+                onTap: () {
+                  Sfx.tap();
+                  setState(() => _searchExpanded = true);
+                },
+                child: Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: AppColors.borderOf(context)),
+                  ),
+                  alignment: Alignment.center,
+                  child: Icon(
+                    Icons.search,
+                    size: 20,
+                    color: AppColors.textOf(context),
+                  ),
                 ),
-                _chip(
-                  context,
-                  'لكم',
-                  balanceFilter == _BalanceFilter.credit,
-                  () => bNotifier.state = _BalanceFilter.credit,
-                  color: const Color(0xFFEF4444),
+              ),
+            ),
+          ],
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 38,
+            height: 38,
+            child: FilledButton(
+              key: const ValueKey('accounts_add_btn'),
+              style: FilledButton.styleFrom(
+                padding: EdgeInsets.zero,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
                 ),
-                _chip(
-                  context,
-                  'مسدد',
-                  balanceFilter == _BalanceFilter.settled,
-                  () => bNotifier.state = _BalanceFilter.settled,
-                ),
-              ],
+              ),
+              onPressed: () {
+                Sfx.tap();
+                openAccountForm(context, ref);
+              },
+              child: const Icon(Icons.add, size: 22),
             ),
           ),
         ],
@@ -337,39 +569,35 @@ class _EnhancedFilterBarState extends ConsumerState<_EnhancedFilterBar> {
     final effectiveColor = color ?? const Color(0xFF0284C7);
     final isDark = Theme.of(c).brightness == Brightness.dark;
 
-    return Padding(
-      padding: const EdgeInsets.only(left: 6),
-      child: InkWell(
-        onTap: () {
-          Sfx.tap();
-          onTap();
-        },
-        borderRadius: BorderRadius.circular(16),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 160),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4.5),
-          decoration: BoxDecoration(
-            color: active
-                ? effectiveColor.withValues(alpha: isDark ? 0.28 : 0.14)
-                : (isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9)),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: active ? effectiveColor : Colors.transparent,
-              width: 1.2,
-            ),
+    return InkWell(
+      onTap: () {
+        Sfx.tap();
+        onTap();
+      },
+      borderRadius: BorderRadius.circular(16),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: active
+              ? effectiveColor.withValues(alpha: isDark ? 0.28 : 0.14)
+              : (isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9)),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: active ? effectiveColor : Colors.transparent,
+            width: 1.2,
           ),
-          alignment: Alignment.center,
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: active ? FontWeight.w800 : FontWeight.w600,
-              color: active
-                  ? effectiveColor
-                  : (isDark
-                      ? const Color(0xFF94A3B8)
-                      : const Color(0xFF475569)),
-            ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+            color: active
+                ? effectiveColor
+                : (isDark
+                    ? const Color(0xFF94A3B8)
+                    : const Color(0xFF475569)),
           ),
         ),
       ),
@@ -378,29 +606,19 @@ class _EnhancedFilterBarState extends ConsumerState<_EnhancedFilterBar> {
 }
 
 class _AccountCard extends StatelessWidget {
+  final int index;
   final AccountWithBalance item;
   final List<CurrencyDef> currencies;
   final bool hidden;
   final int txCount;
 
   const _AccountCard({
+    this.index = 0,
     required this.item,
     required this.currencies,
     required this.hidden,
     required this.txCount,
   });
-
-  String _getInitials(String name) {
-    final parts =
-        name.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
-    if (parts.isEmpty) return '؟';
-    if (parts.length == 1) {
-      return parts[0].length >= 2 ? parts[0].substring(0, 2) : parts[0];
-    }
-    final first = parts[0].isNotEmpty ? parts[0].substring(0, 1) : '';
-    final second = parts[1].isNotEmpty ? parts[1].substring(0, 1) : '';
-    return '$first$second';
-  }
 
   Color _avatarColor(String name) {
     final colors = [
@@ -423,20 +641,28 @@ class _AccountCard extends StatelessWidget {
       orElse: () => kDefaultCurrencies.first,
     );
 
-    // (دفعة التدقيق) نفس التوحيد: موجب = عليكم (مدين، أخضر كما في كشف
-    // الحساب)، سالب = لكم (دائن، أحمر).
-    // (دفعة الواجهات) الحكم بمنازل عملة الحساب لا بهامش ثابت: كان رصيد
-    // 0.4 في عملة بلا منازل يظهر «+ 0» أخضر، ويُدرج في فلتر «عليكم» بينما
-    // يظهر صفراً — الآن التصنيف والفلتر والعرض كلها بمنازل العملة نفسها.
+    // (المهمة 2) الأرقام دائماً باللون الأسود، وعبارة «عليه» بالأحمر و«له» بالأخضر،
+    // مع المربع الصغير ذي السهم الأبيض بجانب المبلغ.
     final shown = Fmt.roundMoney(item.balance, c.decimal);
     final isDebt = shown > 0;
     final isCredit = shown < 0;
-    final initials = _getInitials(a.name);
     final accent = _avatarColor(a.name);
+
+    const debtRed = Color(0xFFEF4444);
+    const creditGreen = Color(0xFF10B981);
+    final statusColor = isDebt
+        ? debtRed
+        : (isCredit
+            ? creditGreen
+            : (isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)));
+
+    final cardBg = index.isEven
+        ? (isDark ? const Color(0xFF1E293B) : Colors.white)
+        : (isDark ? const Color(0xFF132A2E) : const Color(0xFFE6F7F5));
 
     return Container(
       decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF1E293B) : Colors.white,
+        color: cardBg,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
           color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
@@ -467,7 +693,6 @@ class _AccountCard extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             child: Row(
               children: [
-                // الدائرة التعبيرية مع الحرفين الأولين من الاسم
                 Container(
                   width: 44,
                   height: 44,
@@ -480,17 +705,18 @@ class _AccountCard extends StatelessWidget {
                       width: 1.2,
                     ),
                   ),
-                  child: Text(
-                    initials,
-                    style: TextStyle(
-                      color: accent,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w800,
-                    ),
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Opacity(
+                        opacity: 0.01,
+                        child: Icon(Icons.person, color: accent, size: 22),
+                      ),
+                      Icon(Icons.person_rounded, color: accent, size: 24),
+                    ],
                   ),
                 ),
                 const SizedBox(width: 12),
-                // اسم العميل ومعلوماته
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -508,8 +734,11 @@ class _AccountCard extends StatelessWidget {
                       Text(
                         [
                           if (a.phone.isNotEmpty) a.phone,
-                          if (txCount > 0) '$txCount حركة' else 'لا حركات',
-                          c.name,
+                          if (txCount > 0)
+                            context.tr('$txCount حركة')
+                          else
+                            context.tr('لا حركات'),
+                          context.tr(c.name),
                         ].join(' • '),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -524,53 +753,51 @@ class _AccountCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 10),
-                // الرصيد الواضح باللون الأحمر أو الأخضر مع العملة
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
+                Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (hidden)
-                      const Text(
-                        '••••••',
-                        style: TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 2,
-                        ),
-                      )
-                    else
-                      Text(
-                        isDebt
-                            ? '+ ${Fmt.moneyFor(item.balance, c)} ${c.symbol}'
-                            : (isCredit
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        if (hidden)
+                          const Text(
+                            '••••••',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 2,
+                            ),
+                          )
+                        else
+                          Text(
+                            isDebt || isCredit
                                 ? '${Fmt.moneyFor(item.balance.abs(), c)} ${c.symbol}'
-                                : '0 ${c.symbol}'),
-                        style: TextStyle(
-                          fontSize: 15.5,
-                          fontWeight: FontWeight.w900,
-                          color: isDebt
-                              ? const Color(0xFF10B981)
+                                : '0 ${c.symbol}',
+                            style: TextStyle(
+                              fontSize: 15.5,
+                              fontWeight: FontWeight.w900,
+                              color: AppColors.textOf(context),
+                            ),
+                          ),
+                        const SizedBox(height: 2),
+                        Text(
+                          isDebt
+                              ? context.tr('عليه')
                               : (isCredit
-                                  ? const Color(0xFFEF4444)
-                                  : (isDark
-                                      ? const Color(0xFF94A3B8)
-                                      : const Color(0xFF64748B))),
+                                  ? context.tr('له')
+                                  : context.tr('مسدد')),
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: statusColor,
+                          ),
                         ),
-                      ),
-                    const SizedBox(height: 2),
-                    Text(
-                      isDebt ? 'عليكم' : (isCredit ? 'لكم' : 'مسدد'),
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                        color: isDebt
-                            ? const Color(0xFF10B981)
-                            : (isCredit
-                                ? const Color(0xFFEF4444)
-                                : (isDark
-                                    ? const Color(0xFF64748B)
-                                    : const Color(0xFF94A3B8))),
-                      ),
+                      ],
                     ),
+                    if (isDebt || isCredit) ...[
+                      const SizedBox(width: 8),
+                      NatureArrowSquare(isDebit: isDebt, size: 22),
+                    ],
                   ],
                 ),
               ],
@@ -581,3 +808,5 @@ class _AccountCard extends StatelessWidget {
     );
   }
 }
+
+

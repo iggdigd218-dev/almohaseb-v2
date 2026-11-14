@@ -280,8 +280,7 @@ Future<void> _adminLogout(
   final ok = await confirmDialog(
     c3,
     title: 'تسجيل الخروج',
-    message: 'سيستمر النظام ومزامنة باقي الأجهزة بشكل طبيعي أثناء غيابك.\n'
-        'تستعيد حسابك وصلاحياتك فوراً بإدخال بريدك وكلمة مرورك.',
+    message: 'هل تريد بالتأكيد تسجيل الخروج من الحساب؟',
     confirmText: 'خروج',
     danger: true,
   );

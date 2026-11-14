@@ -61,7 +61,7 @@ class PosItemTile extends StatelessWidget {
   IconData get _resolvedIcon => fallbackIcon ?? Icons.inventory_2_outlined;
 
   String _rawQtyCount(double q) {
-    if (q <= 0) return '0';
+    if (q == 0) return '0';
     return q == q.roundToDouble() ? q.toInt().toString() : Fmt.money(q, 2);
   }
 
@@ -106,15 +106,17 @@ class PosItemTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final price = item.sellPrice > 0 ? item.sellPrice : item.buyPrice;
+    final isNeg = item.quantity < 0;
     final isOut = item.quantity <= 0;
     final isLow = !isOut &&
         (item.low || (item.minQuantity > 0 && item.quantity <= item.minQuantity));
 
     final rawCount = _rawQtyCount(item.quantity);
-    final statusLabel =
-        isOut ? 'نفد 0' : (isLow ? 'منخفض $rawCount' : 'متوفر $rawCount');
+    final statusLabel = isNeg
+        ? 'متوفر $rawCount'
+        : (isOut ? 'نفد 0' : (isLow ? 'منخفض $rawCount' : 'متوفر $rawCount'));
     // (PR-8) شارات نقية مشرقة: أخضر تفاحي نضر للمتوفر، أحمر لطيف صريح
-    // للنفاد، أصفر عنبري للمنخفض.
+    // للنفاد أو العجز السالب، أصفر عنبري للمنخفض.
     final statusBg = isOut
         ? const Color(0xFFFEE2E2)
         : (isLow ? const Color(0xFFFEF3C7) : const Color(0xFFDCFCE7));

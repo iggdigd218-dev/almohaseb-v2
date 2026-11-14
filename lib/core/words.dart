@@ -51,23 +51,24 @@ const _hundreds = [
 ];
 
 const _thousands = {3: 'ألف', 6: 'مليون', 9: 'مليار'};
+const _thousandsAccusative = {3: 'ألفاً', 6: 'مليوناً', 9: 'ملياراً'};
 const _thousandsPlural = {3: 'آلاف', 6: 'ملايين', 9: 'مليارات'};
 
 String _three(int n) {
-  var s = '';
+  final parts = <String>[];
   final h = n ~/ 100;
   final r = n % 100;
-  if (h > 0) s += '${_hundreds[h]} ';
+  if (h > 0) parts.add(_hundreds[h]);
   if (r > 0) {
     if (r < 20) {
-      s += '${_ones[r]} ';
+      parts.add(_ones[r]);
     } else {
       final unit = _ones[r % 10];
       final ten = _tens[r ~/ 10];
-      s += unit.isNotEmpty ? '$unit و$ten ' : '$ten ';
+      parts.add(unit.isNotEmpty ? '$unit و$ten' : ten);
     }
   }
-  return s.trim();
+  return parts.join(' و').trim();
 }
 
 String _group(int n) {
@@ -82,16 +83,18 @@ String _group(int n) {
       final th = _thousands[g];
       if (th != null) {
         final thPlural = _thousandsPlural[g] ?? th;
-        // «ألف» للمفرد، «ألفان» للمثنى، جمع التكسير (آلاف/ملايين/مليارات) للأعداد 3..10، والمفرد لما فوقها.
+        final thAccusative = _thousandsAccusative[g] ?? th;
+        final rem100 = chunk % 100;
+        // «ألف» للمفرد، «ألفان» للمثنى، جمع التكسير (آلاف/ملايين/مليارات) للأعداد 3..10،
+        // ومنصوب التمييز (ألفاً/مليوناً/ملياراً) للأعداد 11..99، والمفرد للمئات التامة.
         if (chunk == 1) {
           w = th;
         } else if (chunk == 2) {
-          // (نظافة) الحروف العربية ليست محارف معرّفات في Dart، فـ`$th` ينتهي
-          // عند أول حرف عربي — أي أن هذا التعبير مطابق تماماً لـ`${th}ان` لكنه
-          // يرضي فحصَي unnecessary_brace و prefer_interpolation معاً.
           w = '$thان';
         } else if (chunk >= 3 && chunk <= 10) {
           w = '$w $thPlural';
+        } else if (rem100 >= 11 && rem100 <= 99) {
+          w = '$w $thAccusative';
         } else {
           w = '$w $th';
         }
@@ -113,3 +116,31 @@ String numberToWords(num value) {
   if (frac > 0) s += ' و${_group(frac)} من المائة';
   return s;
 }
+
+/// تجريد اسم العملة من (الـ) التعريف في صياغة التفقيط
+/// (مثال: «الريال اليمني» -> «ريال يمني»).
+String cleanCurrencyNameForTafqeet(String raw) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return '';
+  return trimmed
+      .split(RegExp(r'\s+'))
+      .map((word) {
+        if (word.startsWith('ال') && word.length > 2) {
+          return word.substring(2);
+        }
+        return word;
+      })
+      .join(' ');
+}
+
+/// دالة التفقيط المركزية الموحدة مع اسم العملة منقى من (الـ) التعريف.
+String tafqeet(num value, {String currencyName = '', bool withOnly = true}) {
+  final words = numberToWords(value);
+  final cleanCurr = cleanCurrencyNameForTafqeet(currencyName);
+  final prefix = withOnly ? 'فقط ' : '';
+  if (cleanCurr.isEmpty) {
+    return '$prefix$words لا غير'.trim();
+  }
+  return '$prefix$words $cleanCurr لا غير'.trim();
+}
+

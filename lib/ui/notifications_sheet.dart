@@ -6,6 +6,7 @@ import '../core/theme.dart';
 import '../data/providers.dart';
 import '../data/sync/cloud_control_service.dart';
 import 'app_notice.dart';
+import 'item_conflict_dialog.dart';
 import 'widgets.dart';
 import 'widgets/golden_bell_icon.dart';
 
@@ -78,11 +79,28 @@ class _NotificationsSheet extends ConsumerWidget {
   /// وإلا نعرض نافذة توضيحية بمحتوى الإشعار كاملاً.
   Future<void> _onTap(
     BuildContext context,
+    WidgetRef ref,
     Map<String, Object?> n,
     String kind,
   ) async {
     final entityType = (n['entity_type'] ?? '') as String;
     final entityId = (n['entity_id'] ?? '') as String;
+    if (entityType == 'item_conflict') {
+      final rootCtx = Navigator.of(context, rootNavigator: true).context;
+      Navigator.pop(context);
+      if (onOpenEntity != null) {
+        final opened = await onOpenEntity!(entityType, entityId);
+        if (opened) return;
+      }
+      if (rootCtx.mounted) {
+        await showItemConflictResolutionDialog(
+          rootCtx,
+          ref,
+          conflictKey: entityId,
+        );
+      }
+      return;
+    }
     if (entityType.isNotEmpty && onOpenEntity != null) {
       Navigator.pop(context); // أغلق الصحيفة أولاً ثم انتقل.
       final opened = await onOpenEntity!(entityType, entityId);
@@ -285,7 +303,7 @@ class _NotificationsSheet extends ConsumerWidget {
                           final linked =
                               ((n['entity_type'] ?? '') as String).isNotEmpty;
                           return ListTile(
-                            onTap: () => _onTap(context, n, kind),
+                            onTap: () => _onTap(context, ref, n, kind),
                             leading: Container(
                               width: 40,
                               height: 40,

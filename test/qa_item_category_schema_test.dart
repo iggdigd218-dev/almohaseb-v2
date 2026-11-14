@@ -51,6 +51,24 @@ void main() {
     await AppDatabase.createSchema(db);
     await db.execute('DROP TABLE item_categories');
     await db.execute(_legacyItemCategories);
+    await db.insert(
+      'users',
+      {
+        'id': 1,
+        'name': 'المدير',
+        'role': 'admin',
+        'pin': '',
+        'password': '',
+        'permissions': '',
+        'is_me': 1,
+        'active': 1,
+        'workspace_id': 'default',
+        'deleted_at': '',
+        'created_at': DateTime.now().toIso8601String(),
+        'updated_at': DateTime.now().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
     if (heal) {
       // ما يحدث فعلياً عند كل فتح للتطبيق (onOpen).
       await AppDatabase.ensureFullSchema(db);

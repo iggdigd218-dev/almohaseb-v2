@@ -7,10 +7,12 @@ import 'package:printing/printing.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/accounting.dart';
+import '../core/category_tree.dart';
 import '../core/desktop.dart';
 import '../core/format.dart';
 import '../core/item_search.dart';
 import '../core/icon_catalog.dart';
+import '../core/l10n.dart';
 import '../core/models.dart';
 import '../core/thermal_invoice_doc.dart';
 import '../core/shell_nav.dart';
@@ -97,6 +99,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
   late final TextEditingController _paidCtrl;
   late final TextEditingController _discountCtrl;
   late final TextEditingController _notesCtrl;
+  late final TextEditingController _cashCustomerNameCtrl;
 
   /// (3.70) صلاحية الخصم المحلية — تُحجب عن الكاشير فوراً (بلا شبكة).
   bool _canDiscount = true;
@@ -186,6 +189,11 @@ class _PosScreenState extends ConsumerState<PosScreen>
     _paidCtrl = TextEditingController(text: d.paidText);
     _discountCtrl = TextEditingController(text: d.discountText);
     _notesCtrl = TextEditingController(text: d.notesText);
+    _cashCustomerNameCtrl = TextEditingController(
+      text: d.cashCustomerName.trim().isEmpty
+          ? 'عميل نقدي'
+          : d.cashCustomerName,
+    );
     _tabController = TabController(length: 2, vsync: this);
     _tabController.addListener(() {
       if (mounted) setState(() {});
@@ -233,6 +241,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
     _paidCtrl.dispose();
     _discountCtrl.dispose();
     _notesCtrl.dispose();
+    _cashCustomerNameCtrl.dispose();
     _shortcutFocus.dispose();
     _searchFocus.dispose();
     super.dispose();
@@ -322,6 +331,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
     _paidCtrl.clear();
     _discountCtrl.clear();
     _notesCtrl.clear();
+    _cashCustomerNameCtrl.text = 'عميل نقدي';
     _supervisorOverride = false;
     setState(() {});
   }
@@ -546,6 +556,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
     _paidCtrl.clear();
     _discountCtrl.clear();
     _notesCtrl.clear();
+    _cashCustomerNameCtrl.text = 'عميل نقدي';
     _supervisorOverride = false;
     setState(() {});
     Sfx.pop();
@@ -613,6 +624,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
     _paidCtrl.clear();
     _discountCtrl.clear();
     _notesCtrl.clear();
+    _cashCustomerNameCtrl.text = 'عميل نقدي';
     setState(() {});
     Sfx.pop();
     showSnack(context, 'تم تعليق الفاتورة ⏸️');
@@ -632,6 +644,9 @@ class _PosScreenState extends ConsumerState<PosScreen>
       _paidCtrl.text = d.paidText;
       _discountCtrl.text = d.discountText;
       _notesCtrl.text = d.notesText;
+      _cashCustomerNameCtrl.text = d.cashCustomerName.trim().isEmpty
+          ? 'عميل نقدي'
+          : d.cashCustomerName;
       setState(() {});
       Sfx.pop();
       showSnack(context, 'تم استئناف الفاتورة ▶️');
@@ -1388,12 +1403,9 @@ class _PosScreenState extends ConsumerState<PosScreen>
 
     final allowedCatIds = <int>{};
     if (!hasSearch && _selectedCategoryId != null) {
-      allowedCatIds.add(_selectedCategoryId!);
-      for (final c in categories) {
-        if (c.parentId == _selectedCategoryId && c.id != null) {
-          allowedCatIds.add(c.id!);
-        }
-      }
+      allowedCatIds.addAll(
+        getCategoryAndAllDescendantIds(_selectedCategoryId!, categories),
+      );
     }
 
     // (3.98.39 / الملاحظة 4) البحث في POS يشمل الملاحظات بأولوية درجتين:
@@ -1485,6 +1497,44 @@ class _PosScreenState extends ConsumerState<PosScreen>
         if (s.id != null) s.id!: s,
     };
 
+    final selectedCat = findCategoryInTree(_selectedCategoryId, roots);
+    final categoryPath = getCategoryPath(_selectedCategoryId, roots);
+
+    // تحديد الفئات المعروضة في شريط الفئات وزر «الكل»
+    final List<ItemCategory> activeCategoriesToShow;
+    final ItemCategory? activeDrillParent;
+    final String allChipLabel;
+    final bool isAllChipActive;
+
+    if (_selectedCategoryId != null && selectedCat != null) {
+      if (selectedCat.hasChildren) {
+        activeCategoriesToShow = selectedCat.children;
+        activeDrillParent = selectedCat;
+        allChipLabel = 'كل ${selectedCat.name}';
+        isAllChipActive = true;
+      } else {
+        final parent = categoryPath.length >= 2
+            ? categoryPath[categoryPath.length - 2]
+            : null;
+        if (parent != null && parent.hasChildren) {
+          activeCategoriesToShow = parent.children;
+          activeDrillParent = parent;
+          allChipLabel = 'كل ${parent.name}';
+          isAllChipActive = false;
+        } else {
+          activeCategoriesToShow = [selectedCat];
+          activeDrillParent = selectedCat;
+          allChipLabel = 'كل ${selectedCat.name}';
+          isAllChipActive = true;
+        }
+      }
+    } else {
+      activeCategoriesToShow = sectionCategories;
+      activeDrillParent = null;
+      allChipLabel = 'الكل';
+      isAllChipActive = _selectedCategoryId == null;
+    }
+
     return PopScope(
       canPop: !hasSearch &&
           !_atSectionsGate &&
@@ -1498,7 +1548,12 @@ class _PosScreenState extends ConsumerState<PosScreen>
               _searchCtrl.clear();
             });
           } else if (_selectedCategoryId != null) {
-            setState(() => _selectedCategoryId = null);
+            final path = getCategoryPath(_selectedCategoryId, roots);
+            if (path.length > 1) {
+              setState(() => _selectedCategoryId = path[path.length - 2].id);
+            } else {
+              setState(() => _selectedCategoryId = null);
+            }
           } else if (_selectedSectionId != null) {
             setState(() => _selectedSectionId = null);
           } else if (_atSectionsGate) {
@@ -1572,16 +1627,111 @@ class _PosScreenState extends ConsumerState<PosScreen>
                     ),
             ),
 
-            // 4) شريط الفئات الأفقي التابع للقسم النشط (الضغط على «عرض الكل» يفتح لوحة جميع الفئات)
+            // شريط مسار التصفح (Breadcrumb) داخل نقطة البيع عند اختيار قسم أو فئة
+            if (!_atSectionsGate &&
+                (_selectedSectionId != null || _selectedCategoryId != null)) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: AppColors.surfaceOf(context),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppColors.borderOf(context)),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.account_tree_outlined,
+                        size: 13,
+                        color: AppColors.primaryOf(context),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: [
+                              _PosCrumb(
+                                label: 'الكل',
+                                active: _selectedSectionId == null &&
+                                    _selectedCategoryId == null,
+                                onTap: () => setState(() {
+                                  _selectedSectionId = null;
+                                  _selectedCategoryId = null;
+                                }),
+                              ),
+                              if (_selectedSectionId != null) ...[
+                                const _PosCrumbSep(),
+                                _PosCrumb(
+                                  label: _selectedSectionId == kGeneralSectionId
+                                      ? 'عام'
+                                      : (secById[_selectedSectionId]?.name ?? 'القسم'),
+                                  active: categoryPath.isEmpty,
+                                  onTap: () => setState(() {
+                                    _selectedCategoryId = null;
+                                  }),
+                                ),
+                              ],
+                              for (int i = 0; i < categoryPath.length; i++) ...[
+                                const _PosCrumbSep(),
+                                _PosCrumb(
+                                  label: categoryPath[i].name,
+                                  active: i == categoryPath.length - 1,
+                                  onTap: () => setState(() {
+                                    _selectedCategoryId = categoryPath[i].id;
+                                  }),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(6),
+                        onTap: () => setState(() {
+                          _selectedCategoryId = null;
+                          _selectedSectionId = null;
+                        }),
+                        child: Padding(
+                          padding: const EdgeInsets.all(2),
+                          child: Icon(
+                            Icons.close_rounded,
+                            size: 15,
+                            color: AppColors.text3Of(context),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+
+            // 4) شريط الفئات الأفقي التابع للقسم النشط مع دعم الغوص الشجري
             if (!_atSectionsGate)
               PosCategoryStrip(
-                categories: sectionCategories,
+                categories: activeCategoriesToShow,
                 selectedId: _selectedCategoryId,
+                allLabel: allChipLabel,
+                isAllActive: isAllChipActive,
                 showHeader: true,
-                allItemsCount: _countSectionItems(allItems, categories),
+                allItemsCount: activeDrillParent != null
+                    ? _countCategoryItems(activeDrillParent, allItems, categories)
+                    : _countSectionItems(allItems, categories),
                 itemCountOf: (cat) =>
                     _countCategoryItems(cat, allItems, categories),
-                onPick: (cid) => setState(() => _selectedCategoryId = cid),
+                onPick: (cid) => setState(() {
+                  if (cid == null) {
+                    if (activeDrillParent != null) {
+                      _selectedCategoryId = activeDrillParent.id;
+                    } else {
+                      _selectedCategoryId = null;
+                    }
+                  } else {
+                    _selectedCategoryId = cid;
+                  }
+                }),
               ),
           ],
 
@@ -1732,12 +1882,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
     List<ItemCategory> categories,
   ) {
     if (cat.id == null) return 0;
-    final allowed = <int>{cat.id!};
-    for (final c in categories) {
-      if (c.parentId == cat.id && c.id != null) {
-        allowed.add(c.id!);
-      }
-    }
+    final allowed = getCategoryAndAllDescendantIds(cat.id!, categories);
     var count = 0;
     for (final it in allItems) {
       if (it.categoryId != null && allowed.contains(it.categoryId)) {
@@ -2097,15 +2242,9 @@ class _PosScreenState extends ConsumerState<PosScreen>
 
   void _openPosSalesSummarySheet() {
     Sfx.click();
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      showDragHandle: true,
-      shape: RoundedRectangleBorder(borderRadius: AppRadius.sheetTop),
-      builder: (_) => const FractionallySizedBox(
-        heightFactor: 0.78,
-        child: _PosSalesSummarySheet(),
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => const _PosSalesSummarySheet(),
       ),
     );
   }
@@ -2366,6 +2505,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
                 onPressed: () async {
                   final code = await scanBarcode(context);
                   if (code != null && code.isNotEmpty) {
+                    if (_handleQuickIndex(code.trim())) return;
                     _searchCtrl.text = code;
                     setState(() => _searchQuery = code.trim());
                   }
@@ -2397,9 +2537,114 @@ class _PosScreenState extends ConsumerState<PosScreen>
         borderSide: BorderSide(color: c, width: 1),
       );
 
+  /// نافذة مصغرة فورية لاختيار الصنف المقصود عند مسح باركود مشترك بين أكثر من صنف.
+  Future<void> _showSharedBarcodePickerDialog(
+    List<Item> candidates, {
+    required String barcode,
+    double quantity = 1.0,
+  }) async {
+    if (!mounted || candidates.isEmpty) return;
+    final picked = await showDialog<Item>(
+      context: context,
+      builder: (ctx) {
+        final cs = Theme.of(ctx).colorScheme;
+        return AlertDialog(
+          key: const ValueKey('pos_shared_barcode_picker_dialog'),
+          titlePadding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+          contentPadding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+          title: Row(
+            children: [
+              const Icon(Icons.qr_code_scanner_rounded, color: AppColors.amber),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'باركود مشترك ($barcode) — اختر الصنف المقصود',
+                  style: const TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400, maxHeight: 340),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final it in candidates)
+                    Card(
+                      key: ValueKey('shared_barcode_option_${it.id}'),
+                      margin: const EdgeInsets.symmetric(vertical: 4),
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        side: BorderSide(
+                          color: cs.outlineVariant.withValues(alpha: 0.6),
+                        ),
+                      ),
+                      child: ListTile(
+                        dense: true,
+                        leading: CircleAvatar(
+                          radius: 17,
+                          backgroundColor:
+                              AppColors.primary.withValues(alpha: 0.12),
+                          child: Text(
+                            '#${it.plu ?? it.id ?? ''}',
+                            style: const TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                              color: AppColors.primary,
+                            ),
+                          ),
+                        ),
+                        title: Text(
+                          it.name,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 13.5,
+                          ),
+                        ),
+                        subtitle: Text(
+                          'السعر: ${Fmt.money(it.sellPrice)} • المتاح: ${Fmt.qty(it.quantity)} ${it.unit}',
+                          style: const TextStyle(fontSize: 11.5),
+                        ),
+                        trailing: const Icon(
+                          Icons.add_shopping_cart_rounded,
+                          color: AppColors.primary,
+                          size: 20,
+                        ),
+                        onTap: () => Navigator.of(ctx).pop(it),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(null),
+              child: const Text('إلغاء'),
+            ),
+          ],
+        );
+      },
+    );
+    if (!mounted || picked == null) return;
+    _addItem(picked, quantity: quantity);
+    _searchFocus.requestFocus();
+    showSnack(
+      context,
+      'أُضيف ${Fmt.qty(quantity)} ${picked.unit} من «${picked.name}» (باركود)',
+      silent: true,
+    );
+  }
+
   /// (2026-09-24) **نظام الترقيم السريع (PLU) ودعم قارئ الباركود**.
   ///
   /// • يدعم مسح الباركود مباشرة (USB/Bluetooth) بالبحث المطابق للـ SKU وإضافته فوراً للسلة.
+  /// • إذا اشترك أكثر من صنف في نفس الباركود (اعتماد الفصل بعد تعارض أوفلاين)، يعرض نافذة مصغرة فورية للكاشير لاختيار الصنف المقصود.
   /// • يدعم الترقيم السريع: `7` + Enter يضيف حبة واحدة، و `7*3` أو `7×3` يضيف 3 حبات.
   /// • يدعم الأرقام العربية/الفارسية تلقائياً عبر التطبيع.
   bool _handleQuickIndex(String raw, [List<Item>? itemsList]) {
@@ -2410,15 +2655,27 @@ class _PosScreenState extends ConsumerState<PosScreen>
         itemsList ?? (ref.read(itemsProvider).valueOrNull ?? const <Item>[]);
 
     // أولاً: فحص مطابقة باركود صنف (قارئات الباركود الخارجية USB / Bluetooth)
-    Item? barcodeHit;
+    final barcodeHits = <Item>[];
     for (final it in items) {
-      if (it.sku.trim().isNotEmpty &&
+      if (!it.isDeleted &&
+          it.sku.trim().isNotEmpty &&
           it.sku.trim().toLowerCase() == q.toLowerCase()) {
-        barcodeHit = it;
-        break;
+        barcodeHits.add(it);
       }
     }
-    if (barcodeHit != null) {
+    if (barcodeHits.length > 1) {
+      final displayBarcode = barcodeHits.first.sku.trim().isNotEmpty
+          ? barcodeHits.first.sku.trim()
+          : raw.trim();
+      _searchCtrl.clear();
+      setState(() => _searchQuery = '');
+      unawaited(
+        _showSharedBarcodePickerDialog(barcodeHits, barcode: displayBarcode),
+      );
+      return true;
+    }
+    if (barcodeHits.length == 1) {
+      final barcodeHit = barcodeHits.first;
       _addItem(barcodeHit, quantity: 1);
       _searchCtrl.clear();
       setState(() => _searchQuery = '');
@@ -2439,14 +2696,26 @@ class _PosScreenState extends ConsumerState<PosScreen>
           ? (double.tryParse(m.group(2)!) ?? 1.0)
           : 1.0;
       if (idx != null && qty > 0) {
-        Item? hit;
+        final pluHits = <Item>[];
         for (final it in items) {
-          if (it.plu == idx) {
-            hit = it;
-            break;
+          if (!it.isDeleted && it.plu == idx) {
+            pluHits.add(it);
           }
         }
-        if (hit != null) {
+        if (pluHits.length > 1) {
+          _searchCtrl.clear();
+          setState(() => _searchQuery = '');
+          unawaited(
+            _showSharedBarcodePickerDialog(
+              pluHits,
+              barcode: '#$idx',
+              quantity: qty,
+            ),
+          );
+          return true;
+        }
+        if (pluHits.length == 1) {
+          final hit = pluHits.first;
           _addItem(hit, quantity: qty);
           _searchCtrl.clear();
           setState(() => _searchQuery = '');
@@ -2982,6 +3251,50 @@ class _PosScreenState extends ConsumerState<PosScreen>
                         setState(() {});
                       },
                     ),
+
+                    // عند اختيار «نقداً»: حقل مدمج لاسم العميل بقيمة افتراضية «عميل نقدي» مع مسح سريع
+                    if (_payment == _PosPayment.cash) ...[
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: _cashCustomerNameCtrl,
+                        textInputAction: TextInputAction.done,
+                        onTap: () {
+                          if (_cashCustomerNameCtrl.text.trim() == 'عميل نقدي') {
+                            _cashCustomerNameCtrl.selection = TextSelection(
+                              baseOffset: 0,
+                              extentOffset: _cashCustomerNameCtrl.text.length,
+                            );
+                          }
+                        },
+                        decoration: InputDecoration(
+                          isDense: true,
+                          labelText: 'اسم العميل (نقداً)',
+                          hintText: 'عميل نقدي',
+                          prefixIcon: const Icon(
+                            Icons.person_outline_rounded,
+                            size: 20,
+                          ),
+                          suffixIcon: _cashCustomerNameCtrl.text.isNotEmpty
+                              ? IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  tooltip: 'مسح الاسم',
+                                  icon: const Icon(Icons.close_rounded, size: 18),
+                                  onPressed: () {
+                                    _cashCustomerNameCtrl.clear();
+                                    _cartCtl.setCashCustomerName('');
+                                    setSheetState(() {});
+                                    setState(() {});
+                                  },
+                                )
+                              : null,
+                        ),
+                        onChanged: (val) {
+                          _cartCtl.setCashCustomerName(val);
+                          setSheetState(() {});
+                          setState(() {});
+                        },
+                      ),
+                    ],
 
                     // اختيار العميل — يظهر فقط عند تحديد العملية آجل أو جزئي،
                     // ويتوهج بالأحمر إذا لم يُحدَّد حساب عميل.
@@ -3603,6 +3916,9 @@ class _PosScreenState extends ConsumerState<PosScreen>
 
       if (_payment == _PosPayment.cash) {
         // مبيعات نقدية: إيراد بصفر أثر على مديونية العميل (فاتورة نقدية مدفوعة)
+        final rawCashCust = _cashCustomerNameCtrl.text.trim();
+        final cashCustomerName =
+            rawCashCust.isEmpty ? 'عميل نقدي' : rawCashCust;
         final tx = Tx(
           accountId: _selectedCustomerId,
           accountKind: selectedAccKind,
@@ -3613,7 +3929,7 @@ class _PosScreenState extends ConsumerState<PosScreen>
           description: 'فاتورة نقدية مدفوعة رقم #$refNum',
           reference: refNum,
           notes:
-              'طريقة الدفع: مدفوع نقداً\nالمبلغ المدفوع: ${Fmt.money(_netTotal)} ${cur.symbol}\nالمتبقي: 0.00 ${cur.symbol}$discountNote$supNote',
+              'اسم العميل: $cashCustomerName\nطريقة الدفع: مدفوع نقداً\nالمبلغ المدفوع: ${Fmt.money(_netTotal)} ${cur.symbol}\nالمتبقي: 0.00 ${cur.symbol}$discountNote$supNote',
           createdByUserId: creatorId,
           cashierName: cashierName,
           createdAt: now,
@@ -4324,9 +4640,10 @@ class _PosHistoryTabState extends ConsumerState<_PosHistoryTab> {
                         final isPartial =
                       !isCash && tx.notes.contains('طريقة الدفع: جزئي');
                   final hasReturnNote = tx.notes.contains('تم إرجاع (');
-                  final customerName = account?.name.trim().isNotEmpty == true
-                      ? account!.name
-                      : (isCash ? 'عميل نقدي' : 'عميل مسجل');
+                  final customerName = tx.resolvedPartyName(
+                    account,
+                    fallback: isCash ? 'عميل نقدي' : 'عميل مسجل',
+                  );
                   final customerPhone = account?.phone.trim().isNotEmpty == true
                       ? ' • ${account!.phone}'
                       : '';
@@ -5138,8 +5455,8 @@ class _ZeroButtons extends StatelessWidget {
 
 enum _SalesRangePreset { today, week, month, custom }
 
-/// نافذة تقرير وملخص مبيعات نقطة البيع (اليوم، هذا الأسبوع، هذا الشهر، أو نطاق تاريخ مخصص)
-/// محمية بصلاحية `can_view_sales_summary` ومعزولة تماماً عن العمليات الدفترية والسندات.
+/// شاشة مستقلة وكاملة لتقارير وملخص مبيعات نقطة البيع مع مخطط بياني زمني وفلاتر متقدمة
+/// محمية بصلاحية `can_view_sales_summary`.
 class _PosSalesSummarySheet extends ConsumerStatefulWidget {
   const _PosSalesSummarySheet();
 
@@ -5153,6 +5470,17 @@ class _PosSalesSummarySheetState extends ConsumerState<_PosSalesSummarySheet> {
   DateTimeRange? _customRange;
   bool _loading = true;
   Map<String, dynamic> _data = const {};
+
+  // الفلاتر المتعددة (Multi-dimensional filters)
+  String _invoiceType = 'all'; // 'all' | 'sale' | 'return'
+  String _paymentKind = 'all'; // 'all' | 'cash' | 'credit'
+  String _selectedCurrency = 'all';
+  int? _selectedSectionId;
+  int? _selectedCategoryId;
+  int? _selectedItemId;
+  String? _selectedDeviceId;
+  int? _selectedUserId;
+  String _breakdownTab = 'timeline'; // 'timeline' | 'section' | 'category' | 'item' | 'device' | 'user'
 
   @override
   void initState() {
@@ -5185,7 +5513,18 @@ class _PosSalesSummarySheetState extends ConsumerState<_PosSalesSummarySheet> {
     try {
       final repo = ref.read(repoProvider);
       final (from, to) = _effectiveDates();
-      final res = await repo.posSalesSummary(from: from, to: to);
+      final res = await repo.posSalesSummary(
+        from: from,
+        to: to,
+        sectionId: _selectedSectionId,
+        categoryId: _selectedCategoryId,
+        itemId: _selectedItemId,
+        deviceId: _selectedDeviceId,
+        userId: _selectedUserId,
+        paymentKind: _paymentKind,
+        invoiceType: _invoiceType,
+        currency: _selectedCurrency == 'all' ? null : _selectedCurrency,
+      );
       if (!mounted) return;
       setState(() {
         _data = res;
@@ -5217,8 +5556,33 @@ class _PosSalesSummarySheetState extends ConsumerState<_PosSalesSummarySheet> {
     await _load();
   }
 
+  void _resetAllFilters() {
+    setState(() {
+      _invoiceType = 'all';
+      _paymentKind = 'all';
+      _selectedCurrency = 'all';
+      _selectedSectionId = null;
+      _selectedCategoryId = null;
+      _selectedItemId = null;
+      _selectedDeviceId = null;
+      _selectedUserId = null;
+    });
+    _load();
+  }
+
+  bool get _hasActiveFilters =>
+      _invoiceType != 'all' ||
+      _paymentKind != 'all' ||
+      _selectedCurrency != 'all' ||
+      _selectedSectionId != null ||
+      _selectedCategoryId != null ||
+      _selectedItemId != null ||
+      _selectedDeviceId != null ||
+      _selectedUserId != null;
+
   @override
   Widget build(BuildContext context) {
+    final l10n = L10n.of(context);
     final allowed = _data['allowed'] == true;
     final invoiceCount = (_data['invoiceCount'] as int?) ?? 0;
     final returnCount = (_data['returnCount'] as int?) ?? 0;
@@ -5237,230 +5601,923 @@ class _PosSalesSummarySheetState extends ConsumerState<_PosSalesSummarySheet> {
       ...netByCur.keys,
       ...returnsByCur.keys,
     }.toList();
+    final availableCurrencies =
+        ((_data['availableCurrencies'] as List?) ?? const [])
+            .map((e) => '$e')
+            .toList();
+    final availableSections =
+        ((_data['availableSections'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((m) => Map<String, Object?>.from(m))
+            .toList();
+    final availableCategories =
+        ((_data['availableCategories'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((m) => Map<String, Object?>.from(m))
+            .toList();
+    final availableItems = ((_data['availableItems'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => Map<String, Object?>.from(m))
+        .toList();
+    final availableDevices = ((_data['availableDevices'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => Map<String, Object?>.from(m))
+        .toList();
+    final availableUsers = ((_data['availableUsers'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => Map<String, Object?>.from(m))
+        .toList();
+    final timeline = ((_data['timeline'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => Map<String, Object?>.from(m))
+        .toList();
+    final bySection = ((_data['bySection'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => Map<String, Object?>.from(m))
+        .toList();
+    final byCategory = ((_data['byCategory'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => Map<String, Object?>.from(m))
+        .toList();
+    final byItem = ((_data['byItem'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => Map<String, Object?>.from(m))
+        .toList();
+    final byDevice = ((_data['byDevice'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => Map<String, Object?>.from(m))
+        .toList();
+    final byUser = ((_data['byUser'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => Map<String, Object?>.from(m))
+        .toList();
+    final invoices = ((_data['invoices'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => Map<String, Object?>.from(m))
+        .toList();
+
     final (from, to) = _effectiveDates();
     final rangeLabel =
         '${from.year}-${from.month.toString().padLeft(2, '0')}-${from.day.toString().padLeft(2, '0')}'
         ' ← '
         '${to.year}-${to.month.toString().padLeft(2, '0')}-${to.day.toString().padLeft(2, '0')}';
 
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 4, 16, 18),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
+    return Scaffold(
+      backgroundColor: AppColors.bgOf(context),
+      appBar: AppBar(
+        title: Text(
+          l10n.tr(
+            'ملخص وتقارير مبيعات نقطة البيع',
+            'POS Sales Summary & Analytics',
+          ),
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w900),
+        ),
+        actions: [
+          if (_hasActiveFilters)
+            TextButton.icon(
+              onPressed: _resetAllFilters,
+              icon: const Icon(Icons.filter_alt_off_rounded, size: 18),
+              label: Text(l10n.tr('مسح الفلاتر', 'Clear Filters')),
+            ),
+          IconButton(
+            tooltip: l10n.tr('تحديث', 'Refresh'),
+            onPressed: _load,
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: AppColors.primarySoftOf(context),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(
-                  Icons.bar_chart_rounded,
-                  color: AppColors.primaryOf(context),
-                  size: 22,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              // 1) شريط التاريخ السريع
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
                   children: [
-                    const Text(
-                      'ملخص وتقارير مبيعات نقطة البيع',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w900,
-                      ),
+                    ChoiceChip(
+                      label: Text(l10n.tr('اليوم', 'Today')),
+                      selected: _preset == _SalesRangePreset.today,
+                      onSelected: (_) {
+                        setState(() => _preset = _SalesRangePreset.today);
+                        _load();
+                      },
                     ),
-                    Text(
-                      'مبيعات الفواتير الفعلية فقط (بدون سندات القبض أو الديون الدفترية) • $rangeLabel',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        color: AppColors.text2Of(context),
+                    const SizedBox(width: 8),
+                    ChoiceChip(
+                      label: Text(l10n.tr('هذا الأسبوع', 'This Week')),
+                      selected: _preset == _SalesRangePreset.week,
+                      onSelected: (_) {
+                        setState(() => _preset = _SalesRangePreset.week);
+                        _load();
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    ChoiceChip(
+                      label: Text(l10n.tr('هذا الشهر', 'This Month')),
+                      selected: _preset == _SalesRangePreset.month,
+                      onSelected: (_) {
+                        setState(() => _preset = _SalesRangePreset.month);
+                        _load();
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    ActionChip(
+                      avatar: const Icon(Icons.date_range_rounded, size: 17),
+                      label: Text(
+                        _preset == _SalesRangePreset.custom
+                            ? '${l10n.tr('نطاق مخصص', 'Custom')} ($rangeLabel)'
+                            : l10n.tr(
+                                'تحديد نطاق تاريخ مخصص',
+                                'Custom Date Range',
+                              ),
                       ),
+                      onPressed: _pickCustomRange,
                     ),
                   ],
                 ),
               ),
-              IconButton(
-                onPressed: () => Navigator.pop(context),
-                icon: const Icon(Icons.close_rounded),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              ChoiceChip(
-                label: const Text('اليوم'),
-                selected: _preset == _SalesRangePreset.today,
-                onSelected: (_) {
-                  setState(() => _preset = _SalesRangePreset.today);
-                  _load();
-                },
-              ),
-              ChoiceChip(
-                label: const Text('هذا الأسبوع'),
-                selected: _preset == _SalesRangePreset.week,
-                onSelected: (_) {
-                  setState(() => _preset = _SalesRangePreset.week);
-                  _load();
-                },
-              ),
-              ChoiceChip(
-                label: const Text('هذا الشهر'),
-                selected: _preset == _SalesRangePreset.month,
-                onSelected: (_) {
-                  setState(() => _preset = _SalesRangePreset.month);
-                  _load();
-                },
-              ),
-              ActionChip(
-                avatar: const Icon(Icons.date_range_rounded, size: 17),
-                label: Text(
-                  _preset == _SalesRangePreset.custom
-                      ? 'نطاق مخصص ($rangeLabel)'
-                      : 'تحديد نطاق تاريخ مخصص',
+              const SizedBox(height: 8),
+              // 2) شريط الفلاتر المتعددة (طريقة الدفع، نوع الفاتورة، العملة، التصنيف، الجهاز، الكاشير)
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    ChoiceChip(
+                      label: Text(l10n.tr('الكل', 'All')),
+                      selected: _paymentKind == 'all' && _invoiceType == 'all',
+                      onSelected: (_) {
+                        setState(() {
+                          _paymentKind = 'all';
+                          _invoiceType = 'all';
+                        });
+                        _load();
+                      },
+                    ),
+                    const SizedBox(width: 6),
+                    ChoiceChip(
+                      label: Text(l10n.tr('نقداً', 'Cash')),
+                      selected: _paymentKind == 'cash',
+                      onSelected: (v) {
+                        setState(() => _paymentKind = v ? 'cash' : 'all');
+                        _load();
+                      },
+                    ),
+                    const SizedBox(width: 6),
+                    ChoiceChip(
+                      label: Text(l10n.tr('آجل', 'Credit')),
+                      selected: _paymentKind == 'credit',
+                      onSelected: (v) {
+                        setState(() => _paymentKind = v ? 'credit' : 'all');
+                        _load();
+                      },
+                    ),
+                    if (availableCurrencies.length > 1) ...[
+                      const SizedBox(width: 8),
+                      DropdownButtonHideUnderline(
+                        child: DropdownButton<String>(
+                          value: availableCurrencies.contains(_selectedCurrency)
+                              ? _selectedCurrency
+                              : 'all',
+                          isDense: true,
+                          items: [
+                            DropdownMenuItem(
+                              value: 'all',
+                              child: Text(l10n.tr('كل العملات', 'All Currencies')),
+                            ),
+                            for (final c in availableCurrencies)
+                              DropdownMenuItem(value: c, child: Text(c)),
+                          ],
+                          onChanged: (v) {
+                            setState(() => _selectedCurrency = v ?? 'all');
+                            _load();
+                          },
+                        ),
+                      ),
+                    ],
+                    if (availableSections.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      DropdownButtonHideUnderline(
+                        child: DropdownButton<int?>(
+                          value: availableSections
+                                  .any((s) => s['id'] == _selectedSectionId)
+                              ? _selectedSectionId
+                              : null,
+                          hint: Text(l10n.tr('القسم', 'Section')),
+                          isDense: true,
+                          items: [
+                            DropdownMenuItem<int?>(
+                              value: null,
+                              child: Text(l10n.tr('كل الأقسام', 'All Sections')),
+                            ),
+                            for (final s in availableSections)
+                              DropdownMenuItem<int?>(
+                                value: s['id'] as int?,
+                                child: Text('${s['name'] ?? ''}'),
+                              ),
+                          ],
+                          onChanged: (v) {
+                            setState(() {
+                              _selectedSectionId = v;
+                              _selectedCategoryId = null;
+                              _selectedItemId = null;
+                            });
+                            _load();
+                          },
+                        ),
+                      ),
+                    ],
+                    if (availableCategories.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      DropdownButtonHideUnderline(
+                        child: DropdownButton<int?>(
+                          value: availableCategories
+                                  .any((c) => c['id'] == _selectedCategoryId)
+                              ? _selectedCategoryId
+                              : null,
+                          hint: Text(l10n.tr('الفئة', 'Category')),
+                          isDense: true,
+                          items: [
+                            DropdownMenuItem<int?>(
+                              value: null,
+                              child:
+                                  Text(l10n.tr('كل الفئات', 'All Categories')),
+                            ),
+                            for (final c in availableCategories.where((c) =>
+                                _selectedSectionId == null ||
+                                c['sectionId'] == _selectedSectionId))
+                              DropdownMenuItem<int?>(
+                                value: c['id'] as int?,
+                                child: Text('${c['name'] ?? ''}'),
+                              ),
+                          ],
+                          onChanged: (v) {
+                            setState(() {
+                              _selectedCategoryId = v;
+                              _selectedItemId = null;
+                            });
+                            _load();
+                          },
+                        ),
+                      ),
+                    ],
+                    if (availableItems.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      DropdownButtonHideUnderline(
+                        child: DropdownButton<int?>(
+                          value: availableItems
+                                  .any((it) => it['id'] == _selectedItemId)
+                              ? _selectedItemId
+                              : null,
+                          hint: Text(l10n.tr('الصنف', 'Product')),
+                          isDense: true,
+                          items: [
+                            DropdownMenuItem<int?>(
+                              value: null,
+                              child: Text(l10n.tr('كل الأصناف', 'All Products')),
+                            ),
+                            for (final it in availableItems.where((it) =>
+                                (_selectedSectionId == null ||
+                                    it['sectionId'] == _selectedSectionId) &&
+                                (_selectedCategoryId == null ||
+                                    it['categoryId'] == _selectedCategoryId)))
+                              DropdownMenuItem<int?>(
+                                value: it['id'] as int?,
+                                child: Text('${it['name'] ?? ''}'),
+                              ),
+                          ],
+                          onChanged: (v) {
+                            setState(() => _selectedItemId = v);
+                            _load();
+                          },
+                        ),
+                      ),
+                    ],
+                    if (availableDevices.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      DropdownButtonHideUnderline(
+                        child: DropdownButton<String?>(
+                          value: availableDevices
+                                  .any((d) => d['id'] == _selectedDeviceId)
+                              ? _selectedDeviceId
+                              : null,
+                          hint: Text(l10n.tr('الجهاز', 'Device')),
+                          isDense: true,
+                          items: [
+                            DropdownMenuItem<String?>(
+                              value: null,
+                              child: Text(l10n.tr('كل الأجهزة', 'All Devices')),
+                            ),
+                            for (final d in availableDevices)
+                              DropdownMenuItem<String?>(
+                                value: '${d['id'] ?? ''}',
+                                child: Text('${d['name'] ?? ''}'),
+                              ),
+                          ],
+                          onChanged: (v) {
+                            setState(() => _selectedDeviceId = v);
+                            _load();
+                          },
+                        ),
+                      ),
+                    ],
+                    if (availableUsers.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      DropdownButtonHideUnderline(
+                        child: DropdownButton<int?>(
+                          value: availableUsers
+                                  .any((u) => u['id'] == _selectedUserId)
+                              ? _selectedUserId
+                              : null,
+                          hint: Text(l10n.tr('الكاشير', 'Cashier')),
+                          isDense: true,
+                          items: [
+                            DropdownMenuItem<int?>(
+                              value: null,
+                              child: Text(
+                                l10n.tr('كل الموظفين', 'All Staff'),
+                              ),
+                            ),
+                            for (final u in availableUsers)
+                              DropdownMenuItem<int?>(
+                                value: u['id'] as int?,
+                                child: Text('${u['name'] ?? ''}'),
+                              ),
+                          ],
+                          onChanged: (v) {
+                            setState(() => _selectedUserId = v);
+                            _load();
+                          },
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
-                onPressed: _pickCustomRange,
               ),
+              const SizedBox(height: 10),
+              if (_loading)
+                const Expanded(
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (!allowed)
+                Expanded(
+                  child: EmptyState(
+                    icon: Icons.lock_outline_rounded,
+                    title: l10n.tr(
+                      'صلاحية عرض ملخص المبيعات غير مفعّلة لهذا الحساب',
+                      'Sales summary permission is not enabled for this account',
+                    ),
+                    message: l10n.tr(
+                      'يمكن لمدير المنشأة تفعيل صلاحية «عرض ملخص وتقارير المبيعات» من إدارة الصلاحيات.',
+                      'The workspace manager can enable sales summary access in permissions management.',
+                    ),
+                  ),
+                )
+              else
+                Expanded(
+                  child: ListView(
+                    children: [
+                      // 3) البطاقات الإحصائية التفاعلية القابلة للضغط (عدد فواتير البيع / فواتير المرتجع)
+                      Row(
+                        children: [
+                          Expanded(
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(14),
+                              onTap: () {
+                                setState(() {
+                                  _invoiceType =
+                                      _invoiceType == 'sale' ? 'all' : 'sale';
+                                  _breakdownTab = 'timeline';
+                                });
+                                _load();
+                              },
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: _invoiceType == 'sale'
+                                        ? AppColors.primaryOf(context)
+                                        : Colors.transparent,
+                                    width: 2,
+                                  ),
+                                ),
+                                child: StatCard(
+                                  title: l10n.tr(
+                                    'عدد فواتير البيع',
+                                    'Sales Invoices',
+                                  ),
+                                  value: '$invoiceCount',
+                                  icon: Icons.receipt_long_rounded,
+                                  color: AppColors.primaryOf(context),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(14),
+                              onTap: () {
+                                setState(() {
+                                  _invoiceType = _invoiceType == 'return'
+                                      ? 'all'
+                                      : 'return';
+                                  _breakdownTab = 'timeline';
+                                });
+                                _load();
+                              },
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: _invoiceType == 'return'
+                                        ? const Color(0xFFD97706)
+                                        : Colors.transparent,
+                                    width: 2,
+                                  ),
+                                ),
+                                child: StatCard(
+                                  title: l10n.tr(
+                                    'فواتير المرتجع',
+                                    'Return Invoices',
+                                  ),
+                                  value: '$returnCount',
+                                  icon: Icons.assignment_return_rounded,
+                                  color: const Color(0xFFD97706),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      if (currencies.isEmpty && invoices.isEmpty)
+                        EmptyState(
+                          icon: Icons.receipt_long_outlined,
+                          title: l10n.tr(
+                            'لا توجد فواتير مبيعات مطابقة في هذه الفترة',
+                            'No matching sales invoices in this period',
+                          ),
+                          message: l10n.tr(
+                            'اختر فترة زمنية أخرى أو عدّل الفلاتر لعرض إحصائيات الفواتير.',
+                            'Choose another date range or adjust filters to view invoice statistics.',
+                          ),
+                        )
+                      else ...[
+                        // ملخص العملات (صافي المبيعات، نقداً، آجل، المرتجعات)
+                        for (final code in currencies) ...[
+                          Container(
+                            margin: const EdgeInsets.only(bottom: 12),
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: AppColors.surfaceOf(context),
+                              borderRadius: BorderRadius.circular(16),
+                              border:
+                                  Border.all(color: AppColors.borderOf(context)),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.trending_up_rounded,
+                                      color: AppColors.primaryOf(context),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        '${l10n.tr('صافي المبيعات', 'Net Sales')} ($code)',
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w900,
+                                          fontSize: 14.5,
+                                        ),
+                                      ),
+                                    ),
+                                    Text(
+                                      '${Fmt.money(netByCur[code] ?? 0)} $code',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w900,
+                                        fontSize: 18,
+                                        color: AppColors.textOf(context),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const Divider(height: 20),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        '${l10n.tr('نقداً', 'Cash')}: ${Fmt.money(cashByCur[code] ?? 0)} $code',
+                                        style: TextStyle(
+                                          fontSize: 12.5,
+                                          fontWeight: FontWeight.w700,
+                                          color: AppColors.greenOf(context),
+                                        ),
+                                      ),
+                                    ),
+                                    Expanded(
+                                      child: Text(
+                                        '${l10n.tr('آجل', 'Credit')}: ${Fmt.money(creditByCur[code] ?? 0)} $code',
+                                        style: TextStyle(
+                                          fontSize: 12.5,
+                                          fontWeight: FontWeight.w700,
+                                          color: AppColors.dangerOf(context),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                if ((returnsByCur[code] ?? 0) > 0) ...[
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    '${l10n.tr('إجمالي قبل المرتجع', 'Gross')}: ${Fmt.money(grossByCur[code] ?? 0)} $code • ${l10n.tr('المرتجعات', 'Returns')}: ${Fmt.money(returnsByCur[code] ?? 0)} $code',
+                                    style: TextStyle(
+                                      fontSize: 11.5,
+                                      color: AppColors.text2Of(context),
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ],
+                        // 4) المخطط البياني الزمني وتبويبات التحليل بالنسب المئوية (%)
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 12),
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: AppColors.surfaceOf(context),
+                            borderRadius: BorderRadius.circular(16),
+                            border:
+                                Border.all(color: AppColors.borderOf(context)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: Row(
+                                  children: [
+                                    for (final tab in [
+                                      (
+                                        'timeline',
+                                        l10n.tr(
+                                          'المخطط الزمني (%)',
+                                          'Timeline (%)',
+                                        ),
+                                        Icons.timeline_rounded
+                                      ),
+                                      (
+                                        'section',
+                                        l10n.tr('حسب القسم (%)', 'By Section (%)'),
+                                        Icons.storefront_outlined
+                                      ),
+                                      (
+                                        'category',
+                                        l10n.tr(
+                                          'حسب الفئة (%)',
+                                          'By Category (%)',
+                                        ),
+                                        Icons.category_outlined
+                                      ),
+                                      (
+                                        'item',
+                                        l10n.tr('حسب الصنف (%)', 'By Product (%)'),
+                                        Icons.inventory_2_outlined
+                                      ),
+                                      (
+                                        'device',
+                                        l10n.tr('حسب الجهاز (%)', 'By Device (%)'),
+                                        Icons.devices_rounded
+                                      ),
+                                      (
+                                        'user',
+                                        l10n.tr('حسب الموظف (%)', 'By Staff (%)'),
+                                        Icons.person_outline_rounded
+                                      ),
+                                    ])
+                                      Padding(
+                                        padding:
+                                            const EdgeInsetsDirectional.only(
+                                          end: 6,
+                                        ),
+                                        child: ChoiceChip(
+                                          avatar: Icon(tab.$3, size: 15),
+                                          label: Text(tab.$2),
+                                          selected: _breakdownTab == tab.$1,
+                                          onSelected: (_) => setState(
+                                            () => _breakdownTab = tab.$1,
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              if (_breakdownTab == 'timeline')
+                                _buildTimelineChart(context, timeline, l10n)
+                              else if (_breakdownTab == 'section')
+                                _buildPercentageList(context, bySection, l10n)
+                              else if (_breakdownTab == 'category')
+                                _buildPercentageList(context, byCategory, l10n)
+                              else if (_breakdownTab == 'item')
+                                _buildPercentageList(context, byItem, l10n)
+                              else if (_breakdownTab == 'device')
+                                _buildPercentageList(context, byDevice, l10n)
+                              else
+                                _buildPercentageList(context, byUser, l10n),
+                            ],
+                          ),
+                        ),
+                        // 5) قائمة الفواتير المطابقة (عند النقر على عدد فواتير البيع أو المرتجع أو الفلترة)
+                        if (invoices.isNotEmpty) ...[
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 6,
+                            ),
+                            child: Text(
+                              '${l10n.tr('سجل الفواتير التفصيلي', 'Detailed Invoices')} (${invoices.length})',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w900,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ),
+                          for (final inv in invoices.take(60))
+                            Container(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: AppColors.surfaceOf(context),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: AppColors.borderOf(context),
+                                ),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Icon(
+                                        inv['isReturn'] == true
+                                            ? Icons.assignment_return_rounded
+                                            : Icons.receipt_long_rounded,
+                                        size: 18,
+                                        color: inv['isReturn'] == true
+                                            ? const Color(0xFFD97706)
+                                            : AppColors.primaryOf(context),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Expanded(
+                                        child: Text(
+                                          '#${inv['reference'] ?? inv['id']} • ${inv['accountName'] ?? ''}',
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.w800,
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                      ),
+                                      Text(
+                                        '${Fmt.money((inv['amount'] as num?)?.toDouble() ?? 0)} ${inv['currency'] ?? ''}',
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.w900,
+                                          fontSize: 13.5,
+                                          color: AppColors.textOf(context),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  if ('${inv['itemsSummary'] ?? ''}'
+                                      .trim()
+                                      .isNotEmpty) ...[
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      '${inv['itemsSummary']}',
+                                      style: TextStyle(
+                                        fontSize: 11.5,
+                                        color: AppColors.text2Of(context),
+                                      ),
+                                    ),
+                                  ],
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    '${(inv['date'] as String? ?? '').replaceFirst('T', ' ').split('.').first} • ${inv['deviceName'] ?? ''} • ${inv['userName'] ?? ''}',
+                                    style: TextStyle(
+                                      fontSize: 10.5,
+                                      color: AppColors.text3Of(context),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ],
+                    ],
+                  ),
+                ),
             ],
           ),
-          const SizedBox(height: 14),
-          if (_loading)
-            const Expanded(
-              child: Center(child: CircularProgressIndicator()),
-            )
-          else if (!allowed)
-            const Expanded(
-              child: EmptyState(
-                icon: Icons.lock_outline_rounded,
-                title: 'صلاحية عرض ملخص المبيعات غير مفعّلة لهذا الحساب',
-                message:
-                    'يمكن لمدير المنشأة تفعيل صلاحية «عرض ملخص وتقارير المبيعات» من إدارة الصلاحيات.',
-              ),
-            )
-          else if (currencies.isEmpty)
-            const Expanded(
-              child: EmptyState(
-                icon: Icons.receipt_long_outlined,
-                title: 'لا توجد فواتير مبيعات في هذه الفترة',
-                message: 'اختر فترة زمنية أخرى لعرض إحصائيات الفواتير.',
-              ),
-            )
-          else
-            Expanded(
-              child: ListView(
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTimelineChart(
+    BuildContext context,
+    List<Map<String, Object?>> timeline,
+    L10n l10n,
+  ) {
+    if (timeline.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        child: Center(
+          child: Text(
+            l10n.tr('لا توجد بيانات زمنية في هذه الفترة', 'No timeline data'),
+            style: TextStyle(color: AppColors.text2Of(context), fontSize: 12),
+          ),
+        ),
+      );
+    }
+    return Column(
+      children: [
+        for (final row in timeline) ...[
+          () {
+            final label = '${row['label'] ?? ''}';
+            final sales = ((row['sales'] as num?) ?? 0).toDouble();
+            final returns = ((row['returns'] as num?) ?? 0).toDouble();
+            final count = ((row['count'] as num?) ?? 0).toInt();
+            final retCount = ((row['returnCount'] as num?) ?? 0).toInt();
+            final pct = ((row['percent'] as num?) ?? 0).toDouble();
+            final isRetFocus = _invoiceType == 'return';
+            final val = isRetFocus ? returns : sales;
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Row(
                     children: [
                       Expanded(
-                        child: StatCard(
-                          title: 'عدد فواتير البيع',
-                          value: '$invoiceCount',
-                          icon: Icons.receipt_long_rounded,
-                          color: AppColors.primaryOf(context),
+                        child: Text(
+                          '$label (${isRetFocus ? '$retCount مرتجع' : '$count فاتورة'})',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
                         ),
                       ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: StatCard(
-                          title: 'فواتير المرتجع',
-                          value: '$returnCount',
-                          icon: Icons.assignment_return_rounded,
-                          color: const Color(0xFFD97706),
+                      Text(
+                        '${Fmt.money(val)} (${pct.toStringAsFixed(1)}%)',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w900,
+                          color: AppColors.textOf(context),
                         ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 12),
-                  for (final code in currencies) ...[
-                    Container(
-                      margin: const EdgeInsets.only(bottom: 12),
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        color: AppColors.surfaceOf(context),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: AppColors.borderOf(context)),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(
-                                Icons.trending_up_rounded,
-                                color: AppColors.primaryOf(context),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  'صافي المبيعات ($code)',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w900,
-                                    fontSize: 14.5,
-                                  ),
-                                ),
-                              ),
-                              Text(
-                                '${Fmt.money(netByCur[code] ?? 0)} $code',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w900,
-                                  fontSize: 18,
-                                  color: AppColors.primaryOf(context),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const Divider(height: 20),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  'نقداً: ${Fmt.money(cashByCur[code] ?? 0)} $code',
-                                  style: TextStyle(
-                                    fontSize: 12.5,
-                                    fontWeight: FontWeight.w700,
-                                    color: AppColors.greenOf(context),
-                                  ),
-                                ),
-                              ),
-                              Expanded(
-                                child: Text(
-                                  'آجل: ${Fmt.money(creditByCur[code] ?? 0)} $code',
-                                  style: TextStyle(
-                                    fontSize: 12.5,
-                                    fontWeight: FontWeight.w700,
-                                    color: AppColors.dangerOf(context),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          if ((returnsByCur[code] ?? 0) > 0) ...[
-                            const SizedBox(height: 6),
-                            Text(
-                              'إجمالي قبل المرتجع: ${Fmt.money(grossByCur[code] ?? 0)} $code • المرتجعات: ${Fmt.money(returnsByCur[code] ?? 0)} $code',
-                              style: TextStyle(
-                                fontSize: 11.5,
-                                color: AppColors.text2Of(context),
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
+                  const SizedBox(height: 4),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: LinearProgressIndicator(
+                      value: (pct / 100.0).clamp(0.0, 1.0),
+                      minHeight: 8,
+                      backgroundColor: AppColors.borderOf(context),
+                      color: isRetFocus
+                          ? const Color(0xFFD97706)
+                          : AppColors.primaryOf(context),
                     ),
-                  ],
+                  ),
                 ],
               ),
-            ),
+            );
+          }(),
         ],
+      ],
+    );
+  }
+
+  Widget _buildPercentageList(
+    BuildContext context,
+    List<Map<String, Object?>> list,
+    L10n l10n,
+  ) {
+    if (list.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        child: Center(
+          child: Text(
+            l10n.tr('لا توجد بيانات مطابقة', 'No matching data'),
+            style: TextStyle(color: AppColors.text2Of(context), fontSize: 12),
+          ),
+        ),
+      );
+    }
+    return Column(
+      children: [
+        for (final row in list) ...[
+          () {
+            final name = '${row['name'] ?? ''}';
+            final amt = ((row['amount'] as num?) ?? 0).toDouble();
+            final count = ((row['count'] as num?) ?? 0).toInt();
+            final pct = ((row['percent'] as num?) ?? 0).toDouble();
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '$name ($count)',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        '${Fmt.money(amt)} (${pct.toStringAsFixed(1)}%)',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w900,
+                          color: AppColors.textOf(context),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: LinearProgressIndicator(
+                      value: (pct / 100.0).clamp(0.0, 1.0),
+                      minHeight: 8,
+                      backgroundColor: AppColors.borderOf(context),
+                      color: AppColors.primaryOf(context),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }(),
+        ],
+      ],
+    );
+  }
+}
+
+class _PosCrumb extends StatelessWidget {
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+
+  const _PosCrumb({
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(6),
+      onTap: active ? null : onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+            color: active
+                ? AppColors.primaryOf(context)
+                : AppColors.text2Of(context),
+          ),
+        ),
       ),
     );
   }
 }
 
+class _PosCrumbSep extends StatelessWidget {
+  const _PosCrumbSep();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: Icon(
+        Icons.chevron_left_rounded,
+        size: 14,
+        color: AppColors.text3Of(context),
+      ),
+    );
+  }
+}

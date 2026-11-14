@@ -76,10 +76,17 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
     final rawUserName = (user?.name ?? '').trim();
     final safeUserName = (isMember && rawUserName == 'المدير') ? '' : rawUserName;
 
+    final resolvedOwner = isMember
+        ? (devName.isNotEmpty ? devName : safeUserName)
+        : resolveOwnerDisplayName(
+            profileOwnerName: syncedOwnerName,
+            accountName: st['account.name'],
+            deviceName: devName,
+            userName: rawUserName,
+          );
+
     _userNameCtrl = TextEditingController(
-      text: devName.isNotEmpty
-          ? devName
-          : (syncedOwnerName.isNotEmpty ? syncedOwnerName : safeUserName),
+      text: resolvedOwner.isNotEmpty ? resolvedOwner : devName,
     );
     _emailCtrl = TextEditingController(
       text: (st['account.email'] ?? st['email'] ?? '').trim(),

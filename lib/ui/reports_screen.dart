@@ -7,6 +7,8 @@ import 'package:flutter/services.dart';
 
 import '../core/accounting.dart';
 import '../core/format.dart';
+import '../core/l10n.dart';
+import '../core/models.dart';
 import '../core/pdf_fonts.dart';
 import '../core/theme.dart';
 import '../data/providers.dart';
@@ -45,6 +47,21 @@ enum PeriodUnit {
 final reportTabProvider = StateProvider<ReportTab>((ref) => ReportTab.summary);
 final periodUnitProvider = StateProvider<PeriodUnit>((ref) => PeriodUnit.month);
 
+/// البطاقات الإحصائية الأربع التفاعلية في شبكة (2×2) بشاشة التقارير.
+enum ReportSummaryCard {
+  sales('إجمالي المبيعات'),
+  owedToUs('إجمالي المستحق لنا'),
+  owedByUs('إجمالي المستحق علينا'),
+  net('صافي الرصيد');
+
+  const ReportSummaryCard(this.label);
+  final String label;
+}
+
+final reportSelectedCardProvider = StateProvider<ReportSummaryCard?>(
+  (ref) => null,
+);
+
 /// جدول التقرير الناتج: عناوين وصفوف نصية جاهزة للعرض والتصدير.
 class ReportTable {
   final List<String> headers;
@@ -69,27 +86,7 @@ class ReportsScreen extends ConsumerWidget {
     return Column(
       children: [
         const _ScopeBar(),
-        SizedBox(
-          height: 42,
-          child: ListView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            children: ReportTab.values
-                .map(
-                  (t) => Padding(
-                    padding: const EdgeInsetsDirectional.only(end: 8),
-                    child: ChoiceChip(
-                      selected: tab == t,
-                      onSelected: (_) =>
-                          ref.read(reportTabProvider.notifier).state = t,
-                      label: Text(t.label),
-                    ),
-                  ),
-                )
-                .toList(),
-          ),
-        ),
-        const SizedBox(height: 6),
+        const SizedBox(height: 4),
         Expanded(
           child: data.when(
             skipLoadingOnReload: true,
@@ -104,8 +101,23 @@ class ReportsScreen extends ConsumerWidget {
               final currencies = ref.watch(currenciesProvider).valueOrNull ??
                   kDefaultCurrencies;
               final unit = ref.watch(periodUnitProvider);
-              final table = buildReport(tab, d, currencies, unit);
-              final view = _ReportView(tab: tab, table: table);
+              final selectedCard = ref.watch(reportSelectedCardProvider);
+              final baseTable = buildReport(tab, d, currencies, unit);
+              final effectiveTable =
+                  (tab == ReportTab.summary && selectedCard != null)
+                      ? buildCardDetailTable(
+                          selectedCard,
+                          d,
+                          currencies,
+                          baseSummary: baseTable.summary,
+                        )
+                      : baseTable;
+              final view = _ReportView(
+                tab: tab,
+                table: effectiveTable,
+                data: d,
+                selectedCard: selectedCard,
+              );
               // 🔒 (الخطة الفردية) تقرير التصنيفات ميزة مدفوعة — يبقى
               // ظاهراً بمؤشر القفل ويقود لشاشة الشراء.
               if (tab == ReportTab.categories) {
@@ -127,34 +139,389 @@ class ReportsScreen extends ConsumerWidget {
   }
 }
 
+/// (المتطلب 4-أ) شريط علوي واحد نظيف ومرتب يدمج بادج التاريخ مع بادج موحّد «تصفية وعرض» بدون قصّ للنصوص.
 class _ScopeBar extends ConsumerWidget {
   const _ScopeBar();
+
+  int _activeFilterCount(ReportScope s, ReportTab tab) {
+    var count = 0;
+    if (tab != ReportTab.summary) count++;
+    if (s.currency != null) count++;
+    if (s.accountId != null) count++;
+    if (s.cashier != null) count++;
+    return count;
+  }
+
+  Future<void> _openUnifiedFilterSheet(
+    BuildContext context,
+    WidgetRef ref,
+    ReportScope s,
+    ReportTab currentTab,
+    List<Account> accounts,
+    List<CurrencyDef> currencies,
+  ) async {
+    void setScope(ReportScope v) =>
+        ref.read(reportScopeProvider.notifier).state = v;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetCtx) {
+        return Consumer(
+          builder: (ctx, rref, _) {
+            final scope = rref.watch(reportScopeProvider);
+            final tab = rref.watch(reportTabProvider);
+            final unit = rref.watch(periodUnitProvider);
+            final userList = rref.watch(usersProvider).valueOrNull ?? [];
+
+            return SafeArea(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(ctx).size.height * 0.82,
+                ),
+                child: ListView(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 18),
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.tune_rounded,
+                          color: AppColors.primaryOf(ctx),
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            ctx.tr('تصفية وعرض التقارير'),
+                            style: Theme.of(ctx).textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w800,
+                                ),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () {
+                            rref.read(reportTabProvider.notifier).state =
+                                ReportTab.summary;
+                            rref
+                                .read(reportSelectedCardProvider.notifier)
+                                .state = null;
+                            setScope(
+                              scope.copyWith(
+                                clearCurrency: true,
+                                clearAccount: true,
+                                clearCashier: true,
+                              ),
+                            );
+                            Navigator.pop(ctx);
+                          },
+                          child: Text(ctx.tr('إعادة ضبط')),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 16),
+                    Text(
+                      ctx.tr('نوع التقرير والتصنيفات'),
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.text2Of(ctx),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: ReportTab.values.map((t) {
+                        final selected = tab == t;
+                        return ChoiceChip(
+                          selected: selected,
+                          label: Text(
+                            ctx.tr(t.label),
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: selected
+                                  ? FontWeight.w800
+                                  : FontWeight.w600,
+                            ),
+                          ),
+                          onSelected: (_) {
+                            rref.read(reportTabProvider.notifier).state = t;
+                            if (t != ReportTab.summary) {
+                              rref
+                                  .read(reportSelectedCardProvider.notifier)
+                                  .state = null;
+                            }
+                          },
+                        );
+                      }).toList(),
+                    ),
+                    if (tab == ReportTab.period) ...[
+                      const SizedBox(height: 14),
+                      Text(
+                        'وحدة تجميع الفترة',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w800,
+                          color: AppColors.text2Of(ctx),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: PeriodUnit.values.map((u) {
+                          return ChoiceChip(
+                            selected: unit == u,
+                            label: Text(u.label),
+                            onSelected: (_) => rref
+                                .read(periodUnitProvider.notifier)
+                                .state = u,
+                          );
+                        }).toList(),
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                    Text(
+                      'فترات سريعة',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.text2Of(ctx),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        ActionChip(
+                          label: const Text('اليوم'),
+                          onPressed: () {
+                            final n = DateTime.now();
+                            setScope(
+                              scope.copyWith(
+                                from: DateTime(n.year, n.month, n.day),
+                                to: DateTime(
+                                    n.year, n.month, n.day, 23, 59, 59),
+                              ),
+                            );
+                          },
+                        ),
+                        ActionChip(
+                          label: const Text('هذا الشهر'),
+                          onPressed: () {
+                            final n = DateTime.now();
+                            setScope(
+                              scope.copyWith(
+                                from: DateTime(n.year, n.month, 1),
+                                to: DateTime(
+                                    n.year, n.month, n.day, 23, 59, 59),
+                              ),
+                            );
+                          },
+                        ),
+                        ActionChip(
+                          label: const Text('آخر ٣٠ يومًا'),
+                          onPressed: () {
+                            final n = DateTime.now();
+                            setScope(
+                              scope.copyWith(
+                                from: n.subtract(const Duration(days: 30)),
+                                to: DateTime(
+                                    n.year, n.month, n.day, 23, 59, 59),
+                              ),
+                            );
+                          },
+                        ),
+                        ActionChip(
+                          label: const Text('هذه السنة'),
+                          onPressed: () {
+                            final n = DateTime.now();
+                            setScope(
+                              scope.copyWith(
+                                from: DateTime(n.year, 1, 1),
+                                to: DateTime(n.year, 12, 31, 23, 59, 59),
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 20),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.currency_exchange),
+                      title: const Text(
+                        'العملة',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      subtitle: Text(scope.currency ?? 'كل العملات'),
+                      trailing: const Icon(Icons.chevron_left),
+                      onTap: () async {
+                        final v = await showModalBottomSheet<String>(
+                          context: ctx,
+                          builder: (_) => SafeArea(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                ListTile(
+                                  title: const Text('كل العملات'),
+                                  onTap: () => Navigator.pop(ctx, ''),
+                                ),
+                                for (final c in currencies)
+                                  ListTile(
+                                    title: Text('${c.symbol}  ${c.name}'),
+                                    onTap: () => Navigator.pop(ctx, c.code),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        );
+                        if (v == null) return;
+                        setScope(
+                          v.isEmpty
+                              ? scope.copyWith(clearCurrency: true)
+                              : scope.copyWith(currency: v),
+                        );
+                      },
+                    ),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.person_outline),
+                      title: const Text(
+                        'الحساب',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      subtitle: Text(
+                        scope.accountId == null
+                            ? 'كل الحسابات'
+                            : (accounts
+                                    .where((a) => a.id == scope.accountId)
+                                    .firstOrNull
+                                    ?.name ??
+                                'حساب'),
+                      ),
+                      trailing: const Icon(Icons.chevron_left),
+                      onTap: () async {
+                        final v = await showModalBottomSheet<int>(
+                          context: ctx,
+                          builder: (_) => SafeArea(
+                            child: ListView(
+                              shrinkWrap: true,
+                              children: [
+                                ListTile(
+                                  title: const Text('كل الحسابات'),
+                                  onTap: () => Navigator.pop(ctx, -1),
+                                ),
+                                for (final a in accounts)
+                                  ListTile(
+                                    title: Text('${a.kind.icon}  ${a.name}'),
+                                    onTap: () => Navigator.pop(ctx, a.id),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        );
+                        if (v == null) return;
+                        setScope(
+                          v == -1
+                              ? scope.copyWith(clearAccount: true)
+                              : scope.copyWith(accountId: v),
+                        );
+                      },
+                    ),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.badge_outlined),
+                      title: const Text(
+                        'الكاشير / الموظف',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      subtitle: Text(
+                        scope.cashier == null
+                            ? 'كل الكاشيرات'
+                            : 'الكاشير: ${scope.cashier}',
+                      ),
+                      trailing: const Icon(Icons.chevron_left),
+                      onTap: () async {
+                        final v = await showModalBottomSheet<String>(
+                          context: ctx,
+                          builder: (_) => SafeArea(
+                            child: ListView(
+                              shrinkWrap: true,
+                              children: [
+                                ListTile(
+                                  leading: const Icon(Icons.people_outline),
+                                  title: const Text('كل الكاشيرات والموظفين'),
+                                  onTap: () => Navigator.pop(ctx, ''),
+                                ),
+                                for (final u in userList)
+                                  ListTile(
+                                    leading:
+                                        const Icon(Icons.person_pin_outlined),
+                                    title: Text(u.name),
+                                    subtitle: Text(
+                                      '${u.role.label} • ${u.active ? "نشط" : "معطل"}',
+                                    ),
+                                    onTap: () => Navigator.pop(ctx, u.name),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        );
+                        if (v == null) return;
+                        setScope(
+                          v.isEmpty
+                              ? scope.copyWith(clearCashier: true)
+                              : scope.copyWith(cashier: v),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: const Text('تطبيق الفلاتر والعرض'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final s = ref.watch(reportScopeProvider);
+    final tab = ref.watch(reportTabProvider);
     final accounts = ref.watch(allAccountsProvider).valueOrNull ?? [];
     final currencies = ref.watch(currenciesProvider).valueOrNull ?? [];
     void set(ReportScope v) => ref.read(reportScopeProvider.notifier).state = v;
+    final activeCount = _activeFilterCount(s, tab);
 
     return Container(
       color: AppColors.surfaceOf(context),
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-      child: SizedBox(
-        height: 34,
-        child: ListView(
-          scrollDirection: Axis.horizontal,
-          children: [
-            _pill(
-              context,
-              '${Fmt.date(s.from)} → ${Fmt.date(s.to)}',
-              Icons.date_range,
-              () async {
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: Row(
+        children: [
+          // بادج الفترة الزمنية (التاريخ)
+          Expanded(
+            flex: 5,
+            child: InkWell(
+              key: const ValueKey('reports_date_range_badge'),
+              borderRadius: BorderRadius.circular(12),
+              onTap: () async {
                 final r = await showDateRangePicker(
                   context: context,
                   firstDate: DateTime(2015),
                   lastDate: DateTime(2100),
-                  locale: const Locale('ar'),
                   initialDateRange: DateTimeRange(start: s.from, end: s.to),
                 );
                 if (r != null) {
@@ -173,163 +540,228 @@ class _ScopeBar extends ConsumerWidget {
                   );
                 }
               },
-            ),
-            _quick(context, 'هذا الشهر', () {
-              final n = DateTime.now();
-              set(
-                s.copyWith(
-                  from: DateTime(n.year, n.month, 1),
-                  to: DateTime(n.year, n.month, n.day, 23, 59, 59),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: AppColors.surface2Of(context),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppColors.borderOf(context)),
                 ),
-              );
-            }),
-            _quick(context, 'آخر ٣٠ يومًا', () {
-              final n = DateTime.now();
-              set(
-                s.copyWith(
-                  from: n.subtract(const Duration(days: 30)),
-                  to: DateTime(n.year, n.month, n.day, 23, 59, 59),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.date_range_rounded,
+                      size: 16,
+                      color: AppColors.primaryOf(context),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        '${Fmt.date(s.from)} → ${Fmt.date(s.to)}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.textOf(context),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              );
-            }),
-            _quick(context, 'هذه السنة', () {
-              final n = DateTime.now();
-              set(
-                s.copyWith(
-                  from: DateTime(n.year, 1, 1),
-                  to: DateTime(n.year, 12, 31, 23, 59, 59),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          // بادج «تصفية وعرض» الموحّد (نوع التقرير + التصنيفات + العملات + الحسابات)
+          Expanded(
+            flex: 4,
+            child: InkWell(
+              key: const ValueKey('reports_unified_filter_badge'),
+              borderRadius: BorderRadius.circular(12),
+              onTap: () => _openUnifiedFilterSheet(
+                context,
+                ref,
+                s,
+                tab,
+                accounts,
+                currencies,
+              ),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: activeCount > 0
+                      ? AppColors.primarySoftOf(context)
+                      : AppColors.surface2Of(context),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: activeCount > 0
+                        ? AppColors.primaryOf(context)
+                        : AppColors.borderOf(context),
+                  ),
                 ),
-              );
-            }),
-            _pill(
-              context,
-              s.currency ?? 'كل العملات',
-              Icons.currency_exchange,
-              () async {
-                final v = await showModalBottomSheet<String>(
-                  context: context,
-                  builder: (_) => SafeArea(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        ListTile(
-                          title: const Text('كل العملات'),
-                          onTap: () => Navigator.pop(context, ''),
-                        ),
-                        for (final c in currencies)
-                          ListTile(
-                            title: Text('${c.symbol}  ${c.name}'),
-                            onTap: () => Navigator.pop(context, c.code),
-                          ),
-                      ],
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.tune_rounded,
+                      size: 16,
+                      color: activeCount > 0
+                          ? AppColors.primaryOf(context)
+                          : AppColors.text2Of(context),
                     ),
-                  ),
-                );
-                if (v == null) return;
-                set(
-                  v.isEmpty
-                      ? s.copyWith(clearCurrency: true)
-                      : s.copyWith(currency: v),
-                );
-              },
-            ),
-            _pill(
-              context,
-              s.accountId == null
-                  ? 'كل الحسابات'
-                  : (accounts
-                          .where((a) => a.id == s.accountId)
-                          .firstOrNull
-                          ?.name ??
-                      'حساب'),
-              Icons.person_outline,
-              () async {
-                final v = await showModalBottomSheet<int>(
-                  context: context,
-                  builder: (_) => SafeArea(
-                    child: ListView(
-                      shrinkWrap: true,
-                      children: [
-                        ListTile(
-                          title: const Text('كل الحسابات'),
-                          onTap: () => Navigator.pop(context, -1),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        activeCount > 0
+                            ? '${context.tr('تصفية وعرض')} ($activeCount)'
+                            : context.tr('تصفية وعرض'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                          color: activeCount > 0
+                              ? AppColors.primaryOf(context)
+                              : AppColors.textOf(context),
                         ),
-                        for (final a in accounts)
-                          ListTile(
-                            title: Text('${a.kind.icon}  ${a.name}'),
-                            onTap: () => Navigator.pop(context, a.id),
-                          ),
-                      ],
+                      ),
                     ),
-                  ),
-                );
-                if (v == null) return;
-                set(
-                  v == -1
-                      ? s.copyWith(clearAccount: true)
-                      : s.copyWith(accountId: v),
-                );
-              },
+                  ],
+                ),
+              ),
             ),
-            _pill(
-              context,
-              s.cashier == null ? 'كل الكاشيرات' : 'الكاشير: ${s.cashier}',
-              Icons.badge_outlined,
-              () async {
-                final userList =
-                    ref.read(usersProvider).valueOrNull ?? [];
-                final v = await showModalBottomSheet<String>(
-                  context: context,
-                  builder: (_) => SafeArea(
-                    child: ListView(
-                      shrinkWrap: true,
-                      children: [
-                        ListTile(
-                          leading: const Icon(Icons.people_outline),
-                          title: const Text('كل الكاشيرات والموظفين'),
-                          onTap: () => Navigator.pop(context, ''),
-                        ),
-                        for (final u in userList)
-                          ListTile(
-                            leading: const Icon(Icons.person_pin_outlined),
-                            title: Text(u.name),
-                            subtitle: Text(
-                              '${u.role.label} • ${u.active ? "نشط" : "معطل"}',
-                            ),
-                            onTap: () => Navigator.pop(context, u.name),
-                          ),
-                      ],
-                    ),
-                  ),
-                );
-                if (v == null) return;
-                set(
-                  v.isEmpty
-                      ? s.copyWith(clearCashier: true)
-                      : s.copyWith(cashier: v),
-                );
-              },
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
+}
 
-  Widget _pill(BuildContext c, String label, IconData icon, VoidCallback t) =>
-      Padding(
-        padding: const EdgeInsetsDirectional.only(end: 8),
-        child: ActionChip(
-          avatar: Icon(icon, size: 15),
-          label: Text(label),
-          onPressed: t,
-        ),
+/// بناء جدول تفصيلي مخصص عند النقر على إحدى البطاقات الإحصائية الأربع في شبكة (2×2).
+ReportTable buildCardDetailTable(
+  ReportSummaryCard card,
+  ReportData d,
+  List<CurrencyDef> currencies, {
+  List<(String, String)> baseSummary = const [],
+}) {
+  String sym(String code) => currencies
+      .firstWhere(
+        (c) => c.code == code,
+        orElse: () => CurrencyDef(code, code, code, 0),
+      )
+      .symbol;
+  String cname(String code) => currencies
+      .firstWhere(
+        (c) => c.code == code,
+        orElse: () => CurrencyDef(code, code, code, 0),
+      )
+      .name;
+  final byId = {for (final a in d.accounts) a.id!: a};
+
+  switch (card) {
+    case ReportSummaryCard.sales:
+      final salesTxs = d.txs.where((t) {
+        final isRet = t.description.trim().startsWith('مرتجع ') ||
+            t.category == 'مرتجع مبيعات' ||
+            t.notes.contains('[ORIG_TX:');
+        final isSale = !isRet &&
+            (t.type == OpType.revenue ||
+                (t.type == OpType.debit &&
+                    t.accountKind != AccountKind.supplier));
+        return isSale || isRet;
+      }).toList()
+        ..sort((a, b) => b.date.compareTo(a.date));
+      return ReportTable(
+        headers: const ['التاريخ', 'النوع', 'الحساب', 'البيان', 'المبلغ', 'العملة'],
+        rows: salesTxs
+            .map(
+              (t) => [
+                Fmt.date(t.date),
+                t.type.label,
+                t.resolvedPartyName(byId[t.accountId]),
+                t.description.isEmpty ? t.type.label : t.description,
+                Fmt.money(t.amount),
+                sym(t.currency),
+              ],
+            )
+            .toList(),
+        summary: baseSummary,
       );
 
-  Widget _quick(BuildContext c, String label, VoidCallback t) => Padding(
-        padding: const EdgeInsetsDirectional.only(end: 8),
-        child: ActionChip(label: Text(label), onPressed: t),
+    case ReportSummaryCard.owedToUs:
+      final debtors = d.accounts
+          .where((a) => (d.balances[a.id!] ?? 0) > 0)
+          .toList()
+        ..sort(
+          (a, b) => (d.balances[b.id!] ?? 0).compareTo(d.balances[a.id!] ?? 0),
+        );
+      return ReportTable(
+        headers: const ['الحساب', 'النوع', 'المستحق لنا (عليه)', 'العملة'],
+        rows: debtors
+            .map(
+              (a) => [
+                '${a.kind.icon} ${a.name}',
+                a.kind.label,
+                Fmt.money(d.balances[a.id!] ?? 0),
+                sym(a.currency),
+              ],
+            )
+            .toList(),
+        summary: baseSummary,
       );
+
+    case ReportSummaryCard.owedByUs:
+      final creditors = d.accounts
+          .where((a) => (d.balances[a.id!] ?? 0) < 0)
+          .toList()
+        ..sort(
+          (a, b) => (d.balances[a.id!] ?? 0).compareTo(d.balances[b.id!] ?? 0),
+        );
+      return ReportTable(
+        headers: const ['الحساب', 'النوع', 'المستحق علينا (له)', 'العملة'],
+        rows: creditors
+            .map(
+              (a) => [
+                '${a.kind.icon} ${a.name}',
+                a.kind.label,
+                Fmt.money((d.balances[a.id!] ?? 0).abs()),
+                sym(a.currency),
+              ],
+            )
+            .toList(),
+        summary: baseSummary,
+      );
+
+    case ReportSummaryCard.net:
+      final per = <String, List<double>>{};
+      for (final a in d.accounts) {
+        final bal = d.balances[a.id!] ?? 0;
+        final e = per.putIfAbsent(a.currency, () => [0, 0, 0]);
+        if (bal > 0) {
+          e[0] += bal;
+        } else {
+          e[1] += bal.abs();
+        }
+        e[2] += bal;
+      }
+      return ReportTable(
+        headers: const ['العملة', 'مستحق لنا', 'مستحق علينا', 'الصافي'],
+        rows: per.entries
+            .map(
+              (e) => [
+                '${cname(e.key)} (${sym(e.key)})',
+                Fmt.money(e.value[0]),
+                Fmt.money(e.value[1]),
+                Fmt.money(e.value[2]),
+              ],
+            )
+            .toList(),
+        summary: baseSummary,
+      );
+  }
 }
 
 /// يبني جدول التقرير المطلوب — منطق منقول من دوال `r*` في نسخة الويب.
@@ -389,13 +821,11 @@ ReportTable buildReport(
         if (isSale) {
           tSales += t.amount;
         } else if (isRet) {
-          // (دفعة الواجهات) المرتجعات تُجمع صافياً داخل الحلقة ويُحصر الناتج
-          // مرة واحدة بعدها — الحصر لكل خطوة كان يصفّر الإجمالي مبكراً
-          // ويضخّم المبيعات حين يسبق المرتجع فاتورته في الترتيب.
           tSales -= t.amount;
         }
       }
       tSales = tSales.clamp(0.0, double.infinity);
+      // (المتطلب 4-ب) 4 بطاقات إحصائية فقط (عدد العمليات مدمج كعنصر فرعي داخل إجمالي المبيعات).
       return ReportTable(
         headers: const ['العملة', 'مستحق لنا', 'مستحق علينا', 'الصافي'],
         rows: rows,
@@ -404,7 +834,6 @@ ReportTable buildReport(
           ('إجمالي المستحق لنا', Fmt.money(tRec)),
           ('إجمالي المستحق علينا', Fmt.money(tPay)),
           ('صافي الرصيد', Fmt.money(tNet)),
-          ('عدد العمليات', '${d.txs.length}'),
         ],
       );
 
@@ -428,7 +857,7 @@ ReportTable buildReport(
                 t.type.label,
                 t.type == OpType.transfer
                     ? 'تحويل'
-                    : (byId[t.accountId]?.name ?? '—'),
+                    : t.resolvedPartyName(byId[t.accountId]),
                 t.description,
                 Fmt.money(t.amount),
                 sym(t.currency),
@@ -456,8 +885,6 @@ ReportTable buildReport(
     case ReportTab.period:
       final buckets = <String, List<double>>{};
       for (final t in d.txs) {
-        // (دفعة الواجهات) التجميع على تاريخ تقويمي UTC: طرح الأيام من تاريخ
-        // محلي يزيح الساعة عند تغيير التوقيت الصيفي فيُسند الحدث لأسبوع آخر.
         final day = DateTime.utc(t.date.year, t.date.month, t.date.day);
         final key = switch (unit) {
           PeriodUnit.day => Fmt.date(t.date),
@@ -556,8 +983,6 @@ ReportTable buildReport(
         if (isSale) {
           totalSales += t.amount;
         } else if (isRet) {
-          // (دفعة الواجهات) جمع صافٍ داخل الحلقة وحصر واحد بعدها — نفس علة
-          // كشف الحساب: الحصر المتكرر يخطئ مع مرتجع يسبق فاتورته.
           totalSales -= t.amount;
         }
         switch (t.type) {
@@ -667,7 +1092,90 @@ ReportTable buildReport(
 class _ReportView extends ConsumerWidget {
   final ReportTab tab;
   final ReportTable table;
-  const _ReportView({required this.tab, required this.table});
+  final ReportData data;
+  final ReportSummaryCard? selectedCard;
+  const _ReportView({
+    required this.tab,
+    required this.table,
+    required this.data,
+    required this.selectedCard,
+  });
+
+  Widget _buildInteractiveSummaryGrid(BuildContext context, WidgetRef ref) {
+    final map = {for (final e in table.summary) e.$1: e.$2};
+    final salesVal = map['إجمالي المبيعات'] ?? '0';
+    final owedToUsVal = map['إجمالي المستحق لنا'] ?? '0';
+    final owedByUsVal = map['إجمالي المستحق علينا'] ?? '0';
+    final netVal = map['صافي الرصيد'] ?? '0';
+    final txCount = data.txs.length;
+
+    void toggle(ReportSummaryCard c) {
+      final cur = ref.read(reportSelectedCardProvider);
+      ref.read(reportSelectedCardProvider.notifier).state =
+          cur == c ? null : c;
+    }
+
+    return Column(
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: _InteractiveReportCard(
+                cardKey: const ValueKey('report_card_sales'),
+                title: context.tr(ReportSummaryCard.sales.label),
+                value: salesVal,
+                subBadge: context.tr('عدد العمليات: $txCount'),
+                icon: Icons.point_of_sale_rounded,
+                color: const Color(0xFF10B981),
+                selected: selectedCard == ReportSummaryCard.sales,
+                onTap: () => toggle(ReportSummaryCard.sales),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _InteractiveReportCard(
+                cardKey: const ValueKey('report_card_owed_to_us'),
+                title: context.tr(ReportSummaryCard.owedToUs.label),
+                value: owedToUsVal,
+                icon: Icons.call_received_rounded,
+                color: const Color(0xFF0284C7),
+                selected: selectedCard == ReportSummaryCard.owedToUs,
+                onTap: () => toggle(ReportSummaryCard.owedToUs),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: _InteractiveReportCard(
+                cardKey: const ValueKey('report_card_owed_by_us'),
+                title: context.tr(ReportSummaryCard.owedByUs.label),
+                value: owedByUsVal,
+                icon: Icons.call_made_rounded,
+                color: const Color(0xFFEF4444),
+                selected: selectedCard == ReportSummaryCard.owedByUs,
+                onTap: () => toggle(ReportSummaryCard.owedByUs),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _InteractiveReportCard(
+                cardKey: const ValueKey('report_card_net'),
+                title: context.tr(ReportSummaryCard.net.label),
+                value: netVal,
+                icon: Icons.account_balance_wallet_rounded,
+                color: const Color(0xFF7C3AED),
+                selected: selectedCard == ReportSummaryCard.net,
+                onTap: () => toggle(ReportSummaryCard.net),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -697,104 +1205,106 @@ class _ReportView extends ConsumerWidget {
           child: RefreshIndicator(
             onRefresh: () async => bump(ref),
             child: ListView(
-            padding: const EdgeInsets.fromLTRB(14, 10, 14, 96),
-            children: [
-              if (table.summary.isNotEmpty) ...[
-                StatCardGrid(
-                  children: table.summary
-                      .map(
-                        (e) => StatCard(
-                          title: e.$1,
-                          value: e.$2,
-                          icon: Icons.analytics_outlined,
-                          color: AppColors.primaryOf(context),
-                        ),
-                      )
-                      .toList(),
-                ),
-                const SizedBox(height: 14),
-              ],
-              if (table.rows.isEmpty)
-                const EmptyState(
-                  icon: Icons.bar_chart_outlined,
-                  title: 'لا بيانات في هذه الفترة',
-                  message: 'وسّع الفترة أو غيّر المرشّحات.',
-                )
-              else
-                Card(
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: DataTable(
-                      headingRowHeight: 42,
-                      dataRowMinHeight: 38,
-                      dataRowMaxHeight: 48,
-                      columns: table.headers
-                          .map(
-                            (h) => DataColumn(
-                              label: Text(
-                                h,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w800,
-                                  fontSize: 12.5,
+              padding: const EdgeInsets.fromLTRB(14, 10, 14, 96),
+              children: [
+                if (tab == ReportTab.summary) ...[
+                  _buildInteractiveSummaryGrid(context, ref),
+                  const SizedBox(height: 14),
+                ] else if (table.summary.isNotEmpty) ...[
+                  StatCardGrid(
+                    children: table.summary
+                        .map(
+                          (e) => StatCard(
+                            title: e.$1,
+                            value: e.$2,
+                            icon: Icons.analytics_outlined,
+                            color: AppColors.primaryOf(context),
+                          ),
+                        )
+                        .toList(),
+                  ),
+                  const SizedBox(height: 14),
+                ],
+                if (table.rows.isEmpty)
+                  EmptyState(
+                    icon: Icons.bar_chart_outlined,
+                    title: context.tr('لا بيانات في هذه الفترة'),
+                    message: context.tr('وسّع الفترة أو غيّر المرشّحات.'),
+                  )
+                else
+                  Card(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: DataTable(
+                        headingRowHeight: 42,
+                        dataRowMinHeight: 38,
+                        dataRowMaxHeight: 48,
+                        columns: table.headers
+                            .map(
+                              (h) => DataColumn(
+                                label: Text(
+                                  context.tr(h),
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 12.5,
+                                  ),
                                 ),
                               ),
-                            ),
-                          )
-                          .toList(),
-                      rows: table.rows
-                          .map(
-                            (r) => DataRow(
-                              cells: r
-                                  .map(
-                                    (c) => DataCell(
-                                      Text(
-                                        c.isEmpty ? '—' : c,
-                                        style: const TextStyle(fontSize: 12.5),
+                            )
+                            .toList(),
+                        rows: table.rows
+                            .map(
+                              (r) => DataRow(
+                                cells: r
+                                    .map(
+                                      (c) => DataCell(
+                                        Text(
+                                          c.isEmpty ? '—' : context.tr(c),
+                                          style:
+                                              const TextStyle(fontSize: 12.5),
+                                        ),
                                       ),
-                                    ),
-                                  )
-                                  .toList(),
-                            ),
-                          )
-                          .toList(),
+                                    )
+                                    .toList(),
+                              ),
+                            )
+                            .toList(),
+                      ),
                     ),
                   ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: table.rows.isEmpty
+                            ? null
+                            : () async {
+                                final stamp = await featureNeedsStamp(
+                                    ref, Feature.reportsExport);
+                                if (context.mounted) {
+                                  await _exportPdf(context, tab, table,
+                                      stamp: stamp);
+                                }
+                              },
+                        icon: const Icon(Icons.picture_as_pdf_outlined),
+                        label: Text(context.tr('تصدير PDF')),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: table.rows.isEmpty
+                            ? null
+                            : () => _copyCsv(context, table),
+                        icon: const Icon(Icons.table_view_outlined),
+                        label: Text(context.tr('نسخ CSV')),
+                      ),
+                    ),
+                  ],
                 ),
-              const SizedBox(height: 14),
-              Row(
-                children: [
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed: table.rows.isEmpty
-                          ? null
-                          : () async {
-                              // (دفعة 65-ب) التصدير مسموح دائماً —
-                              // الحساب المقيد يُصدّر بختم مائي.
-                              final stamp = await featureNeedsStamp(
-                                  ref, Feature.reportsExport);
-                              if (context.mounted) {
-                                await _exportPdf(context, tab, table,
-                                    stamp: stamp);
-                              }
-                            },
-                      icon: const Icon(Icons.picture_as_pdf_outlined),
-                      label: const Text('تصدير PDF'),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: table.rows.isEmpty
-                          ? null
-                          : () => _copyCsv(context, table),
-                      icon: const Icon(Icons.table_view_outlined),
-                      label: const Text('نسخ CSV'),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
+              ],
+            ),
           ),
         ),
       ],
@@ -913,3 +1423,130 @@ class _ReportView extends ConsumerWidget {
     );
   }
 }
+
+/// (المتطلب 4-ب) بطاقة إحصائية تفاعلية في شبكة (2×2) بشاشة التقارير:
+/// تدعم النقر والتمييز بإطار واضح، وأيقونة ولون دلالي مميز، مع شارة فرعية لعدد العمليات.
+class _InteractiveReportCard extends StatelessWidget {
+  final Key? cardKey;
+  final String title;
+  final String value;
+  final String? subBadge;
+  final IconData icon;
+  final Color color;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _InteractiveReportCard({
+    this.cardKey,
+    required this.title,
+    required this.value,
+    this.subBadge,
+    required this.icon,
+    required this.color,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Material(
+      color: selected
+          ? color.withValues(alpha: isDark ? 0.18 : 0.08)
+          : AppColors.surfaceOf(context),
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        key: cardKey,
+        borderRadius: BorderRadius.circular(16),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.fromLTRB(12, 11, 12, 11),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: selected ? color : AppColors.borderOf(context),
+              width: selected ? 2.0 : 1.0,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 30,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(9),
+                    ),
+                    child: Icon(icon, size: 17, color: color),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.text2Of(context),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: Text(
+                      value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 16.5,
+                        fontWeight: FontWeight.w900,
+                        color: selected ? color : AppColors.textOf(context),
+                      ),
+                    ),
+                  ),
+                  if (subBadge != null) ...[
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 5,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: color.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          subBadge!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.w800,
+                            color: color,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+

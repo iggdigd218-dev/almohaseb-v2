@@ -134,9 +134,9 @@ void main() {
               return http.Response('null', 200);
             }));
     // المزامنة التراكمية (Delta-Sync): الترشيح بختم خادم فيربيس الرقمي حصراً (server_time)
-    // واستئناف السحب حصراً لما بعد المؤشر (startAfter(cursor) => startAt: cursor + 1).
+    // واستئناف السحب شاملاً اللحظة الأخيرة (startAt: cursor) مع فلترة محلية بالمؤشر المركب لمنع تفويت العمليات المتزامنة.
     expect(requested!.queryParameters['orderBy'], jsonEncode('server_time'));
-    expect(requested!.queryParameters['startAt'], '${ms + 1}');
+    expect(requested!.queryParameters['startAt'], '$ms');
 
     // التوافق الخلفي: مؤشر قديم بصيغة ISO يُقرأ ويُحوَّل رقمياً.
     final iso = DateTime.fromMillisecondsSinceEpoch(ms).toIso8601String();
@@ -148,7 +148,7 @@ void main() {
               requested = request.url;
               return http.Response('null', 200);
             }));
-    expect(requested!.queryParameters['startAt'], '${ms + 1}',
-        reason: 'قيمة ISO قديمة تُفهم وتتحول لملي ثانية مع استئناف startAfter');
+    expect(requested!.queryParameters['startAt'], '$ms',
+        reason: 'قيمة ISO قديمة تُفهم وتتحول لملي ثانية مع استئناف startAt الشامل');
   });
 }
