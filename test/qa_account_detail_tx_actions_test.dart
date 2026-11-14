@@ -275,13 +275,18 @@ void main() {
         expect(find.textContaining('1,500'), findsWidgets);
         expect(tester.takeException(), isNull);
       } finally {
+        await pumpFrames(4);
         await tester.pumpWidget(const SizedBox.shrink());
+        await pumpFrames(2);
         engine.stop();
         container.dispose();
+        await tester.pump(const Duration(seconds: 1));
         await tester.runAsync(() async {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
           await db.close();
           await tmp.delete(recursive: true);
         });
+        await tester.pump(const Duration(seconds: 1));
       }
     },
   );
