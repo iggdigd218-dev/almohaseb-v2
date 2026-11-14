@@ -815,5 +815,65 @@ void main() {
       expect(mergedSub.activeDevices, equals(2));
       expect(mergedSub.rosterDevices.length, equals(2));
     });
+
+    test('LIC-ADM14 أولوية mergeWith تحمي معرف المنشأة المشتركة من الاختطاف بواسطة سجل مهجور', () {
+      const abandoned = SubscriberEntry(
+        workspaceId: 'WS-J4MT2DJ9',
+        planType: 'individual',
+        status: 'abandoned',
+        maxDevices: 1,
+        activeDevices: 1,
+        expiresAtMs: 0,
+        activatedAtMs: 0,
+        lastSeenAtMs: 1794451536668,
+        deviceRef: '',
+        clientName: 'مستخدم جديد',
+        storeName: '',
+        phone: '',
+        deviceId: '',
+        licenseKey: '',
+        hasSubscriptionNode: false,
+        ownerEmail: 'moneerqaid950@gmail.com',
+        rosterDevices: [
+          ConnectedDevice(
+            deviceId: 'DEVICE-FFNQXRJ3KDL9',
+            deviceName: 'مستخدم جديد',
+            isOwner: true,
+            lastSeenAt: 1794451536668,
+          ),
+        ],
+      );
+      const activeOrg = SubscriberEntry(
+        workspaceId: 'WS-PY4WHH9S',
+        planType: 'enterprise',
+        status: 'active',
+        maxDevices: 15,
+        activeDevices: 3,
+        expiresAtMs: 4958327749156,
+        activatedAtMs: 1793926135375,
+        lastSeenAtMs: 1794637479836,
+        deviceRef: 'DEVICE-FFNQXRJ3KDL9',
+        clientName: 'Munir Abdullah',
+        storeName: 'مركز عثمان الوصابي',
+        phone: '+967774190040',
+        deviceId: 'DEVICE-FFNQXRJ3KDL9',
+        licenseKey: 'NX-FFNQ-XRJ3-KDL9',
+        hasSubscriptionNode: true,
+        ownerEmail: 'moneerqaid950@gmail.com',
+        rosterDevices: [
+          ConnectedDevice(deviceId: 'DEVICE-FFNQXRJ3KDL9', deviceName: 'المدير', isOwner: true, lastSeenAt: 1794635614489),
+          ConnectedDevice(deviceId: 'DEVICE-VE5WXPUKS3VA', deviceName: 'الكمبيوتر', lastSeenAt: 1794624613015),
+          ConnectedDevice(deviceId: 'DEVICE-9BJXYSKGNY7A', deviceName: 'محمد حمود', lastSeenAt: 1794637479836),
+        ],
+      );
+
+      final merged = abandoned.mergeWith(activeOrg);
+      expect(merged.workspaceId, equals('WS-PY4WHH9S'));
+      expect(merged.licenseKey, equals('NX-FFNQ-XRJ3-KDL9'));
+      expect(merged.storeName, equals('مركز عثمان الوصابي'));
+      expect(merged.maxDevices, equals(15));
+      expect(merged.activeDevices, equals(3));
+      expect(merged.rosterDevices.length, equals(3));
+    });
   });
 }

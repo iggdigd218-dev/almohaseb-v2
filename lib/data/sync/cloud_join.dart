@@ -2722,17 +2722,13 @@ class CloudJoin {
               final remFp =
                   '${remVal['fingerprint'] ?? remVal['hw_fingerprint'] ?? ''}'
                       .trim();
-              final remEmail =
-                  '${remVal['email'] ?? remVal['user_email'] ?? ''}'
-                      .trim()
-                      .toLowerCase();
+              final hasDifferentFp = myFp.isNotEmpty &&
+                  remFp.isNotEmpty &&
+                  remFp.toLowerCase() != myFp.toLowerCase();
               final sameFp = myFp.isNotEmpty &&
                   remFp.isNotEmpty &&
                   remFp.toLowerCase() == myFp.toLowerCase();
-              final sameEmail = selfEmail.isNotEmpty &&
-                  remEmail.isNotEmpty &&
-                  remEmail == selfEmail;
-              if (remId.isNotEmpty && remId != ourId && (sameFp || sameEmail)) {
+              if (remId.isNotEmpty && remId != ourId && !hasDifferentFp && sameFp) {
                 try {
                   await _delete(
                       '$root/roster/${Uri.encodeComponent(remId)}.json');

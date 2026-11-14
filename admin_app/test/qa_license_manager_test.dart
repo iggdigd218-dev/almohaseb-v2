@@ -34,6 +34,7 @@ class _FakeDb {
   /// معرف المساحة ⇒ {'sub': …, 'roster': …, 'log': …}
   final Map<String, Map<String, Object?>> ws;
   final Map<String, Object?> trials;
+  Map<String, Object?>? subscribersSummaryNode;
   final List<_Req> reqs = [];
   int serverNow;
   int signups = 0;
@@ -116,6 +117,22 @@ class _FakeDb {
 
     if (segs.first == 'workspaces') {
       final id = Uri.decodeComponent(segs[1]);
+      if (id == '_registry' && segs.length >= 3) {
+        final regChild = segs[2].endsWith('.json')
+            ? segs[2].substring(0, segs[2].length - 5)
+            : segs[2];
+        if (regChild == 'subscribers_summary') {
+          if (req.method == 'PUT') {
+            final m = jsonDecode(req.body);
+            subscribersSummaryNode =
+                m is Map ? m.cast<String, Object?>() : null;
+            return _json(subscribersSummaryNode);
+          }
+          return subscribersSummaryNode == null
+              ? _json('null')
+              : _json(subscribersSummaryNode);
+        }
+      }
       final store = ws[id];
       if (store == null) return _json('null');
       if (segs.length == 2) return _json({for (final k in store.keys) k: true});
@@ -137,6 +154,14 @@ class _FakeDb {
       if (child == 'roster') {
         final r = store['roster'];
         return r == null ? _json('null') : _json(r);
+      }
+      if (child == 'devices') {
+        final d = store['devices'];
+        return d == null ? _json('null') : _json(d);
+      }
+      if (child == 'meta') {
+        final m = store['meta'];
+        return m == null ? _json('null') : _json(m);
       }
       if (child == 'admin_log') {
         if (req.method == 'PUT') {
@@ -717,5 +742,148 @@ void main() {
     expect(updatedTrial['status'], 'active');
     expect(updatedTrial['max_devices'], 5);
     expect(updatedTrial['expires_at'], customExp);
+  });
+
+  test('LIC-14 مساحة مهجورة يتيمة بنفس البريد لا تختطف معرف المنشأة النشطة ولا تحجب أجهزتها المتعددة (3/15)',
+      () async {
+    final now = 1794637500000;
+    final db = _FakeDb(
+      serverNow: now,
+      ws: {
+        // مساحة مهجورة بلا subscription وبريد المالك نفسه، وآخر ظهور فيها أحدث من activated_at للمنشأة
+        'WS-J4MT2DJ9': {
+          'roster': {
+            'DEVICE-FFNQXRJ3KDL9': {
+              'id': 'DEVICE-FFNQXRJ3KDL9',
+              'name': 'مستخدم جديد',
+              'is_owner': 1,
+              'email': 'moneerqaid950@gmail.com',
+              'owner_email': 'moneerqaid950@gmail.com',
+              'fingerprint': 'FFNQXRJ3KDL942WTL7BAMW66',
+              'lastSeenAt': 1794451536668,
+              'workspace_id': 'WS-J4MT2DJ9',
+            },
+          },
+        },
+        // المنشأة الحقيقية الفعلية بـ 3 أجهزة (المالك + الكمبيوتر + محمد حمود) من أصل 15
+        'WS-PY4WHH9S': {
+          'sub': {
+            'status': 'active',
+            'plan_type': 'enterprise',
+            'max_devices': 15,
+            'active_devices': 3,
+            'activated_at': 1793926135375,
+            'expires_at': 4958327749156,
+            'store_name': 'مركز عثمان الوصابي',
+            'client_name': 'munir Abdullah',
+            'phone': '+967774190040',
+            'email': 'moneerqaid950@gmail.com',
+            'device_id': 'DEVICE-FFNQXRJ3KDL9',
+            'license_key': 'NX-FFNQ-XRJ3-KDL9',
+          },
+          'meta': {
+            'storeName': 'مركز عثمان الوصابي',
+            'owner_name': 'مدير التطوير : Munir Abdullah',
+            'owner_email': 'moneerqaid950@gmail.com',
+            'phone': '+967774190040',
+          },
+          'roster': {
+            'DEVICE-FFNQXRJ3KDL9': {
+              'id': 'DEVICE-FFNQXRJ3KDL9',
+              'name': 'مدير التطوير : Munir Abdullah',
+              'is_owner': 1,
+              'email': 'moneerqaid950@gmail.com',
+              'owner_email': 'moneerqaid950@gmail.com',
+              'fingerprint': 'FFNQXRJ3KDL942WTL7BAMW66',
+              'lastSeenAt': 1794635614489,
+            },
+            'DEVICE-VE5WXPUKS3VA': {
+              'id': 'DEVICE-VE5WXPUKS3VA',
+              'name': 'الكمبيوتر',
+              'is_owner': 0,
+              'last_seen_at': '2026-11-14T05:44:29.549',
+            },
+            'DEVICE-9BJXYSKGNY7A': {
+              'id': 'DEVICE-9BJXYSKGNY7A',
+              'name': 'محمد حمود',
+              'is_owner': 0,
+              'fingerprint': '9BJXYSKGNY7ANETHLY7D3S8N',
+              'lastSeenAt': 1794637360793,
+            },
+          },
+          'devices': {
+            'DEVICE-FFNQXRJ3KDL9': {
+              'deviceId': 'DEVICE-FFNQXRJ3KDL9',
+              'deviceName': 'مدير التطوير :',
+              'platform': 'Android',
+              'fingerprint': 'FFNQXRJ3KDL942WTL7BAMW66',
+              'lastSeenAt': 1794631762537,
+            },
+            'DEVICE-VE5WXPUKS3VA': {
+              'deviceId': 'DEVICE-VE5WXPUKS3VA',
+              'deviceName': 'الكمبيوتر',
+              'platform': 'Windows',
+              'fingerprint': 'VE5WXPUKS3VAMHUXYA87HGFL',
+              'lastSeenAt': 1794624613015,
+            },
+            'DEVICE-9BJXYSKGNY7A': {
+              'deviceId': 'DEVICE-9BJXYSKGNY7A',
+              'deviceName': 'محمد حمود',
+              'platform': 'Android',
+              'fingerprint': '9BJXYSKGNY7ANETHLY7D3S8N',
+              'lastSeenAt': 1794637479836,
+            },
+          },
+        },
+      },
+    )
+      // كاش قديم مسموم بدون schemaVersion يجب تجاهله وإعادة بنائه تلقائياً
+      ..subscribersSummaryNode = {
+        'WS-J4MT2DJ9': {
+          'workspaceId': 'WS-J4MT2DJ9',
+          'storeName': 'مركز عثمان الوصابي',
+          'phone': '+967774190040',
+          'maxDevices': 15,
+          'activeDevices': 1,
+          'status': 'active',
+          'hasSubscriptionNode': true,
+          'updatedAt': now,
+        },
+      };
+
+    final rtdb = await _rtdb(db);
+    final summaryRows = await rtdb.subscribersSummary();
+
+    expect(summaryRows.length, 2,
+        reason: 'المساحة المهجورة تبقى منفصلة ولا تُدمج عبر البريد مع المنشأة النشطة');
+    final realOrg =
+        summaryRows.firstWhere((e) => e.workspaceId == 'WS-PY4WHH9S');
+    final abandoned =
+        summaryRows.firstWhere((e) => e.workspaceId == 'WS-J4MT2DJ9');
+
+    expect(summaryRows.first.workspaceId, 'WS-PY4WHH9S',
+        reason: 'المنشأة ذات الاشتراك الفعلي تتصدر القائمة قبل المساحة المهجورة');
+    expect(realOrg.storeName, 'مركز عثمان الوصابي');
+    expect(realOrg.maxDevices, 15);
+    expect(realOrg.activeDevices, 3);
+    expect(realOrg.rosterDevices.length, 3);
+    expect(abandoned.hasSubscriptionNode, isFalse);
+
+    final liveDevices = await rtdb.getConnectedDevices(realOrg.workspaceId);
+    expect(liveDevices.length, 3);
+    expect(
+      liveDevices.map((d) => d.deviceId),
+      containsAll(<String>[
+        'DEVICE-FFNQXRJ3KDL9',
+        'DEVICE-VE5WXPUKS3VA',
+        'DEVICE-9BJXYSKGNY7A',
+      ]),
+    );
+
+    // التحقق من تحديث الفهرس على السحابة برقم المخطط الجديد (schemaVersion: 2)
+    expect(
+      (db.subscribersSummaryNode?['WS-PY4WHH9S'] as Map?)?['schemaVersion'],
+      kSubscribersSummarySchemaVersion,
+    );
   });
 }
