@@ -51,6 +51,9 @@ const String kSubscribersSummaryPath = 'workspaces/_registry/subscribers_summary
 /// أقصى عمر مقبول للفهرس قبل إعادة بنائه تلقائياً (10 دقائق).
 const int kSubscribersSummaryMaxAgeMs = 10 * 60 * 1000;
 
+/// رقم إصدار مخطط فهرس الملخص — أي فهرس أقدم يُعاد بناؤه تلقائياً لمنع عرض بيانات دمج قديمة.
+const int kSubscribersSummarySchemaVersion = 2;
+
 const String kOfficialAdminUid = 'mTMmR6MDBMZH8nKEbvCntRemkq73';
 const Set<String> kOfficialAdminUids = <String>{
   'mTMmR6MDBMZH8nKEbvCntRemkq73',
@@ -1669,21 +1672,40 @@ class Rtdb {
       return true;
     }).toList();
 
-    // ترتيب تنازلي حسب تاريخ الإنشاء/التفعيل أو آخر ظهور (الأحدث أولاً)
+    // ترتيب تنازلي: المساحات ذات الاشتراك الفعلي أولاً، ثم الأحدث تفاعلاً/تفعيلاً.
+    // يمنع ذلك طفو مساحة مهجورة بلا اشتراك فوق منشأة نشطة بسبب حداثة نبضة يتيمة.
     orgOnly.sort((a, b) {
-      final aTs = a.activatedAtMs > 0 ? a.activatedAtMs : a.lastSeenAtMs;
-      final bTs = b.activatedAtMs > 0 ? b.activatedAtMs : b.lastSeenAtMs;
+      if (a.hasSubscriptionNode != b.hasSubscriptionNode) {
+        return a.hasSubscriptionNode ? -1 : 1;
+      }
+      final aTs = a.activatedAtMs > a.lastSeenAtMs ? a.activatedAtMs : a.lastSeenAtMs;
+      final bTs = b.activatedAtMs > b.lastSeenAtMs ? b.activatedAtMs : b.lastSeenAtMs;
       final tsCmp = bTs.compareTo(aTs);
       if (tsCmp != 0) return tsCmp;
       return b.expiresAtMs.compareTo(a.expiresAtMs);
     });
 
-    // تجميع ودمج سجلات المشتركين:
-    // كل منشأة مستقلة (WS-...) تبقى في سطر مستقل بمعرفها (workspaceId) حتى لو كان لنفس المالك
-    // عدة منشآت بنفس رقم الهاتف أو نفس الجهاز، ولا تُدمج إلا السجلات المكررة لنفس المنشأة أو
-    // العقدة الافتراضية المشتقة من معرف الجهاز (ws_DEVICE-...).
+    // تجميع ودمج سجلات المشتركين بأمان تام:
+    // • كل منشأة مستقلة (WS-...) تبقى مستقلة بمعرفها (workspaceId) ولا تُدمج عبر البريد
+    //   أو تُختطف بواسطة مساحة مهجورة بلا اشتراك.
+    // • يُسمح بدمج العقدة الافتراضية المشتقة من الجهاز (ws_DEVICE-... أو DEVICE-...) مع منشأتها
+    //   بنفس حالة الاشتراك، أو دمج السجلات المشتركة لنفس المنشأة بنفس الهاتف واسم المتجر.
     final out = <SubscriberEntry>[];
-    final indexByKey = <String, int>{};
+    final indexByWs = <String, int>{};
+    final indexByDev = <String, int>{};
+    final indexByPhone = <String, int>{};
+
+    bool isDerivedDevWs(String wsId, String devUpper) {
+      final w = wsId.trim().toUpperCase();
+      if (w.isEmpty) return false;
+      if (w.startsWith('WS_DEVICE-') || w.startsWith('DEVICE-')) return true;
+      if (devUpper.isNotEmpty &&
+          (w == devUpper ||
+              w == 'WS_${devUpper.replaceAll(RegExp(r'[.#$\[\]/]'), '_')}')) {
+        return true;
+      }
+      return false;
+    }
 
     for (final entry in orgOnly) {
       final wsTrim = entry.workspaceId.trim();
@@ -1692,34 +1714,56 @@ class Rtdb {
       final phoneKey = normPhone.isNotEmpty ? 'phone:$normPhone' : '';
       final dev = entry.deviceId.trim().toUpperCase();
       final devKey = (dev.isNotEmpty && dev.startsWith('DEVICE-')) ? 'dev:$dev' : '';
-      final email = entry.ownerEmail.trim().toLowerCase();
-      final emailKey = (email.isNotEmpty && email.contains('@')) ? 'email:$email' : '';
 
-      int? existingIdx = indexByKey[wsKey];
+      int? existingIdx = indexByWs[wsKey];
       if (existingIdx == null && devKey.isNotEmpty) {
-        existingIdx = indexByKey[devKey];
+        final candIdx = indexByDev[devKey];
+        if (candIdx != null) {
+          final cand = out[candIdx];
+          if (cand.hasSubscriptionNode == entry.hasSubscriptionNode &&
+              (isDerivedDevWs(entry.workspaceId, dev) ||
+                  isDerivedDevWs(cand.workspaceId, cand.deviceId.trim().toUpperCase()))) {
+            existingIdx = candIdx;
+          }
+        }
       }
-      if (existingIdx == null && emailKey.isNotEmpty) {
-        existingIdx = indexByKey[emailKey];
-      }
-      if (existingIdx == null && phoneKey.isNotEmpty && (!includeAbandoned || entry.hasSubscriptionNode)) {
-        existingIdx = indexByKey[phoneKey];
+      if (existingIdx == null &&
+          phoneKey.isNotEmpty &&
+          entry.hasSubscriptionNode) {
+        final candIdx = indexByPhone[phoneKey];
+        if (candIdx != null) {
+          final cand = out[candIdx];
+          final s1 = entry.storeName.trim().toLowerCase();
+          final s2 = cand.storeName.trim().toLowerCase();
+          if (cand.hasSubscriptionNode &&
+              (s1.isEmpty || s2.isEmpty || s1 == s2)) {
+            existingIdx = candIdx;
+          }
+        }
       }
 
       if (existingIdx != null) {
-        final merged = out[existingIdx].mergeWith(entry);
-        out[existingIdx] = merged;
-        indexByKey[wsKey] = existingIdx;
-        if (devKey.isNotEmpty) indexByKey[devKey] = existingIdx;
-        if (emailKey.isNotEmpty) indexByKey[emailKey] = existingIdx;
-        if (phoneKey.isNotEmpty) indexByKey[phoneKey] = existingIdx;
+        final targetIdx = existingIdx;
+        final merged = out[targetIdx].mergeWith(entry);
+        out[targetIdx] = merged;
+        indexByWs[wsKey] = targetIdx;
+        indexByWs['ws:${merged.workspaceId.trim().toLowerCase()}'] = targetIdx;
+        if (devKey.isNotEmpty && merged.hasSubscriptionNode) {
+          indexByDev.putIfAbsent(devKey, () => targetIdx);
+        }
+        if (phoneKey.isNotEmpty && merged.hasSubscriptionNode) {
+          indexByPhone.putIfAbsent(phoneKey, () => targetIdx);
+        }
       } else {
         final newIdx = out.length;
         out.add(entry);
-        indexByKey[wsKey] = newIdx;
-        if (devKey.isNotEmpty) indexByKey[devKey] = newIdx;
-        if (emailKey.isNotEmpty) indexByKey[emailKey] = newIdx;
-        if (phoneKey.isNotEmpty) indexByKey[phoneKey] = newIdx;
+        indexByWs[wsKey] = newIdx;
+        if (devKey.isNotEmpty && entry.hasSubscriptionNode) {
+          indexByDev.putIfAbsent(devKey, () => newIdx);
+        }
+        if (phoneKey.isNotEmpty && entry.hasSubscriptionNode) {
+          indexByPhone.putIfAbsent(phoneKey, () => newIdx);
+        }
       }
     }
 
@@ -1740,7 +1784,9 @@ class Rtdb {
         final node = await _get(kSubscribersSummaryPath);
         final cached = _parseSubscribersSummary(node);
         final cutoff = DateTime.now().millisecondsSinceEpoch - maxAgeMs;
-        if (cached.rows.isNotEmpty && cached.newestUpdatedAtMs >= cutoff) {
+        if (cached.rows.isNotEmpty &&
+            cached.allCurrentSchema &&
+            cached.newestUpdatedAtMs >= cutoff) {
           return cached.rows;
         }
       } catch (_) {}
@@ -1817,20 +1863,29 @@ class Rtdb {
         'hasSubscriptionNode': e.hasSubscriptionNode,
         'featureFlags': e.featureFlags,
         'rosterDevices': e.rosterDevices.map((d) => d.toJson()).toList(),
+        'schemaVersion': kSubscribersSummarySchemaVersion,
         'updatedAt': DateTime.now().millisecondsSinceEpoch,
       };
 
-  ({List<SubscriberEntry> rows, int newestUpdatedAtMs})
+  ({List<SubscriberEntry> rows, int newestUpdatedAtMs, bool allCurrentSchema})
       _parseSubscribersSummary(dynamic node) {
     if (node is! Map) {
-      return (rows: const <SubscriberEntry>[], newestUpdatedAtMs: 0);
+      return (
+        rows: const <SubscriberEntry>[],
+        newestUpdatedAtMs: 0,
+        allCurrentSchema: false,
+      );
     }
     final rows = <SubscriberEntry>[];
     var newest = 0;
+    var allCurrentSchema = true;
     for (final e in node.entries) {
       final key = '${e.key}'.trim();
       final m = e.value;
       if (key.isEmpty || key.startsWith('_') || m is! Map) continue;
+      if (asInt(m['schemaVersion']) < kSubscribersSummarySchemaVersion) {
+        allCurrentSchema = false;
+      }
       final updated = asInt(m['updatedAt'] ?? m['updated_at']);
       if (updated > newest) newest = updated;
       final wsFromNode = asStr(m['workspaceId']);
@@ -1883,12 +1938,19 @@ class Rtdb {
       ));
     }
     rows.sort((a, b) {
-      final at = a.activatedAtMs > 0 ? a.activatedAtMs : a.lastSeenAtMs;
-      final bt = b.activatedAtMs > 0 ? b.activatedAtMs : b.lastSeenAtMs;
+      if (a.hasSubscriptionNode != b.hasSubscriptionNode) {
+        return a.hasSubscriptionNode ? -1 : 1;
+      }
+      final at = a.activatedAtMs > a.lastSeenAtMs ? a.activatedAtMs : a.lastSeenAtMs;
+      final bt = b.activatedAtMs > b.lastSeenAtMs ? b.activatedAtMs : b.lastSeenAtMs;
       final cmp = bt.compareTo(at);
       return cmp != 0 ? cmp : b.expiresAtMs.compareTo(a.expiresAtMs);
     });
-    return (rows: rows, newestUpdatedAtMs: newest);
+    return (
+      rows: rows,
+      newestUpdatedAtMs: newest,
+      allCurrentSchema: allCurrentSchema,
+    );
   }
 
   Future<List<SubscriberEntry>> _readWorkspaceEntries(

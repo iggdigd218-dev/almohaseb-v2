@@ -145,8 +145,15 @@ List<ConnectedDevice> mergeDevicesList(Iterable<ConnectedDevice> raw) {
       newer.deviceName,
       older.deviceName,
     ]);
+    final prevUp = prev.deviceId.trim().toUpperCase();
+    final nextUp = next.deviceId.trim().toUpperCase();
+    final chosenId = (nextUp.startsWith('DEVICE-') && !prevUp.startsWith('DEVICE-'))
+        ? next.deviceId.trim()
+        : ((prevUp.startsWith('DEVICE-') && !nextUp.startsWith('DEVICE-'))
+            ? prev.deviceId.trim()
+            : (newer.deviceId.trim().isNotEmpty ? newer.deviceId : older.deviceId));
     return ConnectedDevice(
-      deviceId: newer.deviceId.trim().isNotEmpty ? newer.deviceId : older.deviceId,
+      deviceId: chosenId,
       deviceName: bestName.isNotEmpty
           ? bestName
           : (newer.deviceName.isNotEmpty ? newer.deviceName : older.deviceName),
@@ -529,8 +536,26 @@ class SubscriberEntry {
             ? 'enterprise'
             : (planType.isNotEmpty ? planType : other.planType);
 
+    bool isDerivedWs(String id) {
+      final up = id.trim().toUpperCase();
+      return up.startsWith('WS_DEVICE-') || up.startsWith('DEVICE-');
+    }
+
+    final useOtherAsPrimary = (!hasSubscriptionNode && other.hasSubscriptionNode) ||
+        (hasSubscriptionNode == other.hasSubscriptionNode &&
+            isDerivedWs(workspaceId) &&
+            !isDerivedWs(other.workspaceId)) ||
+        (hasSubscriptionNode == other.hasSubscriptionNode &&
+            isDerivedWs(workspaceId) == isDerivedWs(other.workspaceId) &&
+            status != 'active' &&
+            other.status == 'active');
+    final primary = useOtherAsPrimary ? other : this;
+    final secondary = useOtherAsPrimary ? this : other;
+
     return SubscriberEntry(
-      workspaceId: workspaceId.isNotEmpty ? workspaceId : other.workspaceId,
+      workspaceId: primary.workspaceId.isNotEmpty
+          ? primary.workspaceId
+          : secondary.workspaceId,
       planType: bestPlan,
       status: bestStatus,
       maxDevices: bestMaxDevices,
@@ -538,21 +563,30 @@ class SubscriberEntry {
       expiresAtMs: bestExpires,
       activatedAtMs: bestActivated,
       lastSeenAtMs: bestLastSeen,
-      deviceRef: deviceRef.isNotEmpty ? deviceRef : other.deviceRef,
+      deviceRef:
+          primary.deviceRef.isNotEmpty ? primary.deviceRef : secondary.deviceRef,
       clientName: pickRealClientName([
-        clientName,
-        other.clientName,
+        primary.clientName,
+        secondary.clientName,
         ...mergedList.where((d) => d.isOwner).map((d) => d.deviceName),
       ]),
-      storeName: storeName.isNotEmpty ? storeName : other.storeName,
-      phone: phone.isNotEmpty ? phone : other.phone,
-      deviceId: deviceId.isNotEmpty ? deviceId : other.deviceId,
-      licenseKey: licenseKey.isNotEmpty ? licenseKey : other.licenseKey,
-      isFrozen: isFrozen && other.isFrozen,
-      featureFlags: {...other.featureFlags, ...featureFlags},
+      storeName:
+          primary.storeName.isNotEmpty ? primary.storeName : secondary.storeName,
+      phone: primary.phone.isNotEmpty ? primary.phone : secondary.phone,
+      deviceId:
+          primary.deviceId.isNotEmpty ? primary.deviceId : secondary.deviceId,
+      licenseKey: primary.licenseKey.isNotEmpty
+          ? primary.licenseKey
+          : secondary.licenseKey,
+      isFrozen: (primary.hasSubscriptionNode && secondary.hasSubscriptionNode)
+          ? (primary.isFrozen && secondary.isFrozen)
+          : primary.isFrozen,
+      featureFlags: {...secondary.featureFlags, ...primary.featureFlags},
       rosterDevices: mergedList,
       hasSubscriptionNode: hasSubscriptionNode || other.hasSubscriptionNode,
-      ownerEmail: ownerEmail.isNotEmpty ? ownerEmail : other.ownerEmail,
+      ownerEmail: primary.ownerEmail.isNotEmpty
+          ? primary.ownerEmail
+          : secondary.ownerEmail,
     );
   }
 
