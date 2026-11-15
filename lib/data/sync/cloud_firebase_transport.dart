@@ -13,6 +13,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:http/http.dart' as http;
 import 'package:sqflite/sqflite.dart';
@@ -30,6 +31,7 @@ import 'chat_hooks.dart';
 import 'operation.dart';
 import 'subscription_guard.dart';
 import 'sync_engine.dart';
+import 'sync_quarantine.dart';
 
 class CloudFirebaseTransport implements SyncTransport {
   final Repo repo;
@@ -194,19 +196,47 @@ class CloudFirebaseTransport implements SyncTransport {
     return '';
   }
 
+  /// يقرأ حاجز المزامنة الذري الصارم `atomic_sync_barrier:$workspaceId` (بالملي ثانية).
+  /// يمنع أي جهاز مثبَّت بلقطة نظيفة من سحب أو إعادة تطبيق العمليات التاريخية الأقدم منه
+  /// حتى عند استدعاء `resetCursor: true` أو `forceFullSync: true`.
+  Future<int> getAtomicSyncBarrier() async {
+    final db = await _db;
+    var best = 0;
+    try {
+      final rows = await db.query(
+        'sync_meta',
+        columns: ['value'],
+        where: 'key IN (?, ?)',
+        whereArgs: [
+          'atomic_sync_barrier:$workspaceId',
+          'atomic_sync_barrier',
+        ],
+      );
+      for (final r in rows) {
+        final raw = '${r['value'] ?? ''}'.trim();
+        final parsed = int.tryParse(raw) ??
+            (DateTime.tryParse(raw)?.millisecondsSinceEpoch ?? 0);
+        if (parsed > best) best = parsed;
+      }
+    } catch (_) {}
+    return best;
+  }
+
   /// يحفظ المؤشر الزمني المركب المحلي الدائم `(last_synced_cursor, last_synced_cursor_key)` فوراً.
   Future<void> saveLastSyncedCursor(
     int cursorMs, {
     String? cursorKey,
     DatabaseExecutor? executor,
   }) async {
-    if (cursorMs <= 0) return;
+    final barrierMs = await getAtomicSyncBarrier();
+    final effectiveCursorMs = math.max(cursorMs, barrierMs);
+    if (effectiveCursorMs <= 0) return;
     final target = executor ?? await _db;
     await target.insert(
       'sync_meta',
       {
         'key': 'last_synced_cursor:$workspaceId',
-        'value': '$cursorMs',
+        'value': '$effectiveCursorMs',
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
@@ -214,7 +244,7 @@ class CloudFirebaseTransport implements SyncTransport {
       'sync_meta',
       {
         'key': 'lastCloudTs:$workspaceId',
-        'value': '$cursorMs',
+        'value': '$effectiveCursorMs',
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
@@ -233,7 +263,7 @@ class CloudFirebaseTransport implements SyncTransport {
         'settings',
         {
           'key': 'last_synced_cursor',
-          'value': '$cursorMs',
+          'value': '$effectiveCursorMs',
         },
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
@@ -279,6 +309,18 @@ class CloudFirebaseTransport implements SyncTransport {
         if (isSynced == 1 || synced == 1) {
           return; // مرفوعة ومؤكدة مسبقاً — يُمنع إعادة إرسالها في أي دورة لاحقة.
         }
+      }
+      final barrierMs = await getAtomicSyncBarrier();
+      if (barrierMs > 0 && op.serverTimeMs > 0 && op.serverTimeMs <= barrierMs) {
+        try {
+          await db.update(
+            'operations',
+            {'synced': 1, 'is_synced': 1},
+            where: 'id = ?',
+            whereArgs: [op.id],
+          );
+        } catch (_) {}
+        return; // عملية تاريخية سابقة لحاجز اللقطة الذرية — يُحظر إعادة دفعها للسحابة.
       }
     } on DatabaseException catch (_) {}
 
@@ -457,12 +499,19 @@ class CloudFirebaseTransport implements SyncTransport {
     // ضمان وجود سجل المنشأة الرئيسية (workspaces) أولاً في قاعدة البيانات المحلية
     // قبل تطبيق أي عمليات مزامنة أو تحديث سجلات الأجهزة والأعضاء والأصناف.
     await AppDatabase.ensureWorkspaceRow(db, workspaceId);
-    // استهلاك السحب بالمؤشر الزمني حصراً (Cursor-Based Inbound Sync):
-    // نقرأ المؤشر المحلي الدائم `last_synced_cursor` المعتمد على `server_time`،
-    // ولا نطلب إلا العمليات الأحدث منه (`startAt = last_synced_cursor + 1`).
-    final int lastCursorMs = resetCursor ? 0 : await getLastSyncedCursor();
+    try {
+      await ApplyRemoteOp.healCorruptedItemCatalog(db);
+    } catch (_) {}
+    // استهلاك السحب بالمؤشر الزمني مع احترام حاجز المزامنة الذري الصارم:
+    // إذا وُجد `atomic_sync_barrier:$workspaceId` فلا يُسمح لأي استدعاء
+    // (حتى مع resetCursor: true أو forceFullSync: true) بالعودة لما قبل اللقطة.
+    final int barrierMs = await getAtomicSyncBarrier();
+    final int rawCursorMs = resetCursor ? 0 : await getLastSyncedCursor();
+    final int lastCursorMs = math.max(rawCursorMs, barrierMs);
     final String lastCursorKey =
-        resetCursor ? '' : await getLastSyncedCursorKey();
+        (resetCursor || lastCursorMs > rawCursorMs)
+            ? ''
+            : await getLastSyncedCursorKey();
     final r = resolver ?? ConflictResolver();
     int applied = 0;
     int maxTsMs = lastCursorMs;
@@ -560,11 +609,29 @@ class CloudFirebaseTransport implements SyncTransport {
       // حاجز عدم التكرار `idempotentQ` عبر `operations.id`، فلا تسقط أي حركة متزامنة
       // تشترك في نفس الملي ثانية على الخادم.
       final int fetchedCount = entries.length;
+      if (barrierMs > 0) {
+        entries = entries.where((e) {
+          final ms = entryMs(e.value);
+          return ms == 0 || ms > barrierMs;
+        }).toList();
+      }
       if (currentCursorMs > 0) {
         entries =
             entries.where((e) => entryMs(e.value) >= currentCursorMs).toList();
       }
       if (entries.isEmpty) {
+        if (fetchedCount >= kPullPageSize) {
+          var rawPageMaxTs = 0;
+          for (final e in decoded.entries) {
+            final ms = entryMs(e.value);
+            if (ms > rawPageMaxTs) rawPageMaxTs = ms;
+          }
+          if (rawPageMaxTs >= currentCursorMs) {
+            currentCursorMs = rawPageMaxTs + 1;
+            hasMore = true;
+            continue;
+          }
+        }
         hasMore = false;
         break;
       }
@@ -651,13 +718,20 @@ class CloudFirebaseTransport implements SyncTransport {
               final v = entry.value;
               if (v is! Map) continue;
               final op = SyncOperation.fromMap(Map<String, Object?>.from(v));
-              if (op.workspaceId != workspaceId &&
-                  op.workspaceId != 'default' &&
-                  workspaceId != 'default' &&
-                  op.workspaceId.isNotEmpty) {
+              final opWs = op.workspaceId.trim();
+              final transportWs = workspaceId.trim();
+              if (transportWs != 'default' && opWs != transportWs) {
                 droppedOtherWs++;
                 if (droppedSample.isEmpty) droppedSample = op.workspaceId;
                 continue;
+              }
+              if (barrierMs > 0) {
+                final opEffMs = op.serverTimeMs > 0
+                    ? op.serverTimeMs
+                    : opTimeMs(op, v);
+                if (opEffMs > 0 && opEffMs <= barrierMs) {
+                  continue;
+                }
               }
               // idempotent: نفس opId موجود مسبقًا -> تجاهل.
               final idempotentQ = await txn.query(
@@ -1054,8 +1128,22 @@ class CloudFirebaseTransport implements SyncTransport {
       } catch (_) {}
     }
 
-    if (applied > 0 || forceFullSync || resetCursor || lastCursorMs == 0) {
+    var replayedFromQuarantine = 0;
+    try {
+      replayedFromQuarantine = await SyncQuarantineStore.autoReplayResolvedQuarantine(
+        repo,
+        workspaceId: workspaceId,
+      );
+      applied += replayedFromQuarantine;
+    } catch (_) {}
+
+    if (applied > 0 ||
+        replayedFromQuarantine > 0 ||
+        forceFullSync ||
+        resetCursor ||
+        lastCursorMs == 0) {
       try {
+        await ApplyRemoteOp.healCorruptedItemCatalog(db);
         await ApplyRemoteOp.reconcileInventoryQuantities(db);
       } catch (_) {}
     }

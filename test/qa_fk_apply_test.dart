@@ -10,6 +10,7 @@ import 'package:nexora_app/data/repository.dart';
 import 'package:nexora_app/data/sync/apply_remote.dart';
 import 'package:nexora_app/data/sync/conflict_resolver.dart';
 import 'package:nexora_app/data/sync/operation.dart';
+import 'package:nexora_app/data/sync/sync_quarantine.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
@@ -48,9 +49,9 @@ void main() {
         deviceTime: DateTime.now().toIso8601String(),
       );
 
-  test('FK-01 فاتورة قبل حسابها: لا 787 والسحب لا يتوقف', () async {
+  test('FK-01 فاتورة قبل حسابها: لا 787 وتُعزل في الحجر الصحي بدون سجلات وهمية ثم تُطبَّق عند وصول الآباء', () async {
     final db = await repo.database;
-    // لا يوجد حساب 77 محلياً — الفاتورة تصل أولاً (ترتيب عشوائي حقيقي).
+    // لا يوجد حساب 77 أو صنف 555 محلياً — الفاتورة تصل أولاً (ترتيب عشوائي حقيقي).
     final txOp = op(
       kind: EntityKind.tx,
       type: OpKind.create,
@@ -81,27 +82,68 @@ void main() {
     );
     final ok = await db.transaction(
         (txn) => repo.applyRemoteOperation(txn, txOp, ConflictResolver()));
-    expect(ok, isTrue, reason: 'العملية تُطبَّق ولا يرتفع FOREIGN KEY 787');
+    expect(ok, isFalse, reason: 'العملية تُعزل في الحجر الصحي بانتظار الأب الحقيقي');
 
-    final rows = await db.query('transactions', where: 'id = ?', whereArgs: [
-      int.tryParse('900') ?? '900'
-    ]);
-    expect(rows.length, 1, reason: 'الفاتورة أُدرجت');
-    final stubs = await db.query('accounts', where: 'id = ?', whereArgs: [77]);
-    expect(stubs.length, 1, reason: 'سجل مؤقت للحساب المفقود');
-    expect(stubs.first['name'], contains('مؤقت'));
-    final items = await db.query('items', where: 'id = ?', whereArgs: [555]);
-    expect(items.length, 1, reason: 'سجل مؤقت للصنف المفقود');
+    expect(await db.query('transactions', where: 'id = ?', whereArgs: [900]), isEmpty);
+    expect(await db.query('accounts', where: 'id = ?', whereArgs: [77]), isEmpty,
+        reason: 'يُمنع إنشاء حساب مؤقت وهمي');
+    expect(await db.query('items', where: 'id = ?', whereArgs: [555]), isEmpty,
+        reason: 'يُمنع إنشاء صنف مؤقت وهمي');
+
+    final q = await SyncQuarantineStore.pendingOps(db, workspaceId: 'WS-QA');
+    expect(q, hasLength(1));
+    expect(q.first['reason'], SyncQuarantineStore.kReasonMissingParentFk);
+
+    // الآن يصل الحساب الحقيقي 77 والصنف الحقيقي 555
+    await db.transaction((txn) => repo.applyRemoteOperation(
+          txn,
+          op(
+            kind: EntityKind.account,
+            type: OpKind.create,
+            id: '77',
+            payload: {
+              'id': 77,
+              'workspace_id': 'WS-QA',
+              'name': 'عميل 77',
+              'kind': 'customer',
+              'notify_channel': 'none',
+            },
+          ),
+          ConflictResolver(),
+        ));
+    await db.transaction((txn) => repo.applyRemoteOperation(
+          txn,
+          op(
+            kind: EntityKind.item,
+            type: OpKind.create,
+            id: '555',
+            payload: {
+              'id': 555,
+              'workspace_id': 'WS-QA',
+              'name': 'صنف وارد',
+              'sell_price': 750,
+            },
+          ),
+          ConflictResolver(),
+        ));
+
+    final replayed = await SyncQuarantineStore.autoReplayResolvedQuarantine(
+      repo,
+      workspaceId: 'WS-QA',
+    );
+    expect(replayed, 1);
+
+    final rows = await db.query('transactions', where: 'id = ?', whereArgs: [900]);
+    expect(rows.length, 1, reason: 'الفاتورة أُدرجت بعد وصول الآباء');
     final lines =
-        await db.query('transaction_items', where: 'tx_id = ?', whereArgs: [
-      int.tryParse('900') ?? '900'
-    ]);
-    expect(lines.length, 1, reason: 'بنود الفاتورة أُدرجت');
+        await db.query('transaction_items', where: 'tx_id = ?', whereArgs: [900]);
+    expect(lines.length, 1, reason: 'بنود الفاتورة أُدرجت بالكامل');
+    expect(await SyncQuarantineStore.countPending(db, workspaceId: 'WS-QA'), 0);
   });
 
-  test('FK-02 الحساب الأصلي يستبدل السجل المؤقت لاحقاً', () async {
+  test('FK-02 الحساب الأصلي يصل لاحقاً فيُعاد تشغيل الفاتورة المعزولة تلقائياً', () async {
     final db = await repo.database;
-    await db.transaction((txn) => repo.applyRemoteOperation(
+    final okBefore = await db.transaction((txn) => repo.applyRemoteOperation(
         txn,
         op(
           kind: EntityKind.tx,
@@ -118,6 +160,9 @@ void main() {
           },
         ),
         ConflictResolver()));
+    expect(okBefore, isFalse);
+    expect(await db.query('accounts', where: 'id = ?', whereArgs: [88]), isEmpty);
+
     await db.transaction((txn) => repo.applyRemoteOperation(
         txn,
         op(
@@ -133,9 +178,17 @@ void main() {
           },
         ),
         ConflictResolver()));
+
+    final replayed = await SyncQuarantineStore.autoReplayResolvedQuarantine(
+      repo,
+      workspaceId: 'WS-QA',
+    );
+    expect(replayed, 1);
+
     final acc = await db.query('accounts', where: 'id = ?', whereArgs: [88]);
-    expect(acc.first['name'], 'عميل حقيقي',
-        reason: 'السجل الحقيقي يحل محل المؤقت بنفس المعرف');
+    expect(acc.first['name'], 'عميل حقيقي');
+    final txRows = await db.query('transactions', where: 'id = ?', whereArgs: [901]);
+    expect(txRows.length, 1);
   });
 
   test('CAT-DEDUP-01 تصنيف مكرر الاسم لا يرمي UNIQUE constraint failed', () async {

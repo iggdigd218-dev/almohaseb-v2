@@ -50,7 +50,7 @@ void main() {
   }
 
   test(
-    'QA-CONFLICT-ENGINE-1 devices DEFAULT dates, creator name priority skipping placeholders, MAX(id)+1 allocation, and wildcard item_id_remap lookup',
+    'QA-CONFLICT-ENGINE-1 devices DEFAULT dates, In-Place Upsert on matching ID by newest timestamp, zero auto-split/remap, and stale write rejection',
     () async {
       final (tmp, db, repo) = await createTestRepo('nexora_eng_1_');
       final resolver = ConflictResolver();
@@ -63,13 +63,6 @@ void main() {
           'is_paired': 1,
         });
 
-        // 2. جدول users يحتوي افتراضياً على "المدير" (اسم عام يجب تخطيه)
-        // التحقق من أولوية الإعدادات: profile.owner_name -> account.name -> sync.deviceName
-        await repo.setSetting('sync.deviceName', 'جهاز الكاشير 1');
-        await repo.setSetting('account.name', 'مؤسسة النور');
-        await repo.setSetting('profile.owner_name', 'خالد المحاسب');
-
-        // نضع صنفاً عالي المعرف للتأكد أن _allocateFreeItemId يستخدم MAX(id) + 1
         const t0 = '2026-11-10T07:00:00.000Z';
         await db.insert('items', {
           'id': 200,
@@ -106,8 +99,9 @@ void main() {
           'updated_at': t1,
         });
 
+        // 2. عملية واردة أحدث (t2 > t1) لنفس ID=50 تحدث السجل في مكانه بدون فصل أو إعادة ترقيم
         const t2 = '2026-11-10T08:10:00.000Z';
-        await repo.applyRemoteOperation(
+        final appliedNewer = await repo.applyRemoteOperation(
           db,
           const SyncOperation(
             id: 'op-item-50-remote',
@@ -137,20 +131,62 @@ void main() {
           ),
           resolver,
         );
+        expect(appliedNewer, isTrue);
 
-        final pending = await repo.pendingItemConflicts();
-        expect(pending.length, 1);
-        final conflict = pending.single;
-        expect(conflict.item1Creator, 'خالد المحاسب');
-        expect(conflict.item2Creator, 'فرع التحرير');
-        // MAX(id) كان 200، فيأخذ الصنف المفصول المعرف 201 مباشرة
-        expect(conflict.item2Id, 201);
+        // لا يُنشأ أي صنف موازٍ 201 ولا مفاتيح item_id_remap ولا تعارض pending
+        expect(await repo.pendingItemConflicts(), isEmpty);
+        final item201 = await db.query('items', where: 'id = 201');
+        expect(item201, isEmpty);
+        final remapRows = await db.query(
+          'sync_meta',
+          where: "key LIKE 'item_id_remap:%'",
+        );
+        expect(remapRows, isEmpty);
 
-        // 3. وصول حركة مخزون لاحقة بدون deviceId تطابق المعرف المعاد ترقيمه عبر LIKE 'item_id_remap:%:50'
+        final updated50 = (await db.query('items', where: 'id = 50')).single;
+        expect(updated50['name'], 'سماعة بلوتوث رياضية');
+        expect(updated50['sell_price'], 4500.0);
+
+        // 3. عملية قديمة متأخرة (t0 < t2) لنفس ID=50 تُرفض ولا تستبدل النسخة الأحدث
+        final appliedOlder = await repo.applyRemoteOperation(
+          db,
+          const SyncOperation(
+            id: 'op-item-50-stale',
+            workspaceId: 'default',
+            deviceId: 'dev-remote-2',
+            userId: 3,
+            opType: OpKind.create,
+            entityType: EntityKind.item,
+            entityId: '50',
+            payload: {
+              'id': 50,
+              'plu': 50,
+              'name': 'نسخة قديمة مرفوضة',
+              'sku': 'OLD-50',
+              'unit': 'قطعة',
+              'buy_price': 500.0,
+              'sell_price': 700.0,
+              'quantity': 2.0,
+              'min_quantity': 0.0,
+              'created_at': t0,
+              'updated_at': t0,
+            },
+            timestamp: t0,
+            deviceTime: t0,
+            version: 1,
+            parentOpId: '',
+          ),
+          resolver,
+        );
+        expect(appliedOlder, isFalse);
+        final stillNew50 = (await db.query('items', where: 'id = 50')).single;
+        expect(stillNew50['name'], 'سماعة بلوتوث رياضية');
+
+        // 4. حركة مخزون لاحقة للمعرف 50 تبقى مرتبطة بالمعرف 50 نفسه
         await repo.applyRemoteOperation(
           db,
           const SyncOperation(
-            id: 'op-move-remap-wildcard',
+            id: 'op-move-50-direct',
             workspaceId: 'default',
             deviceId: '',
             userId: 2,
@@ -179,7 +215,7 @@ void main() {
           where: 'id = ?',
           whereArgs: [901],
         );
-        expect(move901.single['item_id'], 201);
+        expect(move901.single['item_id'], 50);
       } finally {
         await db.close();
         try {
@@ -716,4 +752,110 @@ void main() {
       }
     },
   );
+
+  test(
+    'QA-CONFLICT-ENGINE-6 healCorruptedItemCatalog remaps split moves, purges split items and stale conflicts, and blocks incoming split item ops',
+    () async {
+      final (tmp, db, repo) = await createTestRepo('nexora_eng_6_');
+      final resolver = ConflictResolver();
+      try {
+        const origId = 1881515537087960576;
+        const splitId = 1881848145177768632;
+        const tCreated = '2026-11-11T19:03:54.374645';
+
+        await db.insert('items', {
+          'id': origId,
+          'plu': origId,
+          'workspace_id': 'default',
+          'name': 'بلو شيرنس',
+          'sku': '100002',
+          'unit': 'مل',
+          'buy_price': 60.0,
+          'sell_price': 150.0,
+          'quantity': 50.0,
+          'min_quantity': 20.0,
+          'is_active': 1,
+          'is_deleted': 0,
+          'created_at': tCreated,
+          'updated_at': tCreated,
+        });
+        await db.insert('items', {
+          'id': splitId,
+          'plu': 263,
+          'workspace_id': 'default',
+          'name': 'بلو اجمل',
+          'sku': '',
+          'unit': 'مل',
+          'buy_price': 60.0,
+          'sell_price': 150.0,
+          'quantity': 28.0,
+          'min_quantity': 20.0,
+          'is_active': 1,
+          'is_deleted': 0,
+          'created_at': tCreated,
+          'updated_at': tCreated,
+        });
+        await db.insert('stock_moves', {
+          'id': 1881553655213031936,
+          'workspace_id': 'default',
+          'item_id': splitId,
+          'kind': 'sale',
+          'quantity': 22.0,
+          'unit_price': 150.0,
+          'date': '2026-11-12T20:18:36.020329',
+          'created_at': '2026-11-12T20:18:36.020329',
+        });
+        await repo.setSetting(
+          'item_conflict:${origId}_$splitId',
+          '{"key":"item_conflict:${origId}_$splitId","conflictType":"sku","sharedSku":"100001","item1Id":$origId,"item1Name":"بلو شيرنس","item2Id":$splitId,"item2Name":"بلو اجمل","status":"pending"}',
+        );
+
+        final activeItems = await repo.items();
+        expect(activeItems.length, 1);
+        expect(activeItems.single.id, origId);
+        expect(activeItems.single.name, 'بلو اجمل');
+        expect(activeItems.single.plu, 263);
+
+        final remappedMove = await db.query(
+          'stock_moves',
+          where: 'id = ?',
+          whereArgs: [1881553655213031936],
+        );
+        expect(remappedMove.single['item_id'], origId);
+        expect(await repo.pendingItemConflicts(), isEmpty);
+
+        // عملية واردة لمعرّف منقسم تُرفض فوراً
+        final splitOpApplied = await repo.applyRemoteOperation(
+          db,
+          const SyncOperation(
+            id: 'op-split-reject',
+            workspaceId: 'default',
+            deviceId: 'dev-remote',
+            userId: 1,
+            opType: OpKind.create,
+            entityType: EntityKind.item,
+            entityId: '$splitId',
+            payload: {
+              'id': splitId,
+              'name': 'صنف منقسم مرفوض',
+              'created_at': tCreated,
+              'updated_at': tCreated,
+            },
+            timestamp: tCreated,
+            deviceTime: tCreated,
+            version: 1,
+            parentOpId: '',
+          ),
+          resolver,
+        );
+        expect(splitOpApplied, isFalse);
+      } finally {
+        await db.close();
+        try {
+          await tmp.delete(recursive: true);
+        } catch (_) {}
+      }
+    },
+  );
 }
+

@@ -8494,6 +8494,7 @@ class Repo {
     bool includeDeleted = false,
   }) async {
     final db = await _db;
+    await ApplyRemoteOp.healCorruptedItemCatalog(db);
     final where = <String>[];
     final args = <Object?>[];
     if (!includeArchived) where.add('i.archived = 0');
@@ -8593,7 +8594,13 @@ class Repo {
     Item it, {
     bool enforceMinBarcodeLength = false,
   }) async {
-    await _ensureCan(it.id == null ? 'add_tx' : 'edit_tx');
+    final perms = await effectivePermissions().timeout(
+      const Duration(seconds: 3),
+      onTimeout: () => EffectivePermissions.none(''),
+    );
+    if (!perms.isActive || (!perms.isAdmin && !perms.canManageItems)) {
+      throw StateError('ليس لديك صلاحية إدارة الأصناف.');
+    }
     final db = await _db;
     // (سلامة المخزون) رفض القيم غير المنتهية فقط (NaN / Infinity) مع السماح
     // بالكميات السالبة (مثل -1 عند البيع المتزامن أوفلاين أو البيع على المكشوف).
@@ -8876,16 +8883,59 @@ class Repo {
   /// جميع سجلات تعارض الأصناف المسجّلة (المعلقة والمعالجة).
   Future<List<OfflineItemConflict>> allItemConflicts() async {
     final db = await _db;
+    await ApplyRemoteOp.healCorruptedItemCatalog(db);
     final rows = await db.query(
       'settings',
       where: "key LIKE 'item_conflict:%'",
     );
+    if (rows.isEmpty) return const <OfflineItemConflict>[];
+
+    final activeItemRows = await db.query(
+      'items',
+      columns: ['id', 'name', 'sku', 'is_deleted', 'deleted_at'],
+      where:
+          "(is_deleted = 0 OR is_deleted IS NULL) AND (deleted_at IS NULL OR TRIM(deleted_at) = '' OR TRIM(deleted_at) = 'null')",
+    );
+    final activeById = <int, Map<String, Object?>>{
+      for (final r in activeItemRows)
+        if ((r['id'] as num?)?.toInt() != null)
+          (r['id'] as num).toInt(): r,
+    };
+
     final out = <OfflineItemConflict>[];
     for (final r in rows) {
       final k = '${r['key'] ?? ''}'.trim();
       final v = '${r['value'] ?? ''}'.trim();
       final c = OfflineItemConflict.tryParseJson(v, fallbackKey: k);
-      if (c != null) out.add(c);
+      if (c == null ||
+          isKnownAutoSplitItemId(c.item1Id) ||
+          isKnownAutoSplitItemId(c.item2Id)) {
+        await db.delete('settings', where: 'key = ?', whereArgs: [k]);
+        await db.delete(
+          'notifications',
+          where: "entity_type = 'item_conflict' AND entity_id = ?",
+          whereArgs: [k],
+        );
+        continue;
+      }
+      if (c.isPending &&
+          (c.item1Id > 1000000000000 || c.item2Id > 1000000000000)) {
+        final it1 = activeById[c.item1Id];
+        final it2 = activeById[c.item2Id];
+        final sku1 = '${it1?['sku'] ?? ''}'.trim().toLowerCase();
+        final sku2 = '${it2?['sku'] ?? ''}'.trim().toLowerCase();
+        // إذا حُذف أحد الصنفين أو تغيّر الباركود ولم يعد مشتركاً، يُمسح التعارض تلقائياً
+        if (it1 == null || it2 == null || sku1.isEmpty || sku1 != sku2) {
+          await db.delete('settings', where: 'key = ?', whereArgs: [k]);
+          await db.delete(
+            'notifications',
+            where: "entity_type = 'item_conflict' AND entity_id = ?",
+            whereArgs: [k],
+          );
+          continue;
+        }
+      }
+      out.add(c);
     }
     out.sort(
       (a, b) => safeParseDateTime(b.createdAt)
@@ -10015,13 +10065,19 @@ class Repo {
 
     Map<String, Object?>? snap;
     var snapshotCompactedTs = 0;
+    var snapChecksum = '';
+    Map<String, int>? snapCounts;
     try {
       final snapRec = await CloudJoin.getJson('$root/joinSnapshot.json');
       if (snapRec != null) {
-        snapshotCompactedTs =
-            (snapRec['compacted_through_ts'] as num?)?.toInt() ??
-                (snapRec['updatedAt'] as num?)?.toInt() ??
-                0;
+        snapshotCompactedTs = CloudJoin.extractSnapshotWatermarkMs(snapRec);
+        snapChecksum = '${snapRec['checksum'] ?? ''}'.trim();
+        if (snapRec['counts'] is Map) {
+          snapCounts = {
+            for (final e in (snapRec['counts'] as Map).entries)
+              if (e.value is num) '${e.key}': (e.value as num).toInt(),
+          };
+        }
         if (snapRec['data'] is Map) {
           snap = Map<String, Object?>.from(snapRec['data'] as Map);
         } else if (snapRec['accounts'] != null ||
@@ -10049,7 +10105,23 @@ class Repo {
       );
     }
 
-    await SnapshotApply.applySnapshot(() => _db, ourId, snap);
+    SnapshotApply.verifySnapshotIntegrity(
+      snap,
+      expectedChecksum: snapChecksum,
+      expectedCounts: snapCounts,
+    );
+
+    await SnapshotApply.applySnapshot(
+      () => _db,
+      ourId,
+      snap,
+      mode: amIOwnerBefore
+          ? SnapshotApplyMode.ownerRestore
+          : SnapshotApplyMode.memberJoin,
+      serverWatermarkMs: snapshotCompactedTs,
+      expectedChecksum: snapChecksum,
+      expectedCounts: snapCounts,
+    );
 
     if (amIOwnerBefore) {
       await restoreManagerOwnership();
@@ -10057,7 +10129,34 @@ class Repo {
 
     db = await _db;
     await db.delete('sync_queue');
-    await db.delete('operations');
+    // حظر مسح جدول operations لمنع إعادة تطبيق السجل التاريخي السابق للّقطة.
+    try {
+      await db.update(
+        'operations',
+        {'synced': 1, 'is_synced': 1},
+        where: 'synced = 0 OR is_synced = 0',
+      );
+    } catch (_) {
+      try {
+        await db.update('operations', {'synced': 1}, where: 'synced = 0');
+      } catch (_) {}
+    }
+
+    var existingBarrierMs = 0;
+    try {
+      final bRows = await db.query(
+        'sync_meta',
+        columns: ['value'],
+        where: 'key = ?',
+        whereArgs: ['atomic_sync_barrier:$ws'],
+        limit: 1,
+      );
+      if (bRows.isNotEmpty) {
+        existingBarrierMs =
+            CloudJoin.parseSyncMs(bRows.first['value']);
+      }
+    } catch (_) {}
+
     await db.delete('sync_meta',
         where: 'key IN (?, ?, ?, ?)',
         whereArgs: [
@@ -10066,12 +10165,15 @@ class Repo {
           'lastCloudTs:$ws',
           'selfRevoked',
         ]);
-    if (snapshotCompactedTs > 0) {
+    final effectiveBarrierMs = snapshotCompactedTs > existingBarrierMs
+        ? snapshotCompactedTs
+        : existingBarrierMs;
+    if (effectiveBarrierMs > 0) {
       await db.insert(
         'sync_meta',
         {
           'key': 'last_synced_cursor:$ws',
-          'value': '$snapshotCompactedTs',
+          'value': '$effectiveBarrierMs',
         },
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
@@ -10079,7 +10181,23 @@ class Repo {
         'sync_meta',
         {
           'key': 'lastCloudTs:$ws',
-          'value': '$snapshotCompactedTs',
+          'value': '$effectiveBarrierMs',
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await db.insert(
+        'sync_meta',
+        {
+          'key': 'snapshotThroughTs:$ws',
+          'value': '$effectiveBarrierMs',
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await db.insert(
+        'sync_meta',
+        {
+          'key': 'atomic_sync_barrier:$ws',
+          'value': '$effectiveBarrierMs',
         },
         conflictAlgorithm: ConflictAlgorithm.replace,
       );

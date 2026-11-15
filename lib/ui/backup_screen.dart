@@ -16,6 +16,7 @@ import '../data/providers.dart';
 import '../data/repository.dart'
     show ParentAccountNotFoundException;
 import '../data/pos_cart.dart';
+import '../data/sync/catalog_recovery_service.dart';
 import '../data/sync/google_auth_service.dart';
 import '../data/sync/subscription_guard.dart';
 import '../data/sync/sync_engine.dart';
@@ -510,6 +511,52 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     }
   }
 
+  Future<void> _handleRestoreCatalogFromBackup() async {
+    setState(() => _busy = true);
+    try {
+      final res = await FilePicker.platform.pickFiles(
+        type: FileType.any,
+        withData: true,
+      );
+      if (res == null || !mounted) return;
+      final file = await _materializePickedFile(res.files.single);
+      if (!mounted) return;
+      final ok = await confirmDialog(
+        context,
+        title: 'استرجاع كتالوج الأصناف فقط من نسخة',
+        message:
+            'سيتم حفظ لقطة أمان احترازية ثم استيراد الأقسام والفئات والأصناف '
+            'المفقودة أو المعدلة من النسخة المختارة، مع الحفاظ التام على جميع '
+            'الفواتير والحسابات والكميات الحية المسجلة بعد الانضمام.\n\nهل تريد المتابعة؟',
+        confirmText: 'استرجاع الكتالوج',
+      );
+      if (!ok || !mounted) return;
+      final repo = ref.read(repoProvider);
+      final engine = _tryReadSyncEngine();
+      final result = await CatalogRecoveryService.restoreCatalogFromBackup(
+        repo,
+        file,
+        engine: engine,
+      );
+      if (result.queuedSyncOps > 0) {
+        engine?.notifyNewOperation();
+      }
+      if (mounted) {
+        bump(ref);
+        showSnack(
+          context,
+          'تم استرجاع كتالوج الأصناف (${result.restoredItems} صنف، ${result.restoredCategories} فئة، ${result.restoredSections} قسم) دون المساس بالفواتير ✅',
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        showSnack(context, 'تعذّر استرجاع كتالوج الأصناف: $e', error: true);
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final wsMode = ref.watch(workspaceModeProvider).valueOrNull ?? 'standalone';
@@ -827,6 +874,61 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
           ),
         ),
         const SizedBox(height: 20),
+        if (wsOwner || wsMode == 'standalone') ...[
+          const SectionTitle('استرجاع كتالوج الأصناف من نسخة احتياطية'),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        Icons.inventory_2_outlined,
+                        color: AppColors.primaryOf(context),
+                      ),
+                      const SizedBox(width: 10),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'استيراد كتالوج الأصناف من نسخة (.nexora / .db)',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13.5,
+                              ),
+                            ),
+                            SizedBox(height: 4),
+                            Text(
+                              'أداة جراحية لاستيراد الأقسام والفئات والأصناف من نسخة مختارة دون المساس بالفواتير أو الكميات الحية للأصناف النشطة.',
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed:
+                          _busy ? null : _handleRestoreCatalogFromBackup,
+                      icon: const Icon(Icons.restore_page_outlined),
+                      label: const Text(
+                        'استرجاع كتالوج الأصناف فقط من نسخة (.nexora / .db)',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+        ],
         SectionTitle(
           'سلة المهملات',
           actionLabel: 'تفريغ',

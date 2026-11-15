@@ -146,12 +146,14 @@ void main() {
         await repo.applyRemoteOperation(txn, cloudOp, ConflictResolver());
       });
 
-      // التحقق من تعافي النظام: لم يعد هناك تكرار متعارض، والبيانات مطابقة للسحابة
+      // التحقق من تعافي النظام: إلغاء الدمج التلقائي وبقاء كلا الصنفين بهويتهما المستقلة دون تلف بيانات
       final items = await repo.items();
       expect(items.any((it) => it.id == cloudItemId), isTrue);
-      // التأكد من عدم وجود أكثر من صنف نشط بنفس الاسم
+      expect(items.any((it) => it.id == localItemId), isTrue);
+      // التأكد من عدم الدمج القسري وبقاء الصنفين
       final sameNames = items.where((it) => it.name == 'سكر أبيض 50 كجم').toList();
-      expect(sameNames.length, equals(1));
+      expect(sameNames.length, equals(2),
+          reason: 'إلغاء الدمج التلقائي: الحفاظ على هوية الصنفين ومنع الدمج القسري');
     });
 
     test('3. سياسة التطهير الصارمة (Zero-Orphan): الحذف السحابي يمسح أثر الصنف محلياً كمرآة',
