@@ -1,9 +1,9 @@
 {
   "version": "1.8.12+62",
-  "sha256": "70d76db3547bf2b47212921e7440caf732d30d3095a3c4d13b2fe297a88f1ae9",
+  "sha256": "8dd879fe1bd7fdae8c023cebe09707af780b6498d88246ebeef6328e9cb4951b",
   "sha256Variants": {
-    "arm64": "70d76db3547bf2b47212921e7440caf732d30d3095a3c4d13b2fe297a88f1ae9",
-    "armv7": "00e851dcc22a549525ec43055e1aeefb3ee0ed1b80caa41d71fdb258a45587b4"
+    "arm64": "8dd879fe1bd7fdae8c023cebe09707af780b6498d88246ebeef6328e9cb4951b",
+    "armv7": "a7e717028b8de9fdb7d43d62e2af3c95be9a3d2d9cb3e84f404ae0eccde7bbb7"
   },
   "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/admin-latest",
   "downloads": {
@@ -20,6 +20,6 @@
       "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin-armv7.apk"
     }
   },
-  "publishedAt": "2026-11-14T17:49:35Z",
+  "publishedAt": "2026-11-15T19:23:05Z",
   "notes": "• إصلاح عرض جميع الأجهزة المتصلة للمنشأة (Roster + Devices) ومنع المساحات المهجورة من اختطاف معرف المنشآت النشطة.\n• ترقية فهرس الملخص السحابي (Schema v2) لتصحيح البيانات المخزنة مؤقتاً تلقائياً عند التحديث.\n• حماية سجل الأجهزة المشتركة بنفس البريد الإلكتروني أثناء المزامنة السحابية."
 }
