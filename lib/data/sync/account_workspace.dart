@@ -1941,6 +1941,7 @@ class AccountWorkspace {
     }
 
     Map<String, Object?>? snapPulled;
+    var pulledWatermarkMs = 0;
     for (final snapName in const ['joinSnapshot.json', 'snapshot.json']) {
       try {
         final snapRes = await _authedGet(
@@ -1952,6 +1953,7 @@ class AccountWorkspace {
             snapRes.body.trim() != 'null') {
           final snapDecoded = jsonDecode(utf8.decode(snapRes.bodyBytes));
           if (snapDecoded is Map) {
+            final wm = CloudJoin.extractSnapshotWatermarkMs(snapDecoded);
             final dataMap = snapDecoded['data'] is Map
                 ? snapDecoded['data']
                 : ((snapDecoded['accounts'] != null ||
@@ -1966,6 +1968,9 @@ class AccountWorkspace {
               if (_countPayloadRecords(candidate) >
                   _countPayloadRecords(snapPulled)) {
                 snapPulled = candidate;
+                if (wm > pulledWatermarkMs) pulledWatermarkMs = wm;
+              } else if (pulledWatermarkMs == 0 && wm > 0) {
+                pulledWatermarkMs = wm;
               }
             }
           }
@@ -2150,7 +2155,11 @@ class AccountWorkspace {
               pulledRecordsCount >= existingLocalRecordsCount);
 
       if (shouldImportPulled) {
-        await FactoryReset.wipeAccountingTables(db);
+        await FactoryReset.wipeAccountingTables(
+          db,
+          preserveOperations:
+              fromWorkspaceId == toWorkspaceId || pulledWatermarkMs > 0,
+        );
       }
 
       // 4) ترحيل المساحة ثم استيراد بياناتها (مع السماح باختلاف بصمة الجهاز بعد إعادة التثبيت).
@@ -2196,20 +2205,77 @@ class AccountWorkspace {
             'account.name', ['owner_name', 'clientName', 'client_name']);
       }
 
-      // تصفير مؤشر السحب قبل الجلب الشامل لضمان استرجاع كافة العمليات من /operations
+      // تثبيت حاجز المزامنة الذري إذا استُوردت لقطة ذات خط أساس زمني؛
+      // يمنع إعادة سحب وتطبيق الأرشيف التاريخي القديم (منع تضاعف المخزون ورأس المال).
+      var existingBarrierMs = 0;
       try {
-        await db.delete(
+        final bRows = await db.query(
           'sync_meta',
-          where: 'key IN (?, ?, ?)',
-          whereArgs: [
-            'last_synced_cursor:$toWorkspaceId',
-            'last_synced_cursor',
-            'lastCloudTs:$toWorkspaceId',
-          ],
+          columns: ['value'],
+          where: 'key = ?',
+          whereArgs: ['atomic_sync_barrier:$toWorkspaceId'],
+          limit: 1,
         );
+        if (bRows.isNotEmpty) {
+          existingBarrierMs = CloudJoin.parseSyncMs(bRows.first['value']);
+        }
       } catch (_) {}
+      final effectiveBarrierMs =
+          (shouldImportPulled && pulledWatermarkMs > existingBarrierMs)
+              ? pulledWatermarkMs
+              : existingBarrierMs;
 
-      // سحب كافة عمليات المزامنة من عقدة /operations للمساحة المسترجعة وتطبيقها محلياً
+      if (effectiveBarrierMs > 0) {
+        try {
+          await db.insert(
+            'sync_meta',
+            {
+              'key': 'atomic_sync_barrier:$toWorkspaceId',
+              'value': '$effectiveBarrierMs',
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+          await db.insert(
+            'sync_meta',
+            {
+              'key': 'snapshotThroughTs:$toWorkspaceId',
+              'value': '$effectiveBarrierMs',
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+          await db.insert(
+            'sync_meta',
+            {
+              'key': 'last_synced_cursor:$toWorkspaceId',
+              'value': '$effectiveBarrierMs',
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+          await db.insert(
+            'sync_meta',
+            {
+              'key': 'lastCloudTs:$toWorkspaceId',
+              'value': '$effectiveBarrierMs',
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        } catch (_) {}
+      } else {
+        // مساحة سحابية أولية بدون لقطة معتمدة: نصفر المؤشر لسحب عملياتها من البداية
+        try {
+          await db.delete(
+            'sync_meta',
+            where: 'key IN (?, ?, ?)',
+            whereArgs: [
+              'last_synced_cursor:$toWorkspaceId',
+              'last_synced_cursor',
+              'lastCloudTs:$toWorkspaceId',
+            ],
+          );
+        } catch (_) {}
+      }
+
+      // سحب العمليات اللاحقة لخط الأساس (أو الكل إذا لم تكن هناك لقطة ذات حاجز)
       try {
         await CloudFirebaseTransport(
           repo: repo,
@@ -2217,7 +2283,12 @@ class AccountWorkspace {
           backendUrl: backendUrl,
           workspaceId: toWorkspaceId,
           idTokenProvider: () => FirebaseAuthRest.cloudIdToken(),
-        ).pull(forceFullSync: true, resetCursor: true).timeout(const Duration(seconds: 25));
+        )
+            .pull(
+              forceFullSync: effectiveBarrierMs == 0,
+              resetCursor: effectiveBarrierMs == 0,
+            )
+            .timeout(const Duration(seconds: 25));
       } catch (_) {}
 
       // مزامنة قائمة الأجهزة والأعضاء للمنشأة المسترجعة

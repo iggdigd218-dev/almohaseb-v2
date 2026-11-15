@@ -1,13 +1,111 @@
 // (دفعة 58) تطبيق لقطة الانضمام — استُخرجت من LanSyncService المحذوف.
 // تُستخدم حصرياً في مسار الانضمام السحابي (CloudJoin.join/completeApprovedJoin):
 // تمسح بيانات الجهاز المحلية كاملة وتستبدلها بنسخة المجموعة.
+import 'dart:convert';
+import 'dart:math' as math;
+
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../../core/database.dart';
 import '../../core/media_paths.dart';
 import '../../core/secret_store.dart';
+import 'apply_remote.dart';
+import 'sync_quarantine.dart';
+
+enum SnapshotApplyMode { memberJoin, ownerRestore }
 
 class SnapshotApply {
+  static const List<String> kCoreSnapshotTables = [
+    'workspaces',
+    'sections',
+    'categories',
+    'item_categories',
+    'users',
+    'devices',
+    'accounts',
+    'items',
+    'transactions',
+    'transaction_items',
+    'vouchers',
+    'stock_moves',
+    'currencies',
+    'conversations',
+    'messages',
+    'trash',
+    'activity',
+    'templates',
+  ];
+
+  static Map<String, int> computeTableCounts(Map<String, Object?> snap) {
+    final out = <String, int>{};
+    for (final t in kCoreSnapshotTables) {
+      final v = snap[t];
+      if (v is List) {
+        out[t] = v.length;
+      }
+    }
+    return out;
+  }
+
+  static Object? _canonicalize(Object? v) {
+    if (v is Map) {
+      final entries = v.entries
+          .where((e) {
+            final val = e.value;
+            if (val == null) return false;
+            if (val is Map && val.isEmpty) return false;
+            if (val is List && val.isEmpty) return false;
+            return true;
+          })
+          .map((e) => MapEntry('${e.key}', e.value))
+          .toList()
+        ..sort((a, b) => a.key.compareTo(b.key));
+      return {
+        for (final e in entries) e.key: _canonicalize(e.value),
+      };
+    }
+    if (v is List) {
+      return [for (final item in v) _canonicalize(item)];
+    }
+    if (v is double && v.isFinite && v == v.roundToDouble()) {
+      return v.toInt();
+    }
+    return v;
+  }
+
+  static String computeSnapshotChecksum(Map<String, Object?> snap) {
+    final canonical = _canonicalize(snap);
+    return sha256.convert(utf8.encode(jsonEncode(canonical))).toString();
+  }
+
+  static void verifySnapshotIntegrity(
+    Map<String, Object?> snap, {
+    String expectedChecksum = '',
+    Map<String, int>? expectedCounts,
+  }) {
+    if (expectedCounts != null && expectedCounts.isNotEmpty) {
+      for (final e in expectedCounts.entries) {
+        final actual = (snap[e.key] as List?)?.length ?? 0;
+        if (actual != e.value) {
+          throw StateError(
+            'فشل التحقق من تكامل لقطة المزامنة: عدد صفوف ${e.key} غير مطابق '
+            '(المتوقع ${e.value}، الفعلي $actual).',
+          );
+        }
+      }
+    }
+    final cleanChecksum = expectedChecksum.trim().toLowerCase();
+    if (cleanChecksum.isNotEmpty) {
+      final actualChecksum = computeSnapshotChecksum(snap).toLowerCase();
+      if (actualChecksum != cleanChecksum) {
+        throw StateError(
+          'فشل التحقق من بصمة تكامل اللقطة السحابية (checksum mismatch).',
+        );
+      }
+    }
+  }
   static const Set<String> _deviceColumns = {
     'id',
     'workspace_id',
@@ -29,12 +127,47 @@ class SnapshotApply {
     'updated_at',
   };
 
-  /// يُطبّق لقطة البيانات القادمة من المضيف على الجهاز العضو (يمسح القديم ويستبدله).
+  static int _parseSyncMs(Object? v) {
+    if (v is int && v > 0) return v;
+    if (v is num && v > 0) return v.toInt();
+    if (v is String) {
+      final s = v.trim();
+      if (s.isEmpty) return 0;
+      final asInt = int.tryParse(s);
+      if (asInt != null && asInt > 0) return asInt;
+      final dt = DateTime.tryParse(s);
+      if (dt != null) return dt.millisecondsSinceEpoch;
+    }
+    return 0;
+  }
+
+  static int _extractWatermarkMs(Map<String, Object?> snap) {
+    for (final raw in [
+      snap['serverWatermarkMs'],
+      snap['compacted_through_ts'],
+      snap['updatedAt'],
+    ]) {
+      final ms = _parseSyncMs(raw);
+      if (ms > 0) return ms;
+    }
+    return 0;
+  }
+
+  /// يُطبّق لقطة البيانات القادمة من المضيف على الجهاز العضو (يمسح القديم ويستبدله مع حفظ سجل العمليات).
   static Future<void> applySnapshot(
     Future<Database> Function() dbProvider,
     String ourDeviceId,
-    Map<String, Object?> snap,
-  ) async {
+    Map<String, Object?> snap, {
+    SnapshotApplyMode mode = SnapshotApplyMode.memberJoin,
+    int serverWatermarkMs = 0,
+    String expectedChecksum = '',
+    Map<String, int>? expectedCounts,
+  }) async {
+    verifySnapshotIntegrity(
+      snap,
+      expectedChecksum: expectedChecksum,
+      expectedCounts: expectedCounts,
+    );
     var db = await dbProvider();
     bool isClosed = false;
     try {
@@ -81,9 +214,8 @@ class SnapshotApply {
       final knownSecrets = {
         for (final d in knownDevices) d['id']: d['auth_secret']
       };
-      // 1) مسح البيانات المحلية (نُبقي devices/workspaces/sync_meta جزئياً).
-      // «حذف كامل»: يشمل أيضاً القوالب والإشعارات وإعدادات العمل القديمة —
-      // لا يبقى من بيانات الجهاز القديمة أي أثر بعد الانضمام.
+      // 1) مسح جداول الكيانات المحلية (مع حظر مسح جدول operations نهائياً لمنع إعادة تشغيل التاريخ).
+      // نُبقي أيضاً devices/workspaces/sync_meta جزئياً.
       const clearTables = [
         'sections',
         'templates',
@@ -102,11 +234,33 @@ class SnapshotApply {
         'users',
         'trash',
         'activity',
-        'operations',
         'sync_queue',
       ];
       for (final t in clearTables) {
         await txn.delete(t);
+      }
+      // وسم أي عمليات سابقة في operations كمُزامَنة بدلاً من مسحها،
+      // لحماية عدم تكرار التطبيق السحابي ومنع إعادة الرفع فوق اللقطة النظيفة.
+      try {
+        await txn.update(
+          'operations',
+          {'synced': 1, 'is_synced': 1},
+          where: 'synced = 0 OR is_synced = 0',
+        );
+      } catch (_) {
+        try {
+          await txn.update(
+            'operations',
+            {'synced': 1},
+            where: 'synced = 0',
+          );
+        } catch (_) {}
+      }
+      try {
+        await SyncQuarantineStore.ensureTable(txn);
+        await txn.delete(SyncQuarantineStore.kTable);
+      } catch (e) {
+        debugPrint('SnapshotApply clear sync_quarantine warning: $e');
       }
       // نحذف سجلات الأجهزة الأخرى ونُبقي سجلنا وسجل المضيف.
       await txn.delete('devices', where: 'id <> ?', whereArgs: [ourDeviceId]);
@@ -188,6 +342,12 @@ class SnapshotApply {
               }
             }
             if (table == 'items') {
+              final itemId = (map['id'] as num?)?.toInt() ??
+                  int.tryParse('${map['id'] ?? ''}') ??
+                  0;
+              if (isKnownAutoSplitItemId(itemId)) {
+                continue;
+              }
               if ('${map['name'] ?? ''}'.trim().isEmpty) map['name'] = 'صنف';
               if ('${map['created_at'] ?? ''}'.trim().isEmpty) map['created_at'] = nowIso;
               if ('${map['updated_at'] ?? ''}'.trim().isEmpty) map['updated_at'] = nowIso;
@@ -320,7 +480,22 @@ class SnapshotApply {
             if (table == 'items' && map['id'] != null) {
               knownItemIds.add(map['id']);
             }
-          } catch (_) {}
+          } catch (e) {
+            debugPrint('SnapshotApply insertAll($table) error: $e');
+            const criticalTables = {
+              'workspaces',
+              'accounts',
+              'items',
+              'transactions',
+              'vouchers',
+              'stock_moves',
+              'devices',
+              'users',
+            };
+            if (criticalTables.contains(table)) {
+              rethrow;
+            }
+          }
         }
       }
 
@@ -352,7 +527,9 @@ class SnapshotApply {
             );
           }
         }
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('SnapshotApply cleanup extra workspaces error: $e');
+      }
       // ترتيب محكم يحترم قيود المفاتيح الأجنبية: الأقسام والفئات أولاً ثم الأصناف والحسابات ثم الفواتير
       await insertAll('sections');
       await insertAll('categories');
@@ -419,6 +596,10 @@ class SnapshotApply {
       for (final k in orgKeys) {
         await txn.delete('settings', where: 'key = ?', whereArgs: [k]);
       }
+      await txn.delete(
+        'settings',
+        where: "key LIKE 'item_conflict:%' OR key LIKE 'item_id_remap:%'",
+      );
       Future<void> applyOrgSetting(String k, Object? v) async {
         final val = '${v ?? ''}'.trim();
         if (k == 'logo' || !orgKeys.contains(k) || val.isEmpty) return;
@@ -465,26 +646,35 @@ class SnapshotApply {
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
 
-      // 3) التحقق من دور هذا الجهاز (قاعدة المدير الحتمية):
-      // أ) جهاز المنشئ المضيف لمجموعة العمل (ourDeviceId == hostId) هو المدير دوماً بلا تغيير.
-      // ب) الجهاز المسجل ببريد إلكتروني هو المدير دوماً (البريد خاص بجهاز المدير فقط).
+      // 3) التحقق من دور هذا الجهاز (قاعدة المدير السيادية بدون تصعيد عبر البريد):
       final dev = await txn.query('devices',
           where: 'id = ?', whereArgs: [ourDeviceId], limit: 1);
-      final hostId = '${snap['hostDeviceId'] ?? ''}';
-
-      final emailRow = await txn.query('settings',
-          where: "key = 'account.email'", limit: 1);
-      final localEmail = emailRow.isNotEmpty
-          ? '${emailRow.first['value'] ?? ''}'.trim()
-          : '';
-
+      final hostId = '${snap['hostDeviceId'] ?? ''}'.trim();
       final isHost = ourDeviceId.isNotEmpty && hostId.isNotEmpty && ourDeviceId == hostId;
-      final hasLocalEmail = localEmail.isNotEmpty &&
-          !localEmail.startsWith('cashier@') &&
-          !localEmail.startsWith('member@') &&
-          !localEmail.endsWith('@local');
+      final isHostOrOwner = isHost || mode == SnapshotApplyMode.ownerRestore;
 
-      final isHostOrOwner = isHost || hasLocalEmail;
+      // تطهير مفاتيح المالك والبريد قبل تثبيت دور العضو لمنع أي تداخل أو تصعيد غير مشروع.
+      if (!isHostOrOwner) {
+        const memberPurgeKeys = [
+          'account.email',
+          'profile_email',
+          'email',
+          'user.email',
+          'account.uid',
+          'account.name',
+          'account.idToken',
+          'account.refreshToken',
+          'creatorDeviceId',
+        ];
+        for (final k in memberPurgeKeys) {
+          await txn.delete('settings', where: 'key = ?', whereArgs: [k]);
+        }
+        await txn.delete(
+          'sync_meta',
+          where:
+              "key IN ('ownerDeviceId', 'selfRevoked', 'demotedToAgentBy', 'workspaceStatus')",
+        );
+      }
 
       if (isHostOrOwner) {
         // حماية سيادية: جهاز المدير يبقى مالكاً (is_owner = 1) ووضعه host دوماً
@@ -548,7 +738,7 @@ class SnapshotApply {
             whereArgs: [ourDeviceId],
           );
         }
-        // ضبط وضع المساحة على "عضو" وحذف أي سجل ملكية أو طرد سابق
+        // ضبط وضع المساحة على "عضو"
         await txn.insert(
             'sync_meta',
             {
@@ -556,11 +746,6 @@ class SnapshotApply {
               'value': 'member',
             },
             conflictAlgorithm: ConflictAlgorithm.replace);
-        await txn.delete(
-          'sync_meta',
-          where:
-              "key IN ('ownerDeviceId', 'selfRevoked', 'demotedToAgentBy', 'workspaceStatus')",
-        );
 
         // منشئ هذه المساحة هو المدير (hostId) وليس جهاز العضو
         if (hostId.isNotEmpty) {
@@ -570,20 +755,61 @@ class SnapshotApply {
             conflictAlgorithm: ConflictAlgorithm.replace,
           );
         }
+      }
 
-        // تطهير كامل لأي بريد إلكتروني على جهاز العضو (البريد خاص بالمدير فقط)
-        final memberPurgeKeys = [
-          'account.email',
-          'profile_email',
-          'email',
-          'account.uid',
-          'account.name',
-          'account.idToken',
-          'account.refreshToken',
-        ];
-        for (final k in memberPurgeKeys) {
-          await txn.delete('settings', where: 'key = ?', whereArgs: [k]);
+      // 4) تثبيت مؤشرات المزامنة وحاجز المزامنة الذري والترقيم السريع (last_plu) ذرياً داخل نفس المعاملة
+      var existingBarrierMs = 0;
+      try {
+        final bRows = await txn.query(
+          'sync_meta',
+          columns: ['value'],
+          where: 'key = ?',
+          whereArgs: ['atomic_sync_barrier:$wsId'],
+          limit: 1,
+        );
+        if (bRows.isNotEmpty) {
+          existingBarrierMs = _parseSyncMs(bRows.first['value']);
         }
+      } catch (_) {}
+
+      await txn.delete('sync_meta',
+          where: "key LIKE 'last_synced_cursor%' OR key LIKE 'lastCloudTs:%' "
+              "OR key LIKE 'lastRosterPush:%' OR key LIKE 'lastLanTs:%' "
+              "OR key LIKE 'last_plu:%'");
+      final maxPluRows =
+          await txn.rawQuery('SELECT COALESCE(MAX(plu), 0) AS m FROM items');
+      final maxPlu = ((maxPluRows.firstOrNull?['m']) as num?)?.toInt() ?? 0;
+      await txn.insert(
+        'sync_meta',
+        {'key': 'last_plu:$wsId', 'value': '$maxPlu'},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      final incomingWatermarkMs = serverWatermarkMs > 0
+          ? serverWatermarkMs
+          : _extractWatermarkMs(snap);
+      final effectiveBarrierMs =
+          math.max(existingBarrierMs, incomingWatermarkMs);
+      if (effectiveBarrierMs > 0) {
+        await txn.insert(
+          'sync_meta',
+          {'key': 'last_synced_cursor:$wsId', 'value': '$effectiveBarrierMs'},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        await txn.insert(
+          'sync_meta',
+          {'key': 'lastCloudTs:$wsId', 'value': '$effectiveBarrierMs'},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        await txn.insert(
+          'sync_meta',
+          {'key': 'snapshotThroughTs:$wsId', 'value': '$effectiveBarrierMs'},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        await txn.insert(
+          'sync_meta',
+          {'key': 'atomic_sync_barrier:$wsId', 'value': '$effectiveBarrierMs'},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
       }
     });
   }

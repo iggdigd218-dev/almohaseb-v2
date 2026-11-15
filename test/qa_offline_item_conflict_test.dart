@@ -51,7 +51,7 @@ void main() {
   }
 
   test(
-    'QA-OFFLINE-CONFLICT-1 prevents item overwrite, auto-renumbers younger item, updates linked invoices & stock_moves, creates smart notification, and supports barcode generation & merge resolutions',
+    'QA-OFFLINE-CONFLICT-1 enforces In-Place Upsert on matching ID and detects shared-SKU conflict across distinct item IDs with barcode generation & merge resolutions',
     () async {
       final (tmp, db, repo) = await createTestRepo('nexora_conflict_1_');
       final resolver = ConflictResolver();
@@ -71,7 +71,7 @@ void main() {
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
 
-        // 1. الجهاز الأول (محلي) يدخل صنفاً أوفلاين بالمعرف #50 والباركود SKU-9999
+        // 1. الصنف المحلي #50 والباركود SKU-9999
         final t1 = DateTime.parse('2026-11-10T10:00:00.000Z');
         await db.insert('items', {
           'id': 50,
@@ -90,7 +90,6 @@ void main() {
           'updated_at': t1.toIso8601String(),
         });
 
-        // فاتورة محلية مرتبطة بالصنف #50
         await db.insert('transactions', {
           'id': 501,
           'workspace_id': 'default',
@@ -112,24 +111,57 @@ void main() {
           'total': 6000.0,
         });
 
+        // التحقق أولاً: عملية بنفس المعرف #50 تُحدث السجل في مكانه (In-Place Upsert) دون فصل أي صنف جديد
+        const tSameId = '2026-11-10T10:02:00.000Z';
+        await repo.applyRemoteOperation(
+          db,
+          const SyncOperation(
+            id: 'op-remote-upsert-50',
+            workspaceId: 'default',
+            deviceId: 'dev-B',
+            userId: 2,
+            opType: OpKind.update,
+            entityType: EntityKind.item,
+            entityId: '50',
+            payload: {
+              'id': 50,
+              'plu': 50,
+              'name': 'بطارية آيفون 13 أصلية',
+              'sku': 'SKU-9999',
+              'unit': 'قطعة',
+              'buy_price': 4000.0,
+              'sell_price': 6000.0,
+              'quantity': 10.0,
+              'min_quantity': 2.0,
+              'updated_at': tSameId,
+            },
+            timestamp: tSameId,
+            deviceTime: tSameId,
+            version: 2,
+            parentOpId: '',
+          ),
+          resolver,
+        );
+        expect((await repo.items()).length, 1);
+
         OfflineItemConflict? detectedConflict;
         ItemConflictHooks.onConflictDetected = (c) {
           detectedConflict = c;
         };
 
-        // 2. الجهاز الثاني (dev-B) أدخل أوفلاين صنفاً مختلفاً بنفس المعرف #50 ونفس الباركود SKU-9999
+        // 2. الجهاز الثاني (dev-B) يرسل صنفاً مختلفاً بمعرف مستقل #51 يشترك في نفس الباركود SKU-9999
         const t2 = '2026-11-10T10:05:00.000Z';
         const remoteItemOp = SyncOperation(
-          id: 'op-remote-item-50',
+          id: 'op-remote-item-51',
           workspaceId: 'default',
           deviceId: 'dev-B',
           userId: 2,
           opType: OpKind.create,
           entityType: EntityKind.item,
-          entityId: '50',
+          entityId: '51',
           payload: {
-            'id': 50,
-            'plu': 50,
+            'id': 51,
+            'plu': 51,
             'name': 'شاشة سامسونج A54 وكالة',
             'sku': 'SKU-9999',
             'unit': 'قطعة',
@@ -148,7 +180,7 @@ void main() {
         );
         await repo.applyRemoteOperation(db, remoteItemOp, resolver);
 
-        // 3. الجهاز الثاني يرسل فاتورة وحركة مخزون مرتبطتين بالمعرف الأصلي 50
+        // 3. الجهاز الثاني يرسل فاتورة وحركة مخزون مرتبطتين بالصنف #51
         const remoteTxOp = SyncOperation(
           id: 'op-remote-tx-601',
           workspaceId: 'default',
@@ -168,7 +200,7 @@ void main() {
             'updated_at': t2,
             'items': [
               {
-                'item_id': 50,
+                'item_id': 51,
                 'name': 'شاشة سامسونج A54 وكالة',
                 'unit': 'قطعة',
                 'quantity': 2.0,
@@ -194,7 +226,7 @@ void main() {
           entityId: '701',
           payload: {
             'id': 701,
-            'item_id': 50,
+            'item_id': 51,
             'kind': 'sale',
             'quantity': 2.0,
             'unit_price': 20000.0,
@@ -210,18 +242,17 @@ void main() {
         );
         await repo.applyRemoteOperation(db, remoteMoveOp, resolver);
 
-        // التحقق 1: عدم ضياع أي من الصنفين وفصل الصنف الأصغر برقم جديد
+        // التحقق 1: بقاء الصنفين #50 و #51 بمعرفيهما الأصليين بدون أي إعادة ترقيم وهمية
         final allItems = await repo.items();
         expect(allItems.length, 2);
         final item1 = allItems.firstWhere((e) => e.id == 50);
-        final item2 = allItems.firstWhere((e) => e.id != 50);
+        final item2 = allItems.firstWhere((e) => e.id == 51);
         expect(item1.name, 'بطارية آيفون 13 أصلية');
         expect(item2.name, 'شاشة سامسونج A54 وكالة');
-        expect(item2.id, greaterThan(50));
         expect(item1.sku, 'SKU-9999');
         expect(item2.sku, 'SKU-9999');
 
-        // التحقق 2: تحديث مرجع item_id في الفواتير وحركات المخزون المرتبطة بالصنف الثاني
+        // التحقق 2: بقاء الفواتير وحركات المخزون على معرفاتها الصحيحة
         final tx501Lines = await db.query(
           'transaction_items',
           where: 'tx_id = ?',
@@ -234,16 +265,16 @@ void main() {
           where: 'tx_id = ?',
           whereArgs: [601],
         );
-        expect(tx601Lines.single['item_id'], item2.id);
+        expect(tx601Lines.single['item_id'], 51);
 
         final move701Rows = await db.query(
           'stock_moves',
           where: 'id = ?',
           whereArgs: [701],
         );
-        expect(move701Rows.single['item_id'], item2.id);
+        expect(move701Rows.single['item_id'], 51);
 
-        // التحقق 3: إنشاء إشعار ذكي مفصّل في الجرس وسجل التعارض المعلق
+        // التحقق 3: إنشاء إشعار ذكي لتعارض الباركود المشترك SKU-9999
         expect(detectedConflict, isNotNull);
         final pending = await repo.pendingItemConflicts();
         expect(pending.length, 1);
@@ -252,12 +283,7 @@ void main() {
         expect(conflict.item1Creator, contains('أحمد الكاشير'));
         expect(conflict.item2Name, 'شاشة سامسونج A54 وكالة');
         expect(conflict.item2Creator, contains('محمود المخزن'));
-        expect(conflict.conflictType, 'id_and_sku');
-        expect(
-          conflict.conflictTypeLabel,
-          contains('تعارض رقم صنف (#50 تم فصله تلقائياً'),
-        );
-        expect(conflict.conflictTypeLabel, contains('اشتراك في نفس الباركود'));
+        expect(conflict.conflictType, 'sku');
 
         final notifs = await repo.notifications();
         final conflictNotif = notifs.firstWhere(
@@ -356,16 +382,16 @@ void main() {
         await repo.applyRemoteOperation(
           db,
           const SyncOperation(
-            id: 'op-remote-item-10',
+            id: 'op-remote-item-11',
             workspaceId: 'default',
             deviceId: 'dev-peer',
             userId: 3,
             opType: OpKind.create,
             entityType: EntityKind.item,
-            entityId: '10',
+            entityId: '11',
             payload: {
-              'id': 10,
-              'plu': 10,
+              'id': 11,
+              'plu': 11,
               'name': 'وصلة سماعة آيفون أصلية',
               'sku': 'BAR-777',
               'unit': 'قطعة',

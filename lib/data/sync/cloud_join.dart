@@ -33,6 +33,7 @@ import 'operation.dart';
 import 'device_id.dart';
 import 'google_auth_service.dart';
 import 'device_registry.dart';
+import 'apply_remote.dart';
 import 'firebase_auth_service.dart';
 import 'snapshot_apply.dart';
 import 'subscription_guard.dart';
@@ -763,13 +764,19 @@ class CloudJoin {
     final ourId = await ensureDeviceId(repo);
     final snap = await buildWorkspaceSnapshot(repo, hostDeviceId: ourId);
     final snapTs = DateTime.now().millisecondsSinceEpoch;
+    final checksum = SnapshotApply.computeSnapshotChecksum(snap);
+    final counts = SnapshotApply.computeTableCounts(snap);
     final root = _root(url, ws);
     await _putJson(
       '$root/joinSnapshot.json',
       {
+        'schemaVersion': AppDatabase.schemaVersion,
         'createdAt': DateTime.now().toIso8601String(),
         'hostDeviceId': ourId,
         'compacted_through_ts': snapTs,
+        'serverWatermarkMs': {'.sv': 'timestamp'},
+        'checksum': checksum,
+        'counts': counts,
         'data': snap,
       },
       timeout: const Duration(seconds: 25),
@@ -1001,6 +1008,21 @@ class CloudJoin {
     return 0;
   }
 
+  /// استخراج طابع خط الأساس السحابي (`serverWatermarkMs` ← `compacted_through_ts` ← `updatedAt`).
+  /// يقرأ القيمة الرقمية من RTDB ويتجاهل كائن `{'.sv': 'timestamp'}` غير المحوّل في الاختبارات المحلية.
+  static int extractSnapshotWatermarkMs(Map<dynamic, dynamic>? snapRec) {
+    if (snapRec == null) return 0;
+    for (final raw in [
+      snapRec['serverWatermarkMs'],
+      snapRec['compacted_through_ts'],
+      snapRec['updatedAt'],
+    ]) {
+      final ms = parseSyncMs(raw);
+      if (ms > 0) return ms;
+    }
+    return 0;
+  }
+
   /// يستخرج أحدث طابع زمني بالملي ثانية من سجل طرد أو حظر سحابي (بغض النظر عن اسم المفتاح).
   static int extractEvictionTimeMs(Map<dynamic, dynamic> map) {
     final rawCandidates = <Object?>[
@@ -1107,6 +1129,9 @@ class CloudJoin {
     String? hostDeviceId,
   }) async {
     final db = await repo.database;
+    try {
+      await ApplyRemoteOp.healCorruptedItemCatalog(db);
+    } catch (_) {}
     final ourId = await ensureDeviceId(repo);
     final ownerDevs = await db.query('devices',
         columns: ['id'], where: 'is_owner = 1', limit: 1);
@@ -1158,6 +1183,10 @@ class CloudJoin {
           row['expelled_at'] = '';
         }
         if (t == 'items') {
+          final itemId = (row['id'] as num?)?.toInt() ?? 0;
+          if (isKnownAutoSplitItemId(itemId)) {
+            continue;
+          }
           if (allowMediaSync) {
             final imgPath = (row['image'] as String?)?.trim() ?? '';
             if (imgPath.isNotEmpty) {
@@ -1375,10 +1404,11 @@ class CloudJoin {
     }
 
     Map<String, Object?>? snap;
-    var snapshotCompactedTs = 0;
+    var snapshotWatermarkMs = 0;
+    var snapChecksum = '';
+    Map<String, int>? snapCounts;
     Map<String, Object?>? snapRec = await _getJson('$root/joinSnapshot.json');
-    // آلية الانتظار الذكي (Retry Polling كل 400ms) عند وصول إشعار الموافقة الفوري
-    // لضمان اكتمال رفع joinSnapshot.json ومنع السقوط في فخ اللقطة الفارغة (stub).
+    // انتظار ذكي لضمان اكتمال اللقطة الذرية قبل تطبيق أي سطر
     if (snapRec?['data'] is! Map && isApprovedInCloud) {
       for (var retry = 0; retry < 12; retry++) {
         await Future<void>.delayed(const Duration(milliseconds: 400));
@@ -1388,77 +1418,99 @@ class CloudJoin {
     }
     if (snapRec?['data'] is Map) {
       snap = Map<String, Object?>.from(snapRec!['data'] as Map);
-      snapshotCompactedTs =
-          (snapRec['compacted_through_ts'] as num?)?.toInt() ?? 0;
-    } else if (snapRec?['accounts'] != null ||
-        snapRec?['items'] != null ||
-        snapRec?['transactions'] != null) {
-      snap = Map<String, Object?>.from(snapRec!);
-      snapshotCompactedTs =
-          (snapRec['compacted_through_ts'] as num?)?.toInt() ?? 0;
+      snapshotWatermarkMs = extractSnapshotWatermarkMs(snapRec);
+      snapChecksum = '${snapRec['checksum'] ?? ''}'.trim();
+      if (snapRec['counts'] is Map) {
+        snapCounts = {
+          for (final e in (snapRec['counts'] as Map).entries)
+            if (e.value is num) '${e.key}': (e.value as num).toInt(),
+        };
+      }
+    } else if (!isApprovedInCloud &&
+        snapRec != null &&
+        (snapRec['accounts'] != null ||
+            snapRec['items'] != null ||
+            snapRec['transactions'] != null)) {
+      snap = Map<String, Object?>.from(snapRec);
+      snapshotWatermarkMs = extractSnapshotWatermarkMs(snapRec);
     }
 
-    // فحص نسخة النسخ الاحتياطي التلقائي backup.json إن كانت اللقطة مفقودة أو ناقصة الحسابات/الأصناف
-    if (snap == null ||
-        (((snap['accounts'] as List?)?.isEmpty ?? true) &&
-            ((snap['items'] as List?)?.isEmpty ?? true))) {
+    if (isApprovedInCloud) {
+      if (snap == null) {
+        throw const CloudJoinException(
+          'تعذر جلب اللقطة الذرية النهائية (joinSnapshot) من المدير. أعد المحاولة بعد قليل.',
+        );
+      }
       try {
-        final backupRec = await _getJson('$root/backup.json');
-        Map<String, Object?>? bkpData;
-        if (backupRec?['payload'] is Map &&
-            (backupRec!['payload'] as Map)['data'] is Map) {
-          bkpData = Map<String, Object?>.from(
-              (backupRec['payload'] as Map)['data'] as Map);
-        } else if (backupRec?['data'] is Map) {
-          bkpData = Map<String, Object?>.from(backupRec!['data'] as Map);
-        }
-        if (bkpData != null &&
-            (bkpData['accounts'] != null || bkpData['items'] != null)) {
-          if (snap == null) {
-            snap = bkpData;
-          } else {
-            for (final e in bkpData.entries) {
-              final existing = snap[e.key];
-              if (existing == null ||
-                  (existing is List && existing.isEmpty) ||
-                  (existing is Map && existing.isEmpty)) {
-                snap[e.key] = e.value;
+        SnapshotApply.verifySnapshotIntegrity(
+          snap,
+          expectedChecksum: snapChecksum,
+          expectedCounts: snapCounts,
+        );
+      } on StateError catch (e) {
+        throw CloudJoinException(e.message);
+      }
+    } else {
+      // في المسار المباشر القديم فقط (بدون طلب موافقة مسبق): استخدام backup.json أو هيكل أولي إن غابت اللقطة
+      if (snap == null ||
+          (((snap['accounts'] as List?)?.isEmpty ?? true) &&
+              ((snap['items'] as List?)?.isEmpty ?? true))) {
+        try {
+          final backupRec = await _getJson('$root/backup.json');
+          Map<String, Object?>? bkpData;
+          if (backupRec?['payload'] is Map &&
+              (backupRec!['payload'] as Map)['data'] is Map) {
+            bkpData = Map<String, Object?>.from(
+                (backupRec['payload'] as Map)['data'] as Map);
+          } else if (backupRec?['data'] is Map) {
+            bkpData = Map<String, Object?>.from(backupRec!['data'] as Map);
+          }
+          if (bkpData != null &&
+              (bkpData['accounts'] != null || bkpData['items'] != null)) {
+            if (snap == null) {
+              snap = bkpData;
+            } else {
+              for (final e in bkpData.entries) {
+                final existing = snap[e.key];
+                if (existing == null ||
+                    (existing is List && existing.isEmpty) ||
+                    (existing is Map && existing.isEmpty)) {
+                  snap[e.key] = e.value;
+                }
               }
             }
           }
-        }
-      } catch (_) {}
+        } catch (_) {}
+      }
+
+      if (snap == null) {
+        final snapNow = DateTime.now().toIso8601String();
+        snap = <String, Object?>{
+          'workspaces': [
+            {
+              'id': workspaceId,
+              'name': 'مساحة العمل',
+              'owner_google_id': '',
+              'owner_email': '',
+              'owner_name': '',
+              'created_at': snapNow,
+              'updated_at': snapNow,
+            }
+          ],
+          'settings': [
+            {'key': 'sync.workspaceId', 'value': workspaceId}
+          ],
+        };
+      }
     }
 
     // جلب معلومات المنشأة من meta.json كحزام أمان لضمان عدم ضياع هوية المتجر
     try {
       final metaRec = await _getJson('$root/meta.json');
       if (metaRec is Map) {
-        snap ??= <String, Object?>{};
         snap['meta'] = metaRec;
       }
     } catch (_) {}
-
-    if (snap == null) {
-      // إذا لم تكتمل اللقطة بعد، نبني هيكل لقطة أولي آمن ويستكمل SyncEngine المزامنة
-      final snapNow = DateTime.now().toIso8601String();
-      snap = <String, Object?>{
-        'workspaces': [
-          {
-            'id': workspaceId,
-            'name': 'مساحة العمل',
-            'owner_google_id': '',
-            'owner_email': '',
-            'owner_name': '',
-            'created_at': snapNow,
-            'updated_at': snapNow,
-          }
-        ],
-        'settings': [
-          {'key': 'sync.workspaceId', 'value': workspaceId}
-        ],
-      };
-    }
     // ضمان احتواء اللقطة دائماً على سجل المنشأة المستهدفة (workspaceId)
     {
       final snapNow = DateTime.now().toIso8601String();
@@ -1630,9 +1682,14 @@ class CloudJoin {
           where: "key = 'creatorDeviceId' AND value = ?",
           whereArgs: [ourId]);
     } catch (_) {}
-    // حذف كامل البيانات المحلية واستبدالها بنسخة المجموعة (معاملة واحدة):
-    // نفس منطق الانضمام المحلي بالضبط — الجهاز يبدأ نظيفاً ببيانات المجموعة.
-    await SnapshotApply.applySnapshot(() => repo.database, ourId, snap);
+    // استبدال قاعدة بيانات العضو باللقطة الذرية النهائية وتثبيت مؤشر الاستئناف مباشرة
+    await SnapshotApply.applySnapshot(
+      () => repo.database,
+      ourId,
+      snap,
+      mode: SnapshotApplyMode.memberJoin,
+      serverWatermarkMs: snapshotWatermarkMs,
+    );
     db = await repo.database;
 
     // ضمان وجود سجل جهازنا كعضو بعد الاستبدال (يظهر لدى المدير عبر roster).
@@ -1817,26 +1874,48 @@ class CloudJoin {
     if (cloudCode.trim().isNotEmpty) {
       await repo.setSetting('cloudCode', cloudCode.trim().toUpperCase());
     }
-    // ضبط مؤشرات المزامنة: إذا استلمنا لقطة حقيقية مع compacted_through_ts،
-    // نضبط المؤشر عند (compacted_through_ts - 60 ثانية) لتجنب إعادة تنزيل آلاف العمليات التاريخية من الصفر.
+    // ضبط مؤشرات المزامنة وحاجز المزامنة الذري عند خط الأساس الدقيق (serverWatermarkMs) بلا تراجع
+    // لتجنب إعادة تشغيل التاريخ القديم وتعارضاته بعد الانضمام الذري.
+    var existingBarrierMs = 0;
+    try {
+      final bRows = await db.query(
+        'sync_meta',
+        columns: ['value'],
+        where: 'key = ?',
+        whereArgs: ['atomic_sync_barrier:$workspaceId'],
+        limit: 1,
+      );
+      if (bRows.isNotEmpty) {
+        existingBarrierMs = parseSyncMs(bRows.first['value']);
+      }
+    } catch (_) {}
     await db.delete('sync_meta',
         where: "key LIKE 'last_synced_cursor%' OR key LIKE 'lastCloudTs:%' "
             "OR key LIKE 'lastRosterPush:%' OR key LIKE 'lastLanTs:%'");
-    if (snapshotCompactedTs > 0) {
-      final safeCursor =
-          snapshotCompactedTs > 60000 ? snapshotCompactedTs - 60000 : 0;
-      if (safeCursor > 0) {
-        await db.insert(
-          'sync_meta',
-          {'key': 'last_synced_cursor:$workspaceId', 'value': '$safeCursor'},
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
-        await db.insert(
-          'sync_meta',
-          {'key': 'lastCloudTs:$workspaceId', 'value': '$safeCursor'},
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
-      }
+    final effectiveBarrierMs = snapshotWatermarkMs > existingBarrierMs
+        ? snapshotWatermarkMs
+        : existingBarrierMs;
+    if (effectiveBarrierMs > 0) {
+      await db.insert(
+        'sync_meta',
+        {'key': 'last_synced_cursor:$workspaceId', 'value': '$effectiveBarrierMs'},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await db.insert(
+        'sync_meta',
+        {'key': 'lastCloudTs:$workspaceId', 'value': '$effectiveBarrierMs'},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await db.insert(
+        'sync_meta',
+        {'key': 'snapshotThroughTs:$workspaceId', 'value': '$effectiveBarrierMs'},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await db.insert(
+        'sync_meta',
+        {'key': 'atomic_sync_barrier:$workspaceId', 'value': '$effectiveBarrierMs'},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
     }
 
     // مضاد الأشباح: deviceId حتمي من بصمة العتاد — إعادة التثبيت تعيد
@@ -1932,7 +2011,7 @@ class CloudJoin {
     ].reduce((a, b) => a > b ? a : b);
     final effectiveJoinedAtMs = [
       localJoinNowMs,
-      snapshotCompactedTs,
+      snapshotWatermarkMs,
       rosterApprovedMs,
     ].reduce((a, b) => a > b ? a : b);
     try {
@@ -3756,10 +3835,16 @@ class CloudJoin {
         final snap =
             await buildWorkspaceSnapshot(repo, hostDeviceId: ourOwnDeviceId);
         final snapTs = DateTime.now().millisecondsSinceEpoch;
+        final checksum = SnapshotApply.computeSnapshotChecksum(snap);
+        final counts = SnapshotApply.computeTableCounts(snap);
         final snapPayload = {
+          'schemaVersion': AppDatabase.schemaVersion,
           'createdAt': now,
           'hostDeviceId': ourOwnDeviceId,
           'compacted_through_ts': snapTs,
+          'serverWatermarkMs': {'.sv': 'timestamp'},
+          'checksum': checksum,
+          'counts': counts,
           'data': snap,
         };
         await _putJson(
@@ -3779,13 +3864,18 @@ class CloudJoin {
           );
         }
       } catch (e) {
-        debugPrint('approveJoinRequest snapshot upload: $e');
+        throw CloudJoinException(
+          '❌ فشل رفع اللقطة الذرية للمنشأة قبل اعتماد العضو.\n'
+          'السبب: $e\n'
+          'الحل: تأكد من استقرار الإنترنت وأعد المحاولة.',
+        );
       }
     }
 
-    final snapshotFuture = uploadJoinSnapshotOnly();
-    unawaited(snapshotFuture);
-    unawaited(cleanCloudExpulsionOperations());
+    // الترتيب الذري الإلزامي: تنظيف آثار الطرد ورفع اللقطة والتحقق من اكتمالها أولاً،
+    // ثم إعلان حالة approved وكتابة roster حتى لا يستلم العضو موافقة قبل جاهزية اللقطة.
+    await cleanCloudExpulsionOperations();
+    await uploadJoinSnapshotOnly();
 
     await Future.wait<void>([
       writeApprovedSignal(),
@@ -3825,13 +3915,6 @@ class CloudJoin {
       ])
         _delete('$root/$node/$encApproved.json').catchError((_) {}),
     ]);
-
-    // نافذة انتظار قصيرة غير معطّلة (600ms) تضمن اكتمال اللقطة فوراً في الشبكات السريعة
-    // والاختبارات دون تأخير إغلاق نافذة المدير في قواعد البيانات الضخمة.
-    await snapshotFuture.timeout(
-      const Duration(milliseconds: 600),
-      onTimeout: () {},
-    );
   }
 
   /// ══ (2026-09-22 — توجيه العمليات بين الأجهزة) ══

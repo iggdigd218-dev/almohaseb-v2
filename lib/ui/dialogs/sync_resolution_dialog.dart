@@ -8,6 +8,7 @@ import '../../core/sfx.dart';
 import '../../data/providers.dart';
 import '../../data/sync/error_localization_mapper.dart';
 import '../../data/sync/sync_diagnostics.dart';
+import '../../data/sync/sync_quarantine.dart';
 import '../widgets.dart' show confirmDialog, showSnack;
 
 /// نافذة معالجة تنبيهات وعمليات المزامنة بالتفصيل (Sync Resolution Dialog / Sheet).
@@ -38,6 +39,7 @@ class _SyncResolutionDialogState extends ConsumerState<SyncResolutionDialog> {
   bool _loading = true;
   bool _actionInProgress = false;
   List<Map<String, Object?>> _unsyncedOps = [];
+  List<Map<String, Object?>> _quarantinedOps = [];
 
   @override
   void initState() {
@@ -50,14 +52,32 @@ class _SyncResolutionDialogState extends ConsumerState<SyncResolutionDialog> {
     try {
       final repo = ref.read(repoProvider);
       final ops = await repo.getUnsyncedOperationsWithDetails();
+      final db = await repo.database;
+      final qOps = await SyncQuarantineStore.pendingOps(db);
       if (mounted) {
         setState(() {
           _unsyncedOps = ops;
+          _quarantinedOps = qOps;
           _loading = false;
         });
       }
     } catch (e) {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  String _quarantineReasonLabel(String reason) {
+    switch (reason) {
+      case SyncQuarantineStore.kReasonMissingParentFk:
+        return 'بانتظار وصول السجل الأب (مرجع غير مكتمل بعد)';
+      case SyncQuarantineStore.kReasonSovereignViolation:
+        return 'محجوب أمنياً: تعديل سيادي مرفوض من جهاز غير مخوّل';
+      case SyncQuarantineStore.kReasonMemberItemCollision:
+        return 'تعارض ترقيم/باركود صنف من جهاز فرعي — محجوز لمراجعة المدير';
+      case SyncQuarantineStore.kReasonWorkspaceMismatch:
+        return 'اختلاف معرف المنشأة عن المنشأة النشطة';
+      default:
+        return reason.isNotEmpty ? reason : 'معزولة للمراجعة';
     }
   }
 
@@ -393,6 +413,64 @@ class _SyncResolutionDialogState extends ConsumerState<SyncResolutionDialog> {
                               ],
                             ),
                           ),
+                        ],
+
+                        if (_quarantinedOps.isNotEmpty) ...[
+                          const SizedBox(height: 14),
+                          Text(
+                            'العمليات المعزولة في الحجر الصحي (${_quarantinedOps.length})',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13.5,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          for (final q in _quarantinedOps.take(25)) ...[
+                            Container(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              padding: const EdgeInsets.all(11),
+                              decoration: BoxDecoration(
+                                color: isDark
+                                    ? const Color(0xFF0F172A)
+                                    : const Color(0xFFFFFBEB),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: Colors.orange.withValues(alpha: 0.4),
+                                ),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    '${_entityLabel('${q['entity_type'] ?? ''}')} #${q['entity_id'] ?? ''}',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12.5,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    _quarantineReasonLabel('${q['reason'] ?? ''}'),
+                                    style: TextStyle(
+                                      fontSize: 11.5,
+                                      color: Colors.orange.shade900,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  if ('${q['missing_parent_table'] ?? ''}'.isNotEmpty) ...[
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      'المرجع الناقص: ${q['missing_parent_table']} #${q['missing_parent_id']}',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.grey.shade700,
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          ],
                         ],
 
                         // خطأ الاتصال العام إن وُجد

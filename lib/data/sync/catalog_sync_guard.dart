@@ -10,6 +10,7 @@ import 'package:http/http.dart' as http;
 
 import '../repository.dart';
 import 'package:sqflite/sqflite.dart';
+import 'apply_remote.dart';
 import 'cloud_firebase_transport.dart';
 import 'cloud_join.dart';
 import 'conflict_resolver.dart';
@@ -88,6 +89,7 @@ class CatalogSyncGuard {
   /// حساب البصمة المحلية الحتمية لقاعدة البيانات (باستبعاد المحذوف قطعياً).
   static Future<CatalogDigest> computeLocalDigest(Repo repo) async {
     final db = await repo.database;
+    await ApplyRemoteOp.healCorruptedItemCatalog(db);
 
     // 1. الحسابات النشطة غير المحذوفة
     final accRows = await db.query(
@@ -98,13 +100,16 @@ class CatalogSyncGuard {
     );
 
     // 2. الأصناف النشطة غير المحذوفة
-    final itemRows = await db.query(
+    final rawItemRows = await db.query(
       'items',
       columns: ['id', 'name', 'sku'],
       where:
           "(is_deleted = 0 OR is_deleted IS NULL) AND (deleted_at IS NULL OR TRIM(deleted_at) = '' OR TRIM(deleted_at) = 'null')",
       orderBy: 'id ASC',
     );
+    final itemRows = rawItemRows
+        .where((r) => !isKnownAutoSplitItemId((r['id'] as num?)?.toInt() ?? 0))
+        .toList();
 
     // 3. الأقسام النشطة
     final secRows = await db.query(
@@ -586,16 +591,41 @@ class CatalogSyncGuard {
         itm.forEach((k, v) {
           if (validCols.contains(k.toString())) itmMap[k.toString()] = v as Object?;
         });
-        final itmId = itmMap['id'];
-        if (itmId == null) continue;
+        final itmId = (itmMap['id'] as num?)?.toInt() ??
+            int.tryParse('${itmMap['id'] ?? ''}') ??
+            0;
+        if (itmId <= 0 || isKnownAutoSplitItemId(itmId)) continue;
+
+        final isSnapDeleted = ((itmMap['is_deleted'] as num?)?.toInt() ?? 0) == 1 ||
+            (itmMap['deleted_at'] != null &&
+                '${itmMap['deleted_at']}'.trim().isNotEmpty &&
+                '${itmMap['deleted_at']}'.trim().toLowerCase() != 'null');
 
         final ex = await db.query('items',
             where: 'id = ?', whereArgs: [itmId], limit: 1);
         if (ex.isEmpty) {
+          if (isSnapDeleted) continue;
           await db.insert('items', itmMap,
               conflictAlgorithm: ConflictAlgorithm.replace);
           healed++;
         } else {
+          if (isSnapDeleted) {
+            final curDel = ((ex.first['is_deleted'] as num?)?.toInt() ?? 0) == 1;
+            if (!curDel) {
+              await db.update(
+                'items',
+                {
+                  'is_deleted': 1,
+                  'is_active': 0,
+                  'deleted_at': '${itmMap['deleted_at'] ?? nowIso}',
+                },
+                where: 'id = ?',
+                whereArgs: [itmId],
+              );
+              healed++;
+            }
+            continue;
+          }
           final curName = '${ex.first['name'] ?? ''}';
           if (curName.contains('صنف مؤقت') ||
               (forceCatalogCheck &&

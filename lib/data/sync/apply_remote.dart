@@ -6,7 +6,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../../core/auth_config.dart';
-import '../../core/database.dart';
 import '../../core/device_names.dart';
 import '../../core/item_conflict.dart';
 import '../../core/media_paths.dart';
@@ -17,18 +16,17 @@ import 'error_localization_mapper.dart';
 import 'operation.dart';
 import 'sync_activity.dart';
 import 'sync_diagnostics.dart';
+import 'sync_quarantine.dart';
 
 
 /// ══════════════════════════════════════════════════════════════════════════
-/// (2026-09-22) سلامة تطبيق العمليات الواردة — FOREIGN KEY 787
+/// سلامة تطبيق العمليات الواردة — الحجر الصحي للمفاتيح الأجنبية (NO STUBS)
 /// ══════════════════════════════════════════════════════════════════════════
-/// العمليات تصل من السحابة مرتّبة **زمنياً** لا حسب التبعية: فاتورة قد
-/// تسبق حسابها أو صنفَها، فيرفض SQLite إدراجها
-/// (FOREIGN KEY constraint failed — code 787) ويتوقف السحب كله.
-/// الحل ثلاث طبقات:
-///   1) فرز الدفعة الواردة حسب التبعية (ترتيب واعٍ بالاعتمادية).
-///   2) إنشاء سجل مؤقت (Stub) لكل أب مفقود قبل إدراج ابنه.
-///   3) تعطيل فحص المفاتيح أثناء الدفعة من الناقل (حزام أمان أخير).
+/// العمليات تصل من السحابة مرتّبة حسب التبعية:
+///   1) فرز الدفعة الواردة حسب التبعية (أقسام ← فئات ← أصناف ← فواتير ← حركات).
+///   2) عند فقدان أي أب حقيقي (`account_id` / `item_id` / `category_id`...)،
+///      تُعزل العملية بأمان في `sync_quarantine` بدل إنشاء سجلات وهمية
+///      («صنف مؤقت» / «حساب مؤقت»)، وتُعاد معالجتها تلقائياً فور وصول الأب.
 
 /// الجدول الأب لكل عمود مفتاح أجنبي معروف في المخطط.
 const Map<String, String> kForeignParentTable = {
@@ -88,65 +86,7 @@ List<SyncOperation> sortOperationsByDependency(Iterable<SyncOperation> ops) {
   return indexed.map((e) => e.value).toList();
 }
 
-/// إنشاء سجل مؤقت (Stub) بالمعرف المطلوب: يمنع كسر التكامل المرجعي حتى
-/// تصل العملية الأصلية فتستبدله. الأعمدة الإلزامية تُملأ بقيم آمنة عامة
-/// فلا ينفجر الإدراج على قواعد بختلف مخططها.
-Future<void> insertStubRow(
-  DatabaseExecutor txn,
-  String table,
-  Object id,
-  SyncOperation op,
-) async {
-  final info = await txn.rawQuery('PRAGMA table_info($table)');
-  if (info.isEmpty) return;
-  final pkCol = info.cast<Map<Object?, Object?>?>().firstWhere(
-        (c) => ((c?['pk'] as int?) ?? 0) > 0,
-        orElse: () => null,
-      );
-  if (pkCol == null) return;
-  final pk = pkCol['name'] as String;
-  final now = DateTime.now().toIso8601String();
-  final row = <String, Object?>{
-    pk: id,
-    if (table == 'accounts') 'name': 'حساب مؤقت (قيد المزامنة) $id',
-    if (table == 'items') 'name': 'صنف مؤقت (قيد المزامنة) $id',
-    if (table == 'item_categories') 'name': 'تصنيف مؤقت $id',
-    if (table == 'sections') 'name': 'قسم مؤقت $id',
-    if (table == 'conversations') 'title': 'محادثة',
-    if (table == 'transactions') ...{
-        'type': 'sale',
-        'amount': 1, // CHECK (amount > 0)
-        'status': 'done',
-        'sync_state': 'synced',
-      },
-  };
-  for (final col in info) {
-    final name = col['name'] as String;
-    if (row.containsKey(name)) continue;
-    final notNull = (col['notnull'] as int? ?? 0) == 1;
-    final hasDefault = col['dflt_value'] != null;
-    final isPk = (col['pk'] as int? ?? 0) > 0;
-    if (!notNull || hasDefault || isPk) continue;
-    final type = ((col['type'] as String?) ?? '').toUpperCase();
-    row[name] = switch (name) {
-      'workspace_id' => op.workspaceId,
-      'created_at' || 'updated_at' || 'date' => now,
-      _ => (type.contains('INT') ||
-              type.contains('REAL') ||
-              type.contains('NUM'))
-          ? 0
-          : '',
-    };
-  }
-  await txn.insert(table, row, conflictAlgorithm: ConflictAlgorithm.replace);
-}
-
 /// (2026-09-24) يُفرغ `section_id` إن كان يشير إلى قسم غير موجود محلياً.
-///
-/// وصول فئة (أو صنف) قبل قسمها — أو بقسم محذوف على هذا الجهاز — كان يكسر
-/// قيد `sections(id)` فيفشل تطبيق العملية كلها (FOREIGN KEY 787) وتعلق
-/// المزامنة. نُفرغ العلاقة مؤقتاً: يُعرض الكيان تحت «عام/بدون قسم»، ويُصحَّح
-/// تلقائياً عند وصول القسم أو باختيار المستخدم.
 Future<void> nullDanglingSection(
   DatabaseExecutor txn,
   String table,
@@ -164,37 +104,67 @@ Future<void> nullDanglingSection(
   }
 }
 
-/// يتأكد من وجود كل آباء هذا الصف قبل إدراجه/تحديثه، فيُنشئ لهم سجلات
-/// مؤقتة إن كانوا مفقودين (وصل الابن قبل أبيه).
-Future<void> ensureForeignParents(
+/// فحص وجود كافة السجلات الأب المطلوبة لهذا الصف قبل إدراجه أو تحديثه.
+/// يُستثنى `section_id` الاختياري (تُفرّغ قيمته عبر `nullDanglingSection`).
+/// عند غياب أي أب حقيقي، يعيد بياناته ليتم عزل العملية في `sync_quarantine`.
+Future<({String table, String id})?> findMissingForeignParent(
   DatabaseExecutor txn,
   String table,
   Map<String, Object?> row,
-  SyncOperation op,
-) async {
+  SyncOperation op, {
+  List<Map<String, Object?>>? txLines,
+}) async {
   for (final entry in row.entries) {
+    if (entry.key == 'section_id') continue;
     final parent = kForeignParentTable[entry.key];
     final id = entry.value;
     if (parent == null || parent == table || id == null) continue;
     if (id is String && id.trim().isEmpty) continue;
+    if (id is num && id == 0 && entry.key == 'category_id') {
+      row['category_id'] = null;
+      continue;
+    }
     try {
-      final found = await txn.query(parent,
-          columns: ['id'], where: 'id = ?', whereArgs: [id], limit: 1);
-      if (found.isNotEmpty) continue;
-      await insertStubRow(txn, parent, id, op);
-    } catch (_) {
-      // تعذّر إنشاء السجل المؤقت لا يمنع المحاولة الأصلية — حزام
-      // الأمان الثالث (PRAGMA foreign_keys = OFF) يمتصّ الصدمة.
+      final found = await txn.query(
+        parent,
+        columns: ['id'],
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (found.isEmpty) {
+        return (table: parent, id: '$id');
+      }
+    } catch (_) {}
+  }
+
+  if (table == 'transactions' && txLines != null && txLines.isNotEmpty) {
+    for (final line in txLines) {
+      final rawItemId = line['item_id'];
+      if (rawItemId == null) continue;
+      if (rawItemId is String && rawItemId.trim().isEmpty) continue;
+      final checkId = rawItemId;
+      try {
+        final found = await txn.query(
+          'items',
+          columns: ['id'],
+          where: 'id = ?',
+          whereArgs: [checkId],
+          limit: 1,
+        );
+        if (found.isEmpty) {
+          return (table: 'items', id: '$checkId');
+        }
+      } catch (_) {}
     }
   }
+  return null;
 }
 
-/// (2026-09-26) معالجة ذكية وذاتية لتعارضات الأقسام والفئات (Auto-Healing on Sync):
-/// 1. فحص وجود سجل محلي بنفس الاسم بمعرف مختلف.
-/// 2. إعادة ربط الأصناف التابعة للسجل المحلي بالمعرف السحابي الجديد.
-/// 3. حذف أو تحديث السجل المحلي المتعارض بأمان لتفريغ الاسم.
-/// 4. إذا كان السجل القديم موسوماً بالحذف (deleted_at != NULL)،
-///    يتم تحرير قيد الفرادة محلياً بإضافة لاحقة زمنية للاسم القديم لمنع كسر قيد UNIQUE constraint.
+/// تحرير قيد الفرادة على أسماء الفئات بدون أي حذف أعمى (No DELETE):
+/// 1. إذا كان السجل المحلي القديم محذوفاً، يُحرر الاسم بإضافة لاحقة `(محذوف ...)`.
+/// 2. إذا كان السجل المحلي القديم نشطاً، يُعاد ربط الأصناف والفئات الفرعية بالمعرف الوارد
+///    وتُضاف لاحقة تمييز غير متلفة للاسم القديم بدل حذفه من قاعدة البيانات.
 Future<void> _healCategoryNameConflict(
   DatabaseExecutor txn,
   String catName,
@@ -216,7 +186,6 @@ Future<void> _healCategoryNameConflict(
     if (dupId == null) continue;
     final deletedAt = d['deleted_at']?.toString() ?? '';
 
-    // 3. تحرير قيد الفرادة محلياً للسجل المحذوف بإضافة لاحقة زمنية
     if (deletedAt.isNotEmpty) {
       final suffix = DateTime.now().millisecondsSinceEpoch;
       await txn.update(
@@ -229,7 +198,6 @@ Future<void> _healCategoryNameConflict(
       continue;
     }
 
-    // 1. إعادة ربط الأصناف التابعة للسجل المحلي بالمعرف السحابي الجديد
     try {
       await txn.update(
         'items',
@@ -240,7 +208,6 @@ Future<void> _healCategoryNameConflict(
       );
     } catch (_) {}
 
-    // إعادة ربط الفئات الفرعية التابعة
     try {
       await txn.update(
         'item_categories',
@@ -251,24 +218,18 @@ Future<void> _healCategoryNameConflict(
       );
     } catch (_) {}
 
-    // 2. حذف أو تحديث السجل المحلي المتعارض بأمان لتفريغ الاسم
-    try {
-      await txn.delete('item_categories', where: 'id = ?', whereArgs: [dupId]);
-    } catch (_) {
-      await txn.update(
-        'item_categories',
-        {'name': '$cleanName (محلي $dupId)'},
-        where: 'id = ?',
-        whereArgs: [dupId],
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-    }
+    // تحرير قيد UNIQUE بدون حذف فعلي للسجل القديم
+    await txn.update(
+      'item_categories',
+      {'name': '$cleanName (مؤرشف $dupId)'},
+      where: 'id = ?',
+      whereArgs: [dupId],
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 }
 
-/// معالجة تعارض أسماء الأقسام:
-/// 1. إعادة ربط الفئات والأصناف التابعة للقسم المحلي بالمعرف السحابي الجديد.
-/// 2. تحرير قيد الاسم للسجل المحذوف أو إخلاؤه.
+/// تحرير قيد الفرادة على أسماء الأقسام بدون حذف السجل القديم:
 Future<void> _healSectionNameConflict(
   DatabaseExecutor txn,
   String sectionName,
@@ -322,23 +283,18 @@ Future<void> _healSectionNameConflict(
       );
     } catch (_) {}
 
-    try {
-      await txn.delete('sections', where: 'id = ?', whereArgs: [dupId]);
-    } catch (_) {
-      await txn.update(
-        'sections',
-        {'name': '$cleanName (محلي $dupId)'},
-        where: 'id = ?',
-        whereArgs: [dupId],
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-    }
+    await txn.update(
+      'sections',
+      {'name': '$cleanName (مؤرشف $dupId)'},
+      where: 'id = ?',
+      whereArgs: [dupId],
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 }
 
-/// معالجة تعارض أسماء الحسابات للأعضاء المنقطعين لفترات طويلة:
-/// 1. إعادة ربط العمليات المالية والسندات بالمعرف السحابي المعتمد.
-/// 2. تحرير قيد الاسم للحساب المحذوف أو دمجه بسلاسة لمنع التصادم.
+/// حظر دمج الحسابات المتشابهة في الاسم: كل حساب يظل كياناً مستقلاً
+/// بفصل الاسم تلقائياً بلاحقة دون لمس العمليات أو السندات أو حذف أي حساب.
 Future<void> _healAccountConflict(
   DatabaseExecutor txn,
   String accountName,
@@ -349,7 +305,7 @@ Future<void> _healAccountConflict(
 
   final dups = await txn.query(
     'accounts',
-    columns: ['id', 'deleted_at', 'name', 'kind', 'currency', 'opening_balance'],
+    columns: ['id', 'deleted_at', 'name'],
     where: 'name = ? COLLATE NOCASE AND id != ?',
     whereArgs: [cleanName, newEntityId],
   );
@@ -372,169 +328,14 @@ Future<void> _healAccountConflict(
       continue;
     }
 
-    // (دفعة التدقيق) لا دمج أعمى على تشابه الاسم وحده: المكرر النشط
-    // الذي يختلف عن الوافد في النوع أو العملة — أو يحمل أيٌّ من الطرفين
-    // رصيداً افتتاحياً غير صفري — كيان مالي مستقل ودمجه يخلط الأرصدة.
-    // نكتفي بلاحقة تميّز تحفظ الحسابين كيانين منفصلين.
-    final dupKind = '${d['kind'] ?? ''}'.trim();
-    final dupCurrency = '${d['currency'] ?? ''}'.trim();
-    final dupOpening = ((d['opening_balance'] as num?) ?? 0).toDouble();
-    var newKind = '';
-    var newCurrency = '';
-    var newOpening = 0.0;
-    try {
-      final newRows = await txn.query(
-        'accounts',
-        columns: ['kind', 'currency', 'opening_balance'],
-        where: 'id = ?',
-        whereArgs: [newEntityId],
-        limit: 1,
-      );
-      if (newRows.isNotEmpty) {
-        newKind = '${newRows.first['kind'] ?? ''}'.trim();
-        newCurrency = '${newRows.first['currency'] ?? ''}'.trim();
-        newOpening =
-            ((newRows.first['opening_balance'] as num?) ?? 0).toDouble();
-      }
-    } catch (_) {}
-    final kindsDiffer =
-        newKind.isNotEmpty && dupKind.isNotEmpty && newKind != dupKind;
-    final currenciesDiffer = newCurrency.isNotEmpty &&
-        dupCurrency.isNotEmpty &&
-        newCurrency != dupCurrency;
-    if (kindsDiffer || currenciesDiffer || dupOpening != 0 || newOpening != 0) {
-      await txn.update(
-        'accounts',
-        {'name': '$cleanName (مستقل $dupId)'},
-        where: 'id = ?',
-        whereArgs: [dupId],
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-      continue;
-    }
-    try {
-      await txn.update(
-        'transactions',
-        {'account_id': newEntityId},
-        where: 'account_id = ?',
-        whereArgs: [dupId],
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-    } catch (_) {}
-    try {
-      await txn.update(
-        'transactions',
-        {'from_id': newEntityId},
-        where: 'from_id = ?',
-        whereArgs: [dupId],
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-    } catch (_) {}
-    try {
-      await txn.update(
-        'transactions',
-        {'to_id': newEntityId},
-        where: 'to_id = ?',
-        whereArgs: [dupId],
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-    } catch (_) {}
-    try {
-      await txn.update(
-        'vouchers',
-        {'account_id': newEntityId},
-        where: 'account_id = ?',
-        whereArgs: [dupId],
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-    } catch (_) {}
-
-    try {
-      await txn.delete('accounts', where: 'id = ?', whereArgs: [dupId]);
-    } catch (_) {
-      await txn.update(
-        'accounts',
-        {'name': '$cleanName (محلي $dupId)'},
-        where: 'id = ?',
-        whereArgs: [dupId],
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-    }
-  }
-}
-
-/// استرجاع معرّف الصنف المعاد ترقيمه تلقائياً إثر تعارض أوفلاين (إن وُجد).
-Future<int?> _lookupRemappedItemId(
-  DatabaseExecutor txn,
-  String deviceId,
-  Object? rawItemId,
-) async {
-  if (rawItemId == null) return null;
-  final idStr = '$rawItemId'.trim();
-  if (idStr.isEmpty) return null;
-  try {
-    final cleanDev = deviceId.trim();
-    if (cleanDev.isNotEmpty) {
-      final exactRows = await txn.query(
-        'sync_meta',
-        columns: ['value'],
-        where: 'key = ?',
-        whereArgs: ['item_id_remap:$cleanDev:$idStr'],
-        limit: 1,
-      );
-      if (exactRows.isNotEmpty) {
-        final parsed = int.tryParse('${exactRows.first['value'] ?? ''}'.trim());
-        if (parsed != null && parsed > 0) return parsed;
-      }
-    }
-    final likeRows = await txn.query(
-      'sync_meta',
-      columns: ['key', 'value'],
-      where: 'key LIKE ?',
-      whereArgs: ['item_id_remap:%:$idStr'],
+    await txn.update(
+      'accounts',
+      {'name': '$cleanName (مستقل $dupId)'},
+      where: 'id = ?',
+      whereArgs: [dupId],
+      conflictAlgorithm: ConflictAlgorithm.replace,
     );
-    final origId = int.tryParse(idStr);
-    int? fallbackId;
-    for (final r in likeRows) {
-      final parsed = int.tryParse('${r['value'] ?? ''}'.trim());
-      if (parsed == null || parsed <= 0) continue;
-      if (origId != null && parsed != origId) {
-        return parsed;
-      }
-      fallbackId ??= parsed;
-    }
-    if (fallbackId != null) return fallbackId;
-  } catch (e) {
-    debugPrint('_lookupRemappedItemId error: $e');
   }
-  return null;
-}
-
-/// توليد رقم صنف (id) جديد متاح للصنف المتعارض دون الكتابة فوق أي صنف موجود.
-Future<int> _allocateFreeItemId(
-  DatabaseExecutor txn, [
-  int collidingId = 0,
-]) async {
-  final nextId = Sqflite.firstIntValue(
-        await txn.rawQuery('SELECT COALESCE(MAX(id), 0) + 1 FROM items'),
-      ) ??
-      1;
-  return nextId > collidingId ? nextId : collidingId + 1;
-}
-
-/// توليد رقم ترقيم سريع (PLU) متاح داخل المعاملة الحالية.
-Future<int> _allocateNextPlu(
-  DatabaseExecutor txn,
-  String workspaceId,
-) async {
-  final ws = workspaceId.trim().isNotEmpty
-      ? workspaceId.trim()
-      : AppDatabase.activeWorkspaceId;
-  final rows = await txn.rawQuery(
-    'SELECT COALESCE(MAX(plu), 0) + 1 AS next_plu FROM items WHERE workspace_id = ?',
-    [ws],
-  );
-  return (rows.firstOrNull?['next_plu'] as num?)?.toInt() ?? 1;
 }
 
 /// استخراج اسم الجهاز/المستخدم المدخل للصنف بدقة لعرضه في إشعار التعارض.
@@ -862,196 +663,8 @@ Future<void> _detectAndNotifyBarcodeOrPluConflict(
   );
 }
 
-/// معالجة تعارض أسماء الأصناف:
-/// 1. إعادة ربط حركات المخزون وعناصر الفواتير بالمعرف السحابي الجديد.
-/// 2. تحرير قيد الاسم للسجل المحذوف بإضافة لاحقة زمنية.
-Future<void> _healItemNameConflict(
-  DatabaseExecutor txn,
-  String itemName,
-  Object newEntityId,
-) async {
-  final cleanName = itemName.trim();
-  if (cleanName.isEmpty) return;
-
-  final dups = await txn.query(
-    'items',
-    columns: ['id', 'deleted_at', 'name', 'is_deleted', 'quantity', 'workspace_id'],
-    where: 'name = ? COLLATE NOCASE AND id != ?',
-    whereArgs: [cleanName, newEntityId],
-  );
-  if (dups.isEmpty) return;
-
-  for (final d in dups) {
-    final dupId = d['id'];
-    if (dupId == null) continue;
-    final deletedAt = d['deleted_at']?.toString() ?? '';
-    final isDeleted = (d['is_deleted'] as int? ?? 0) == 1;
-
-    if (deletedAt.isNotEmpty || isDeleted) {
-      try {
-        await txn.update(
-          'stock_moves',
-          {'item_id': newEntityId},
-          where: 'item_id = ?',
-          whereArgs: [dupId],
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
-      } catch (_) {}
-
-      try {
-        await txn.update(
-          'transaction_items',
-          {'item_id': newEntityId},
-          where: 'item_id = ?',
-          whereArgs: [dupId],
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
-      } catch (_) {}
-
-      try {
-        await txn.delete('items', where: 'id = ?', whereArgs: [dupId]);
-      } catch (_) {
-        await txn.update(
-          'items',
-          {
-            'is_deleted': 1,
-            'is_active': 0,
-            'deleted_at':
-                deletedAt.isNotEmpty ? deletedAt : DateTime.now().toIso8601String(),
-          },
-          where: 'id = ?',
-          whereArgs: [dupId],
-        );
-      }
-      continue;
-    }
-
-    // (PR-3+) حماية رصيد الصنف الافتتاحي عند دمج التكرار غير المتصل.
-    // حساب «المغطى بحركات المكرر» يجب أن يسبق إعادة توجيه الحركات إلى الصنف
-    // المعتمد: بعدها لا تبقى أي حركة مرتبطة بمعرّف المكرر فيتحول الفحص إلى
-    // كود ميت ويُسجَّل شراء تسوية مزدوج يخالف صيغة المطابقة
-    // (initialCreateQty + طيّ الحركات) ويضخّم المخزون عند إعادة المطابقة.
-    final dupQty = ((d['quantity'] as num?) ?? 0).toDouble();
-    double recordedInMoves = 0.0;
-    try {
-      final dropMoves = await txn.query(
-        'stock_moves',
-        columns: ['id', 'kind', 'quantity'],
-        where:
-            "item_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
-        whereArgs: [dupId],
-        orderBy: 'date ASC, created_at ASC, id ASC',
-      );
-      for (final m in dropMoves) {
-        final k = '${m['kind'] ?? ''}'.trim();
-        final q = ((m['quantity'] as num?) ?? 0).toDouble();
-        if (k == 'adjust') {
-          final delta = q - recordedInMoves;
-          if (delta >= 0) {
-            await txn.update(
-              'stock_moves',
-              {'kind': StockKind.purchase.code, 'quantity': delta},
-              where: 'id = ?',
-              whereArgs: [m['id']],
-            );
-          } else {
-            await txn.update(
-              'stock_moves',
-              {'kind': StockKind.sale.code, 'quantity': -delta},
-              where: 'id = ?',
-              whereArgs: [m['id']],
-            );
-          }
-          recordedInMoves = q;
-        } else if (k == 'purchase' || k == 'return' || k == 'returnIn') {
-          recordedInMoves += q;
-        } else if (k == 'sale') {
-          recordedInMoves -= q;
-        }
-      }
-    } catch (e) {
-      debugPrint('_healItemNameConflict moves query error: $e');
-    }
-
-    var movesRepointed = false;
-    try {
-      await txn.update(
-        'stock_moves',
-        {'item_id': newEntityId},
-        where: 'item_id = ?',
-        whereArgs: [dupId],
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-      movesRepointed = true;
-    } catch (e) {
-      debugPrint('_healItemNameConflict repoint moves error: $e');
-    }
-
-    try {
-      await txn.update(
-        'transaction_items',
-        {'item_id': newEntityId},
-        where: 'item_id = ?',
-        whereArgs: [dupId],
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-    } catch (e) {
-      debugPrint('_healItemNameConflict repoint tx_items error: $e');
-    }
-
-    final rawUncovered =
-        movesRepointed ? (dupQty - recordedInMoves) : dupQty;
-    final uncoveredQty = rawUncovered > 0 ? rawUncovered : 0.0;
-    if (dupQty > 0 || uncoveredQty > 0) {
-      final now = DateTime.now();
-      final nowIso = now.toIso8601String();
-      final dateStr = nowIso.split('T').first;
-      final wsId = (d['workspace_id']?.toString().isNotEmpty ?? false)
-          ? d['workspace_id']
-          : AppDatabase.activeWorkspaceId;
-
-      if (uncoveredQty > 0) {
-        try {
-          await txn.insert('stock_moves', {
-            'workspace_id': wsId,
-            'item_id': newEntityId,
-            'kind': StockKind.purchase.code,
-            'quantity': uncoveredQty,
-            'unit_price': 0,
-            'notes': 'تسوية تلقائية لدمج رصيد صنف مكرر ($cleanName)',
-            'date': dateStr,
-            'created_at': nowIso,
-          });
-        } catch (e) {
-          debugPrint('_healItemNameConflict insert move error: $e');
-        }
-      }
-
-      if (dupQty > 0) {
-        try {
-          await txn.rawUpdate(
-            'UPDATE items SET quantity = quantity + ?, updated_at = ? WHERE id = ?',
-            [dupQty, nowIso, newEntityId],
-          );
-        } catch (e) {
-          debugPrint('_healItemNameConflict update qty error: $e');
-        }
-      }
-    }
-
-    try {
-      await txn.delete('items', where: 'id = ?', whereArgs: [dupId]);
-    } catch (_) {
-      await txn.update(
-        'items',
-        {'name': '$cleanName (محلي $dupId)'},
-        where: 'id = ?',
-        whereArgs: [dupId],
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-    }
-  }
-}
+// تم إلغاء الدمج والحذف التلقائي للأصناف المتشابهة بالاسم نهائياً؛
+// أي تداخل أو تعارض يُترك مستقلاً أو يُعالج يدوياً عبر المدير السيادي فقط.
 
 /// (PR-3+) شفاء الأصناف العالقة بدون قسم تلقائياً:
 /// عند وصول قسم جديد أو فئة مرتبطة بقسم، يتم ربط أي أصناف ذات `section_id IS NULL`
@@ -1095,6 +708,16 @@ Future<int> _autoHealOrphanItems(
   }
 }
 
+
+/// فحص ما إذا كان معرّف الصنف من المعرّفات المولّدة تلقائياً بسبب الانقسام السابق
+/// (`_allocateNonCollidingItemId` التي كانت تضيف `+1, +2...` لآحاد الـ Snowflake ID).
+bool isKnownAutoSplitItemId(int id) {
+  if (id <= 0) return false;
+  if (id >= 1881541471252432897 && id <= 1881541471252432898) return true;
+  if (id >= 1881793993336740609 && id <= 1881793993336740666) return true;
+  if (id >= 1881848145177768449 && id <= 1881848145177768635) return true;
+  return id > 1000000000000 && (id & 0xFF) != 0;
+}
 
 extension ApplyRemoteOp on Repo {
   /// حركات المخزون التي طُبّقت كميتها الابتدائية عبر لقطة صنف يتيم (بلا سجل محلي سابق)
@@ -1150,67 +773,74 @@ extension ApplyRemoteOp on Repo {
         return false;
       }
     }
-    // (2026-09-28/30) ممنوع المزامنة خارج مساحة العمل الواحدة للمنشأة (رفض أي مساحة عمل مغايرة)
+    // ممنوع المزامنة خارج مساحة العمل الواحدة للمنشأة (بدون أي إعادة ربط تلقائية)
     final currentWs = requireWorkspaceId;
     if (op.workspaceId.isNotEmpty &&
         op.workspaceId != 'default' &&
         currentWs.isNotEmpty &&
         currentWs != 'default' &&
         op.workspaceId != currentWs) {
-      var canAdoptPeerWorkspace = false;
-      if (RegExp(r'^WS-[A-Z0-9]{8}$').hasMatch(op.workspaceId)) {
-        try {
-          final existingOps =
-              await txn.query('operations', columns: ['id'], limit: 1);
-          if (existingOps.isEmpty) {
-            final wsRows = await txn.query(
-              'workspaces',
-              where: 'id = ?',
-              whereArgs: [currentWs],
-              limit: 1,
-            );
-            final ownerEmail = wsRows.isEmpty
-                ? ''
-                : '${wsRows.first['owner_email'] ?? ''}'.trim();
-            final wsName =
-                wsRows.isEmpty ? '' : '${wsRows.first['name'] ?? ''}'.trim();
-            if (ownerEmail.isEmpty && (wsName.isEmpty || wsName == 'متجري')) {
-              canAdoptPeerWorkspace = true;
-              debugSetWorkspaceId(op.workspaceId);
-              final nowIso = DateTime.now().toIso8601String();
-              await txn.insert(
-                'workspaces',
-                {
-                  'id': op.workspaceId,
-                  'name': 'متجري',
-                  'owner_google_id': '',
-                  'owner_email': '',
-                  'owner_name': '',
-                  'created_at': nowIso,
-                  'updated_at': nowIso,
-                },
-                conflictAlgorithm: ConflictAlgorithm.ignore,
-              );
-              await txn.insert(
-                'sync_meta',
-                {'key': 'sync.workspaceId', 'value': op.workspaceId},
-                conflictAlgorithm: ConflictAlgorithm.replace,
-              );
-            }
-          }
-        } catch (_) {}
-      }
-      if (!canAdoptPeerWorkspace) {
-        return false;
-      }
+      return false;
     }
 
     // (2026-09-22) كيان من إصدار أحدث: نتجاهله صراحةً بدل كتابته في جدول
     // خاطئ (كان يسقط على transactions فيُتلف البيانات).
     if (op.entityType == EntityKind.unknown) return false;
+    if (op.entityType == EntityKind.item) {
+      final parsedItemId = int.tryParse(op.entityId) ?? 0;
+      if (isKnownAutoSplitItemId(parsedItemId)) {
+        return false;
+      }
+    }
+    if (op.entityType == EntityKind.setting &&
+        op.entityId.startsWith('item_conflict:')) {
+      final rawVal = '${op.payload['value'] ?? ''}'.trim();
+      final conflict =
+          rawVal.isEmpty ? null : OfflineItemConflict.tryParseJson(rawVal);
+      if (rawVal.isEmpty ||
+          conflict == null ||
+          isKnownAutoSplitItemId(conflict.item1Id) ||
+          isKnownAutoSplitItemId(conflict.item2Id)) {
+        await txn.delete(
+          'settings',
+          where: 'key = ?',
+          whereArgs: [op.entityId],
+        );
+        await txn.delete(
+          'notifications',
+          where: "entity_type = 'item_conflict' AND entity_id = ?",
+          whereArgs: [op.entityId],
+        );
+        await _insertStoredOperation(txn, op);
+        return true;
+      }
+    }
     final seen = await txn.query('operations',
         columns: ['id'], where: 'id = ?', whereArgs: [op.id], limit: 1);
     if (seen.isNotEmpty) return false;
+
+    String ownDevId = '';
+    try {
+      ownDevId = requireDeviceId;
+    } catch (_) {}
+
+    if (SovereignAuthorityGuard.isSovereignMutation(op)) {
+      final authorized = await SovereignAuthorityGuard.isSenderAuthorizedOwner(
+        txn,
+        op,
+        ownDeviceId: ownDevId,
+      );
+      if (!authorized) {
+        await SyncQuarantineStore.quarantineOp(
+          txn,
+          op: op,
+          reason: SyncQuarantineStore.kReasonSovereignViolation,
+          details:
+              'Blocked non-owner device ${op.deviceId} from mutating ${op.entityType.name}:${op.entityId}',
+        );
+        return false;
+      }
+    }
 
     // (2026-09-28) حماية سيادية: لا يمكن لأي عملية سحابية قادمة من جهاز عضو
     // أن تعدل حساب المالك الرئيسي أو تخفض رتبته أو تبدّل اسمه.
@@ -1250,35 +880,6 @@ extension ApplyRemoteOp on Repo {
       } catch (_) {}
     }
 
-    // إذا كان الصنف الوارد قد أُعيد ترقيمه مسبقاً بسبب تعارض أوفلاين، نوجّه التعديل/الحذف للمعرّف الجديد.
-    if (op.entityType == EntityKind.item && op.opType != OpKind.create) {
-      final remapped = await _lookupRemappedItemId(
-        txn,
-        op.deviceId,
-        op.entityId,
-      );
-      if (remapped != null && '$remapped' != op.entityId) {
-        final newPayload = Map<String, Object?>.from(op.payload)
-          ..['id'] = remapped;
-        op = SyncOperation(
-          id: op.id,
-          deviceId: op.deviceId,
-          workspaceId: op.workspaceId,
-          userId: op.userId,
-          entityType: op.entityType,
-          entityId: '$remapped',
-          opType: op.opType,
-          version: op.version,
-          parentOpId: op.parentOpId,
-          payload: newPayload,
-          deviceTime: op.deviceTime,
-          timestamp: op.timestamp,
-          serverTime: op.serverTime,
-          isSynced: op.isSynced,
-        );
-      }
-    }
-
     final existing = await txn.query(table,
         where: '$primaryKey = ?', whereArgs: [op.entityId], limit: 1);
     final latest = await txn.query('operations',
@@ -1289,74 +890,61 @@ extension ApplyRemoteOp on Repo {
     final localLatest =
         latest.isEmpty ? null : SyncOperation.fromMap(latest.first);
 
-    // ══ (نظام منع مسح البيانات وإعادة الترقيم التلقائي الذكي للأصناف — أوفلاين) ══
-    // عند استقبال صنف عبر المزامنة يحمل نفس id لصنف محلي مختلف (أُدخلا أوفلاين من جهازين):
-    // لا نسمح لـ ConflictResolver بتجاهل أحدهما ولا نسمح بالكتابة فوق الصنف المحلي.
-    var isOfflineItemIdCollision = false;
-    String localCreateDeviceId = '';
+    // ══ القاعدة الصارمة (In-Place Upsert): تطابق معرّف الصنف (ID) يعني نفس الصنف 100% ══
+    // يُمنع الفصل التلقائي أو توليد أرقام أصناف جديدة كلياً؛ يُحسم التحديث في مكانه
+    // لصاحب الطابع الزمني/الإصدار الأحدث فقط.
+    final shouldApply = resolver.decide(
+      incoming: op,
+      exists: existing.isNotEmpty,
+      localVersion: localLatest?.version ?? 0,
+      localLatest: localLatest,
+    );
+    if (!shouldApply) return false;
+
     if (table == 'items' &&
         existing.isNotEmpty &&
-        (op.opType == OpKind.create || op.opType == OpKind.update)) {
+        op.opType != OpKind.delete_) {
       final existingRow = existing.first;
       final existingName = '${existingRow['name'] ?? ''}'.trim();
-      final incomingName = '${op.payload['name'] ?? ''}'.trim();
       final isStubRow = existingName.isEmpty ||
           existingName == 'صنف' ||
           existingName.startsWith('صنف مؤقت');
-      final isExistingDeleted =
-          ((existingRow['is_deleted'] as num?)?.toInt() ?? 0) == 1 ||
-              ('${existingRow['deleted_at'] ?? ''}'.trim().isNotEmpty &&
-                  '${existingRow['deleted_at'] ?? ''}'.trim().toLowerCase() !=
-                      'null');
       final isControlOp = op.payload['__from_stock_move'] != null ||
           op.payload['__from_stock_move_delete'] != null ||
           op.payload['__reconciled'] == true ||
-          op.payload['__conflict_resolved'] == true ||
-          op.payload['__reassigned_from_id'] != null;
-
-      try {
-        final createOps = await txn.query(
-          'operations',
-          columns: ['device_id'],
-          where: "entity_type = 'item' AND entity_id = ? AND op_type = 'create'",
-          whereArgs: [op.entityId],
-          orderBy: 'version ASC, timestamp ASC',
-          limit: 1,
-        );
-        if (createOps.isNotEmpty) {
-          localCreateDeviceId =
-              '${createOps.first['device_id'] ?? ''}'.trim();
-        }
-      } catch (_) {}
-
-      if (!isStubRow &&
-          !isExistingDeleted &&
-          !isControlOp &&
-          incomingName.isNotEmpty) {
-        final namesDiffer =
-            existingName.toLowerCase() != incomingName.toLowerCase();
-        final devicesDiffer = localCreateDeviceId.isNotEmpty &&
-            op.deviceId.trim().isNotEmpty &&
-            localCreateDeviceId != op.deviceId.trim();
-        if (op.opType == OpKind.create && (namesDiffer || devicesDiffer)) {
-          isOfflineItemIdCollision = true;
-        } else if (op.opType == OpKind.update &&
-            op.version <= 1 &&
-            namesDiffer &&
-            (localCreateDeviceId.isEmpty || devicesDiffer)) {
-          isOfflineItemIdCollision = true;
+          op.payload['__conflict_resolved'] == true;
+      if (!isStubRow && !isControlOp) {
+        final payloadItemMs =
+            safeParseNullableDateTime(op.payload['updated_at'])
+                    ?.millisecondsSinceEpoch ??
+                safeParseNullableDateTime(op.payload['created_at'])
+                    ?.millisecondsSinceEpoch ??
+                0;
+        final incomingEffMs = op.serverTimeMs > 0
+            ? op.serverTimeMs
+            : (payloadItemMs > 0
+                ? payloadItemMs
+                : (safeParseNullableDateTime(op.timestamp)
+                        ?.millisecondsSinceEpoch ??
+                    safeParseNullableDateTime(op.deviceTime)
+                        ?.millisecondsSinceEpoch ??
+                    0));
+        final existingRowMs =
+            safeParseNullableDateTime(existingRow['updated_at'])
+                    ?.millisecondsSinceEpoch ??
+                safeParseNullableDateTime(existingRow['created_at'])
+                    ?.millisecondsSinceEpoch ??
+                0;
+        // منع أي عملية إنشاء قديمة أو عملية تحمل updated_at أقدم من تحديث الصنف المحلي
+        // من إرجاع اسم الصنف أو باركوده أو سعره إلى ما قبل التعديل.
+        if (existingRowMs > 0 &&
+            ((payloadItemMs > 0 && payloadItemMs < existingRowMs) ||
+                (localLatest == null &&
+                    incomingEffMs > 0 &&
+                    incomingEffMs < existingRowMs))) {
+          return false;
         }
       }
-    }
-
-    if (!isOfflineItemIdCollision) {
-      final shouldApply = resolver.decide(
-        incoming: op,
-        exists: existing.isNotEmpty,
-        localVersion: localLatest?.version ?? 0,
-        localLatest: localLatest,
-      );
-      if (!shouldApply) return false;
     }
 
     // سطور الفاتورة تُنقل داخل حمولة العملية المالية (ليست كيانًا مستقلًا).
@@ -1376,21 +964,16 @@ extension ApplyRemoteOp on Repo {
             !(table == 'users' && entry.key == 'is_me'))
           entry.key: entry.value,
       if (columns.contains('workspace_id')) 'workspace_id': op.workspaceId,
-      if (columns.contains('updated_at')) 'updated_at': now,
+      if (columns.contains('updated_at'))
+        'updated_at': (table == 'items'
+                ? safeParseNullableDateTime(op.payload['updated_at'])
+                    ?.toIso8601String()
+                : null) ??
+            now,
       if (columns.contains('sync_state')) 'sync_state': 'synced',
       if (columns.contains('sync_status')) 'sync_status': 'synced',
       if (columns.contains('is_synced')) 'is_synced': 1,
     };
-    if (op.entityType == EntityKind.stockMove && row['item_id'] != null) {
-      final remappedItemId = await _lookupRemappedItemId(
-        txn,
-        op.deviceId,
-        row['item_id'],
-      );
-      if (remappedItemId != null) {
-        row['item_id'] = remappedItemId;
-      }
-    }
     // رسالة دردشة تشير لمحادثة غير موجودة محلياً: أنشئ المحادثة أولاً
     // (قيد المفتاح الأجنبي conversation_id) — عنوانها يأتي في الحمولة.
     if (op.entityType == EntityKind.message) {
@@ -1451,250 +1034,28 @@ extension ApplyRemoteOp on Repo {
       case OpKind.create:
       case OpKind.update:
       case OpKind.settings:
-        // (2026-09-22) آباء هذا الصف (حساب/صنف/فاتورة) قد لا يكون وصل بعد
-        // — نُنشئ لهم سجلات مؤقتة قبل الإدراج/التحديث (FOREIGN KEY 787).
-        await ensureForeignParents(txn, table, row, op);
-        // (2026-09-24) قسم يتيح: يُفرغ section_id غير الموجود محلياً.
+        // إفراغ section_id الاختياري إذا غاب قسمه، ثم فحص الآباء الحقيقيين وعزل الناقص في sync_quarantine
         await nullDanglingSection(txn, table, row);
-
-        // ══ تنفيذ الفصل التلقائي الذكي عند تعارض رقم الصنف (id) أوفلاين ══
-        if (table == 'items' && isOfflineItemIdCollision && existing.isNotEmpty) {
-          final existingRow = existing.first;
-          final collidingId = (existingRow['id'] as num?)?.toInt() ??
-              int.tryParse(op.entityId) ??
-              1;
-          final incomingName = '${row['name'] ?? op.payload['name'] ?? ''}'.trim();
-
-          final localCreatedMs =
-              safeParseNullableDateTime(existingRow['created_at'])
-                      ?.millisecondsSinceEpoch ??
-                  0;
-          final incomingCreatedMs = safeParseNullableDateTime(
-                    op.payload['created_at'] ?? op.deviceTime,
-                  )?.millisecondsSinceEpoch ??
-                  (op.serverTimeMs > 0 ? op.serverTimeMs : 0);
-
-          final bool incomingIsYounger;
-          if (localCreatedMs > 0 &&
-              incomingCreatedMs > 0 &&
-              localCreatedMs != incomingCreatedMs) {
-            incomingIsYounger = incomingCreatedMs > localCreatedMs;
-          } else if (localCreateDeviceId.isNotEmpty &&
-              op.deviceId.trim().isNotEmpty &&
-              localCreateDeviceId != op.deviceId.trim()) {
-            incomingIsYounger =
-                op.deviceId.trim().compareTo(localCreateDeviceId) > 0;
-          } else {
-            incomingIsYounger = true;
-          }
-
-          final newId = await _allocateFreeItemId(txn, collidingId);
-          final nextPlu = await _allocateNextPlu(txn, op.workspaceId);
-
-          final incomingRow = <String, Object?>{
-            ...row,
-            'is_deleted': 0,
-            'is_active': 1,
-            'archived': 0,
-            'deleted_at': '',
-          };
-          for (final col in tableInfo) {
-            final colName = col['name'] as String;
-            if (incomingRow.containsKey(colName)) continue;
-            final notNull = (col['notnull'] as int? ?? 0) == 1;
-            final hasDefault = col['dflt_value'] != null;
-            final isPk = (col['pk'] as int? ?? 0) > 0;
-            if (!notNull || hasDefault || isPk) continue;
-            final type = ((col['type'] as String?) ?? '').toUpperCase();
-            incomingRow[colName] = switch (colName) {
-              'created_at' || 'updated_at' || 'date' => now,
-              _ => type.contains('INT') ||
-                      type.contains('REAL') ||
-                      type.contains('NUM')
-                  ? 0
-                  : '',
-            };
-          }
-
-            incomingRow['created_at'] =
-                (safeParseNullableDateTime(incomingRow['created_at']) ??
-                        safeParseNullableDateTime(op.timestamp) ??
-                        safeParseNullableDateTime(now))
-                    ?.toIso8601String() ??
-                    now;
-            incomingRow['updated_at'] =
-                (safeParseNullableDateTime(incomingRow['updated_at']) ??
-                        safeParseNullableDateTime(incomingRow['created_at']) ??
-                        safeParseNullableDateTime(now))
-                    ?.toIso8601String() ??
-                    now;
-
-            if (incomingIsYounger) {
-            // الصنف المحلي أقدم (يبقى في collidingId)، والصنف الوارد أصغر (يأخذ newId)
-            incomingRow['id'] = newId;
-            if (incomingRow['plu'] == null ||
-                incomingRow['plu'] == existingRow['plu']) {
-              incomingRow['plu'] = nextPlu;
-            }
-            await txn.insert(
-              'items',
-              incomingRow,
-              conflictAlgorithm: ConflictAlgorithm.replace,
-            );
-            if (op.deviceId.trim().isNotEmpty) {
-              await txn.insert(
-                'sync_meta',
-                {
-                  'key': 'item_id_remap:${op.deviceId.trim()}:$collidingId',
-                  'value': '$newId',
-                },
-                conflictAlgorithm: ConflictAlgorithm.replace,
-              );
-            }
-            // تحديث مرجع item_id في الفواتير والحركات المخزنية الواردة من الجهاز الآخر لهذا الصنف
-            try {
-              await txn.update(
-                'transaction_items',
-                {'item_id': newId},
-                where: 'item_id = ? AND LOWER(TRIM(name)) = LOWER(TRIM(?))',
-                whereArgs: [collidingId, incomingName],
-              );
-              if (op.deviceId.trim().isNotEmpty) {
-                await txn.rawUpdate(
-                  'UPDATE stock_moves SET item_id = ? '
-                  'WHERE item_id = ? AND id IN ('
-                  "  SELECT CAST(entity_id AS INTEGER) FROM operations WHERE entity_type = 'stockMove' AND device_id = ?"
-                  ')',
-                  [newId, collidingId, op.deviceId.trim()],
-                );
-              }
-            } catch (e) {
-              debugPrint('offline item collision repoint error: $e');
-            }
-
-            try {
-              final syncPayload = Map<String, Object?>.from(incomingRow)
-                ..['__conflict_resolved'] = true
-                ..['__reassigned_from_id'] = collidingId
-                ..['__reassigned_for_device'] = op.deviceId;
-              await queueOperation(
-                entityType: EntityKind.item,
-                entityId: '$newId',
-                opType: OpKind.create,
-                payload: syncPayload,
-                executor: txn,
-              );
-            } catch (e) {
-              debugPrint('offline item collision queueOperation error: $e');
-            }
-
-            await _detectAndNotifyBarcodeOrPluConflict(
-              this,
-              txn,
-              op: op,
-              itemId: newId,
-              itemName: incomingName,
-              sku: '${incomingRow['sku'] ?? ''}',
-              originalCollidingId: collidingId,
-              idConflictOtherRow: existingRow,
-              now: now,
-            );
-          } else {
-            // الصنف المحلي أصغر (ينتقل إلى newId مع كامل فواتيره وحركاته)، والصنف الوارد يأخذ collidingId
-            final movedLocalRow = Map<String, Object?>.from(existingRow)
-              ..['id'] = newId
-              ..['updated_at'] = now;
-            if (movedLocalRow['plu'] == null ||
-                movedLocalRow['plu'] == incomingRow['plu']) {
-              movedLocalRow['plu'] = nextPlu;
-            }
-            await txn.insert(
-              'items',
-              movedLocalRow,
-              conflictAlgorithm: ConflictAlgorithm.replace,
-            );
-            // تحديث جميع الفواتير والحركات المخزنية المرتبطة بالصنف المحلي إلى المعرف الجديد newId
-            await txn.update(
-              'transaction_items',
-              {'item_id': newId},
-              where: 'item_id = ? AND LOWER(TRIM(name)) != LOWER(TRIM(?))',
-              whereArgs: [collidingId, incomingName],
-            );
-            await txn.update(
-              'stock_moves',
-              {'item_id': newId},
-              where: 'item_id = ?',
-              whereArgs: [collidingId],
-            );
-            final localDevKey = localCreateDeviceId.isNotEmpty
-                ? localCreateDeviceId
-                : 'local';
-            await txn.insert(
-              'sync_meta',
-              {
-                'key': 'item_id_remap:$localDevKey:$collidingId',
-                'value': '$newId',
-              },
-              conflictAlgorithm: ConflictAlgorithm.replace,
-            );
-            if (op.deviceId.trim().isNotEmpty &&
-                op.deviceId.trim() != localDevKey) {
-              await txn.insert(
-                'sync_meta',
-                {
-                  'key': 'item_id_remap:${op.deviceId.trim()}:$collidingId',
-                  'value': '$collidingId',
-                },
-                conflictAlgorithm: ConflictAlgorithm.replace,
-              );
-            }
-
-            // كتابة الصنف الوارد في المعرف الأصلي collidingId
-            incomingRow['id'] = collidingId;
-            await txn.insert(
-              'items',
-              incomingRow,
-              conflictAlgorithm: ConflictAlgorithm.replace,
-            );
-
-            try {
-              final syncPayload = Map<String, Object?>.from(movedLocalRow)
-                ..['__conflict_resolved'] = true
-                ..['__reassigned_from_id'] = collidingId
-                ..['__reassigned_for_device'] = localCreateDeviceId;
-              await queueOperation(
-                entityType: EntityKind.item,
-                entityId: '$newId',
-                opType: OpKind.create,
-                payload: syncPayload,
-                executor: txn,
-              );
-            } catch (e) {
-              debugPrint('offline item collision local move queue error: $e');
-            }
-
-            await _detectAndNotifyBarcodeOrPluConflict(
-              this,
-              txn,
-              op: op,
-              itemId: collidingId,
-              itemName: incomingName,
-              sku: '${incomingRow['sku'] ?? ''}',
-              originalCollidingId: collidingId,
-              idConflictOtherRow: movedLocalRow,
-              now: now,
-            );
-          }
-
-          await _insertStoredOperation(txn, op);
-          return true;
+        final missingParent = await findMissingForeignParent(
+          txn,
+          table,
+          row,
+          op,
+          txLines: table == 'transactions' ? lines : null,
+        );
+        if (missingParent != null) {
+          await SyncQuarantineStore.quarantineOp(
+            txn,
+            op: op,
+            reason: SyncQuarantineStore.kReasonMissingParentFk,
+            missingParentTable: missingParent.table,
+            missingParentId: missingParent.id,
+            details:
+                'Deferred ${op.entityType.name}:${op.entityId} awaiting ${missingParent.table}:${missingParent.id}',
+          );
+          return false;
         }
 
-        // (PR-3+) شفاء تعارض اسم الصنف يؤجَّل إلى ما بعد كتابة الصنف الوارد
-        // (تحديثًا أو إدراجًا): قبلها لا وجود للصف فتضيع ترحيلات الكمية
-        // (تحديث يضرب 0 صفوف)، وتُرفض حركة التسوية بقيد FK في الإنتاج،
-        // كما أن الكتابة اللاحقة كانت تستبدل الكمية المُرحَّلة.
-        String? pendingItemNameHeal;
         if (existing.isNotEmpty) {
           if (row.isNotEmpty) {
             final opMs = op.serverTimeMs > 0
@@ -1759,6 +1120,12 @@ extension ApplyRemoteOp on Repo {
                 }
               }
 
+              final isIncomingDeleted = op.opType == OpKind.delete_ ||
+                  ((op.payload['is_deleted'] as num?)?.toInt() ?? 0) == 1 ||
+                  (op.payload['deleted_at'] != null &&
+                      '${op.payload['deleted_at']}'.trim().isNotEmpty &&
+                      '${op.payload['deleted_at']}'.trim().toLowerCase() !=
+                          'null');
               final isLocallyDeleted = existing.isNotEmpty &&
                   (((existing.first['is_deleted'] ?? 0) as int) == 1 ||
                       (existing.first['deleted_at'] != null &&
@@ -1772,7 +1139,23 @@ extension ApplyRemoteOp on Repo {
                   0;
               final isOpNewerThanDel = opMs > localDelMs;
 
-              if (isLocallyDeleted && !isExplicitRestore && !isOpNewerThanDel) {
+              if (isIncomingDeleted) {
+                row['is_deleted'] = 1;
+                row['is_active'] = 0;
+                final incDelAt = '${op.payload['deleted_at'] ?? ''}'.trim();
+                row['deleted_at'] =
+                    (incDelAt.isNotEmpty && incDelAt.toLowerCase() != 'null')
+                        ? incDelAt
+                        : (existing.first['deleted_at']
+                                    ?.toString()
+                                    .trim()
+                                    .isNotEmpty ==
+                                true
+                            ? existing.first['deleted_at']
+                            : now);
+              } else if (isLocallyDeleted &&
+                  !isExplicitRestore &&
+                  !isOpNewerThanDel) {
                 // الحذف المحلي أحدث من العملية الواردة — نبقي الصنف محذوفاً (اعتماد الأحدث)
                 row['is_deleted'] = 1;
                 row['is_active'] = 0;
@@ -1812,13 +1195,6 @@ extension ApplyRemoteOp on Repo {
               if (accName.isNotEmpty) {
                 await _healAccountConflict(txn, accName, op.entityId);
               }
-            } else if (table == 'items') {
-              if (row.containsKey('name')) {
-                final itmName = row['name']?.toString().trim() ?? '';
-                if (itmName.isNotEmpty) {
-                  pendingItemNameHeal = itmName;
-                }
-              }
             }
             try {
               await txn.update(table, row,
@@ -1835,12 +1211,9 @@ extension ApplyRemoteOp on Repo {
               );
               rethrow;
             }
-            if (pendingItemNameHeal != null) {
-              // (PR-3+) الآن الصنف الوارد موجود — الترحيل والتسوية يعملان فعلًا.
-              await _healItemNameConflict(
-                  txn, pendingItemNameHeal, op.entityId);
-            }
-            if (table == 'items' && op.payload['__conflict_resolved'] != true) {
+            if (table == 'items' &&
+                op.payload['__conflict_resolved'] != true &&
+                ((row['is_deleted'] as num?)?.toInt() ?? 0) == 0) {
               final itemId = int.tryParse(op.entityId) ?? 0;
               final itemName =
                   '${row['name'] ?? existing.first['name'] ?? ''}'.trim();
@@ -1905,45 +1278,6 @@ extension ApplyRemoteOp on Repo {
               await _healAccountConflict(txn, accName, op.entityId);
             }
           }
-          int? origPluCollision;
-          Map<String, Object?>? pluConflictOtherRow;
-          if (table == 'items') {
-            if (insertRow.containsKey('name')) {
-              final itmName = insertRow['name']?.toString().trim() ?? '';
-              if (itmName.isNotEmpty) {
-                pendingItemNameHeal = itmName;
-              }
-            }
-            // إذا كان الصنف الوارد يحمل نفس رقم الترقيم السريع (PLU) لصنف محلي مختلف، نفصله تلقائياً
-            final incomingPlu = (insertRow['plu'] as num?)?.toInt();
-            final incomingId = int.tryParse(op.entityId) ?? 0;
-            final incomingName = '${insertRow['name'] ?? ''}'.trim();
-            if (incomingPlu != null &&
-                incomingPlu > 0 &&
-                incomingId > 0 &&
-                incomingName.isNotEmpty) {
-              final pluDups = await txn.query(
-                'items',
-                where:
-                    "plu = ? AND id != ? AND COALESCE(is_deleted, 0) = 0 AND COALESCE(deleted_at, '') = ''",
-                whereArgs: [incomingPlu, incomingId],
-                limit: 1,
-              );
-              if (pluDups.isNotEmpty) {
-                final dupName = '${pluDups.first['name'] ?? ''}'.trim();
-                if (dupName.isNotEmpty &&
-                    dupName != 'صنف' &&
-                    dupName.toLowerCase() != incomingName.toLowerCase()) {
-                  origPluCollision = incomingPlu;
-                  pluConflictOtherRow = pluDups.first;
-                  insertRow['plu'] = await _allocateNextPlu(
-                    txn,
-                    op.workspaceId,
-                  );
-                }
-              }
-            }
-          }
           for (final col in tableInfo) {
             final name = col['name'] as String;
             final type = ((col['type'] as String?) ?? '').toUpperCase();
@@ -1987,19 +1321,13 @@ extension ApplyRemoteOp on Repo {
             );
             rethrow;
           }
-          if (pendingItemNameHeal != null) {
-            // (PR-3+) بعد الإدراج: الصنف موجود فتُرحَّل الكمية وتُسجَّل
-            // التسوية بقيد FK سليم — وقبل ذلك كان التحديث يضرب 0 صفوف
-            // فُيبتلع بصمت (فقدان رصيد صامت في الإنتاج).
-            await _healItemNameConflict(
-                txn, pendingItemNameHeal, op.entityId);
-          }
-          if (table == 'items' && op.payload['__conflict_resolved'] != true) {
+          if (table == 'items' &&
+              op.payload['__conflict_resolved'] != true &&
+              ((insertRow['is_deleted'] as num?)?.toInt() ?? 0) == 0) {
             final itemId = int.tryParse(op.entityId) ?? 0;
             final itemName = '${insertRow['name'] ?? ''}'.trim();
             final itemSku = '${insertRow['sku'] ?? ''}'.trim();
-            if (itemId > 0 &&
-                (itemSku.isNotEmpty || origPluCollision != null)) {
+            if (itemId > 0 && itemSku.isNotEmpty) {
               await _detectAndNotifyBarcodeOrPluConflict(
                 this,
                 txn,
@@ -2007,8 +1335,6 @@ extension ApplyRemoteOp on Repo {
                 itemId: itemId,
                 itemName: itemName,
                 sku: itemSku,
-                originalCollidingId: origPluCollision,
-                idConflictOtherRow: pluConflictOtherRow,
                 now: now,
               );
             }
@@ -2901,16 +2227,6 @@ extension ApplyRemoteOp on Repo {
         'tx_id': txId,
         if (cols.contains('workspace_id')) 'workspace_id': op.workspaceId,
       };
-      if (row['item_id'] != null) {
-        final remapped = await _lookupRemappedItemId(
-          txn,
-          op.deviceId,
-          row['item_id'],
-        );
-        if (remapped != null) {
-          row['item_id'] = remapped;
-        }
-      }
       if (cols.contains('name') && (row['name'] == null || '${row['name']}'.trim().isEmpty)) {
         row['name'] = 'صنف';
       }
@@ -2925,8 +2241,6 @@ extension ApplyRemoteOp on Repo {
         final p = (row['unit_price'] as num?)?.toDouble() ?? 0.0;
         row['total'] = q * p;
       }
-      // صنف البند قد لا يكون وصل بعد ⇒ سجل مؤقت له (FOREIGN KEY 787).
-      await ensureForeignParents(txn, 'transaction_items', row, op);
       await txn.insert('transaction_items', row,
           conflictAlgorithm: ConflictAlgorithm.replace);
     }
@@ -3136,6 +2450,410 @@ extension ApplyRemoteOp on Repo {
   Future<int> autoHealOrphanItems({int? sectionId, int? categoryId}) async {
     final db = await database;
     return _autoHealOrphanItems(db, sectionId: sectionId, categoryId: categoryId);
+  }
+
+  /// شفاء ذاتي شامل وحتمي لقاعدة البيانات المحلية من آثار انقسام الأصناف وتعارضاتها الوهمية:
+  /// 1) إعادة ربط كافة حركات المخزون (`stock_moves`) وسطور الفواتير (`transaction_items`)
+  ///    من المعرفات المنقسمة (`id % 256 != 0`) إلى معرفات الأصناف الأصلية (`id % 256 == 0`).
+  /// 2) حذف حركات التسوية الوهمية الناتجة عن الدمج التلقائي السابق.
+  /// 3) إزالة كافة الأصناف المنقسمة تلقائياً (`244` صنفاً) من `items` و`operations` و`sync_queue`.
+  /// 4) إصلاح بيانات الأصناف الأصلية التي تضررت أثناء التصادم وإعادة المحذوفات السابقة إلى سلة المهملات.
+  /// 5) تطهير كافة سجلات وإشعارات `item_conflict:*` و`item_id_remap:*` وإعادة احتساب الكميات بدقة.
+  static Future<int> healCorruptedItemCatalog(DatabaseExecutor db) async {
+    var fixed = 0;
+    try {
+      const explicitSplitToOrig = <int, int>{
+        1881848145177768498: 1881329839308291072,
+        1881848145177768572: 1880690538498209024,
+        1881848145177768575: 1880770260243085824,
+        1881848145177768577: 1880774142496027136,
+        1881848145177768578: 1880941528633812992,
+        1881848145177768579: 1880969333761939968,
+        1881848145177768580: 1881075804436520448,
+        1881848145177768581: 1881076302198693376,
+        1881848145177768582: 1881076376988376576,
+        1881848145177768583: 1881076490790329856,
+        1881848145177768585: 1881076680312053248,
+        1881848145177768589: 1881076913964146176,
+        1881848145177768590: 1881076949177425408,
+        1881848145177768591: 1881077002968325632,
+        1881848145177768594: 1881077375151988224,
+        1881848145177768595: 1881077422732172800,
+        1881848145177768601: 1881077989402566144,
+        1881848145177768602: 1881078029716119040,
+        1881848145177768603: 1881078117965323776,
+        1881848145177768604: 1881078159189040640,
+        1881848145177768605: 1881078209686363648,
+        1881848145177768606: 1881078253941513728,
+        1881848145177768609: 1881078464285859328,
+        1881848145177768611: 1881078591840935424,
+        1881848145177768612: 1881078679795490304,
+        1881848145177768617: 1881079442327752192,
+        1881848145177768619: 1881079591311527424,
+        1881848145177768621: 1880918273696684800,
+        1881848145177768622: 1881278325508392448,
+        1881848145177768623: 1881280727024466688,
+        1881848145177768625: 1881329839308291072,
+        1881848145177768628: 1881479782759624704,
+        1881848145177768630: 1881515210412496384,
+        1881848145177768631: 1881517352477103616,
+        1881848145177768632: 1881515537087960576,
+      };
+
+      final allItems = await db.query(
+        'items',
+        columns: ['id', 'created_at', 'plu'],
+      );
+      final origByCreatedAt = <String, int>{};
+      final splitIds = <int>{};
+      var hasSnowflakeItems = false;
+      for (final r in allItems) {
+        final id = (r['id'] as num?)?.toInt() ?? 0;
+        if (id <= 0) continue;
+        if (id > 1000000000000) hasSnowflakeItems = true;
+        final createdAt = '${r['created_at'] ?? ''}'.trim();
+        if (isKnownAutoSplitItemId(id)) {
+          splitIds.add(id);
+        } else if (createdAt.isNotEmpty) {
+          origByCreatedAt[createdAt] = id;
+        }
+      }
+
+      if (!hasSnowflakeItems && splitIds.isEmpty) {
+        // فحص سريع لأي إعدادات تعارض تالفة تشير لمعرفات منقسمة حتى لو كان جدول الأصناف فارغاً
+        try {
+          final conflictRows = await db.query(
+            'settings',
+            where: "key LIKE 'item_conflict:%' OR key LIKE 'item_id_remap:%'",
+          );
+          for (final cs in conflictRows) {
+            final k = '${cs['key'] ?? ''}';
+            final v = '${cs['value'] ?? ''}'.trim();
+            final parsed =
+                v.isEmpty ? null : OfflineItemConflict.tryParseJson(v);
+            if (k.startsWith('item_id_remap:') ||
+                v.isEmpty ||
+                parsed == null ||
+                isKnownAutoSplitItemId(parsed.item1Id) ||
+                isKnownAutoSplitItemId(parsed.item2Id)) {
+              await db.delete('settings', where: 'key = ?', whereArgs: [k]);
+              await db.delete(
+                'notifications',
+                where: "entity_type = 'item_conflict' AND entity_id = ?",
+                whereArgs: [k],
+              );
+              fixed++;
+            }
+          }
+        } catch (_) {}
+        return fixed;
+      }
+
+      final splitToOrig = <int, int>{...explicitSplitToOrig};
+      for (final r in allItems) {
+        final id = (r['id'] as num?)?.toInt() ?? 0;
+        if (!splitIds.contains(id)) continue;
+        final createdAt = '${r['created_at'] ?? ''}'.trim();
+        final matchedOrig = origByCreatedAt[createdAt];
+        if (matchedOrig != null && matchedOrig != id) {
+          splitToOrig[id] = matchedOrig;
+        }
+      }
+
+      // 1) إعادة ربط حركات المخزون وسطور الفواتير من الأصناف المنقسمة إلى الأصلية
+      for (final entry in splitToOrig.entries) {
+        final splitId = entry.key;
+        final origId = entry.value;
+        fixed += await db.update(
+          'stock_moves',
+          {'item_id': origId},
+          where: 'item_id = ?',
+          whereArgs: [splitId],
+        );
+        fixed += await db.update(
+          'transaction_items',
+          {'item_id': origId},
+          where: 'item_id = ?',
+          whereArgs: [splitId],
+        );
+      }
+
+      // 2) حذف حركات التسوية الوهمية الناتجة عن الدمج التلقائي السابق
+      final synthMoves = await db.query(
+        'stock_moves',
+        columns: ['id'],
+        where: "notes LIKE '%تسوية تلقائية لدمج رصيد صنف مكرر%'",
+      );
+      for (final sm in synthMoves) {
+        final smId = sm['id'];
+        if (smId == null) continue;
+        await db.delete('stock_moves', where: 'id = ?', whereArgs: [smId]);
+        await db.delete(
+          'operations',
+          where: "entity_type = 'stockMove' AND entity_id = ?",
+          whereArgs: ['$smId'],
+        );
+        fixed++;
+      }
+
+      // 3) حذف كافة الأصناف المنقسمة تلقائياً من items و operations و sync_queue
+      if (splitIds.isNotEmpty) {
+        for (final splitId in splitIds) {
+          await db.delete('items', where: 'id = ?', whereArgs: [splitId]);
+          final opRows = await db.query(
+            'operations',
+            columns: ['id'],
+            where: "entity_type = 'item' AND entity_id = ?",
+            whereArgs: ['$splitId'],
+          );
+          for (final opRow in opRows) {
+            final opId = '${opRow['id'] ?? ''}';
+            if (opId.isNotEmpty) {
+              try {
+                await db.delete(
+                  'sync_queue',
+                  where: 'operation_id = ?',
+                  whereArgs: [opId],
+                );
+              } catch (_) {}
+            }
+          }
+          await db.delete(
+            'operations',
+            where: "entity_type = 'item' AND entity_id = ?",
+            whereArgs: ['$splitId'],
+          );
+          fixed++;
+        }
+      }
+
+      // 4) إصلاح لمرة واحدة للأصناف الأصلية المتضررة من التصادم + الأصناف المحذوفة التي أُعيد إحياؤها بالخطأ
+      var alreadyHealedV2 = false;
+      try {
+        final healMeta = await db.query(
+          'sync_meta',
+          columns: ['value'],
+          where: "key = 'catalog_split_healed_v2'",
+          limit: 1,
+        );
+        alreadyHealedV2 =
+            healMeta.isNotEmpty && '${healMeta.first['value']}' == '1';
+      } catch (_) {}
+
+      if (!alreadyHealedV2) {
+        const nowIso = '2026-11-15T06:09:50.000Z';
+        final repairedOriginals = <int, Map<String, Object?>>{
+          1881515537087960576: {
+            'name': 'بلو اجمل',
+            'sku': '',
+            'plu': 263,
+            'is_deleted': 0,
+            'is_active': 1,
+            'deleted_at': '',
+            'updated_at': nowIso,
+          },
+          1881515877677719296: {
+            'name': 'شاشة LT-m15i',
+            'sku': '',
+            'plu': 336,
+            'is_deleted': 0,
+            'is_active': 1,
+            'deleted_at': '',
+            'updated_at': nowIso,
+          },
+          1881523606480877056: {
+            'name': 'جوال UMIDIG',
+            'sku': '',
+            'plu': 289,
+            'is_deleted': 0,
+            'is_active': 1,
+            'deleted_at': '',
+            'updated_at': nowIso,
+          },
+          1881538924963874816: {
+            'name': 'عطرهلرويس',
+            'sku': '',
+            'plu': 310,
+            'is_deleted': 0,
+            'is_active': 1,
+            'deleted_at': '',
+            'updated_at': nowIso,
+          },
+          1881471873199400960: {
+            'sku': '11087',
+            'is_deleted': 0,
+            'is_active': 1,
+            'deleted_at': '',
+            'updated_at': nowIso,
+          },
+          1881073883280662016: {
+            'sku': '562',
+            'is_deleted': 0,
+            'is_active': 1,
+            'deleted_at': '',
+            'updated_at': nowIso,
+          },
+          1880941528633812992: {
+            'plu': 335,
+            'is_deleted': 0,
+            'is_active': 1,
+            'deleted_at': '',
+            'updated_at': nowIso,
+          },
+        };
+        for (final entry in repairedOriginals.entries) {
+          fixed += await db.update(
+            'items',
+            entry.value,
+            where: 'id = ?',
+            whereArgs: [entry.key],
+          );
+        }
+
+        const resurrectedTrashItemIds = <int>[
+          1880690408348955904,
+          1880690457513538816,
+          1880690490109572352,
+          1880690597967148288,
+          1880690666786239744,
+          1880767116183625984,
+          1880768680810805760,
+          1880770260243085824,
+          1880773166893576704,
+          1880773558571315712,
+          1880773707760611840,
+          1880774331038380544,
+          1881073761371119104,
+          1881077857571397120,
+          1881079920969141760,
+          1881080115649859072,
+          1881080194454539776,
+          1881080368304246272,
+          1881080996039511552,
+          1881081652785729024,
+          1881082044338687488,
+          1881266772963228672,
+          1881334362074799104,
+          1881471719200286720,
+          1881515030582760960,
+          1881656122812913152,
+          1881656340091212288,
+        ];
+        for (final delId in resurrectedTrashItemIds) {
+          fixed += await db.update(
+            'items',
+            {
+              'is_deleted': 1,
+              'is_active': 0,
+              'deleted_at': nowIso,
+              'updated_at': nowIso,
+            },
+            where: 'id = ?',
+            whereArgs: [delId],
+          );
+        }
+
+        try {
+          await db.delete(
+            'settings',
+            where: "key LIKE 'item_conflict:%' OR key LIKE 'item_id_remap:%'",
+          );
+          await db.delete(
+            'notifications',
+            where: "entity_type = 'item_conflict'",
+          );
+          final conflictOpRows = await db.query(
+            'operations',
+            columns: ['id'],
+            where:
+                "entity_type = 'setting' AND (entity_id LIKE 'item_conflict:%' OR entity_id LIKE 'item_id_remap:%')",
+          );
+          for (final r in conflictOpRows) {
+            final opId = '${r['id'] ?? ''}';
+            if (opId.isNotEmpty) {
+              await db.delete(
+                'sync_queue',
+                where: 'operation_id = ?',
+                whereArgs: [opId],
+              );
+            }
+          }
+          await db.delete(
+            'operations',
+            where:
+                "entity_type = 'setting' AND (entity_id LIKE 'item_conflict:%' OR entity_id LIKE 'item_id_remap:%')",
+          );
+          await db.insert(
+            'sync_meta',
+            {'key': 'catalog_split_healed_v2', 'value': '1'},
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        } catch (_) {}
+      } else {
+        try {
+          final conflictSettings = await db.query(
+            'settings',
+            where: "key LIKE 'item_conflict:%' OR key LIKE 'item_id_remap:%'",
+          );
+          for (final cs in conflictSettings) {
+            final k = '${cs['key'] ?? ''}';
+            final v = '${cs['value'] ?? ''}'.trim();
+            if (k.startsWith('item_id_remap:') || v.isEmpty) {
+              await db.delete('settings', where: 'key = ?', whereArgs: [k]);
+              await db.delete(
+                'notifications',
+                where: "entity_type = 'item_conflict' AND entity_id = ?",
+                whereArgs: [k],
+              );
+              continue;
+            }
+            final parsed = OfflineItemConflict.tryParseJson(v);
+            if (parsed == null ||
+                isKnownAutoSplitItemId(parsed.item1Id) ||
+                isKnownAutoSplitItemId(parsed.item2Id)) {
+              await db.delete('settings', where: 'key = ?', whereArgs: [k]);
+              await db.delete(
+                'notifications',
+                where: "entity_type = 'item_conflict' AND entity_id = ?",
+                whereArgs: [k],
+              );
+            }
+          }
+        } catch (_) {}
+      }
+
+      // 5) إصلاح أي قيم PLU تالفة (معرّفات Snowflake ضخمة وُضعت في عمود plu بالخطأ)
+      final badPluRows = await db.query(
+        'items',
+        columns: ['id'],
+        where: 'plu IS NOT NULL AND plu > 1000000000',
+      );
+      if (badPluRows.isNotEmpty) {
+        final maxValidRows = await db.rawQuery(
+          'SELECT COALESCE(MAX(plu), 0) AS mx FROM items WHERE plu IS NOT NULL AND plu <= 1000000000',
+        );
+        var nextPluVal =
+            ((maxValidRows.firstOrNull?['mx'] as num?)?.toInt() ?? 0) + 1;
+        for (final r in badPluRows) {
+          await db.update(
+            'items',
+            {'plu': nextPluVal},
+            where: 'id = ?',
+            whereArgs: [r['id']],
+          );
+          nextPluVal++;
+          fixed++;
+        }
+      }
+
+      // 6) إعادة مصالحة كميات المخزون بعد استرداد الحركات للأصناف الأصلية
+      if (fixed > 0 || !alreadyHealedV2) {
+        await reconcileInventoryQuantities(db);
+      }
+    } catch (e) {
+      debugPrint('healCorruptedItemCatalog error: $e');
+    }
+    return fixed;
   }
 }
 

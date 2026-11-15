@@ -52,9 +52,26 @@ class FactoryReset {
   /// وإعداداته. يُستخدم عند الانضمام لمؤسسة أو تبديل الحساب، لمنع تداخل
   /// حركات الموظف السابقة مع حسابات المتجر.
   /// تُعيد عدد الجداول التي فُرّغت فعلاً.
-  static Future<int> wipeAccountingTables(Database db) async {
+  static Future<int> wipeAccountingTables(
+    Database db, {
+    bool preserveOperations = false,
+  }) async {
     var wiped = 0;
     for (final table in kAccountingTables) {
+      if (preserveOperations && table == 'operations') {
+        try {
+          await db.update(
+            'operations',
+            {'synced': 1, 'is_synced': 1},
+            where: 'synced = 0 OR is_synced = 0',
+          );
+        } catch (_) {
+          try {
+            await db.update('operations', {'synced': 1}, where: 'synced = 0');
+          } catch (_) {}
+        }
+        continue;
+      }
       try {
         await db.delete(table);
         wiped++;

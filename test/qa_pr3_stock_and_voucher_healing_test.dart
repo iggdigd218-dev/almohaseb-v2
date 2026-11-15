@@ -211,8 +211,8 @@ void main() {
       await db.close();
     });
 
-    test('دمج صنف مكرر غير متصل يضيف كميته إلى الصنف السحابي ويسجل حركة شراء تسوية', () async {
-      // 1. صنف محلي أضيف بدون اتصال بكمية 15
+    test('إلغاء الدمج التلقائي للصنف المكرر: الصنفان يبقيان مستقلين بدون حذف أو تسوية دمج مصطنعة', () async {
+      // 1. صنف محلي أضيف بكمية 15
       await db.insert('items', {
         'id': 1001,
         'name': 'عصير برتقال',
@@ -249,27 +249,25 @@ void main() {
         expect(applied, isTrue);
       });
 
-      // 3. التحقق من أن الصنف المكرر (1001) تم حذفه
+      // 3. التحقق من بقاء الصنف (1001) سليماً برصيده الأصلي دون حذف أو دمج
       final localDups = await db.query('items', where: 'id = 1001');
-      expect(localDups.isEmpty, isTrue);
+      expect(localDups, hasLength(1));
+      expect((localDups.first['quantity'] as num).toDouble(), equals(15.0));
 
-      // 4. التحقق من أن الصنف المعتمد (2002) يحمل مجموع الكميتين (25 + 15 = 40)
-      final canonical = await db.query('items', where: 'id = 2002');
-      expect(canonical.isNotEmpty, isTrue);
-      final totalQty = (canonical.first['quantity'] as num).toDouble();
-      expect(totalQty, equals(40.0));
+      // 4. التحقق من بقاء الصنف (2002) مستقلاً برصيده 25 دون جمع كميات مصطنع
+      final remoteItem = await db.query('items', where: 'id = 2002');
+      expect(remoteItem, hasLength(1));
+      expect((remoteItem.first['quantity'] as num).toDouble(), equals(25.0));
 
-      // 5. التحقق من إنشاء حركة مخزنية رسمية من نوع purchase لتوثيق التسوية
-      final moves = await db.query('stock_moves', where: 'item_id = 2002');
-      expect(moves.isNotEmpty, isTrue);
-      expect(moves.first['kind'], equals('purchase'));
-      expect((moves.first['quantity'] as num).toDouble(), equals(15.0));
-      expect(moves.first['notes'], contains('تسوية تلقائية لدمج رصيد صنف مكرر'));
+      // 5. التحقق من عدم إنشاء أي حركة تسوية دمج تلقائي
+      final mergeMoves = await db.query(
+        'stock_moves',
+        where: "notes LIKE '%تسوية تلقائية لدمج%'",
+      );
+      expect(mergeMoves, isEmpty);
     });
 
-    test('دمج مكرر ذي حركات موثقة لا يكرر التوثيق — التسوية للرصيد غير المغطى فقط', () async {
-      // صنف محلي: رصيد افتتاحي 5 + شراء موثق بحركة 10 → الكمية الحالية 15
-      // (الشراء 10 موثق في stock_moves، والافتتاحي 5 غير موثق بحركة).
+    test('الحركات المخزنية للصنف المحلي تبقى مرتبطة به عند وصول صنف آخر بنفس الاسم دون ترحيل أو دمج', () async {
       final t0 = DateTime.now().toIso8601String();
       await db.insert('items', {
         'id': 1001,
@@ -290,7 +288,6 @@ void main() {
         'created_at': t0,
       });
 
-      // وصول صنف سحابي بنفس الاسم بمعرف 2002 ورصيد 25
       final op = SyncOperation(
         id: 'op_item_2002b',
         deviceId: 'DEV-CLOUD',
@@ -316,24 +313,17 @@ void main() {
         expect(applied, isTrue);
       });
 
-      // المكرر حُذف والكمية رُحِّلت كاملة (25 + 15 = 40)
-      expect((await db.query('items', where: 'id = 1001')).isEmpty, isTrue);
-      final canonical = await db.query('items', where: 'id = 2002');
-      expect(canonical.isNotEmpty, isTrue);
-      expect((canonical.first['quantity'] as num).toDouble(), equals(40.0));
+      final item1 = await db.query('items', where: 'id = 1001');
+      final item2 = await db.query('items', where: 'id = 2002');
+      expect(item1, hasLength(1));
+      expect(item2, hasLength(1));
+      expect((item1.first['quantity'] as num).toDouble(), equals(15.0));
+      expect((item2.first['quantity'] as num).toDouble(), equals(25.0));
 
-      // التوثيق بلا ازدواج: الشراء المعاد توجيهه (10) + تسوية الافتتاحي
-      // غير الموثق (5) = 15 فقط — وليس 15+10 كما كان قبل التصحيح.
-      final moves = await db.query('stock_moves', where: 'item_id = 2002');
-      expect(moves.length, equals(2));
-      final synth = moves.firstWhere(
-        (m) => '${m['notes']}'.contains('تسوية تلقائية'),
-      );
-      expect((synth['quantity'] as num).toDouble(), equals(5.0));
-      final docSum = moves.fold<double>(
-          0.0, (a, m) => a + (m['quantity'] as num).toDouble());
-      expect(docSum, equals(15.0));
-      // واتساق صيغة المطابقة (PR-2): initialCreate(25) + طيّ الحركات(15) = 40 = الكمية.
+      final moves1 = await db.query('stock_moves', where: 'item_id = 1001');
+      final moves2 = await db.query('stock_moves', where: 'item_id = 2002');
+      expect(moves1, hasLength(1));
+      expect(moves2, isEmpty);
     });
   });
 

@@ -12,6 +12,7 @@ import 'package:nexora_app/data/sync/apply_remote.dart';
 import 'package:nexora_app/data/sync/conflict_resolver.dart';
 import 'package:nexora_app/data/sync/firebase_auth_service.dart';
 import 'package:nexora_app/data/sync/operation.dart';
+import 'package:nexora_app/data/sync/sync_quarantine.dart';
 import 'package:nexora_app/data/sync/workspace_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -342,14 +343,57 @@ void main() {
       timestamp: now,
     );
 
-    // تطبيق العملية يجب أن ينجح بفضل ensureForeignParents والـ Stub Rows
+    // عزل الفاتورة في الحجر الصحي لغياب الحساب والصنف دون إنشاء سجلات مؤقتة وهمية
     final applied = await repo.applyRemoteOperation(db, opTx, resolver);
-    expect(applied, isTrue, reason: 'يجب تطبيق العملية وإنشاء سجلات مؤقتة لمنع Foreign Key Exception');
+    expect(applied, isFalse, reason: 'يجب عزل العملية عند غياب الآباء بدلاً من إنشاء سجلات مؤقتة');
 
-    // التحقق من إنشاء الحساب المؤقت والصنف المؤقت
+    expect(await db.query('accounts', where: 'id = ?', whereArgs: [990]), isEmpty);
+    expect(await db.query('items', where: 'id = ?', whereArgs: [880]), isEmpty);
+    expect(await SyncQuarantineStore.countPending(db, workspaceId: ws), 1);
+
+    // وصول الحساب 990 والصنف 880 الحقيقيين لاحقاً ثم إعادة تشغيل الحجر الصحي
+    await repo.applyRemoteOperation(
+      db,
+      SyncOperation(
+        id: 'OP-ACC-990',
+        deviceId: 'PEER-OFFLINE',
+        workspaceId: ws,
+        userId: 1,
+        parentOpId: '',
+        entityType: EntityKind.account,
+        entityId: '990',
+        opType: OpKind.create,
+        version: 1,
+        payload: {'id': 990, 'workspace_id': ws, 'name': 'عميل حقيقي 990', 'kind': 'customer'},
+        deviceTime: now,
+        timestamp: now,
+      ),
+      resolver,
+    );
+    await repo.applyRemoteOperation(
+      db,
+      SyncOperation(
+        id: 'OP-ITEM-880',
+        deviceId: 'PEER-OFFLINE',
+        workspaceId: ws,
+        userId: 1,
+        parentOpId: '',
+        entityType: EntityKind.item,
+        entityId: '880',
+        opType: OpKind.create,
+        version: 1,
+        payload: {'id': 880, 'workspace_id': ws, 'name': 'صنف فاصوليا', 'sell_price': 750.0},
+        deviceTime: now,
+        timestamp: now,
+      ),
+      resolver,
+    );
+
+    final replayed = await SyncQuarantineStore.autoReplayResolvedQuarantine(repo, workspaceId: ws);
+    expect(replayed, 1);
+
     final acc = await db.query('accounts', where: 'id = ?', whereArgs: [990]);
-    expect(acc.isNotEmpty, isTrue);
-    expect(acc.first['name'], contains('مؤقت'));
+    expect(acc.first['name'], 'عميل حقيقي 990');
 
     final tx = await db.query('transactions', where: 'id = ?', whereArgs: [999]);
     expect(tx.isNotEmpty, isTrue);

@@ -8,6 +8,7 @@ import 'package:sqflite/sqflite.dart';
 import 'db_init.dart';
 import 'device_names.dart';
 import 'models.dart';
+import '../data/sync/apply_remote.dart';
 
 /// معرف Workspace الافتراضي (ثابت محلي لتجنب circular imports).
 const defaultWorkspaceIdConst = 'default';
@@ -1312,6 +1313,28 @@ class AppDatabase {
         value TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS sync_quarantine (
+        op_id                TEXT PRIMARY KEY,
+        workspace_id         TEXT NOT NULL DEFAULT 'default',
+        device_id            TEXT NOT NULL DEFAULT '',
+        entity_type          TEXT NOT NULL,
+        entity_id            TEXT NOT NULL,
+        op_type              TEXT NOT NULL,
+        payload              TEXT NOT NULL DEFAULT '{}',
+        op_json              TEXT NOT NULL,
+        reason               TEXT NOT NULL,
+        missing_parent_table TEXT DEFAULT '',
+        missing_parent_id    TEXT DEFAULT '',
+        details              TEXT DEFAULT '',
+        status               TEXT NOT NULL DEFAULT 'pending',
+        attempts             INTEGER NOT NULL DEFAULT 0,
+        created_at           TEXT NOT NULL,
+        updated_at           TEXT NOT NULL,
+        resolved_at          TEXT DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_quarantine_status ON sync_quarantine(status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_quarantine_ws ON sync_quarantine(workspace_id, status);
+
       CREATE TABLE IF NOT EXISTS google_auth (
         id           INTEGER PRIMARY KEY CHECK (id = 1),
         google_id    TEXT DEFAULT '',
@@ -1474,6 +1497,36 @@ class AppDatabase {
           next_try_at TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           UNIQUE(operation_id, target)
         )''');
+    await _tryCreateTable(db, 'sync_quarantine', '''
+        CREATE TABLE IF NOT EXISTS sync_quarantine (
+          op_id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL DEFAULT 'default',
+          device_id TEXT NOT NULL DEFAULT '',
+          entity_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          op_type TEXT NOT NULL,
+          payload TEXT NOT NULL DEFAULT '{}',
+          op_json TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          missing_parent_table TEXT DEFAULT '',
+          missing_parent_id TEXT DEFAULT '',
+          details TEXT DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'pending',
+          attempts INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          resolved_at TEXT DEFAULT ''
+        )''');
+    await _tryCreateIndex(
+      db,
+      'idx_quarantine_status',
+      'CREATE INDEX IF NOT EXISTS idx_quarantine_status ON sync_quarantine(status, updated_at)',
+    );
+    await _tryCreateIndex(
+      db,
+      'idx_quarantine_ws',
+      'CREATE INDEX IF NOT EXISTS idx_quarantine_ws ON sync_quarantine(workspace_id, status)',
+    );
     await _tryCreateTable(db, 'google_auth', '''
         CREATE TABLE IF NOT EXISTS google_auth (
           id INTEGER PRIMARY KEY CHECK (id = 1), google_id TEXT DEFAULT '',
@@ -2326,6 +2379,9 @@ class AppDatabase {
       await migrateToV30(db);
     } catch (_) {}
     await _healCatalogDates(db);
+    try {
+      await ApplyRemoteOp.healCorruptedItemCatalog(db);
+    } catch (_) {}
   }
 
   /// ترميم أي قيم `created_at` أو `updated_at` فارغة أو غير صالحة في جدولي
@@ -2695,6 +2751,25 @@ class AppDatabase {
         next_try_at TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         UNIQUE(operation_id, target)
       )''';
+    const ddlQuarantine = '''CREATE TABLE IF NOT EXISTS sync_quarantine (
+        op_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL DEFAULT 'default',
+        device_id TEXT NOT NULL DEFAULT '',
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        op_type TEXT NOT NULL,
+        payload TEXT NOT NULL DEFAULT '{}',
+        op_json TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        missing_parent_table TEXT DEFAULT '',
+        missing_parent_id TEXT DEFAULT '',
+        details TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        resolved_at TEXT DEFAULT ''
+      )''';
     await ex.execute(ddlOps);
     final cols = await ex.rawQuery('PRAGMA table_info(operations)');
     if (!cols.any((c) => c['name'] == 'is_synced')) {
@@ -2703,5 +2778,8 @@ class AppDatabase {
       );
     }
     await ex.execute(ddlSyncQ);
+    try {
+      await ex.execute(ddlQuarantine);
+    } catch (_) {}
   }
 }
