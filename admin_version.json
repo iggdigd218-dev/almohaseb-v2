@@ -1,25 +1,25 @@
 {
-  "version": "1.8.12+62",
-  "sha256": "8dd879fe1bd7fdae8c023cebe09707af780b6498d88246ebeef6328e9cb4951b",
+  "version": "1.8.13+63",
+  "sha256": "93be20db45bb3d7b9cc42ce38abf1fdbe65adab7cddb306ba59701c666d3bf4f",
   "sha256Variants": {
-    "arm64": "8dd879fe1bd7fdae8c023cebe09707af780b6498d88246ebeef6328e9cb4951b",
-    "armv7": "a7e717028b8de9fdb7d43d62e2af3c95be9a3d2d9cb3e84f404ae0eccde7bbb7"
+    "arm64": "93be20db45bb3d7b9cc42ce38abf1fdbe65adab7cddb306ba59701c666d3bf4f",
+    "armv7": "8525a2f2f5ab604e573e050143e4dced9239c2c8acc568a609e49298241e07e5"
   },
-  "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/admin-latest",
+  "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-admin/releases/tag/admin-latest",
   "downloads": {
-    "android": "https://iggdigd218-dev.github.io/almohaseb-v2/license-admin.apk",
+    "android": "https://iggdigd218-dev.github.io/almohaseb-admin/license-admin.apk",
     "androidVariants": {
-      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/license-admin.apk",
-      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/license-admin-armv7.apk"
+      "arm64": "https://iggdigd218-dev.github.io/almohaseb-admin/license-admin.apk",
+      "armv7": "https://iggdigd218-dev.github.io/almohaseb-admin/license-admin-armv7.apk"
     }
   },
   "downloadsFallbackGithub": {
-    "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk",
+    "android": "https://github.com/iggdigd218-dev/almohaseb-admin/releases/download/admin-latest/license-admin.apk",
     "androidVariants": {
-      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin.apk",
-      "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/admin-latest/license-admin-armv7.apk"
+      "arm64": "https://github.com/iggdigd218-dev/almohaseb-admin/releases/download/admin-latest/license-admin.apk",
+      "armv7": "https://github.com/iggdigd218-dev/almohaseb-admin/releases/download/admin-latest/license-admin-armv7.apk"
     }
   },
-  "publishedAt": "2026-11-15T19:23:05Z",
-  "notes": "• إصلاح عرض جميع الأجهزة المتصلة للمنشأة (Roster + Devices) ومنع المساحات المهجورة من اختطاف معرف المنشآت النشطة.\n• ترقية فهرس الملخص السحابي (Schema v2) لتصحيح البيانات المخزنة مؤقتاً تلقائياً عند التحديث.\n• حماية سجل الأجهزة المشتركة بنفس البريد الإلكتروني أثناء المزامنة السحابية."
+  "publishedAt": "2026-11-16T07:45:57Z",
+  "notes": "• فصل تطبيق الإدارة في مستودع مستقل مع الحفاظ على بصمة التثبيت والتحديث المباشر.\n• إضافة لوحة مراقبة مساحة فيرباس (المستخدمة والمتبقية) وحجم النقل الشهري للمنشآت.\n• تحسين مسح المنشآت السحابي بأقل استهلاك للشبكة مع دعم الفحص الدقيق والمعايرة."
 }
