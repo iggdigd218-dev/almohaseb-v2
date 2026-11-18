@@ -251,12 +251,20 @@ class CloudControlService {
             '${subMap['status']}'.trim().toLowerCase() == 'suspended';
         isFrozenNotifier.value = frozen;
 
-        final featRaw = subMap['feature_flags'] ?? subMap['features'];
+        final featFlags = subMap['feature_flags'];
+        final featMap = subMap['features'];
         final allowMedia = subMap['allow_cloud_media_sync'] == true ||
-            (featRaw is Map &&
-                (featRaw['allow_cloud_media_sync'] == true ||
-                    featRaw['cloud_media_sync'] == true));
+            subMap['cloud_media_sync'] == true ||
+            (featFlags is Map &&
+                (featFlags['allow_cloud_media_sync'] == true ||
+                    featFlags['cloud_media_sync'] == true)) ||
+            (featMap is Map &&
+                (featMap['allow_cloud_media_sync'] == true ||
+                    featMap['cloud_media_sync'] == true));
         await repo.setSetting('allow_cloud_media_sync', allowMedia ? '1' : '0');
+        if (allowMedia) {
+          unawaited(repo.backfillCloudMediaIfNeeded());
+        }
 
         // التحقق من فك ارتباط الجهاز (Unlink Device) للمدير فقط
         final isOwner = await repo.isWorkspaceOwner();

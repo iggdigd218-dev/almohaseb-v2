@@ -141,7 +141,7 @@ class _JoinApprovalScreenState extends ConsumerState<JoinApprovalScreen> {
   // (المعمارية الصامتة) لا حقل رابط بعد اليوم: الرابط الرسمي مضمّن،
   // ومساحة عمل المدير تُكتشف تلقائياً من رمز الدعوة نفسه.
   Future<void> _submitPin() async {
-    final pin = _pinCtrl.text.trim();
+    final pin = CloudJoin.normalizeInviteCode(_pinCtrl.text);
     if (pin.isEmpty) {
       setState(() => _error = 'أدخل رمز الاقتران.');
       return;
@@ -155,20 +155,17 @@ class _JoinApprovalScreenState extends ConsumerState<JoinApprovalScreen> {
       final repo = ref.read(repoProvider);
       final st = await repo.settings();
       final url = effectiveBackendUrl(st['cloudBackendUrl']);
-      final ws = await CloudJoin.findWorkspaceByInvite(
-          backendUrl: url, tokenOrPin: pin);
-      // (دفعة الواجهات) الشبكة قد تتأخر والمستخدم قد يغادر الشاشة — setState
-      // بعد التخلص من الحالة يرمي، وكان ذلك يبتلع رسالة الخطأ الحقيقية.
+      final resolved = await CloudJoin.verifyAndResolveInvite(
+        backendUrl: url,
+        tokenOrPin: pin,
+      );
       if (!mounted) return;
-      if (ws == null) {
-        setState(() {
-          _busy = false;
-          _error = 'رمز الاقتران غير صحيح أو انتهت صلاحيته.';
-        });
-        return;
-      }
       _busy = false;
-      await _sendRequest(url: url, ws: ws, tokenOrPin: pin);
+      await _sendRequest(
+        url: url,
+        ws: resolved.workspaceId,
+        tokenOrPin: resolved.token,
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -741,7 +738,7 @@ class _JoinApprovalScreenState extends ConsumerState<JoinApprovalScreen> {
                   controller: _pinCtrl,
                   textDirection: TextDirection.ltr,
                   keyboardType: TextInputType.number,
-                  maxLength: 8,
+                  maxLength: 14,
                   decoration: const InputDecoration(
                     labelText: 'رمز الاقتران (6 أرقام أو رمز الدعوة)',
                     counterText: '',

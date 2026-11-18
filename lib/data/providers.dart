@@ -179,14 +179,13 @@ final accountsProvider = FutureProvider<List<AccountWithBalance>>((ref) async {
   final f = ref.watch(accountFilterProvider);
   final repo = ref.read(repoProvider);
 
-  final all = await repo.accounts(includeArchived: f.showArchived);
+  final all = await repo.accounts(includeArchived: true);
   final balances = await repo.allBalances(all);
 
   final q = f.query.trim();
   final numericQ = q.isNotEmpty && Fmt.isNumericQuery(q);
   final out = <AccountWithBalance>[];
   for (final a in all) {
-    if (f.showArchived && !a.archived) continue;
     if (f.kind != null && a.kind != f.kind) continue;
     if (f.currency != null && a.currency != f.currency) continue;
     if (q.isNotEmpty) {
@@ -1311,7 +1310,7 @@ final txDeliveryBadgesProvider = FutureProvider<Map<String, TxDeliveryBadge>>((
   // جلب كافة أجهزة المنشأة النشطة المسجلة في الروستر (المدير + الأعضاء المقترنين).
   final deviceRows = await db.rawQuery(
     '''
-    SELECT d.id, d.name, d.is_owner, d.is_paired, d.last_sync_at, d.last_seen_at,
+    SELECT d.id, d.name, d.user_id, d.is_owner, d.is_paired, d.last_sync_at, d.last_seen_at,
            d.updated_at, u.name AS user_name
     FROM devices d
     LEFT JOIN users u ON u.id = d.user_id
@@ -1327,19 +1326,41 @@ final txDeliveryBadgesProvider = FutureProvider<Map<String, TxDeliveryBadge>>((
   if (!hasMemberPeers || deviceRows.length <= 1) return const {};
 
   final total = deviceRows.length;
+  final knownDeviceIds = <String>{
+    for (final d in deviceRows)
+      if ('${d['id'] ?? ''}'.trim().isNotEmpty) '${d['id'] ?? ''}'.trim(),
+  };
 
   final txRows = await db.rawQuery(
     '''
     SELECT t.id AS tx_id,
+           t.cashier_name AS tx_cashier_name,
            t.sync_state AS tx_sync_state,
            t.updated_at AS tx_updated_at,
            t.created_at AS tx_created_at,
            o.device_id AS op_device_id,
+           o.user_id AS tx_user_id,
            o.synced AS op_synced,
            o.is_synced AS op_is_synced,
            o.server_time AS op_server_time,
            o.timestamp AS op_timestamp,
-           o.device_time AS op_device_time
+           o.device_time AS op_device_time,
+           (
+             SELECT o3.device_id FROM operations o3
+             WHERE o3.entity_type = 'tx' AND o3.entity_id = CAST(t.id AS TEXT)
+               AND COALESCE(o3.device_id, '') <> ''
+             ORDER BY CASE WHEN o3.op_type = 'create' THEN 0 ELSE 1 END,
+                      o3.timestamp ASC, o3.rowid ASC
+             LIMIT 1
+           ) AS creator_op_device_id,
+           (
+             SELECT COALESCE(NULLIF(o3.server_time, ''), NULLIF(o3.timestamp, ''), o3.device_time)
+             FROM operations o3
+             WHERE o3.entity_type = 'tx' AND o3.entity_id = CAST(t.id AS TEXT)
+             ORDER BY CASE WHEN o3.op_type = 'create' THEN 0 ELSE 1 END,
+                      o3.timestamp ASC, o3.rowid ASC
+             LIMIT 1
+           ) AS creator_op_time
     FROM transactions t
     LEFT JOIN operations o
       ON o.entity_type = 'tx'
@@ -1360,24 +1381,89 @@ final txDeliveryBadgesProvider = FutureProvider<Map<String, TxDeliveryBadge>>((
     if (eid.isEmpty) continue;
     final txSyncState = '${r['tx_sync_state'] ?? 'synced'}'.trim();
     final hasOpRow = r['op_device_id'] != null;
-    final senderDeviceId = '${r['op_device_id'] ?? ourId}'.trim();
+    final latestOpDeviceId = '${r['op_device_id'] ?? ''}'.trim();
+    final creatorOpDevId = '${r['creator_op_device_id'] ?? ''}'.trim();
+    final cashierNameNorm =
+        '${r['tx_cashier_name'] ?? ''}'.trim().toLowerCase();
+    final txUserId = (r['tx_user_id'] as num?)?.toInt();
+
+    // تحديد الجهاز المنشئ الحقيقي للعملية:
+    // 1) مطابقة اسم الكاشير أو معرف المستخدم في العملية مع أجهزة الروستر.
+    // 2) أو جهاز عملية الإنشاء الأولى (op_type = 'create') إن لم يكن إعادة بث من المدير.
+    String matchedDeviceByCashier = '';
+    if (cashierNameNorm.isNotEmpty) {
+      for (final d in deviceRows) {
+        final devId = '${d['id'] ?? ''}'.trim();
+        final dName = '${d['name'] ?? ''}'.trim().toLowerCase();
+        final uName = '${d['user_name'] ?? ''}'.trim().toLowerCase();
+        if (devId.isNotEmpty &&
+            (dName == cashierNameNorm || uName == cashierNameNorm)) {
+          matchedDeviceByCashier = devId;
+          break;
+        }
+      }
+    }
+    if (matchedDeviceByCashier.isEmpty && txUserId != null && txUserId > 0) {
+      for (final d in deviceRows) {
+        final devId = '${d['id'] ?? ''}'.trim();
+        final dUid = (d['user_id'] as num?)?.toInt();
+        if (devId.isNotEmpty && dUid == txUserId) {
+          matchedDeviceByCashier = devId;
+          break;
+        }
+      }
+    }
+
+    String creatorDeviceId;
+    if (matchedDeviceByCashier.isNotEmpty &&
+        (creatorOpDevId.isEmpty || creatorOpDevId == ourId)) {
+      creatorDeviceId = matchedDeviceByCashier;
+    } else if (creatorOpDevId.isNotEmpty &&
+        knownDeviceIds.contains(creatorOpDevId)) {
+      creatorDeviceId = creatorOpDevId;
+    } else if (matchedDeviceByCashier.isNotEmpty) {
+      creatorDeviceId = matchedDeviceByCashier;
+    } else if (creatorOpDevId.isNotEmpty) {
+      creatorDeviceId = creatorOpDevId;
+    } else if (latestOpDeviceId.isNotEmpty) {
+      creatorDeviceId = latestOpDeviceId;
+    } else {
+      creatorDeviceId = ourId;
+    }
+
     final opSynced = hasOpRow
         ? ((((r['op_synced'] as int?) ?? 0) == 1 ||
                 ((r['op_is_synced'] as int?) ?? 0) == 1) &&
             txSyncState == 'synced')
         : (txSyncState == 'synced');
 
+    final txCreatedMs = _parseSyncTimeMs(r['tx_created_at']);
+    final txUpdatedMs = _parseSyncTimeMs(r['tx_updated_at']);
+    final creatorOpMs = _parseSyncTimeMs(r['creator_op_time']);
     final opServerMs = _parseSyncTimeMs(r['op_server_time']);
     final opFallbackMs = [
       _parseSyncTimeMs(r['op_timestamp']),
       _parseSyncTimeMs(r['op_device_time']),
-      _parseSyncTimeMs(r['tx_updated_at']),
-      _parseSyncTimeMs(r['tx_created_at']),
+      txUpdatedMs,
+      txCreatedMs,
     ].reduce((a, b) => a > b ? a : b);
     final opTimeMs = opServerMs > 0 ? opServerMs : opFallbackMs;
+    final txRefMs = txUpdatedMs > txCreatedMs ? txUpdatedMs : txCreatedMs;
+    // إذا كانت آخر عملية في جدول operations مجرد إعادة بث جماعي (resyncAllToGroup)
+    // بعد وقت العملية الفعلي دون تعديل على العملية نفسها، نعتمد وقت العملية الفعلي
+    // حتى لا تظهر الأجهزة التي استلمت العملية مسبقاً وكأنها بانتظار الاتصال.
+    final effectiveSyncCheckMs =
+        (txRefMs > 0 && opTimeMs > txRefMs + 60000) ? txRefMs : opTimeMs;
+
     final opTimeIso = opTimeMs > 0
         ? DateTime.fromMillisecondsSinceEpoch(opTimeMs).toIso8601String()
         : '${r['tx_updated_at'] ?? r['tx_created_at'] ?? ''}';
+    final originMs = txCreatedMs > 0
+        ? txCreatedMs
+        : (creatorOpMs > 0 ? creatorOpMs : opTimeMs);
+    final originIso = originMs > 0
+        ? DateTime.fromMillisecondsSinceEpoch(originMs).toIso8601String()
+        : '${r['tx_created_at'] ?? opTimeIso}';
 
     int deliveredCount = 0;
     final peersList = <TxPeerDelivery>[];
@@ -1387,7 +1473,7 @@ final txDeliveryBadgesProvider = FutureProvider<Map<String, TxDeliveryBadge>>((
       if (devId.isEmpty) continue;
       final isSelf = devId == ourId;
       final isDevOwner = ((d['is_owner'] as int?) ?? 0) == 1;
-      final isCreator = devId == senderDeviceId;
+      final isCreator = devId == creatorDeviceId;
       final rawName = '${d['name'] ?? ''}'.trim();
       final userName = '${d['user_name'] ?? ''}'.trim();
       final displayName = rawName.isNotEmpty
@@ -1404,11 +1490,17 @@ final txDeliveryBadgesProvider = FutureProvider<Map<String, TxDeliveryBadge>>((
       bool isDelivered = false;
       String receivedTimeStr = '';
 
-      if (isSelf || isCreator) {
-        // منشئ العملية وجهاز المدير (الحالي) يملكان العملية محلياً بالفعل.
+      if (isCreator) {
+        // الجهاز المنشئ للعملية يملكها منذ لحظة إنشائها.
+        isDelivered = true;
+        receivedTimeStr = originIso.isNotEmpty ? originIso : devSyncIso;
+      } else if (isSelf) {
+        // هذا الجهاز يملك العملية محلياً بالفعل في قاعدة بياناته.
         isDelivered = true;
         receivedTimeStr = devSyncIso.isNotEmpty ? devSyncIso : opTimeIso;
-      } else if (opSynced && opTimeMs > 0 && devSyncMs >= opTimeMs) {
+      } else if (opSynced &&
+          effectiveSyncCheckMs > 0 &&
+          devSyncMs >= effectiveSyncCheckMs) {
         isDelivered = true;
         receivedTimeStr = devSyncIso;
       }
@@ -1429,6 +1521,13 @@ final txDeliveryBadgesProvider = FutureProvider<Map<String, TxDeliveryBadge>>((
         ),
       );
     }
+
+    // ترتيب القائمة بحيث يظهر منشئ العملية أولاً، ثم جهاز المدير، ثم بقية الأعضاء
+    peersList.sort((a, b) {
+      if (a.isCreator != b.isCreator) return a.isCreator ? -1 : 1;
+      if (a.isOwner != b.isOwner) return a.isOwner ? -1 : 1;
+      return 0;
+    });
 
     out[eid] = TxDeliveryBadge(
       deliveredCount,

@@ -37,6 +37,7 @@ import 'apply_remote.dart';
 import 'firebase_auth_service.dart';
 import 'snapshot_apply.dart';
 import 'subscription_guard.dart';
+import 'cloud_firebase_transport.dart';
 import '../../core/cloud_config.dart';
 import '../../core/rbac.dart';
 
@@ -49,15 +50,19 @@ const _tokenChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 /// offline لحظياً (شبكة ضعيفة) ضاع القرار. الآن 10 دقائق آمنة.
 const Duration _approvedRequestTtl = Duration(minutes: 10);
 
-  /// (أ-2) فهرس الدعوات على الجذر: `{base}/invite_index/{pin_XXXXXX|tok_XXXXXXXX}`.
+/// (أ-2) فهرس الدعوات: المسار الأساسي `{base}/workspaces/_invite_index/invites/{key}`
+/// والمسار التراثي على الجذر `{base}/invite_index/{key}`.
 ///
-/// كان اكتشاف مساحة المدير يتم بمسح `/workspaces?shallow=true` ثم قراءة
-/// عقدة `invites` لكل مساحة (سقف 500) — أي استطلاعاً جماعياً لبيانات كل
-/// المنشآت واستهلاكاً شبكياً هائلاً من طرف العميل. الفهرس يجعل الاكتشاف
-/// **قراءةً واحدة لعقدة واحدة**، ويتيح لقواعد الأمان منع قراءة الجذر.
+/// مثل `device_index` تحت `_registry`، الجذر `/invite_index` قد يُحجب في قواعد
+/// RTDB المنشورة (HTTP 401 Permission denied)، بينما `workspaces/$ws/invites`
+/// مفتوح قراءةً وكتابةً للموثّقين (`auth != null`) بدون أي نشر قواعد إضافي.
 /// مفتاحان في أب واحد: `pin_` للرمز الرقمي و`tok_` لتوكن الدعوة.
 String _inviteIndexPath(String base, String key) =>
     '${base.replaceAll(RegExp(r'/+$'), '')}/invite_index/'
+    '${Uri.encodeComponent(key)}.json';
+
+String _workspaceInviteIndexPath(String base, String key) =>
+    '${base.replaceAll(RegExp(r'/+$'), '')}/workspaces/_invite_index/invites/'
     '${Uri.encodeComponent(key)}.json';
 
 String _invitePinKey(String pin) => 'pin_${pin.trim().toUpperCase()}';
@@ -65,7 +70,7 @@ String _invitePinKey(String pin) => 'pin_${pin.trim().toUpperCase()}';
 String _inviteTokenKey(String token) => 'tok_${token.trim().toUpperCase()}';
 
 /// (توافق مؤقت) المسح القديم إن تعذّر الفهرس — تم إيقافه نهائياً للاكتفاء
-/// بفهرس `/invite_index` السريع وتجنب مسح كامل عقدة `/workspaces`.
+/// بفهرس الدعوات السريع وتجنب مسح كامل عقدة `/workspaces`.
 const bool legacyInviteScanFallback = false;
 
 String _newToken([int len = 8]) {
@@ -701,18 +706,161 @@ class CloudJoin {
   }
 
   /// (أ-2) محو فهرسي الدعوة (PIN + توكن) بعد استهلاكها أو انتهائها —
-  /// يمنع تراكم مفاتيح ميتة في `/invite_index`.
+  /// ينظّف المسار الأساسي تحت `workspaces/_invite_index/invites` والجذر التراثي.
+  /// يطبّع رمز الدعوة أو PIN (يحوّل الأرقام العربية/الفارسية إلى لاتينية،
+  /// ويزيل المسافات والشرطات العارضة وعلامات الاتجاه الخفية).
+  static String normalizeInviteCode(String raw) {
+    if (raw.isEmpty) return '';
+    final buf = StringBuffer();
+    for (final rune in raw.runes) {
+      if (rune >= 0x0660 && rune <= 0x0669) {
+        buf.writeCharCode(0x30 + (rune - 0x0660));
+      } else if (rune >= 0x06F0 && rune <= 0x06F9) {
+        buf.writeCharCode(0x30 + (rune - 0x06F0));
+      } else if (rune == 0x200E ||
+          rune == 0x200F ||
+          rune == 0x200B ||
+          rune == 0x200C ||
+          rune == 0x200D ||
+          rune == 0xFEFF) {
+        // محارف اتجاه خفية — تُهمل
+      } else {
+        buf.writeCharCode(rune);
+      }
+    }
+    var cleaned = buf.toString().trim().toUpperCase();
+    final stripped = cleaned.replaceAll(RegExp(r'[\s\-_]+'), '');
+    if (stripped.isNotEmpty) {
+      cleaned = stripped;
+    }
+    return cleaned;
+  }
+
+  /// يحلّل تاريخ انتهاء الدعوة مع مراعاة فروق المناطق الزمنية بين جهاز المدير وجهاز العضو.
+  static DateTime? _parseInviteExpiry(Map<String, dynamic> rec) {
+    final rawExp = '${rec['expiresAt'] ?? ''}'.trim();
+    if (rawExp.isEmpty) return null;
+    final parsed = DateTime.tryParse(rawExp);
+    if (parsed == null) return null;
+    if (rawExp.endsWith('Z') ||
+        rawExp.endsWith('z') ||
+        RegExp(r'[+\-]\d{2}:?\d{2}$').hasMatch(rawExp)) {
+      return parsed.toLocal();
+    }
+    final tzMin = rec['tzOffsetMin'];
+    if (tzMin is num) {
+      final localOffsetMin = DateTime.now().timeZoneOffset.inMinutes;
+      final diffMin = localOffsetMin - tzMin.toInt();
+      if (diffMin != 0) {
+        return parsed.add(Duration(minutes: diffMin));
+      }
+    }
+    return parsed;
+  }
+
+  /// يتحقق مما إذا كانت الدعوة لا تزال سارية المفعول، مع تسامح ذكي لفروق
+  /// ضبط الساعة أو المنطقة الزمنية بين هاتف المدير وجهاز الكمبيوتر/الهاتف المنضم.
+  static bool _isInviteLive(Map<String, dynamic> rec) {
+    final exp = _parseInviteExpiry(rec);
+    if (exp == null) return false;
+    final now = DateTime.now();
+    if (now.isBefore(exp)) return true;
+    final rawCreated = '${rec['createdAt'] ?? ''}'.trim();
+    if (rawCreated.isNotEmpty) {
+      final created = DateTime.tryParse(rawCreated);
+      if (created != null &&
+          exp.difference(created) >= const Duration(minutes: 10)) {
+        DateTime adjustedExp = exp;
+        final tzMin = rec['tzOffsetMin'];
+        if (tzMin == null) {
+          final createdDiffMin = now.difference(created).inMinutes;
+          if (createdDiffMin.abs() >= 45 && createdDiffMin.abs() <= 720) {
+            final roundedHours = (createdDiffMin / 60).round();
+            final shiftedCreated =
+                created.add(Duration(hours: roundedHours));
+            if (now.difference(shiftedCreated).inMinutes.abs() <= 20) {
+              adjustedExp = exp.add(Duration(hours: roundedHours));
+            }
+          }
+        }
+        if (now.isBefore(adjustedExp.add(const Duration(minutes: 15)))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  static bool _isInviteExpired(Map<String, dynamic> rec) =>
+      !_isInviteLive(rec);
+
   static Future<void> _purgeInviteIndex(String base,
       {String pin = '', String token = ''}) async {
-    if (pin.trim().isNotEmpty) {
-      try {
-        await _delete(_inviteIndexPath(base, _invitePinKey(pin)));
-      } catch (_) {}
+    final cleanPin = normalizeInviteCode(pin);
+    final cleanTok = normalizeInviteCode(token);
+    for (final key in [
+      if (cleanPin.isNotEmpty) _invitePinKey(cleanPin),
+      if (cleanTok.isNotEmpty) _inviteTokenKey(cleanTok),
+    ]) {
+      await _delete(_workspaceInviteIndexPath(base, key));
+      await _delete(_inviteIndexPath(base, key), refreshOnReject: false);
     }
-    if (token.trim().isNotEmpty) {
-      try {
-        await _delete(_inviteIndexPath(base, _inviteTokenKey(token)));
-      } catch (_) {}
+  }
+
+  static Future<Map<String, dynamic>?> _readInviteIndex(
+    String base,
+    String key,
+  ) async {
+    CloudJoinException? primaryErr;
+    try {
+      final primary = await _getJson(_workspaceInviteIndexPath(base, key));
+      if (primary != null) return primary;
+    } on CloudJoinException catch (e) {
+      primaryErr = e;
+    }
+    try {
+      final legacy = await _getJson(
+        _inviteIndexPath(base, key),
+        refreshOnReject: primaryErr != null,
+      );
+      if (legacy != null) return legacy;
+    } catch (_) {
+      // الجذر /invite_index قد يكون محجوباً في القواعد المنشورة (401/403).
+    }
+    if (primaryErr != null) throw primaryErr;
+    return null;
+  }
+
+  static Future<void> _writeInviteIndex(
+    String base,
+    String key,
+    Object body, {
+    Duration timeout = const Duration(seconds: 60),
+  }) async {
+    CloudJoinException? primaryErr;
+    var primaryOk = false;
+    try {
+      await _putJson(
+        _workspaceInviteIndexPath(base, key),
+        body,
+        timeout: timeout,
+      );
+      primaryOk = true;
+    } on CloudJoinException catch (e) {
+      primaryErr = e;
+    }
+    try {
+      await _putJson(
+        _inviteIndexPath(base, key),
+        body,
+        timeout: timeout,
+        refreshOnReject: false,
+      );
+      primaryOk = true;
+    } catch (_) {
+      if (!primaryOk && primaryErr != null) {
+        throw primaryErr;
+      }
     }
   }
 
@@ -728,6 +876,113 @@ class CloudJoin {
       t = await FirebaseAuthRest.cloudIdToken();
     } catch (_) {}
     return t;
+  }
+
+  /// (3.98.56) اسم العقدة السحابية الأخير من الرابط — لتسمية سبب الرفض
+  /// بدقة («عند "invite_index"») بلا كشف الرابط الكامل أو أي سر.
+  static String _nodeName(String url) {
+    try {
+      final clean = Uri.parse(url).path.replaceAll(RegExp(r'/+$'), '');
+      final parts = clean
+          .split('/')
+          .where((p) => p.isNotEmpty && !p.endsWith('.json'))
+          .toList();
+      return parts.isEmpty ? '' : parts.last;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// (3.98.57) فحص تشخيصي مبكر **بقراءة فقط** لصلاحية مساحة العمل.
+  ///
+  /// إنشاء الدعوة يكتب ٤ عقد (`invites/{tok}`، فهرسي `/invite_index`،
+  /// وربما `members/{uid}`). كان أول فشل يظهر كـ HTTP 401/403 عام يُترجم
+  /// إلى «ليس لديك الصلاحية… راجع مدير النظام» — رسالة خاطئة تماماً على
+  /// جهاز المالك، فلا يعرف أن المشكلة في قواعد RTDB أو في هويته السحابية.
+  ///
+  /// الإصدار السابق من هذا الفحص كتب عقدة جديدة `_probe` — وهذا خطأ في
+  /// بيئة تكون فيها القواعد غير منشورة أو قديمة: كان الفحص نفسه يُرفض بـ 403
+  /// فيصير هو سبب العطل بدل أن يوضّحه. الفحص الآن **لا يكتب شيئاً**:
+  ///   • يقرأ عقدة قائمة (`meta.json`) — إن رُفضت القراءة فالقواعد/الهوية لا
+  ///     تسمح أصلاً، والرسالة تقول ذلك صراحةً.
+  ///   • يتحقق من وجود هوية وتوكن فعّال قبل أي كتابة.
+  ///
+  /// النتيجة: صفر تغييرات مطلوبة على قاعدة Firebase، وصفر عقد جديدة، ومعرفة
+  /// دقيقة للسبب (401 هوية / 403 قواعد) قبل الإبلاغ عنه.
+  static Future<void> _probeWorkspaceAccess(String backendUrl,
+      String workspaceId) async {
+    final token = await _requireToken(action: 'التحقق من مساحة العمل السحابية');
+    final url = '${_root(backendUrl, workspaceId)}/meta.json';
+    try {
+      var res = await http
+          .get(_authedUrl(url, token))
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        final fresh = await FirebaseAuthRest.forceRefreshToken();
+        if (fresh != null && fresh.isNotEmpty) {
+          res = await http
+              .get(_authedUrl(url, fresh))
+              .timeout(const Duration(seconds: 10));
+        }
+      }
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        throw CloudJoinException(_cloudRejectedMessage(
+          res.statusCode,
+          node: 'بيانات المنشأة',
+          responseBody: res.body,
+        ));
+      }
+    } on CloudJoinException {
+      rethrow;
+    } catch (_) {
+      // شبكة/مهلة: لا نمنع الإنشاء — بقية المسار سيبلّغ عن الخطأ الحقيقي.
+    }
+  }
+
+  /// (3.98.56) توكن إلزامي لعمليات الكتابة الحسّاسة (دعوة/فهرس/عضوية).
+  ///
+  /// كان غياب التوكن يمرّ صامتاً إلى الطلب، فيرد RTDB بـ 401/403 ويُترجم
+  /// الخطأ إلى «ليس لديك الصلاحية… راجع مدير النظام» — على جهاز المالك نفسه.
+  /// الآن نفشل قبل الشبكة برسالة تشخيصية صحيحة تُخبره أن الهوية السحابية
+  /// غير فعّالة (لا أن صلاحياته ناقصة).
+  static Future<String> _requireToken({String action = 'العملية'}) async {
+    var t = await _ensureToken();
+    if (t == null || t.isEmpty) {
+      // محاولة أخيرة: تجديد قسري يعيد ضبط تبريد مزوّد الهوية ويعيد إنشاء
+      // الهوية المجهولة/الحساب إن انتهت. بلا هذه المحاولة كان انتهاء
+      // التوكن يعني طلباً بلا `?auth` ⇒ 401 ⇒ «راجع مدير النظام» زوراً.
+      try {
+        t = await FirebaseAuthRest.forceRefreshToken();
+      } catch (_) {}
+    }
+    if (t == null || t.isEmpty) {
+      throw CloudJoinException(
+          'تعذّر $action: لا توجد هوية سحابية فعّالة على هذا الجهاز. '
+          'اتصل بالإنترنت وسجّل الدخول بحساب Google من الإعدادات ← '
+          'حساب المؤسسة، ثم أعد المحاولة.');
+    }
+    return t;
+  }
+
+  /// (3.98.59) رسالة موحّدة لرفض السحابة، تُفرّق بين انتهاء التوكن (401)
+  /// ورفض قواعد RTDB (403 أو 401 مع "Permission denied").
+  static String _cloudRejectedMessage(
+    int code, {
+    String? node,
+    String? responseBody,
+  }) {
+    final where = (node == null || node.isEmpty) ? '' : ' عند "$node"';
+    final bodyLower = (responseBody ?? '').toLowerCase();
+    final isRuleDenial =
+        code == 403 || (code == 401 && bodyLower.contains('permission denied'));
+    if (isRuleDenial) {
+      return 'رفضت السحابة الوصول$where (HTTP $code). هذا ليس نقصاً في '
+          'صلاحيتك كمالك ولا يعني بالضرورة انتهاء تسجيل الدخول — الأرجح أن '
+          'قواعد Firebase Realtime Database تمنع العملية على هذا المسار '
+          'أو لم تُنشر بعد، أو أن هوية الجهاز لم تُربط بالمنشأة.';
+    }
+    return 'انتهت صلاحية هوية هذا الجهاز على السحابة$where (HTTP 401). '
+        'سجّل الدخول بحساب Google من الإعدادات ← حساب المؤسسة ثم أعد المحاولة.';
   }
 
   /// (401) توقيع أي طلب إلى RTDB بـ `?auth=` — القواعد تشترط `auth != null`.
@@ -794,11 +1049,14 @@ class CloudJoin {
     }
   }
 
-  static Future<Map<String, dynamic>?> _getJson(String url) async {
+  static Future<Map<String, dynamic>?> _getJson(
+    String url, {
+    bool refreshOnReject = true,
+  }) async {
     var token = await _ensureToken();
     var uri = _authedUrl(url, token);
     var res = await http.get(uri).timeout(const Duration(seconds: 30));
-    if (res.statusCode == 401 || res.statusCode == 403) {
+    if (refreshOnReject && (res.statusCode == 401 || res.statusCode == 403)) {
       final fresh = await FirebaseAuthRest.forceRefreshToken();
       if (fresh != null && fresh.isNotEmpty) {
         token = fresh;
@@ -808,10 +1066,11 @@ class CloudJoin {
       }
     }
     if (res.statusCode == 401 || res.statusCode == 403) {
-      throw CloudJoinException(
-          'فشل المصادقة مع السحابة (HTTP ${res.statusCode}). '
-          'تحقق من اتصال الإنترنت ومفتاح Firebase ApiKey. '
-          'إن استمرت المشكلة، أعد تشغيل التطبيق.');
+      throw CloudJoinException(_cloudRejectedMessage(
+        res.statusCode,
+        node: _nodeName(url),
+        responseBody: res.body,
+      ));
     }
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw CloudJoinException('تعذّر الاتصال بالسحابة (HTTP ${res.statusCode})');
@@ -822,8 +1081,12 @@ class CloudJoin {
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
 
-  static Future<void> _putJson(String url, Object body,
-      {Duration timeout = const Duration(seconds: 60)}) async {
+  static Future<void> _putJson(
+    String url,
+    Object body, {
+    Duration timeout = const Duration(seconds: 60),
+    bool refreshOnReject = true,
+  }) async {
     var token = await _ensureToken();
     var uri = _authedUrl(url, token);
     var res = await http
@@ -831,7 +1094,7 @@ class CloudJoin {
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode(body))
         .timeout(timeout);
-    if (res.statusCode == 401 || res.statusCode == 403) {
+    if (refreshOnReject && (res.statusCode == 401 || res.statusCode == 403)) {
       final fresh = await FirebaseAuthRest.forceRefreshToken();
       if (fresh != null && fresh.isNotEmpty) {
         res = await http
@@ -842,10 +1105,11 @@ class CloudJoin {
       }
     }
     if (res.statusCode == 401 || res.statusCode == 403) {
-      throw CloudJoinException(
-          'فشل الرفع إلى السحابة: المصادقة مرفوضة (HTTP ${res.statusCode}). '
-          'السبب المحتمل: توكن Firebase منتهٍ أو ApiKey غير صحيح أو قواعد RTDB تمنع الكتابة. '
-          'الحل: تأكد من الإنترنت، وأن قواعد Firebase هي auth != null، وأن ApiKey صحيح، ثم أعد المحاولة.');
+      throw CloudJoinException(_cloudRejectedMessage(
+        res.statusCode,
+        node: _nodeName(url),
+        responseBody: res.body,
+      ));
     }
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw CloudJoinException('فشل الرفع إلى السحابة (HTTP ${res.statusCode})');
@@ -910,12 +1174,15 @@ class CloudJoin {
     }
   }
 
-  static Future<void> _delete(String url) async {
+  static Future<void> _delete(
+    String url, {
+    bool refreshOnReject = true,
+  }) async {
     try {
       var token = await _ensureToken();
       var uri = _authedUrl(url, token);
       var res = await http.delete(uri).timeout(const Duration(seconds: 20));
-      if (res.statusCode == 401 || res.statusCode == 403) {
+      if (refreshOnReject && (res.statusCode == 401 || res.statusCode == 403)) {
         final fresh = await FirebaseAuthRest.forceRefreshToken();
         if (fresh != null) {
           await http
@@ -1127,11 +1394,15 @@ class CloudJoin {
   static Future<Map<String, Object?>> buildWorkspaceSnapshot(
     Repo repo, {
     String? hostDeviceId,
+    bool includeMediaThumbs = true,
+    bool skipCatalogHeal = false,
   }) async {
     final db = await repo.database;
-    try {
-      await ApplyRemoteOp.healCorruptedItemCatalog(db);
-    } catch (_) {}
+    if (!skipCatalogHeal) {
+      try {
+        await ApplyRemoteOp.healCorruptedItemCatalog(db);
+      } catch (_) {}
+    }
     final ourId = await ensureDeviceId(repo);
     final ownerDevs = await db.query('devices',
         columns: ['id'], where: 'is_owner = 1', limit: 1);
@@ -1162,6 +1433,11 @@ class CloudJoin {
         (await repo.getSetting('allow_cloud_media_sync')) == '1' ||
             SubscriptionGuard.lastState.features.allowCloudMediaSync;
     for (final t in tables) {
+      // في لقطة الانضمام السريعة، نتجنب تضخيم الحمولة بسجل النشاط أو سلة المحذوفات التاريخية
+      if (!includeMediaThumbs && (t == 'trash' || t == 'activity')) {
+        snapshot[t] = const <Map<String, Object?>>[];
+        continue;
+      }
       final rows = await db.query(t);
       final filteredRows = t == 'devices'
           ? rows.where((r) =>
@@ -1187,7 +1463,7 @@ class CloudJoin {
           if (isKnownAutoSplitItemId(itemId)) {
             continue;
           }
-          if (allowMediaSync) {
+          if (allowMediaSync && includeMediaThumbs) {
             final imgPath = (row['image'] as String?)?.trim() ?? '';
             if (imgPath.isNotEmpty) {
               final b64 = await MediaPaths.encodeThumbBase64(imgPath);
@@ -1246,10 +1522,15 @@ class CloudJoin {
           'اضبط رابط قاعدة البيانات السحابية أولاً من الإعدادات ← المزامنة السحابية.');
     }
     _validateHttps(url);
-    await _ensureToken();
-
     final ws = await repo.activeWorkspaceId();
     final ourId = await ensureDeviceId(repo);
+
+    // (3.98.56) هوية إلزامية قبل أي كتابة: بلا توكن كان الطلب يُرسل عارياً
+    // فيرد RTDB بـ 401/403 ويظهر «ليس لديك الصلاحية» للمالك نفسه.
+    await _requireToken(action: 'إنشاء دعوة الانضمام');
+    // (3.98.56) فحص كتابة مبكر: يكشف قواعد RTDB غير المنشورة أو هوية غير
+    // عضوة قبل توليد الرمز، برسالة تشرح السبب الحقيقي بدل «راجع المدير».
+    await _probeWorkspaceAccess(url, ws);
 
     // التحقق من المقاعد وتهيئة سجل المالك بالتوازي لتسريع التوليد
     try {
@@ -1280,8 +1561,8 @@ class CloudJoin {
     for (var attempt = 0; attempt < 5; attempt++) {
       try {
         final checks = await Future.wait<Map<String, Object?>?>([
-          _getJson(_inviteIndexPath(url, _inviteTokenKey(token))),
-          _getJson(_inviteIndexPath(url, _invitePinKey(pin))),
+          _readInviteIndex(url, _inviteTokenKey(token)),
+          _readInviteIndex(url, _invitePinKey(pin)),
         ]);
         final existTok = checks[0];
         final existPin = checks[1];
@@ -1305,9 +1586,14 @@ class CloudJoin {
 
     // TTL دقيق: 15 دقيقة لمسار الموافقة التفاعلي.
     final expires = now.add(const Duration(minutes: 15));
+    final tzOffsetMin = now.timeZoneOffset.inMinutes;
     final invitePayload = {
       'createdAt': now.toIso8601String(),
       'expiresAt': expires.toIso8601String(),
+      'createdAtUtc': now.toUtc().toIso8601String(),
+      'expiresAtUtc': expires.toUtc().toIso8601String(),
+      'expiresAtMs': expires.toUtc().millisecondsSinceEpoch,
+      'tzOffsetMin': tzOffsetMin,
       'ws': ws,
       'pin': pin,
     };
@@ -1315,16 +1601,21 @@ class CloudJoin {
       'ws': ws,
       'token': token,
       'pin': pin,
+      'createdAt': now.toIso8601String(),
       'expiresAt': expires.toIso8601String(),
+      'createdAtUtc': now.toUtc().toIso8601String(),
+      'expiresAtUtc': expires.toUtc().toIso8601String(),
+      'expiresAtMs': expires.toUtc().millisecondsSinceEpoch,
+      'tzOffsetMin': tzOffsetMin,
     };
 
     // كتابة عقدة الدعوة ومفتاحي الفهرس (PIN + توكن) بالتوازي في خطوة واحدة سريعة
     await Future.wait<void>([
       _putJson('$root/invites/$token.json', invitePayload,
           timeout: const Duration(seconds: 15)),
-      _putJson(_inviteIndexPath(url, _invitePinKey(pin)), indexPayload,
+      _writeInviteIndex(url, _invitePinKey(pin), indexPayload,
           timeout: const Duration(seconds: 15)),
-      _putJson(_inviteIndexPath(url, _inviteTokenKey(token)), indexPayload,
+      _writeInviteIndex(url, _inviteTokenKey(token), indexPayload,
           timeout: const Duration(seconds: 15)),
     ]);
 
@@ -1354,7 +1645,7 @@ class CloudJoin {
   }) async {
     final url = backendUrl.trim();
     _validateHttps(url);
-    final tok = token.trim().toUpperCase();
+    final tok = normalizeInviteCode(token);
     if (tok.isEmpty && !preApproved) {
       throw const CloudJoinException('أدخل رمز الدعوة.');
     }
@@ -1395,8 +1686,7 @@ class CloudJoin {
         throw const CloudJoinException(
             'رمز الدعوة غير صحيح أو انتهت صلاحيته أو استُخدم من قبل.');
       }
-      final exp = DateTime.tryParse('${invite['expiresAt'] ?? ''}');
-      if (exp == null || DateTime.now().isAfter(exp)) {
+      if (_isInviteExpired(invite)) {
         await _delete('$root/invites/$tok.json');
         throw const CloudJoinException(
             'انتهت صلاحية رمز الدعوة — اطلب من المدير إنشاء دعوة جديدة.');
@@ -1555,15 +1845,25 @@ class CloudJoin {
     //    بعد فتح قاعدة بيانات المنشأة المعزولة دون مسح الجداول مسبقاً.
 
     // 3) هوية مجهولة مقترنة بمساحة المالك: تسجيل خروج أي حساب Google
-    //    شخصي أولاً، ثم جلسة مجهولة مستقلة لا ترث بصمة الموظف.
+    //    شخصي أولاً، مع الحفاظ على الهوية المجهولة المعتمدة (auth.uid)
+    //    التي سجّلها المدير للتو في /members/{uid} أثناء الموافقة.
     try {
       await GoogleAuthService(await repo.database)
           .signOut(keepDatabaseOpen: true);
     } catch (e) {
       debugPrint('CloudJoin: google signOut: $e');
     }
-    await FirebaseAuthRest.clearSession(repo, keepDatabaseOpen: true);
-    await FirebaseAuthRest.ensureScopedAnonymous(repo, workspaceId);
+    final hadApprovedAnon =
+        FirebaseAuthRest.hasValidToken &&
+        FirebaseAuthRest.currentUid.trim().isNotEmpty;
+    await FirebaseAuthRest.clearSession(
+      repo,
+      keepDatabaseOpen: true,
+      preserveAnonymous: hadApprovedAnon,
+    );
+    if (!hadApprovedAnon) {
+      await FirebaseAuthRest.ensureScopedAnonymous(repo, workspaceId);
+    }
     await FirebaseAuthRest.initSilentAuth(repo);
 
     // 4) نوع الحساب يصير «مؤسسة» فوراً بعد انضمام ناجح.
@@ -2055,10 +2355,14 @@ class CloudJoin {
           where: 'id = ?',
           whereArgs: [ourId],
         );
+        final activeMemberUid = FirebaseAuthRest.currentUid.trim().isNotEmpty
+            ? FirebaseAuthRest.currentUid.trim()
+            : '${latestRosterRec?['uid'] ?? ''}'.trim();
         await _putJson(
             '$root/roster/${Uri.encodeComponent(ourId)}.json',
             {
               ..._safeDeviceRow(own.first),
+              if (activeMemberUid.isNotEmpty) 'uid': activeMemberUid,
               'status': 'active',
               'revoked': false,
               'fingerprint': myFp,
@@ -2801,13 +3105,17 @@ class CloudJoin {
               final remFp =
                   '${remVal['fingerprint'] ?? remVal['hw_fingerprint'] ?? ''}'
                       .trim();
-              final hasDifferentFp = myFp.isNotEmpty &&
-                  remFp.isNotEmpty &&
-                  remFp.toLowerCase() != myFp.toLowerCase();
+              final remEmail =
+                  '${remVal['email'] ?? remVal['user_email'] ?? ''}'
+                      .trim()
+                      .toLowerCase();
               final sameFp = myFp.isNotEmpty &&
                   remFp.isNotEmpty &&
                   remFp.toLowerCase() == myFp.toLowerCase();
-              if (remId.isNotEmpty && remId != ourId && !hasDifferentFp && sameFp) {
+              final sameEmail = selfEmail.isNotEmpty &&
+                  remEmail.isNotEmpty &&
+                  remEmail == selfEmail;
+              if (remId.isNotEmpty && remId != ourId && (sameFp || sameEmail)) {
                 try {
                   await _delete(
                       '$root/roster/${Uri.encodeComponent(remId)}.json');
@@ -2860,18 +3168,17 @@ class CloudJoin {
     required String tokenOrPin,
   }) async {
     final url = backendUrl.trim().replaceAll(RegExp(r'/+$'), '');
-    final input = tokenOrPin.trim().toUpperCase();
+    final input = normalizeInviteCode(tokenOrPin);
     if (input.isEmpty) return null;
     final isPin = RegExp(r'^\d{6}$').hasMatch(input);
     // (أ-2) الفهرس أولاً: **قراءة واحدة** لعقدة واحدة بدل مسح كل المساحات
     // وقراءة invites كل واحدة (حتى 500 قراءة). هذا هو المسار الطبيعي الآن.
     try {
-      final Map<String, dynamic>? rec = await _getJson(_inviteIndexPath(
-          url, isPin ? _invitePinKey(input) : _inviteTokenKey(input)));
+      final Map<String, dynamic>? rec = await _readInviteIndex(
+          url, isPin ? _invitePinKey(input) : _inviteTokenKey(input));
       if (rec != null) {
-        final exp = DateTime.tryParse('${rec['expiresAt'] ?? ''}');
         final ws = '${rec['ws'] ?? ''}'.trim();
-        if (ws.isNotEmpty && exp != null && DateTime.now().isBefore(exp)) {
+        if (ws.isNotEmpty && _isInviteLive(rec)) {
           return ws;
         }
       }
@@ -2885,6 +3192,7 @@ class CloudJoin {
     // حماية (500 مساحة) يبقي الفحص سريعاً على القاعدة المشتركة.
     var scanned = 0;
     for (final ws in keys.keys) {
+      if (ws.isEmpty || ws.startsWith('_')) continue;
       if (++scanned > 500) break;
       try {
         if (isPin) {
@@ -2893,17 +3201,16 @@ class CloudJoin {
           if (all == null) continue;
           for (final e in all.entries) {
             final v = e.value;
-            if (v is Map && '${v['pin'] ?? ''}' == input) {
-              final exp = DateTime.tryParse('${v['expiresAt'] ?? ''}');
-              if (exp != null && DateTime.now().isBefore(exp)) return ws;
+            if (v is Map &&
+                normalizeInviteCode('${v['pin'] ?? ''}') == input) {
+              if (_isInviteLive(Map<String, dynamic>.from(v))) return ws;
             }
           }
         } else {
           final inv = await _getJson(
               '${_root(url, ws)}/invites/${Uri.encodeComponent(input)}.json');
-          if (inv != null) {
-            final exp = DateTime.tryParse('${inv['expiresAt'] ?? ''}');
-            if (exp != null && DateTime.now().isBefore(exp)) return ws;
+          if (inv != null && _isInviteLive(inv)) {
+            return ws;
           }
         }
       } catch (_) {
@@ -2911,6 +3218,255 @@ class CloudJoin {
       }
     }
     return null;
+  }
+
+  /// مسح احتياطي ذكي للمنشآت السحابية عند غياب سجل الفهرس (مثلاً إذا أنشأ المدير
+  /// الدعوة من إصدار سابق لم يكتب في _invite_index). يرمم الفهرس تلقائياً عند العثور عليها.
+  static Future<({
+    String workspaceId,
+    String token,
+    Map<String, dynamic> invite,
+  })?> _scanWorkspacesForInvite({
+    required String url,
+    required String input,
+    required bool isPin,
+    String skipWorkspace = '',
+  }) async {
+    final keys = await _getJson('$url/workspaces.json?shallow=true');
+    if (keys == null || keys.isEmpty) return null;
+    var scanned = 0;
+    for (final ws in keys.keys) {
+      if (ws.isEmpty || ws.startsWith('_') || ws == skipWorkspace) continue;
+      if (++scanned > 150) break;
+      try {
+        final wsRoot = _root(url, ws);
+        if (isPin) {
+          final all = await _getJson('$wsRoot/invites.json');
+          if (all == null) continue;
+          for (final e in all.entries) {
+            final v = e.value;
+            if (v is Map &&
+                normalizeInviteCode('${v['pin'] ?? ''}') == input) {
+              final invMap = Map<String, dynamic>.from(v);
+              final tok = e.key.trim().toUpperCase();
+              // ترميم الفهرس تلقائياً لتسريع أي محاولة لاحقة
+              final healPayload = {
+                'ws': ws,
+                'token': tok,
+                'pin': input,
+                'createdAt': '${invMap['createdAt'] ?? ''}',
+                'expiresAt': '${invMap['expiresAt'] ?? ''}',
+                if (invMap['tzOffsetMin'] != null)
+                  'tzOffsetMin': invMap['tzOffsetMin'],
+              };
+              unawaited(_writeInviteIndex(url, _invitePinKey(input), healPayload)
+                  .catchError((_) {}));
+              unawaited(_writeInviteIndex(url, _inviteTokenKey(tok), healPayload)
+                  .catchError((_) {}));
+              return (workspaceId: ws, token: tok, invite: invMap);
+            }
+          }
+        } else {
+          final inv = await _getJson(
+              '$wsRoot/invites/${Uri.encodeComponent(input)}.json');
+          if (inv != null) {
+            final pin = normalizeInviteCode('${inv['pin'] ?? ''}');
+            final healPayload = {
+              'ws': ws,
+              'token': input,
+              'pin': pin,
+              'createdAt': '${inv['createdAt'] ?? ''}',
+              'expiresAt': '${inv['expiresAt'] ?? ''}',
+              if (inv['tzOffsetMin'] != null) 'tzOffsetMin': inv['tzOffsetMin'],
+            };
+            if (pin.isNotEmpty) {
+              unawaited(_writeInviteIndex(url, _invitePinKey(pin), healPayload)
+                  .catchError((_) {}));
+            }
+            unawaited(_writeInviteIndex(url, _inviteTokenKey(input), healPayload)
+                .catchError((_) {}));
+            return (workspaceId: ws, token: input, invite: inv);
+          }
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /// يتحقق من صحة رمز الاقتران (PIN أو توكن) ويحسم معرف مساحة العمل والتوكن
+  /// **قبل** أي مسح للبيانات المحلية أو الجلسة، مع كشف الأسباب التشخيصية الحقيقية
+  /// (انقطاع الشبكة، رفض قواعد السحابة، انتهاء الصلاحية) بدل رسائل الخطأ المبهمة.
+  static Future<({
+    String workspaceId,
+    String token,
+    Map<String, dynamic> invite,
+  })> verifyAndResolveInvite({
+    required String backendUrl,
+    required String tokenOrPin,
+    String workspaceId = 'default',
+  }) async {
+    final url = backendUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    _validateHttps(url);
+    final input = normalizeInviteCode(tokenOrPin);
+    if (input.isEmpty) {
+      throw const CloudJoinException('أدخل رمز الاقتران.');
+    }
+
+    var targetWs = workspaceId.trim();
+    if (targetWs.isEmpty) targetWs = 'default';
+    final isPin = RegExp(r'^\d{6}$').hasMatch(input);
+    String? matchedToken;
+    Map<String, dynamic>? invite;
+    Object? lastLookupError;
+
+    // 1) فحص الفهرس السريع O(1) تحت workspaces/_invite_index/invites ثم /invite_index
+    try {
+      final rec = await _readInviteIndex(
+        url,
+        isPin ? _invitePinKey(input) : _inviteTokenKey(input),
+      );
+      if (rec != null) {
+        final invWs = '${rec['ws'] ?? ''}'.trim();
+        final tok = isPin
+            ? normalizeInviteCode('${rec['token'] ?? ''}')
+            : normalizeInviteCode('${rec['token'] ?? input}');
+        if (invWs.isNotEmpty) {
+          targetWs = invWs;
+        }
+        if (targetWs.isNotEmpty && tok.isNotEmpty) {
+          final root = _root(url, targetWs);
+          final inv = await _getJson('$root/invites/$tok.json');
+          if (inv != null) {
+            matchedToken = tok;
+            invite = inv;
+          } else if (_isInviteLive(rec)) {
+            matchedToken = tok;
+            invite = Map<String, dynamic>.from(rec);
+          }
+        }
+      }
+    } catch (e) {
+      lastLookupError = e;
+    }
+
+    // 2) فحص قائمة الدعوات تحت مساحة العمل المحددة حالياً
+    if (invite == null || matchedToken == null) {
+      final root = _root(url, targetWs);
+      try {
+        if (isPin) {
+          final all = await _getJson('$root/invites.json');
+          if (all != null) {
+            for (final e in all.entries) {
+              final v = e.value;
+              if (v is Map &&
+                  normalizeInviteCode('${v['pin'] ?? ''}') == input) {
+                matchedToken = e.key;
+                invite = Map<String, dynamic>.from(v);
+                break;
+              }
+            }
+          }
+        } else {
+          final inv = await _getJson('$root/invites/$input.json');
+          if (inv != null) {
+            matchedToken = input;
+            invite = inv;
+          }
+        }
+      } catch (e) {
+        lastLookupError ??= e;
+      }
+    }
+
+    // 3) شبكة أمان لمساحة default إذا كانت مختلفة عن targetWs
+    if ((invite == null || matchedToken == null) && targetWs != 'default') {
+      try {
+        final defRoot = _root(url, 'default');
+        if (isPin) {
+          final all = await _getJson('$defRoot/invites.json');
+          if (all != null) {
+            for (final e in all.entries) {
+              final v = e.value;
+              if (v is Map &&
+                  normalizeInviteCode('${v['pin'] ?? ''}') == input) {
+                matchedToken = e.key;
+                invite = Map<String, dynamic>.from(v);
+                targetWs = 'default';
+                break;
+              }
+            }
+          }
+        } else {
+          final defInv = await _getJson('$defRoot/invites/$input.json');
+          if (defInv != null) {
+            matchedToken = input;
+            invite = defInv;
+            targetWs = 'default';
+          }
+        }
+      } catch (e) {
+        lastLookupError ??= e;
+      }
+    }
+
+    // 4) مسح احتياطي للمساحات السحابية إذا لم يُعثر على الدعوة في الفهرس
+    //    (يعالج حالة مدير على إصدار أقدم لم يكتب الفهرس في _invite_index).
+    if (invite == null || matchedToken == null) {
+      try {
+        final scanned = await _scanWorkspacesForInvite(
+          url: url,
+          input: input,
+          isPin: isPin,
+          skipWorkspace: targetWs,
+        );
+        if (scanned != null) {
+          targetWs = scanned.workspaceId;
+          matchedToken = scanned.token;
+          invite = scanned.invite;
+        }
+      } catch (_) {}
+    }
+
+    if (invite == null || matchedToken == null) {
+      if (lastLookupError is CloudJoinException) {
+        throw lastLookupError;
+      }
+      if (lastLookupError != null) {
+        final errStr = '$lastLookupError'.toLowerCase();
+        if (errStr.contains('socketexception') ||
+            errStr.contains('timeoutexception') ||
+            errStr.contains('failed host lookup') ||
+            errStr.contains('handshakeexception') ||
+            errStr.contains('clientexception') ||
+            errStr.contains('connection')) {
+          throw const CloudJoinException(
+            'تعذّر الاتصال بالسحابة للتحقق من رمز الاقتران — تأكد من اتصال هذا الجهاز بالإنترنت ثم أعد المحاولة.',
+          );
+        }
+      }
+      throw const CloudJoinException(
+        'رمز الاقتران غير صحيح أو انتهت صلاحيته.',
+      );
+    }
+
+    final root = _root(url, targetWs);
+    if (_isInviteExpired(invite)) {
+      await _delete('$root/invites/$matchedToken.json');
+      await _purgeInviteIndex(
+        url,
+        pin: '${invite['pin'] ?? ''}',
+        token: matchedToken,
+      );
+      throw const CloudJoinException(
+        'انتهت صلاحية رمز الاقتران — اطلب من المدير رمزاً جديداً.',
+      );
+    }
+
+    return (
+      workspaceId: targetWs,
+      token: matchedToken,
+      invite: invite,
+    );
   }
 
   static Future<void> requestJoin(
@@ -2922,14 +3478,13 @@ class CloudJoin {
   }) async {
     final url = backendUrl.trim();
     _validateHttps(url);
-    final input = tokenOrPin.trim().toUpperCase();
+    final input = normalizeInviteCode(tokenOrPin);
     if (input.isEmpty) throw const CloudJoinException('أدخل رمز الاقتران.');
     if (deviceName.trim().isEmpty) {
       throw const CloudJoinException('أدخل اسم الجهاز أولاً.');
     }
 
     // ══ (توجيه حتمي لمساحة عمل المدير) ══
-    // إذا كانت المساحة غير محددة أو افتراضية، نكتشف مساحة المدير الفعلية من الفهرس السحابي أولاً
     var targetWs = workspaceId.trim();
     if (targetWs.isEmpty || targetWs == 'default') {
       final discoveredWs = await findWorkspaceByInvite(
@@ -2944,11 +3499,6 @@ class CloudJoin {
     final mode = await repo.workspaceMode();
     if (mode == 'member') {
       // ══ (2026-09-22) لا تحبس العضو المطرود خلف وضع محلي منتهٍ ══
-      // طرد المدير (removePeerFromCloud) يحذف سجل الجهاز من /roster، فإن
-      // كان جهاز العضو مغلقاً/بلا شبكة وقت الطرد فلم يعالجه، يبقى محلياً
-      // `member` للأبد — والرفض الأعمى هنا كان يمنع إعادة دعوته نهائياً
-      // («عضو في مجموعة قائمة بالفعل»). الفحص الصحيح: هل عضويته ما زالت
-      // فعّالة في السحابة فعلاً؟
       final curWs = repo.requireWorkspaceId;
       final stillActive = await _isActiveCloudMember(
         repo,
@@ -2962,8 +3512,6 @@ class CloudJoin {
             'الانضمام لمجموعة أخرى.');
       }
       if (!stillActive) {
-        // عضو صوري (مطرود/سجله محذوف): صفّي الوضع المحلي المنتهي ثم
-        // اكمل الانضمام — الموافقة والترطيب سيعيدان الربط الصحيح.
         try {
           final db = await repo.database;
           await db.insert(
@@ -2973,86 +3521,16 @@ class CloudJoin {
           );
         } catch (_) {}
       }
-      // sameWs && stillActive: ترميم مشروع لعضوية المجموعة نفسها — نكمل.
     }
-    var root = _root(url, targetWs);
-    // مطابقة الدعوة: توكن كامل، أو PIN من 6 أرقام (نمسح كل الدعوات الحية).
-    String? matchedToken;
-    Map<String, dynamic>? invite;
-    if (RegExp(r'^\d{6}$').hasMatch(input)) {
-      // 1) فحص الفهرس O(1) السريع للحصول على التوكن ومساحة العمل الحقيقية للمدير مباشرة
-      try {
-        final rec = await _getJson(_inviteIndexPath(url, _invitePinKey(input)));
-        if (rec != null) {
-          final tok = '${rec['token'] ?? ''}'.trim();
-          final invWs = '${rec['ws'] ?? ''}'.trim();
-          if (invWs.isNotEmpty) {
-            targetWs = invWs;
-            root = _root(url, targetWs);
-          }
-          if (tok.isNotEmpty) {
-            final inv = await _getJson('$root/invites/$tok.json');
-            if (inv != null) {
-              matchedToken = tok;
-              invite = inv;
-            }
-          }
-        }
-      } catch (_) {}
 
-      // 2) احتياط: إذا لم يُعثر عليه في الفهرس، نفحص قائمة الدعوات تحت مساحة العمل
-      if (invite == null) {
-        final all = await _getJson('$root/invites.json');
-        if (all != null) {
-          for (final e in all.entries) {
-            final v = e.value;
-            if (v is Map && '${v['pin'] ?? ''}' == input) {
-              matchedToken = e.key;
-              invite = Map<String, dynamic>.from(v);
-              break;
-            }
-          }
-        }
-      }
-    } else {
-      try {
-        final rec = await _getJson(_inviteIndexPath(url, _inviteTokenKey(input)));
-        if (rec != null) {
-          final invWs = '${rec['ws'] ?? ''}'.trim();
-          if (invWs.isNotEmpty) {
-            targetWs = invWs;
-            root = _root(url, targetWs);
-          }
-        }
-      } catch (_) {}
-      invite = await _getJson('$root/invites/$input.json');
-      if (invite != null) matchedToken = input;
-    }
-    // شبكة أمان أخيرة: فحص مساحة default إذا لم يُعثر على الدعوة في مساحة العمل الحالية
-    if ((invite == null || matchedToken == null) && targetWs != 'default') {
-      try {
-        final defRoot = _root(url, 'default');
-        final defInv = await _getJson('$defRoot/invites/$input.json');
-        if (defInv != null) {
-          matchedToken = input;
-          invite = defInv;
-          targetWs = 'default';
-          root = defRoot;
-        }
-      } catch (_) {}
-    }
-    if (invite == null || matchedToken == null) {
-      throw const CloudJoinException(
-          'رمز الاقتران غير صحيح أو انتهت صلاحيته.');
-    }
-    final exp = DateTime.tryParse('${invite['expiresAt'] ?? ''}');
-    if (exp == null || DateTime.now().isAfter(exp)) {
-      await _delete('$root/invites/$matchedToken.json');
-      await _purgeInviteIndex(url,
-          pin: '${invite['pin'] ?? ''}', token: matchedToken);
-      throw const CloudJoinException(
-          'انتهت صلاحية رمز الاقتران — اطلب من المدير رمزاً جديداً.');
-    }
+    final resolved = await verifyAndResolveInvite(
+      backendUrl: url,
+      tokenOrPin: input,
+      workspaceId: targetWs,
+    );
+    targetWs = resolved.workspaceId;
+    final matchedToken = resolved.token;
+    final root = _root(url, targetWs);
     // (إصلاح 2026-09-18) لا نمحي فهرس الدعوة عند الطلب — فقط عند
     // الانضمام الناجح (join). محو الفهرس عند الطلب كان يمنع إعادة
     // المحاولة بنفس الرمز إذا فشل دفع الطلب شبكياً، ويجبر المسار البطيء
@@ -3301,6 +3779,16 @@ class CloudJoin {
         } catch (_) {}
       }
       await FirebaseAuthRest.clearSession(repo, keepDatabaseOpen: true);
+      if (targetWorkspaceId.trim().isNotEmpty) {
+        await FirebaseAuthRest.ensureScopedAnonymous(
+          repo,
+          targetWorkspaceId.trim(),
+        );
+      }
+      await FirebaseAuthRest.initSilentAuth(repo, forceReload: true);
+      try {
+        await FirebaseAuthRest.cloudIdToken();
+      } catch (_) {}
       db = await repo.database;
       await db.delete('settings',
           where: "key IN ('account.email','email','user.email')");
@@ -3561,9 +4049,13 @@ class CloudJoin {
         }
         return;
       }
+      final curUid = FirebaseAuthRest.currentUid.trim();
       await _putJson(
         '$root/roster/$enc.json',
-        _safeDeviceRow(deviceRow),
+        {
+          ..._safeDeviceRow(deviceRow),
+          if (curUid.isNotEmpty) 'uid': curUid,
+        },
         timeout: const Duration(seconds: 15),
       );
     } catch (_) {}
@@ -3805,35 +4297,33 @@ class CloudJoin {
       }
     }
 
-    Future<void> cleanCloudExpulsionOperations() async {
-      try {
-        final opsMap = await _getJson('$root/operations.json');
-        if (opsMap == null || opsMap.isEmpty) return;
-        for (final entry in opsMap.entries) {
-          final v = entry.value;
-          if (v is! Map) continue;
-          final entId = '${v['entity_id'] ?? v['entityId'] ?? ''}'.trim();
-          final entType = '${v['entity_type'] ?? v['entityType'] ?? ''}'.trim();
-          final opType = '${v['op_type'] ?? v['opType'] ?? ''}'.trim();
-          final payload = v['payload'] is Map ? (v['payload'] as Map) : const {};
-          final targetDev =
-              '${payload['expelled_device_id'] ?? payload['revoked_device_id'] ?? ''}'
-                  .trim();
-          final isStaleExpelOp = entId == 'deviceExpelled:$deviceId' ||
-              entId == 'deviceRevoked:$deviceId' ||
-              (entType == 'user' && opType == 'delete' && targetDev == deviceId);
-          if (isStaleExpelOp) {
-            await _delete(
-                '$root/operations/${Uri.encodeComponent(entry.key)}.json');
-          }
-        }
-      } catch (_) {}
-    }
-
     Future<void> uploadJoinSnapshotOnly() async {
       try {
-        final snap =
-            await buildWorkspaceSnapshot(repo, hostDeviceId: ourOwnDeviceId);
+        // سحب تفاضلي سريع للعمليات الحديثة فقط (إن كان للمدير مؤشر مزامنة سابق > 0)
+        // لضمان احتواء اللقطة على آخر حركات الأعضاء قبل ختم serverWatermarkMs.
+        try {
+          final transport = CloudFirebaseTransport(
+            repo: repo,
+            dbProvider: () => repo.database,
+            backendUrl: backendUrl,
+            workspaceId: targetWsId,
+          );
+          final prevCursor = await transport.getLastSyncedCursor();
+          if (prevCursor > 0) {
+            await transport
+                .pull()
+                .timeout(const Duration(milliseconds: 2500));
+          }
+        } catch (_) {}
+
+        // بناء لقطة انضمام سريعة وخفيفة بدون تضمين صور الأصناف (تتزامن لاحقاً عبر العمليات)
+        // لتجنب تجاوز مهلة الرفع على شبكات الجوال البطيئة.
+        final snap = await buildWorkspaceSnapshot(
+          repo,
+          hostDeviceId: ourOwnDeviceId,
+          includeMediaThumbs: false,
+          skipCatalogHeal: true,
+        );
         final snapTs = DateTime.now().millisecondsSinceEpoch;
         final checksum = SnapshotApply.computeSnapshotChecksum(snap);
         final counts = SnapshotApply.computeTableCounts(snap);
@@ -3850,7 +4340,7 @@ class CloudJoin {
         await _putJson(
           '$root/joinSnapshot.json',
           snapPayload,
-          timeout: const Duration(seconds: 25),
+          timeout: const Duration(seconds: 30),
         );
         final dbSnap = await repo.database;
         if (dbSnap.isOpen) {
@@ -3872,31 +4362,58 @@ class CloudJoin {
       }
     }
 
-    // الترتيب الذري الإلزامي: تنظيف آثار الطرد ورفع اللقطة والتحقق من اكتمالها أولاً،
-    // ثم إعلان حالة approved وكتابة roster حتى لا يستلم العضو موافقة قبل جاهزية اللقطة.
-    await cleanCloudExpulsionOperations();
-    await uploadJoinSnapshotOnly();
+    Future<void> writeRosterStrict() async {
+      try {
+        await _putJson(
+          '$root/roster/$encApproved.json',
+          {
+            ..._safeDeviceRow(deviceRow),
+            if (memberUid.isNotEmpty) 'uid': memberUid,
+            'status': 'active',
+            'revoked': false,
+            'joined_at_ms': approvalNowMs,
+            'approved_at_ms': approvalNowMs,
+            'is_paired': 1,
+            'is_owner': 0,
+            'revoked_at': '',
+            'expelled_at': '',
+            'user_id': uid,
+            'user_role': role.code,
+            'user_permissions': permStr,
+          },
+          timeout: const Duration(seconds: 20),
+        );
+      } catch (e) {
+        throw CloudJoinException(
+          '❌ فشل تسجيل العضو في سجل المنشأة السحابي (roster).\n'
+          'السبب: $e\n'
+          'الحل: تأكد من استقرار الإنترنت وأعد المحاولة.',
+        );
+      }
+    }
 
+    Future<void> clearEvictionsStrict() async {
+      for (final node in const [
+        'evictions',
+        'revoked_devices',
+        'ejected_devices',
+      ]) {
+        try {
+          await _delete('$root/$node/$encApproved.json');
+        } catch (_) {
+          // محاولة ثانية لتأكيد إزالة شواهد الطرد السابقة قبل اعتماد العضو
+          await _delete('$root/$node/$encApproved.json').catchError((_) {});
+        }
+      }
+    }
+
+    // الترتيب الذري السريع:
+    // 1) رفع اللقطة الخفيفة + تحديث الروستر الإلزامي وحذف شواهد الطرد بالتوازي.
+    // 2) فور اكتمال رفع اللقطة والروستر، نكتب إشارة approved حتى يجد العضو اللقطة جاهزة فوراً.
     await Future.wait<void>([
-      writeApprovedSignal(),
-      _putJson(
-        '$root/roster/$encApproved.json',
-        {
-          ..._safeDeviceRow(deviceRow),
-          'status': 'active',
-          'revoked': false,
-          'joined_at_ms': approvalNowMs,
-          'approved_at_ms': approvalNowMs,
-          'is_paired': 1,
-          'is_owner': 0,
-          'revoked_at': '',
-          'expelled_at': '',
-          'user_id': uid,
-          'user_role': role.code,
-          'user_permissions': permStr,
-        },
-        timeout: const Duration(seconds: 15),
-      ).catchError((_) {}),
+      uploadJoinSnapshotOnly(),
+      writeRosterStrict(),
+      clearEvictionsStrict(),
       if (memberUid.isNotEmpty)
         _putJson(
           '$root/members/${Uri.encodeComponent(memberUid)}.json',
@@ -3906,15 +4423,21 @@ class CloudJoin {
             'deviceId': deviceId,
             'joined_at': {'.sv': 'timestamp'},
           },
-          timeout: const Duration(seconds: 15),
+          timeout: const Duration(seconds: 20),
         ).catchError((_) {}),
-      for (final node in const [
-        'evictions',
-        'revoked_devices',
-        'ejected_devices',
-      ])
-        _delete('$root/$node/$encApproved.json').catchError((_) {}),
     ]);
+
+    await writeApprovedSignal();
+
+    // 3) في الخلفية بعد إتمام الموافقة فوراً: إعادة جدولة ضخ مصغّرات صور الأصناف والشعار
+    //    بطابع زمني أحدث من serverWatermarkMs ليحصل العضو الجديد على كافة صور المنتجات.
+    unawaited(Future<void>(() async {
+      try {
+        await Future<void>.delayed(const Duration(seconds: 2));
+        await repo.setSetting('media_backfilled_v1:$targetWsId', '0');
+        await repo.backfillCloudMediaIfNeeded();
+      } catch (_) {}
+    }));
   }
 
   /// ══ (2026-09-22 — توجيه العمليات بين الأجهزة) ══
@@ -3954,7 +4477,7 @@ class CloudJoin {
     } catch (_) {}
     final ids = <String>[];
     wsMap?.forEach((k, _) {
-      if (k.isEmpty || k == '_registry') return;
+      if (k.isEmpty || k == '_registry' || k.startsWith('_')) return;
       if (ids.length < maxScan) ids.add(k);
     });
     if (ids.isEmpty) return (workspaceId: '', scanned: scanned);
@@ -4669,7 +5192,7 @@ class CloudJoin {
   /// تدمير مساحة سحابية مع الاحتفاظ بالاشتراك إن وُجد.
   static Future<void> destroyWorkspaceKeepSubscription(
       String base, String ws) async {
-    if (ws.isEmpty || ws == '_registry') return;
+    if (ws.isEmpty || ws == '_registry' || ws.startsWith('_')) return;
     final root = _root(base, ws);
     for (final node in const [
       'roster',
@@ -5022,32 +5545,49 @@ class CloudJoin {
     return removed;
   }
 
-  /// (أ-2) تقليم فهرس الدعوات المنتهية على الجذر — يمنع تراكم مفاتيح
-  /// ميتة في `/invite_index` بعد انتهاء مهلتها (15 دقيقة).
+  /// (أ-2) تقليم فهرس الدعوات المنتهية — ينظّف المسار الأساسي
+  /// `workspaces/_invite_index/invites` والجذر التراثي `/invite_index`.
   /// يعيد عدد المفاتيح المُقلَّمة.
   static Future<int> pruneExpiredInviteIndex({
     required String backendUrl,
   }) async {
-    Map<String, dynamic>? all;
     final base = backendUrl.trim().replaceAll(RegExp(r'/+$'), '');
-    try {
-      all = await _getJson('$base/invite_index.json');
-    } catch (_) {
-      return 0;
-    }
-    if (all == null || all.isEmpty) return 0;
     final now = DateTime.now();
     var pruned = 0;
-    for (final e in all.entries) {
-      final v = e.value;
-      if (v is! Map) continue;
-      final exp = DateTime.tryParse('${v['expiresAt'] ?? ''}');
-      if (exp != null && now.isBefore(exp)) continue;
+
+    Future<void> pruneMap(
+      String listUrl,
+      String Function(String key) entryUrl, {
+      bool refreshOnReject = true,
+    }) async {
+      Map<String, dynamic>? all;
       try {
-        await _delete(_inviteIndexPath(backendUrl, e.key));
-        pruned++;
-      } catch (_) {}
+        all = await _getJson(listUrl, refreshOnReject: refreshOnReject);
+      } catch (_) {
+        return;
+      }
+      if (all == null || all.isEmpty) return;
+      for (final e in all.entries) {
+        final v = e.value;
+        if (v is! Map) continue;
+        final exp = DateTime.tryParse('${v['expiresAt'] ?? ''}');
+        if (exp != null && now.isBefore(exp)) continue;
+        try {
+          await _delete(entryUrl(e.key), refreshOnReject: refreshOnReject);
+          pruned++;
+        } catch (_) {}
+      }
     }
+
+    await pruneMap(
+      '$base/workspaces/_invite_index/invites.json',
+      (k) => _workspaceInviteIndexPath(backendUrl, k),
+    );
+    await pruneMap(
+      '$base/invite_index.json',
+      (k) => _inviteIndexPath(backendUrl, k),
+      refreshOnReject: false,
+    );
     return pruned;
   }
 

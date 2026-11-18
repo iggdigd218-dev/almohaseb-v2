@@ -1,12 +1,20 @@
+import 'dart:io';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/accounting.dart';
 import '../core/format.dart';
 import '../core/l10n.dart';
 import '../core/models.dart';
+import '../core/pdf_fonts.dart';
 import '../core/sfx.dart';
 import '../core/theme.dart';
 import '../core/thermal_invoice_doc.dart';
@@ -194,6 +202,21 @@ class _AccountDetailScreenState extends ConsumerState<AccountDetailScreen> {
                   _refreshAccountData();
                 },
               ),
+              IconButton(
+                tooltip: context.tr('مشاركة كشف الحساب'),
+                icon: const Icon(Icons.share_outlined),
+                onPressed: () => _showShareStatementSheet(
+                  context,
+                  ref,
+                  account: a,
+                  txs: txs,
+                  txRunningBalance: txRunningBalance,
+                  currency: c,
+                  balance: balance,
+                  totalDebit: totalDebit,
+                  totalCredit: totalCredit,
+                ),
+              ),
               if (canEdit)
                 IconButton(
                   tooltip: context.tr('تعديل'),
@@ -203,22 +226,14 @@ class _AccountDetailScreenState extends ConsumerState<AccountDetailScreen> {
                     _refreshAccountData();
                   },
                 ),
-              if (canEdit || canDelete)
+              if (canDelete)
                 PopupMenuButton<String>(
                   onSelected: (v) => _action(context, ref, a, v),
                   itemBuilder: (_) => [
-                    if (canEdit)
-                      PopupMenuItem(
-                        value: 'archive',
-                        child: Text(
-                          context.tr(a.archived ? 'إلغاء الأرشفة' : 'أرشفة'),
-                        ),
-                      ),
-                    if (canDelete)
-                      PopupMenuItem(
-                        value: 'delete',
-                        child: Text(context.tr('حذف نهائي')),
-                      ),
+                    PopupMenuItem(
+                      value: 'delete',
+                      child: Text(context.tr('حذف نهائي')),
+                    ),
                   ],
                 ),
             ],
@@ -342,11 +357,49 @@ class _AccountDetailScreenState extends ConsumerState<AccountDetailScreen> {
                             ],
                           ),
                         ),
-                        if (a.contactNumber.isNotEmpty) ...[
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              flex: 3,
+                              child: SizedBox(
+                                height: 34,
+                                child: FilledButton.tonalIcon(
+                                  style: FilledButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                    ),
+                                    visualDensity: VisualDensity.compact,
+                                  ),
+                                  onPressed: () => _showShareStatementSheet(
+                                    context,
+                                    ref,
+                                    account: a,
+                                    txs: txs,
+                                    txRunningBalance: txRunningBalance,
+                                    currency: c,
+                                    balance: balance,
+                                    totalDebit: totalDebit,
+                                    totalCredit: totalCredit,
+                                  ),
+                                  icon: const Icon(
+                                    Icons.share_outlined,
+                                    size: 15,
+                                  ),
+                                  label: Text(
+                                    context.tr('مشاركة كشف الحساب'),
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            if (a.contactNumber.isNotEmpty) ...[
+                              const SizedBox(width: 6),
                               Expanded(
+                                flex: 2,
                                 child: SizedBox(
                                   height: 34,
                                   child: OutlinedButton.icon(
@@ -372,8 +425,9 @@ class _AccountDetailScreenState extends ConsumerState<AccountDetailScreen> {
                                   ),
                                 ),
                               ),
-                              const SizedBox(width: 8),
+                              const SizedBox(width: 6),
                               Expanded(
+                                flex: 2,
                                 child: SizedBox(
                                   height: 34,
                                   child: OutlinedButton.icon(
@@ -393,8 +447,8 @@ class _AccountDetailScreenState extends ConsumerState<AccountDetailScreen> {
                                 ),
                               ),
                             ],
-                          ),
-                        ],
+                          ],
+                        ),
                       ],
                     ),
                   ),
@@ -486,16 +540,7 @@ class _AccountDetailScreenState extends ConsumerState<AccountDetailScreen> {
     String v,
   ) async {
     final repo = ref.read(repoProvider);
-    if (v == 'archive') {
-      await repo.archiveAccount(a.id!, !a.archived);
-      _refreshAccountData();
-      if (context.mounted) {
-        showSnack(
-          context,
-          context.tr(a.archived ? 'تمت الاستعادة' : 'تمت الأرشفة'),
-        );
-      }
-    } else if (v == 'delete') {
+    if (v == 'delete') {
       final ok = await confirmDialog(
         context,
         title: context.tr('حذف الحساب'),
@@ -512,6 +557,538 @@ class _AccountDetailScreenState extends ConsumerState<AccountDetailScreen> {
         showSnack(context, context.tr('تم حذف الحساب'));
       }
     }
+  }
+
+  Future<void> _showShareStatementSheet(
+    BuildContext context,
+    WidgetRef ref, {
+    required Account account,
+    required List<Tx> txs,
+    required Map<Tx, double> txRunningBalance,
+    required CurrencyDef currency,
+    required double balance,
+    required double totalDebit,
+    required double totalCredit,
+  }) async {
+    Sfx.tap();
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'مشاركة كشف حساب «${account.name}»',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'العملة: ${currency.name} (${currency.symbol}) · عدد العمليات: ${txs.length}',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(ctx).hintColor,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const Divider(height: 20),
+              ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: Colors.red.withValues(alpha: 0.12),
+                  child: const Icon(
+                    Icons.picture_as_pdf_rounded,
+                    color: Colors.redAccent,
+                  ),
+                ),
+                title: const Text(
+                  'مشاركة كشف الحساب كملف PDF',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                subtitle: const Text(
+                  'إرسال كشف حساب رسمي منسق عبر واتساب أو أي تطبيق',
+                ),
+                onTap: () => Navigator.pop(ctx, 'pdf_share'),
+              ),
+              ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: Colors.green.withValues(alpha: 0.12),
+                  child: const Icon(
+                    Icons.chat_rounded,
+                    color: Colors.green,
+                  ),
+                ),
+                title: const Text(
+                  'إرسال سجل العمليات نصياً عبر واتساب',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                subtitle: Text(
+                  account.contactNumber.isNotEmpty
+                      ? 'إرسال مباشر إلى رقم العميل (${account.contactNumber})'
+                      : 'مشاركة نص كشف الحساب والرصيد النهائي',
+                ),
+                onTap: () => Navigator.pop(ctx, 'wa_text'),
+              ),
+              ListTile(
+                leading: CircleAvatar(
+                  backgroundColor:
+                      AppColors.primaryOf(ctx).withValues(alpha: 0.12),
+                  child: Icon(
+                    Icons.print_outlined,
+                    color: AppColors.primaryOf(ctx),
+                  ),
+                ),
+                title: const Text(
+                  'طباعة / معاينة كشف الحساب',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                subtitle: const Text(
+                  'فتح معاينة الطباعة أو الحفظ المباشر على الجهاز',
+                ),
+                onTap: () => Navigator.pop(ctx, 'pdf_print'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (choice == null || !context.mounted) return;
+
+    if (choice == 'wa_text') {
+      final stamp = await featureNeedsStamp(ref, Feature.whatsappClaims);
+      if (!context.mounted) return;
+      await _shareStatementText(
+        context,
+        ref,
+        account: account,
+        txs: txs,
+        txRunningBalance: txRunningBalance,
+        currency: currency,
+        balance: balance,
+        totalDebit: totalDebit,
+        totalCredit: totalCredit,
+        stamp: stamp,
+      );
+      return;
+    }
+
+    final stamp = await featureNeedsStamp(ref, Feature.reportsExport);
+    if (!context.mounted) return;
+
+    try {
+      final pdfBytes = await _buildStatementPdfBytes(
+        ref,
+        account: account,
+        txs: txs,
+        txRunningBalance: txRunningBalance,
+        currency: currency,
+        balance: balance,
+        totalDebit: totalDebit,
+        totalCredit: totalCredit,
+        stamp: stamp,
+      );
+      final safeName = account.name
+          .trim()
+          .replaceAll(RegExp(r'[\\/:*?"<>|\s]+'), '_')
+          .replaceAll(RegExp(r'_+'), '_');
+      final fileName =
+          'كشف_حساب_${safeName.isEmpty ? account.id : safeName}.pdf';
+
+      if (choice == 'pdf_print') {
+        await Printing.layoutPdf(
+          onLayout: (_) async => pdfBytes,
+          name: fileName,
+        );
+      } else if (choice == 'pdf_share') {
+        final tempDir = await getTemporaryDirectory();
+        final file = File('${tempDir.path}/$fileName');
+        await file.writeAsBytes(pdfBytes, flush: true);
+        final nature = balance > 0
+            ? 'عليكم'
+            : (balance < 0 ? 'لكم' : 'خالص');
+        final caption =
+            'كشف حساب: ${account.name}\n'
+            'الرصيد الحالي: ${Fmt.money(balance.abs(), currency.decimal)} ${currency.symbol} ($nature)';
+        await Share.shareXFiles(
+          [XFile(file.path, mimeType: 'application/pdf')],
+          text: caption,
+          subject: 'كشف حساب ${account.name}',
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        showSnack(
+          context,
+          'تعذر تجهيز كشف الحساب: $e',
+          error: true,
+        );
+      }
+    }
+  }
+
+  Future<void> _shareStatementText(
+    BuildContext context,
+    WidgetRef ref, {
+    required Account account,
+    required List<Tx> txs,
+    required Map<Tx, double> txRunningBalance,
+    required CurrencyDef currency,
+    required double balance,
+    required double totalDebit,
+    required double totalCredit,
+    required bool stamp,
+  }) async {
+    final st = await ref.read(repoProvider).settings();
+    final orgName = (st['businessName'] ?? '').trim();
+    final sb = StringBuffer();
+    if (orgName.isNotEmpty) {
+      sb.writeln('📋 *$orgName*');
+    }
+    sb.writeln('*كشف حساب: ${account.name}*');
+    sb.writeln('التاريخ: ${Fmt.date(DateTime.now())}');
+    sb.writeln('العملة: ${currency.name} (${currency.symbol})');
+    sb.writeln('────────────────');
+
+    final chronological = txs.reversed.toList();
+    if (account.openingBalance != 0 && currency.code == account.currency) {
+      final opDir = account.openingBalance > 0 ? 'عليه' : 'له';
+      sb.writeln(
+        '• رصيد افتتاحي: ${Fmt.money(account.openingBalance.abs(), currency.decimal)} ${currency.symbol} ($opDir)',
+      );
+    }
+    if (chronological.isEmpty) {
+      sb.writeln('لا توجد عمليات مسجلة.');
+    } else {
+      for (final t in chronological) {
+        final eff = t.effectOn(account.id ?? accountId) ?? 0.0;
+        final dir = eff >= 0 ? 'عليه' : 'له';
+        final desc = t.description.trim().isNotEmpty
+            ? t.description.trim()
+            : t.type.label;
+        final runBal = txRunningBalance[t] ?? 0.0;
+        final runDir = runBal > 0 ? 'عليه' : (runBal < 0 ? 'له' : '0');
+        sb.writeln(
+          '• ${Fmt.date(t.date)} | $desc: ${Fmt.money(t.amount, currency.decimal)} ($dir) ⬅ الرصيد: ${Fmt.money(runBal.abs(), currency.decimal)} ($runDir)',
+        );
+      }
+    }
+    sb.writeln('────────────────');
+    sb.writeln(
+      'إجمالي عليه: ${Fmt.money(totalDebit, currency.decimal)} ${currency.symbol}',
+    );
+    sb.writeln(
+      'إجمالي له: ${Fmt.money(totalCredit, currency.decimal)} ${currency.symbol}',
+    );
+    final nature = balance > 0
+        ? 'عليكم'
+        : (balance < 0 ? 'لكم' : 'خالص');
+    sb.writeln(
+      '*الرصيد النهائي: ${Fmt.money(balance.abs(), currency.decimal)} ${currency.symbol} ($nature)*',
+    );
+    if (stamp) {
+      sb.writeln('―\n$kWatermarkText');
+    }
+
+    final text = sb.toString();
+    if (account.contactNumber.trim().isNotEmpty) {
+      final uri = Uri.parse(
+        'https://wa.me/${Fmt.waNumber(account.contactNumber)}?text=${Uri.encodeComponent(text)}',
+      );
+      if (await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+        return;
+      }
+    }
+    await Share.share(text, subject: 'كشف حساب ${account.name}');
+  }
+
+  Future<Uint8List> _buildStatementPdfBytes(
+    WidgetRef ref, {
+    required Account account,
+    required List<Tx> txs,
+    required Map<Tx, double> txRunningBalance,
+    required CurrencyDef currency,
+    required double balance,
+    required double totalDebit,
+    required double totalCredit,
+    required bool stamp,
+  }) async {
+    final st = await ref.read(repoProvider).settings();
+    final orgName = (st['businessName'] ?? '').trim().isNotEmpty
+        ? st['businessName']!.trim()
+        : 'كشف حساب مالي';
+    final orgPhone = (st['phone'] ?? st['whatsapp'] ?? '').trim();
+    final fonts = await PdfFonts.load();
+    final regular = fonts.base;
+    final bold = fonts.bold;
+
+    final chronological = txs.reversed.toList();
+    final nature = balance > 0
+        ? 'عليه (مدين)'
+        : (balance < 0 ? 'له (دائن)' : 'متوازن');
+
+    final doc = pw.Document(theme: fonts.theme);
+    doc.addPage(
+      pw.MultiPage(
+        pageTheme: pw.PageTheme(
+          pageFormat: PdfPageFormat.a4,
+          textDirection: pw.TextDirection.rtl,
+          theme: pw.ThemeData.withFont(base: regular, bold: bold),
+          margin: const pw.EdgeInsets.all(26),
+          buildBackground: stamp
+              ? (_) => pw.Watermark.text(
+                    kWatermarkText,
+                    style: pw.TextStyle(
+                      font: bold,
+                      fontSize: 32,
+                      color: const PdfColor(0.25, 0.25, 0.35, 0.08),
+                    ),
+                  )
+              : null,
+        ),
+        header: (_) => pw.Directionality(
+          textDirection: pw.TextDirection.rtl,
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+            children: [
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text(
+                        orgName,
+                        style: pw.TextStyle(font: bold, fontSize: 16),
+                      ),
+                      if (orgPhone.isNotEmpty)
+                        pw.Text(
+                          'هاتف: $orgPhone',
+                          style: const pw.TextStyle(
+                            fontSize: 10,
+                            color: PdfColors.grey700,
+                          ),
+                        ),
+                    ],
+                  ),
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.end,
+                    children: [
+                      pw.Text(
+                        'كشف حساب تفصيلي',
+                        style: pw.TextStyle(
+                          font: bold,
+                          fontSize: 14,
+                          color: PdfColors.blue900,
+                        ),
+                      ),
+                      pw.Text(
+                        'تاريخ الإصدار: ${Fmt.dateTime(DateTime.now())}',
+                        style: const pw.TextStyle(
+                          fontSize: 9.5,
+                          color: PdfColors.grey700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              pw.SizedBox(height: 8),
+              pw.Container(
+                padding: const pw.EdgeInsets.all(8),
+                decoration: pw.BoxDecoration(
+                  color: PdfColors.grey100,
+                  borderRadius: pw.BorderRadius.circular(6),
+                  border: pw.Border.all(color: PdfColors.grey300),
+                ),
+                child: pw.Row(
+                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                  children: [
+                    pw.Text(
+                      'الحساب: ${account.name} (${account.kind.label})',
+                      style: pw.TextStyle(font: bold, fontSize: 11.5),
+                    ),
+                    if (account.contactNumber.isNotEmpty)
+                      pw.Text(
+                        'الهاتف: ${account.contactNumber}',
+                        style: const pw.TextStyle(fontSize: 10.5),
+                      ),
+                    pw.Text(
+                      'العملة: ${currency.name} (${currency.symbol})',
+                      style: pw.TextStyle(font: bold, fontSize: 10.5),
+                    ),
+                  ],
+                ),
+              ),
+              pw.SizedBox(height: 10),
+            ],
+          ),
+        ),
+        footer: (ctx) => pw.Directionality(
+          textDirection: pw.TextDirection.rtl,
+          child: pw.Padding(
+            padding: const pw.EdgeInsets.only(top: 6),
+            child: pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+              children: [
+                pw.Text(
+                  stamp ? kWatermarkText : orgName,
+                  style: const pw.TextStyle(
+                    fontSize: 8.5,
+                    color: PdfColors.grey600,
+                  ),
+                ),
+                pw.Text(
+                  'صفحة ${ctx.pageNumber} من ${ctx.pagesCount}',
+                  style: const pw.TextStyle(
+                    fontSize: 8.5,
+                    color: PdfColors.grey600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        build: (_) => [
+          // ملخص الأرصدة
+          pw.Container(
+            padding: const pw.EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+            decoration: pw.BoxDecoration(
+              color: PdfColors.blue50,
+              borderRadius: pw.BorderRadius.circular(6),
+              border: pw.Border.all(color: PdfColors.blue200),
+            ),
+            child: pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceAround,
+              children: [
+                pw.Column(
+                  children: [
+                    pw.Text(
+                      'إجمالي عليه (مدين)',
+                      style: const pw.TextStyle(
+                        fontSize: 9.5,
+                        color: PdfColors.red800,
+                      ),
+                    ),
+                    pw.Text(
+                      '${Fmt.money(totalDebit, currency.decimal)} ${currency.symbol}',
+                      style: pw.TextStyle(font: bold, fontSize: 11.5),
+                    ),
+                  ],
+                ),
+                pw.Column(
+                  children: [
+                    pw.Text(
+                      'إجمالي له (دائن)',
+                      style: const pw.TextStyle(
+                        fontSize: 9.5,
+                        color: PdfColors.green800,
+                      ),
+                    ),
+                    pw.Text(
+                      '${Fmt.money(totalCredit, currency.decimal)} ${currency.symbol}',
+                      style: pw.TextStyle(font: bold, fontSize: 11.5),
+                    ),
+                  ],
+                ),
+                pw.Column(
+                  children: [
+                    pw.Text(
+                      'الرصيد النهائي ($nature)',
+                      style: const pw.TextStyle(
+                        fontSize: 9.5,
+                        color: PdfColors.blue900,
+                      ),
+                    ),
+                    pw.Text(
+                      '${Fmt.money(balance.abs(), currency.decimal)} ${currency.symbol}',
+                      style: pw.TextStyle(
+                        font: bold,
+                        fontSize: 12.5,
+                        color: balance > 0
+                            ? PdfColors.red900
+                            : PdfColors.green900,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          pw.SizedBox(height: 12),
+          pw.TableHelper.fromTextArray(
+            headers: const [
+              'الرصيد',
+              'له (دائن)',
+              'عليه (مدين)',
+              'البيان / التفاصيل',
+              'النوع',
+              'التاريخ',
+            ],
+            data: [
+              if (account.openingBalance != 0 &&
+                  currency.code == account.currency)
+                [
+                  '${Fmt.money(account.openingBalance.abs(), currency.decimal)} (${account.openingBalance > 0 ? 'عليه' : 'له'})',
+                  account.openingBalance < 0
+                      ? Fmt.money(account.openingBalance.abs(), currency.decimal)
+                      : '—',
+                  account.openingBalance > 0
+                      ? Fmt.money(account.openingBalance, currency.decimal)
+                      : '—',
+                  'رصيد افتتاحي',
+                  'افتتاحي',
+                  '—',
+                ],
+              for (final t in chronological)
+                (() {
+                  final eff = t.effectOn(account.id ?? accountId) ?? 0.0;
+                  final debitStr =
+                      eff > 0 ? Fmt.money(eff, currency.decimal) : '—';
+                  final creditStr =
+                      eff < 0 ? Fmt.money(eff.abs(), currency.decimal) : '—';
+                  final runBal = txRunningBalance[t] ?? 0.0;
+                  final runDir =
+                      runBal > 0 ? 'عليه' : (runBal < 0 ? 'له' : '0');
+                  final desc = [
+                    if (t.description.trim().isNotEmpty) t.description.trim(),
+                    if (t.reference.trim().isNotEmpty) '#${t.reference.trim()}',
+                  ].join(' · ');
+                  return [
+                    '${Fmt.money(runBal.abs(), currency.decimal)} ($runDir)',
+                    creditStr,
+                    debitStr,
+                    desc.isEmpty ? t.type.label : desc,
+                    t.type.label,
+                    Fmt.date(t.date),
+                  ];
+                })(),
+            ],
+            headerStyle: pw.TextStyle(
+              font: bold,
+              fontSize: 9.5,
+              color: PdfColors.white,
+            ),
+            headerDecoration: const pw.BoxDecoration(
+              color: PdfColors.blueGrey800,
+            ),
+            cellStyle: const pw.TextStyle(fontSize: 9),
+            cellAlignment: pw.Alignment.centerRight,
+            border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
+          ),
+        ],
+      ),
+    );
+    return doc.save();
   }
 
   Future<void> _whatsapp(

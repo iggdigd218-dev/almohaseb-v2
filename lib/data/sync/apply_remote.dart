@@ -709,14 +709,15 @@ Future<int> _autoHealOrphanItems(
 }
 
 
-/// فحص ما إذا كان معرّف الصنف من المعرّفات المولّدة تلقائياً بسبب الانقسام السابق
-/// (`_allocateNonCollidingItemId` التي كانت تضيف `+1, +2...` لآحاد الـ Snowflake ID).
+/// فحص ما إذا كان معرّف الصنف من المعرّفات المولّدة تلقائياً ضمن الحادثة التاريخية المحددة فقط.
+/// لا يُفحص البايت المنخفض `(id & 0xFF)` بشكل عام لأن مولّد `newGlobalId()` يستخدم آخر 8 بتات
+/// كعدّاد تسلسلي طبيعي (`_seq`) عند إنشاء أكثر من سجل في نفس الملي ثانية.
 bool isKnownAutoSplitItemId(int id) {
   if (id <= 0) return false;
   if (id >= 1881541471252432897 && id <= 1881541471252432898) return true;
   if (id >= 1881793993336740609 && id <= 1881793993336740666) return true;
   if (id >= 1881848145177768449 && id <= 1881848145177768635) return true;
-  return id > 1000000000000 && (id & 0xFF) != 0;
+  return false;
 }
 
 extension ApplyRemoteOp on Repo {
@@ -1016,7 +1017,8 @@ extension ApplyRemoteOp on Repo {
           // فشل حفظ المرفق لا يمنع وصول الرسالة نفسها.
         }
       }
-    } else if (op.entityType == EntityKind.item) {
+    } else if (op.entityType == EntityKind.item &&
+        columns.contains('image')) {
       final thumbB64 = op.payload['thumb_b64'];
       if (thumbB64 is String && thumbB64.trim().isNotEmpty) {
         final localImg = await MediaPaths.materializeThumbBase64(thumbB64);
@@ -1027,6 +1029,20 @@ extension ApplyRemoteOp on Repo {
           (op.payload.containsKey('thumb_b64') &&
               '${op.payload['thumb_b64'] ?? ''}'.trim().isEmpty)) {
         row['image'] = '';
+      } else {
+        // إذا لم تحمل العملية مصغّرة جديدة ولم يُطلب مسح الصورة صراحةً:
+        // نحافظ على الصورة المحلية الموجودة مسبقاً، ونمنع تخزين مسار ملف يخص جهازاً آخر ولا يوجد محلياً.
+        final rawImg = '${row['image'] ?? ''}'.trim();
+        final rawExistsLocally = rawImg.isNotEmpty &&
+            File(MediaPaths.toAbsolute(rawImg)).existsSync();
+        if (!rawExistsLocally) {
+          final prevImg = existing.isNotEmpty
+              ? '${existing.first['image'] ?? ''}'.trim()
+              : '';
+          final prevExistsLocally = prevImg.isNotEmpty &&
+              File(MediaPaths.toAbsolute(prevImg)).existsSync();
+          row['image'] = prevExistsLocally ? prevImg : '';
+        }
       }
     }
 
@@ -2341,13 +2357,14 @@ extension ApplyRemoteOp on Repo {
         // 2. حركات المخزون الفعلية: طيّ زمني + مجموعا البيع والإرجاع للتغطية
         final moves = await db.query(
           'stock_moves',
-          columns: ['kind', 'quantity'],
+          columns: ['kind', 'quantity', 'date', 'created_at'],
           where:
               "item_id = ? AND (deleted_at IS NULL OR deleted_at = '')",
           whereArgs: [itemId],
           orderBy: 'date ASC, created_at ASC, id ASC',
         );
         var hasAdjust = false;
+        var lastAdjustMs = 0;
         var running = initialCreateQty ?? 0.0;
         var moveSalesSum = 0.0;
         var moveReturnsSum = 0.0;
@@ -2357,6 +2374,14 @@ extension ApplyRemoteOp on Repo {
           if (k == 'adjust') {
             running = mq;
             hasAdjust = true;
+            // الجرد المطلق (adjust) يطوي كل ما سبقه؛ نحتسب فقط المبيعات والمرتجعات اللاحقة له
+            moveSalesSum = 0.0;
+            moveReturnsSum = 0.0;
+            final adjDt = safeParseNullableDateTime(m['created_at']) ??
+                safeParseNullableDateTime(m['date']);
+            if (adjDt != null && adjDt.millisecondsSinceEpoch > lastAdjustMs) {
+              lastAdjustMs = adjDt.millisecondsSinceEpoch;
+            }
           } else if (k == 'purchase' || k == 'return' || k == 'returnIn') {
             running += mq;
             if (k == 'return' || k == 'returnIn') moveReturnsSum += mq;
@@ -2374,7 +2399,9 @@ extension ApplyRemoteOp on Repo {
           final txLines = await db.rawQuery('''
             SELECT ti.quantity AS qty, t.type AS tx_type,
                    COALESCE(t.original_tx_id, '') AS orig_id,
-                   COALESCE(t.notes, '') AS notes
+                   COALESCE(t.notes, '') AS notes,
+                   COALESCE(t.created_at, '') AS tx_created_at,
+                   COALESCE(t.date, '') AS tx_date
             FROM transaction_items ti
             JOIN transactions t ON t.id = ti.tx_id
             WHERE ti.item_id = ?
@@ -2384,6 +2411,14 @@ extension ApplyRemoteOp on Repo {
           for (final tl in txLines) {
             final q = (tl['qty'] as num?)?.toDouble() ?? 0.0;
             if (q <= 0) continue;
+            if (hasAdjust && lastAdjustMs > 0) {
+              final txDt = safeParseNullableDateTime(tl['tx_created_at']) ??
+                  safeParseNullableDateTime(tl['tx_date']);
+              if (txDt != null && txDt.millisecondsSinceEpoch <= lastAdjustMs) {
+                // فاتورة سابقة للجرد المطلق الأخير — مشمولة مسبقاً في رصيد الجرد
+                continue;
+              }
+            }
             final origId = '${tl['orig_id'] ?? ''}'.trim();
             final notes = '${tl['notes'] ?? ''}';
             final txType = '${tl['tx_type'] ?? ''}'.trim();
@@ -2460,6 +2495,18 @@ extension ApplyRemoteOp on Repo {
   /// 4) إصلاح بيانات الأصناف الأصلية التي تضررت أثناء التصادم وإعادة المحذوفات السابقة إلى سلة المهملات.
   /// 5) تطهير كافة سجلات وإشعارات `item_conflict:*` و`item_id_remap:*` وإعادة احتساب الكميات بدقة.
   static Future<int> healCorruptedItemCatalog(DatabaseExecutor db) async {
+    try {
+      if (db is Database) {
+        return await db.transaction((txn) => _healCorruptedItemCatalogImpl(txn));
+      }
+      return await _healCorruptedItemCatalogImpl(db);
+    } catch (e) {
+      debugPrint('healCorruptedItemCatalog error: $e');
+      return 0;
+    }
+  }
+
+  static Future<int> _healCorruptedItemCatalogImpl(DatabaseExecutor db) async {
     var fixed = 0;
     try {
       const explicitSplitToOrig = <int, int>{
@@ -2500,27 +2547,40 @@ extension ApplyRemoteOp on Repo {
         1881848145177768632: 1881515537087960576,
       };
 
+      const historicalOriginalIds = <int>{
+        1881515537087960576,
+        1881515877677719296,
+        1881523606480877056,
+        1881538924963874816,
+        1881471873199400960,
+        1881073883280662016,
+        1880941528633812992,
+      };
+
       final allItems = await db.query(
         'items',
         columns: ['id', 'created_at', 'plu'],
       );
       final origByCreatedAt = <String, int>{};
       final splitIds = <int>{};
-      var hasSnowflakeItems = false;
+      var hasHistoricalIncidentItems = false;
       for (final r in allItems) {
         final id = (r['id'] as num?)?.toInt() ?? 0;
         if (id <= 0) continue;
-        if (id > 1000000000000) hasSnowflakeItems = true;
+        if (historicalOriginalIds.contains(id)) {
+          hasHistoricalIncidentItems = true;
+        }
         final createdAt = '${r['created_at'] ?? ''}'.trim();
         if (isKnownAutoSplitItemId(id)) {
           splitIds.add(id);
+          hasHistoricalIncidentItems = true;
         } else if (createdAt.isNotEmpty) {
           origByCreatedAt[createdAt] = id;
         }
       }
 
-      if (!hasSnowflakeItems && splitIds.isEmpty) {
-        // فحص سريع لأي إعدادات تعارض تالفة تشير لمعرفات منقسمة حتى لو كان جدول الأصناف فارغاً
+      if (!hasHistoricalIncidentItems && splitIds.isEmpty) {
+        // فحص سريع لأي إعدادات تعارض تشير صراحةً لمعرّفات الحادثة المنقسمة فقط
         try {
           final conflictRows = await db.query(
             'settings',
@@ -2529,10 +2589,18 @@ extension ApplyRemoteOp on Repo {
           for (final cs in conflictRows) {
             final k = '${cs['key'] ?? ''}';
             final v = '${cs['value'] ?? ''}'.trim();
+            if (k.startsWith('item_id_remap:')) {
+              final fromId = int.tryParse(k.substring('item_id_remap:'.length)) ?? 0;
+              final toId = int.tryParse(v) ?? 0;
+              if (isKnownAutoSplitItemId(fromId) || isKnownAutoSplitItemId(toId)) {
+                await db.delete('settings', where: 'key = ?', whereArgs: [k]);
+                fixed++;
+              }
+              continue;
+            }
             final parsed =
                 v.isEmpty ? null : OfflineItemConflict.tryParseJson(v);
-            if (k.startsWith('item_id_remap:') ||
-                v.isEmpty ||
+            if (v.isEmpty ||
                 parsed == null ||
                 isKnownAutoSplitItemId(parsed.item1Id) ||
                 isKnownAutoSplitItemId(parsed.item2Id)) {
@@ -2552,7 +2620,7 @@ extension ApplyRemoteOp on Repo {
       final splitToOrig = <int, int>{...explicitSplitToOrig};
       for (final r in allItems) {
         final id = (r['id'] as num?)?.toInt() ?? 0;
-        if (!splitIds.contains(id)) continue;
+        if (!splitIds.contains(id) || splitToOrig.containsKey(id)) continue;
         final createdAt = '${r['created_at'] ?? ''}'.trim();
         final matchedOrig = origByCreatedAt[createdAt];
         if (matchedOrig != null && matchedOrig != id) {
@@ -2596,7 +2664,7 @@ extension ApplyRemoteOp on Repo {
         fixed++;
       }
 
-      // 3) حذف كافة الأصناف المنقسمة تلقائياً من items و operations و sync_queue
+      // 3) حذف كافة الأصناف المنقسمة التاريخية من items و operations و sync_queue
       if (splitIds.isNotEmpty) {
         for (final splitId in splitIds) {
           await db.delete('items', where: 'id = ?', whereArgs: [splitId]);
@@ -2798,13 +2866,16 @@ extension ApplyRemoteOp on Repo {
           for (final cs in conflictSettings) {
             final k = '${cs['key'] ?? ''}';
             final v = '${cs['value'] ?? ''}'.trim();
-            if (k.startsWith('item_id_remap:') || v.isEmpty) {
+            if (k.startsWith('item_id_remap:')) {
+              final fromId = int.tryParse(k.substring('item_id_remap:'.length)) ?? 0;
+              final toId = int.tryParse(v) ?? 0;
+              if (isKnownAutoSplitItemId(fromId) || isKnownAutoSplitItemId(toId)) {
+                await db.delete('settings', where: 'key = ?', whereArgs: [k]);
+              }
+              continue;
+            }
+            if (v.isEmpty) {
               await db.delete('settings', where: 'key = ?', whereArgs: [k]);
-              await db.delete(
-                'notifications',
-                where: "entity_type = 'item_conflict' AND entity_id = ?",
-                whereArgs: [k],
-              );
               continue;
             }
             final parsed = OfflineItemConflict.tryParseJson(v);

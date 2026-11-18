@@ -857,5 +857,49 @@ void main() {
       }
     },
   );
+
+  test(
+    'QA-CONFLICT-ENGINE-7 preserves legitimate Snowflake items with non-zero sequence byte',
+    () async {
+      final (tmp, db, repo) = await createTestRepo('nexora_eng_7_');
+      try {
+        const legitimateSeq1Id = (1763290000000 << 20) | (42 << 8) | 1;
+        expect(isKnownAutoSplitItemId(legitimateSeq1Id), isFalse);
+
+        const tCreated = '2026-11-10T10:00:00.000Z';
+        await db.insert('items', {
+          'id': legitimateSeq1Id,
+          'plu': 501,
+          'workspace_id': 'default',
+          'name': 'صنف شرعي عداد 1',
+          'sku': 'SEQ-01',
+          'unit': 'حبة',
+          'buy_price': 100.0,
+          'sell_price': 150.0,
+          'quantity': 20.0,
+          'min_quantity': 2.0,
+          'is_active': 1,
+          'is_deleted': 0,
+          'created_at': tCreated,
+          'updated_at': tCreated,
+        });
+
+        await ApplyRemoteOp.healCorruptedItemCatalog(db);
+        final afterHeal = await db.query(
+          'items',
+          where: 'id = ?',
+          whereArgs: [legitimateSeq1Id],
+        );
+        expect(afterHeal.length, 1,
+            reason: 'لا يجوز حذف صنف شرعي بسبب البايت المنخفض غير الصفري');
+      } finally {
+        await db.close();
+        try {
+          await tmp.delete(recursive: true);
+        } catch (_) {}
+      }
+    },
+  );
 }
+
 

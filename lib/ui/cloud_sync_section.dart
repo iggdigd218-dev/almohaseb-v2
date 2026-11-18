@@ -126,8 +126,20 @@ Future<void> showCloudInviteDialog(BuildContext context, WidgetRef ref) async {
   if (!context.mounted || cancelled) return;
   if (invite == null) {
     Sfx.error();
-    showSnack(context, '❌ تعذّر إنشاء الدعوة: ${error ?? 'خطأ غير معروف'}',
-        error: true);
+    // (3.98.56) لا تُغلَّف رسالة التشخيص السحابية في «تعذّر إنشاء الدعوة: …»
+    // التي تُظهر للمالك «ليس لديك الصلاحية» بلا سبب حقيقي. الرسالة الآن
+    // تصل كما صيغت في طبقة السحابة: قواعد غير منشورة أو هوية منتهية.
+    final detail = error ?? 'خطأ غير معروف';
+    showSnack(
+      context,
+      detail.startsWith('رفضت السحابة') ||
+              detail.startsWith('انتهت صلاحية') ||
+              detail.startsWith('تعذّر ') ||
+              detail.startsWith('لا توجد هوية')
+          ? detail
+          : '❌ تعذّر إنشاء الدعوة: $detail',
+      error: true,
+    );
     return;
   }
   Sfx.pair();

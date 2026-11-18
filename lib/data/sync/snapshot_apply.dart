@@ -487,6 +487,7 @@ class SnapshotApply {
               'accounts',
               'items',
               'transactions',
+              'transaction_items',
               'vouchers',
               'stock_moves',
               'devices',
@@ -561,7 +562,10 @@ class SnapshotApply {
             }
             await txn.insert('transaction_items', lineMap,
                 conflictAlgorithm: ConflictAlgorithm.replace);
-          } catch (_) {}
+          } catch (e) {
+            debugPrint('SnapshotApply embeddedTxItems error: $e');
+            rethrow;
+          }
         }
       }
       await insertAll('vouchers');

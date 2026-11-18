@@ -3775,6 +3775,10 @@ class AccountWorkspace {
     if (finalAccount.uid.isNotEmpty || finalAccount.email.isNotEmpty) {
       await FirebaseAuthRest.saveSession(repo, finalAccount);
     }
+    await FirebaseAuthRest.syncSessionOnWorkspaceSwitch(
+      repo,
+      expectedEmail: finalEmail,
+    );
     if (finalEmail.isNotEmpty) {
       await repo.setSetting('account.email', finalEmail);
       await repo.setSetting('email', finalEmail);
