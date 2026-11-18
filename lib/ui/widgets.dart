@@ -511,7 +511,15 @@ String friendlyErrorText(dynamic raw) {
   if (low.contains('expelled')) {
     return 'تم إخراج هذا الجهاز من المجموعة من قِبل المدير.';
   }
-  if (low.contains('token') &&
+  final isCloudToken = low.contains('id_token') ||
+      low.contains('idtoken') ||
+      low.contains('cloud') ||
+      low.contains('firebase') ||
+      low.contains('rtdb') ||
+      str.contains('السحابة') ||
+      str.contains('هوية');
+  if (!isCloudToken &&
+      low.contains('token') &&
       (low.contains('expired') || low.contains('invalid'))) {
     return 'رمز الاقتران غير صالح أو انتهت مدته. اطلب من المدير توليد رمز جديد وأعد المحاولة.';
   }

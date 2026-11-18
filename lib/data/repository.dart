@@ -33,6 +33,7 @@ import 'sync/operation.dart';
 import 'sync/apply_remote.dart';
 import 'sync/recorder.dart';
 import 'sync/snapshot_apply.dart';
+import 'sync/subscription_guard.dart';
 import 'sync/sync_diagnostics.dart';
 import 'sync/sync_queue.dart';
 import 'daily_harvest_service.dart';
@@ -7526,6 +7527,94 @@ class Repo {
     return queued;
   }
 
+  /// عند تفعيل خيار «السماح بمزامنة الصور والوسائط على السحابة» (allow_cloud_media_sync)
+  /// لمنشأة قائمة، نعيد جدولة شعار المنشأة (org.icon.b64) والمصغّرات (thumb_b64)
+  /// للأصناف التي تملك صوراً محلية حتى تظهر فوراً لدى جميع أجهزة المنشأة.
+  Future<int> backfillCloudMediaIfNeeded() async {
+    try {
+      final mode = await workspaceMode();
+      if (mode == 'standalone') return 0;
+      final allowMediaSync =
+          (await getSetting('allow_cloud_media_sync')) == '1' ||
+              SubscriptionGuard.lastState.features.allowCloudMediaSync;
+      if (!allowMediaSync) return 0;
+
+      final db = await _db;
+      final wsId = (_workspaceId ?? '').trim().isEmpty
+          ? 'default'
+          : _workspaceId!.trim();
+      final metaKey = 'media_backfilled_v1:$wsId';
+      final doneRows = await db.query(
+        'sync_meta',
+        columns: ['value'],
+        where: 'key = ?',
+        whereArgs: [metaKey],
+        limit: 1,
+      );
+      if (doneRows.isNotEmpty && '${doneRows.first['value'] ?? ''}' == '1') {
+        return 0;
+      }
+
+      var count = 0;
+      // 1) إعادة بث شعار المنشأة إن وجد محلياً
+      final orgIconB64 = ((await getSetting('org.icon.b64')) ?? '').trim();
+      if (orgIconB64.isNotEmpty) {
+        await setSyncedSetting('org.icon.b64', orgIconB64);
+        count++;
+      }
+
+      // 2) إعادة بث مصغرات الأصناف التي تملك صوراً محلية صالحة
+      final itemRows = await db.query(
+        'items',
+        where:
+            "COALESCE(image, '') <> '' AND COALESCE(deleted_at, '') = '' AND COALESCE(is_deleted, 0) = 0",
+      );
+      if (itemRows.isNotEmpty) {
+        final thumbsById = <int, String>{};
+        for (final row in itemRows) {
+          final id = (row['id'] as num?)?.toInt();
+          final img = '${row['image'] ?? ''}'.trim();
+          if (id == null || img.isEmpty) continue;
+          final b64 = await MediaPaths.encodeThumbBase64(img);
+          if (b64.isNotEmpty) {
+            thumbsById[id] = b64;
+          }
+        }
+        if (thumbsById.isNotEmpty) {
+          await db.transaction((txn) async {
+            final rec = await newRecorder(txn);
+            for (final row in itemRows) {
+              final id = (row['id'] as num?)?.toInt();
+              if (id == null) continue;
+              final b64 = thumbsById[id];
+              if (b64 == null || b64.isEmpty) continue;
+              final payload = Map<String, Object?>.from(row)
+                ..['thumb_b64'] = b64
+                ..['__qty_changed'] = 0;
+              await rec.record(
+                entityType: EntityKind.item,
+                entityId: '$id',
+                opType: OpKind.update,
+                payload: payload,
+              );
+              count++;
+            }
+          });
+        }
+      }
+
+      await db.insert(
+        'sync_meta',
+        {'key': metaKey, 'value': '1'},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      return count;
+    } catch (e) {
+      debugPrint('Repo.backfillCloudMediaIfNeeded error: $e');
+      return 0;
+    }
+  }
+
   /// يحوّل القيم إلى أنواع تقبلها sqflite، ويعيد ربط الصور.
   Object? _valueForDatabase(
     String table,
@@ -8663,7 +8752,9 @@ class Repo {
         itemToSave = it.copyWith(sectionId: sid);
       }
     }
-    final allowMediaSync = (await getSetting('allow_cloud_media_sync')) == '1';
+    final allowMediaSync =
+        (await getSetting('allow_cloud_media_sync')) == '1' ||
+            SubscriptionGuard.lastState.features.allowCloudMediaSync;
     final thumbB64 =
         (allowMediaSync && itemToSave.image.trim().isNotEmpty)
             ? await MediaPaths.encodeThumbBase64(itemToSave.image)
@@ -10212,37 +10303,119 @@ class Repo {
     return true;
   }
 
-  /// استرجاع اسم الجهاز المنفّذ للعملية المالية من سجل العمليات (operations) وجدول الأجهزة (devices).
+  /// استرجاع اسم الجهاز المنفّذ للعملية المالية من بيانات العملية (cashier_name / user_id)
+  /// وسجل العمليات (operations) وجدول الأجهزة (devices).
   Future<String> txCreatorDeviceName(int? txId) async {
     if (txId == null) return '';
     try {
       final db = await _db;
-      final ops = await db.query(
-        'operations',
-        columns: ['device_id'],
-        where: "entity_type = 'tx' AND entity_id = ?",
-        whereArgs: ['$txId'],
-        orderBy: 'timestamp ASC',
-        limit: 1,
-      );
-      if (ops.isEmpty) return '';
-      final devId = '${ops.first['device_id'] ?? ''}'.trim();
-      if (devId.isEmpty) return '';
-      final devRows = await db.query(
-        'devices',
-        columns: ['name'],
+      String cashierName = '';
+      final txRows = await db.query(
+        'transactions',
+        columns: ['cashier_name'],
         where: 'id = ?',
-        whereArgs: [devId],
+        whereArgs: [txId],
         limit: 1,
       );
-      if (devRows.isNotEmpty) {
-        final name = '${devRows.first['name'] ?? ''}'.trim();
-        if (name.isNotEmpty) return name;
+      if (txRows.isNotEmpty) {
+        cashierName = '${txRows.first['cashier_name'] ?? ''}'.trim();
       }
-      if (devId == _deviceId) {
-        return await deviceName(this);
+
+      final allDevs = await db.rawQuery(
+        '''
+        SELECT d.id, d.name, d.user_id, u.name AS user_name
+        FROM devices d
+        LEFT JOIN users u ON u.id = d.user_id
+        WHERE COALESCE(d.revoked_at, '') = '' AND COALESCE(d.expelled_at, '') = ''
+        ''',
+      );
+
+      // 1) مطابقة الكاشير المسجل على العملية مع أجهزة المنشأة
+      String matchedDevNameByCashier = '';
+      if (cashierName.isNotEmpty) {
+        final normCashier = cashierName.toLowerCase();
+        for (final d in allDevs) {
+          final dName = '${d['name'] ?? ''}'.trim();
+          final uName = '${d['user_name'] ?? ''}'.trim();
+          if (dName.toLowerCase() == normCashier ||
+              uName.toLowerCase() == normCashier) {
+            matchedDevNameByCashier = dName.isNotEmpty ? dName : uName;
+            break;
+          }
+        }
       }
-      return devId.length > 10 ? devId.substring(0, 10) : devId;
+
+      // 2) فحص عملية الإنشاء الأولى (op_type = 'create') في جدول operations
+      final ops = await db.rawQuery(
+        '''
+        SELECT device_id, user_id, op_type FROM operations
+        WHERE entity_type = 'tx' AND entity_id = ?
+          AND COALESCE(device_id, '') <> ''
+        ORDER BY CASE WHEN op_type = 'create' THEN 0 ELSE 1 END,
+                 timestamp ASC, rowid ASC
+        LIMIT 1
+        ''',
+        ['$txId'],
+      );
+
+      if (ops.isNotEmpty) {
+        final opUserId = (ops.first['user_id'] as num?)?.toInt();
+        if (matchedDevNameByCashier.isEmpty &&
+            opUserId != null &&
+            opUserId > 0) {
+          for (final d in allDevs) {
+            final dUid = (d['user_id'] as num?)?.toInt();
+            if (dUid == opUserId) {
+              final dName = '${d['name'] ?? ''}'.trim();
+              final uName = '${d['user_name'] ?? ''}'.trim();
+              matchedDevNameByCashier = dName.isNotEmpty ? dName : uName;
+              if (matchedDevNameByCashier.isNotEmpty) break;
+            }
+          }
+        }
+        final devId = '${ops.first['device_id'] ?? ''}'.trim();
+        final opType = '${ops.first['op_type'] ?? ''}'.trim();
+        // إذا كانت العملية الوحيدة في السجل هي update من جهازنا الحالي (بسبب استعادة أو إعادة بث)
+        // وكان اسم الكاشير يشير صراحةً إلى جهاز عضو آخر، نعتمد جهاز الكاشير الحقيقي.
+        if (matchedDevNameByCashier.isNotEmpty &&
+            (devId == _deviceId && opType != 'create')) {
+          return matchedDevNameByCashier;
+        }
+        if (devId.isNotEmpty) {
+          for (final d in allDevs) {
+            if ('${d['id'] ?? ''}'.trim() == devId) {
+              final dName = '${d['name'] ?? ''}'.trim();
+              if (dName.isNotEmpty) {
+                if (devId == _deviceId &&
+                    matchedDevNameByCashier.isNotEmpty &&
+                    matchedDevNameByCashier.toLowerCase() !=
+                        dName.toLowerCase()) {
+                  return matchedDevNameByCashier;
+                }
+                return dName;
+              }
+            }
+          }
+          if (devId == _deviceId) {
+            if (matchedDevNameByCashier.isNotEmpty) {
+              return matchedDevNameByCashier;
+            }
+            return await deviceName(this);
+          }
+          if (matchedDevNameByCashier.isNotEmpty) {
+            return matchedDevNameByCashier;
+          }
+          return devId.length > 10 ? devId.substring(0, 10) : devId;
+        }
+      }
+
+      if (matchedDevNameByCashier.isNotEmpty) {
+        return matchedDevNameByCashier;
+      }
+      if (cashierName.isNotEmpty) {
+        return cashierName;
+      }
+      return '';
     } catch (e) {
       debugPrint('Repo.txCreatorDeviceName error: $e');
       return '';

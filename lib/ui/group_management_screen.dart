@@ -1129,14 +1129,17 @@ Future<void> showJoinApprovalSheet(
                             : () async {
                                 setSheet(() => approving = true);
                                 try {
+                                  const approvalTimeout = Duration(seconds: 45);
                                   await CloudJoin.approveJoinRequest(repo,
                                           backendUrl: backendUrl,
                                           deviceId: deviceId,
                                           deviceName: deviceName,
                                           roleCode: role.code,
                                           workspaceId: ws)
-                                      .timeout(kCloudOpTimeout);
-                                  await engine.broadcastRosterChange();
+                                      .timeout(approvalTimeout);
+                                  unawaited(engine
+                                      .broadcastRosterChange()
+                                      .catchError((_) {}));
                                   Sfx.pair();
                                   if (ctx.mounted) Navigator.pop(ctx);
                                   return;
@@ -1144,8 +1147,7 @@ Future<void> showJoinApprovalSheet(
                                   if (ctx.mounted) {
                                     showSnack(
                                         ctx,
-                                        'انتهت مهلة الاتصال '
-                                        '(${kCloudOpTimeout.inSeconds} ثانية) — '
+                                        'انتهت مهلة الاتصال (45 ثانية) — '
                                         'تحقّق من الشبكة ثم أعد المحاولة.',
                                         error: true);
                                   }

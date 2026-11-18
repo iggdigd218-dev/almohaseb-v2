@@ -70,4 +70,23 @@ void main() {
     );
     expect(wrong, isNull);
   });
+
+  test('JOIN-DISC-04 الفهرس تحت workspaces/_invite_index/invites يعمل حتى مع حجب /invite_index', () async {
+    http.Client primaryOnly() => MockClient((req) async {
+          final p = req.url.path;
+          if (p == '/workspaces/_invite_index/invites/pin_998877.json') {
+            return js({'ws': 'WS-PRIMARY1', 'expiresAt': live});
+          }
+          if (p.startsWith('/invite_index')) {
+            return http.Response('{"error":"Permission denied"}', 401);
+          }
+          return js(null);
+        });
+    final ws = await http.runWithClient(
+      () => CloudJoin.findWorkspaceByInvite(
+          backendUrl: url, tokenOrPin: '998877'),
+      primaryOnly,
+    );
+    expect(ws, 'WS-PRIMARY1');
+  });
 }

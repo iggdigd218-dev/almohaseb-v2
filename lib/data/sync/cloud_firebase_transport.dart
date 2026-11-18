@@ -21,6 +21,7 @@ import 'package:sqflite/sqflite.dart';
 import '../../core/database.dart';
 import '../../core/desktop_net.dart';
 import '../../core/item_conflict.dart';
+import '../../core/media_paths.dart';
 import '../repository.dart';
 import 'apply_remote.dart';
 import 'cloud_join.dart';
@@ -356,6 +357,19 @@ class CloudFirebaseTransport implements SyncTransport {
       if (tb is String && tb.trim().isNotEmpty) {
         cloudPayload.remove('thumb_b64');
       }
+    } else if (op.entityType == EntityKind.item &&
+        op.opType != OpKind.delete_ &&
+        cloudPayload['image_cleared'] != 1 &&
+        '${cloudPayload['thumb_b64'] ?? ''}'.trim().isEmpty) {
+      final imgPath = '${op.payload['image'] ?? ''}'.trim();
+      if (imgPath.isNotEmpty) {
+        try {
+          final b64 = await MediaPaths.encodeThumbBase64(imgPath);
+          if (b64.isNotEmpty) {
+            cloudPayload['thumb_b64'] = b64;
+          }
+        } catch (_) {}
+      }
     }
     final localSanitizedPayload = sanitizeOperationPayload(
       op.payload,
@@ -525,13 +539,14 @@ class CloudFirebaseTransport implements SyncTransport {
 
     bool hasMore = true;
     int currentCursorMs = lastCursorMs;
+    int currentPageLimit = kPullPageSize;
     String indexField = 'server_time';
     while (hasMore) {
       // حصر الاستعلام بالاستئناف فقط: .orderByChild('server_time').startAfter(last_synced_cursor)
       final params = buildCursorQueryParams(
         lastSyncedCursor: currentCursorMs,
         indexField: indexField,
-        limit: kPullPageSize,
+        limit: currentPageLimit,
       );
       final tok = await _idToken();
       if (tok != null) params['auth'] = tok;
@@ -552,7 +567,7 @@ class CloudFirebaseTransport implements SyncTransport {
         final fallbackParams = buildCursorQueryParams(
           lastSyncedCursor: currentCursorMs,
           indexField: indexField,
-          limit: kPullPageSize,
+          limit: currentPageLimit,
         );
         if (tok != null) fallbackParams['auth'] = tok;
         final fallbackUri =
@@ -564,7 +579,7 @@ class CloudFirebaseTransport implements SyncTransport {
         final fallbackParams = buildCursorQueryParams(
           lastSyncedCursor: currentCursorMs,
           indexField: indexField,
-          limit: kPullPageSize,
+          limit: currentPageLimit,
         );
         if (tok != null) fallbackParams['auth'] = tok;
         final fallbackUri =
@@ -620,14 +635,25 @@ class CloudFirebaseTransport implements SyncTransport {
             entries.where((e) => entryMs(e.value) >= currentCursorMs).toList();
       }
       if (entries.isEmpty) {
-        if (fetchedCount >= kPullPageSize) {
+        if (fetchedCount >= currentPageLimit) {
           var rawPageMaxTs = 0;
           for (final e in decoded.entries) {
             final ms = entryMs(e.value);
             if (ms > rawPageMaxTs) rawPageMaxTs = ms;
           }
-          if (rawPageMaxTs >= currentCursorMs) {
+          if (rawPageMaxTs > currentCursorMs) {
+            currentCursorMs = rawPageMaxTs;
+            currentPageLimit = kPullPageSize;
+            hasMore = true;
+            continue;
+          } else if (rawPageMaxTs == currentCursorMs &&
+              currentPageLimit < 10000) {
+            currentPageLimit = math.min(currentPageLimit * 2, 10000);
+            hasMore = true;
+            continue;
+          } else if (rawPageMaxTs >= currentCursorMs) {
             currentCursorMs = rawPageMaxTs + 1;
+            currentPageLimit = kPullPageSize;
             hasMore = true;
             continue;
           }
@@ -1048,9 +1074,17 @@ class CloudFirebaseTransport implements SyncTransport {
         await saveLastSyncedCursor(maxTsMs, cursorKey: maxTsKey);
       }
 
-      if (fetchedCount >= kPullPageSize && pageMaxTs >= currentCursorMs) {
-        currentCursorMs =
-            pageMaxTs > currentCursorMs ? pageMaxTs : pageMaxTs + 1;
+      if (fetchedCount >= currentPageLimit && pageMaxTs >= currentCursorMs) {
+        if (pageMaxTs > currentCursorMs) {
+          currentCursorMs = pageMaxTs;
+          currentPageLimit = kPullPageSize;
+        } else if (currentPageLimit < 10000) {
+          // أكثر من حجم الصفحة بنفس المللي ثانية: نوسّع نافذة الجلب بدلاً من تخطي المللي ثانية
+          currentPageLimit = math.min(currentPageLimit * 2, 10000);
+        } else {
+          currentCursorMs = pageMaxTs + 1;
+          currentPageLimit = kPullPageSize;
+        }
         hasMore = true;
       } else {
         hasMore = false;

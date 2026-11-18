@@ -183,9 +183,28 @@ class FirebaseAuthRest {
   static bool get hasAccountSession =>
       _accountIdToken != null && _accountIdToken!.isNotEmpty;
 
+  /// فحص صلاحيّة JWT محلياً عبر حقل `exp` (بهامش أمان 30 ثانية) لتفادي إرسال
+  /// توكن منتهٍ بسبب انحراف ساعة الجهاز أو استعادة جلسة قديمة من القاعدة.
+  /// التوكنات غير JWT (مثل توكنات الاختبار `'TOK-QA'`) تُترك لفحص الطابع الزمني.
+  static bool _isJwtExpired(String? token) {
+    if (token == null || token.isEmpty) return true;
+    final parts = token.split('.');
+    if (parts.length != 3) return false;
+    try {
+      final normalized = base64Url.normalize(parts[1]);
+      final decoded = jsonDecode(utf8.decode(base64Url.decode(normalized)));
+      if (decoded is Map && decoded['exp'] is num) {
+        final expMs = (decoded['exp'] as num).toInt() * 1000;
+        return DateTime.now().millisecondsSinceEpoch >= (expMs - 30000);
+      }
+    } catch (_) {}
+    return false;
+  }
+
   static bool get _accountTokenValid =>
       hasAccountSession &&
-      DateTime.now().millisecondsSinceEpoch < _accountExpiryMs;
+      DateTime.now().millisecondsSinceEpoch < _accountExpiryMs &&
+      !_isJwtExpired(_accountIdToken);
 
   /// الهوية المجهولة للجهاز (قبل/بلا ربط حساب Google).
   static String get anonymousUid => _anonUid ?? '';
@@ -324,9 +343,7 @@ class FirebaseAuthRest {
           _accountIdToken != null &&
           _accountIdToken!.isNotEmpty) {
         return FirebaseAccount(
-          uid: (googleId != null && googleId.trim().isNotEmpty)
-              ? googleId.trim()
-              : _accountUid!,
+          uid: _accountUid!,
           email: cleanEmail,
           displayName: (displayName ?? '').trim(),
           idToken: _accountIdToken!,
@@ -341,9 +358,7 @@ class FirebaseAuthRest {
             _accountUid != null &&
             _accountUid!.isNotEmpty) {
           return FirebaseAccount(
-            uid: (googleId != null && googleId.trim().isNotEmpty)
-                ? googleId.trim()
-                : _accountUid!,
+            uid: _accountUid!,
             email: cleanEmail,
             displayName: (displayName ?? '').trim(),
             idToken: refreshed,
@@ -605,6 +620,7 @@ class FirebaseAuthRest {
   static Future<void> clearSession(
     Repo repo, {
     bool keepDatabaseOpen = false,
+    bool preserveAnonymous = false,
   }) async {
     try {
       final st = await repo.settings();
@@ -638,11 +654,18 @@ class FirebaseAuthRest {
     _accountIdToken = null;
     _accountRefreshToken = null;
     _accountExpiryMs = 0;
-    // (دفعة التدقيق) الخروج يستدعي resetAnonymousSession كاملة: مسح
-    // الهوية المجهولة من الذاكرة والتخزين معاً — بقاء uid الجهاز القديم
-    // بعد الخروج يورّث الجلسة التالية هوية سحابية مستعملة (عضوية
-    // /members ونطاق القواعد) بدل هوية جديدة مستقلة عن السابقة.
-    await resetAnonymousSession(repo);
+    if (preserveAnonymous &&
+        _anonUid != null &&
+        _anonUid!.isNotEmpty &&
+        hasValidToken) {
+      _activeTokenUid = _anonUid;
+    } else {
+      // (دفعة التدقيق) الخروج يستدعي resetAnonymousSession كاملة: مسح
+      // الهوية المجهولة من الذاكرة والتخزين معاً — بقاء uid الجهاز القديم
+      // بعد الخروج يورّث الجلسة التالية هوية سحابية مستعملة (عضوية
+      // /members ونطاق القواعد) بدل هوية جديدة مستقلة عن السابقة.
+      await resetAnonymousSession(repo);
+    }
     await purgeAllSessionPrefs();
     if (!keepDatabaseOpen) {
       repo.debugSetWorkspaceId(defaultWorkspaceIdConst);
@@ -761,7 +784,8 @@ class FirebaseAuthRest {
   static bool get hasValidToken =>
       _anonIdToken != null &&
       _anonIdToken!.isNotEmpty &&
-      DateTime.now().millisecondsSinceEpoch < _anonExpiryMs;
+      DateTime.now().millisecondsSinceEpoch < _anonExpiryMs &&
+      !_isJwtExpired(_anonIdToken);
 
   /// (للاختبارات) حقن توكن وهمي لتفادي حظر الشبكة والـ 401.
   static void setMockTokenForTest({String? token, String? uid}) {
@@ -833,6 +857,11 @@ class FirebaseAuthRest {
         _activeTokenUid = _accountUid;
         return fresh;
       }
+      // إن تعذّر تجديد جلسة الحساب لغياب refresh token، نُسقط التوكن الميت
+      // كي يتحوّل `cachedIdToken` تلقائياً للهوية المجهولة الصالحة.
+      if (_accountRefreshToken == null || _accountRefreshToken!.isEmpty) {
+        _accountIdToken = null;
+      }
     }
     _anonExpiryMs = 0;
     _anonProviderDisabledUntilMs = 0;
@@ -844,11 +873,44 @@ class FirebaseAuthRest {
     return null;
   }
 
+  /// ضمان وجود جلسة سحابية صالحة بعد التبديل إلى قاعدة بيانات منشأة أخرى:
+  /// يحافظ على التوكن الحي في الذاكرة ويحفظه بالقاعدة الجديدة، أو يعيد التهيئة.
+  static Future<void> syncSessionOnWorkspaceSwitch(
+    Repo repo, {
+    String? expectedEmail,
+  }) async {
+    _repo = repo;
+    final cleanExpected = (expectedEmail ?? '').trim().toLowerCase();
+    var currentEmail = '';
+    try {
+      final st = await repo.settings();
+      currentEmail = (st[emailKey] ?? st['email'] ?? '').trim().toLowerCase();
+    } catch (_) {}
+    final targetEmail = cleanExpected.isNotEmpty ? cleanExpected : currentEmail;
+    if (_accountTokenValid &&
+        _accountUid != null &&
+        _accountUid!.isNotEmpty &&
+        (targetEmail.isEmpty ||
+            currentEmail.isEmpty ||
+            targetEmail == currentEmail)) {
+      await persistActiveSession(repo);
+      return;
+    }
+    if (hasValidToken && _anonUid != null && _anonUid!.isNotEmpty) {
+      await persistActiveSession(repo);
+      return;
+    }
+    await initSilentAuth(repo, forceReload: true);
+  }
+
   /// تهيئة صامتة تماماً: بلا نافذة، بلا إذن، بلا تأخير مرئي.
   /// تُستدعى مرة واحدة من `main()` **قبل** أي اتصال بـ RTDB.
-  static Future<void> initSilentAuth(Repo repo) async {
+  static Future<void> initSilentAuth(
+    Repo repo, {
+    bool forceReload = false,
+  }) async {
     _repo = repo;
-    if (_anonStarted) return;
+    if (_anonStarted && !forceReload) return;
     _anonStarted = true;
     if (effectiveFirebaseApiKey.isEmpty) return;
     try {
@@ -1049,7 +1111,21 @@ class FirebaseAuthRest {
                 '${Uri.encodeComponent(refresh)}',
           )
           .timeout(const Duration(seconds: 15));
-      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        final bodyUpper = res.body.toUpperCase();
+        if (res.statusCode == 400 &&
+            (bodyUpper.contains('INVALID_REFRESH_TOKEN') ||
+                bodyUpper.contains('TOKEN_EXPIRED') ||
+                bodyUpper.contains('USER_DISABLED') ||
+                bodyUpper.contains('USER_NOT_FOUND') ||
+                bodyUpper.contains('INVALID_GRANT'))) {
+          _accountIdToken = null;
+          _accountRefreshToken = null;
+          _accountExpiryMs = 0;
+          await _persistAccount();
+        }
+        return null;
+      }
       final m = jsonDecode(utf8.decode(res.bodyBytes));
       if (m is! Map) return null;
       final tok = '${m['id_token'] ?? ''}'.trim();

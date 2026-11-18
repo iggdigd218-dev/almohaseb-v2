@@ -1134,6 +1134,9 @@ class SubscriptionGuard {
         'allow_cloud_media_sync',
         st.features.allowCloudMediaSync ? '1' : '0',
       );
+      if (st.features.allowCloudMediaSync) {
+        unawaited(repo.backfillCloudMediaIfNeeded());
+      }
       await repo.setSetting(
           'subCachedState',
           jsonEncode({
@@ -1274,7 +1277,30 @@ class SubscriptionGuard {
   }
 
   static SubscriptionState _stateFrom(Map<String, dynamic> m, int nowMs) {
-    final rawFeat = m['feature_flags'] ?? m['features'];
+    final mergedFeat = <String, dynamic>{};
+    if (m['features'] is Map) {
+      mergedFeat.addAll(Map<String, dynamic>.from(m['features'] as Map));
+    }
+    if (m['feature_flags'] is Map) {
+      mergedFeat.addAll(Map<String, dynamic>.from(m['feature_flags'] as Map));
+    }
+    if (m['allow_cloud_media_sync'] is bool) {
+      mergedFeat['allow_cloud_media_sync'] = m['allow_cloud_media_sync'];
+    } else if (m['cloud_media_sync'] is bool) {
+      mergedFeat['allow_cloud_media_sync'] = m['cloud_media_sync'];
+    }
+    // إذا فُعّل الخيار في أي من العقدتين (features أو feature_flags أو المستوى الأعلى) نعتبِره مفعّلاً
+    final mediaOnInAny = m['allow_cloud_media_sync'] == true ||
+        m['cloud_media_sync'] == true ||
+        (m['features'] is Map &&
+            ((m['features'] as Map)['allow_cloud_media_sync'] == true ||
+                (m['features'] as Map)['cloud_media_sync'] == true)) ||
+        (m['feature_flags'] is Map &&
+            ((m['feature_flags'] as Map)['allow_cloud_media_sync'] == true ||
+                (m['feature_flags'] as Map)['cloud_media_sync'] == true));
+    if (mediaOnInAny) {
+      mergedFeat['allow_cloud_media_sync'] = true;
+    }
     final frozen = m['is_frozen'] == true ||
         '${m['status']}'.trim().toLowerCase() == 'suspended';
     return SubscriptionState(
@@ -1295,8 +1321,8 @@ class SubscriptionGuard {
       expiresAtMs: _asInt(m['expires_at']),
       isActive: m['is_active'] != false,
       deviceFingerprint: '${m['device_fingerprint'] ?? ''}',
-      features: PlanFeatures.fromMap(
-          rawFeat is Map ? Map<String, dynamic>.from(rawFeat) : null),
+      features:
+          PlanFeatures.fromMap(mergedFeat.isEmpty ? null : mergedFeat),
       serverNowMs: nowMs,
     );
   }

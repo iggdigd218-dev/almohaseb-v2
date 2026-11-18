@@ -7,6 +7,7 @@
 //   3) الانضمام لمنشأة قائمة كعضو / موظف (عبر رمز دعوة 6 أرقام أو باركود QR).
 //   4) استخدام محلي مستقل (بدون بريد إلكتروني أو سحابة).
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -17,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../core/accounting.dart';
 import '../core/app_error_mapper.dart';
+import '../core/app_version.dart';
 import '../core/cloud_config.dart';
 import '../core/device_names.dart';
 import '../core/l10n.dart';
@@ -40,6 +42,7 @@ import 'home_shell.dart';
 import 'join_approval_flow.dart';
 import 'lock_gate.dart';
 import 'qr_pair_scanner.dart';
+import 'update_section.dart' show showUpdateDialog, updateServiceProvider;
 import 'widgets.dart';
 
 /// مفتاح علم «أُكمل الإعداد الأول» في جدول الإعدادات.
@@ -184,6 +187,11 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   void initState() {
     super.initState();
     _loadSavedDeviceWorkspaces();
+    if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _checkOnboardingAppUpdate();
+      });
+    }
     if (widget.initialNotice != null && widget.initialNotice!.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
@@ -217,6 +225,14 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         );
       });
     }
+  }
+
+  Future<void> _checkOnboardingAppUpdate() async {
+    try {
+      final info = await ref.read(updateServiceProvider).check();
+      if (!mounted || !info.hasUpdate) return;
+      await showUpdateDialog(context, ref, info);
+    } catch (_) {}
   }
 
   @override
@@ -1660,6 +1676,25 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                     ],
                   ),
                 ),
+                const SizedBox(height: 10),
+                Center(
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(8),
+                    onTap: _busy ? null : _checkOnboardingAppUpdate,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
+                      child: Text(
+                        'v$kAppVersion',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: AppColors.text2Of(context)
+                              .withValues(alpha: 0.65),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
@@ -1702,13 +1737,13 @@ class _JoinMemberDialogState extends ConsumerState<_JoinMemberDialog> {
       return;
     }
 
-    String tokenOrPin = _pinCtrl.text.trim();
+    String tokenOrPin = CloudJoin.normalizeInviteCode(_pinCtrl.text);
     String targetWs = '';
     final st = await repo.settings();
     String backendUrl = effectiveBackendUrl(st['cloudBackendUrl']);
 
     if (qrData != null) {
-      tokenOrPin = qrData.tok.trim();
+      tokenOrPin = CloudJoin.normalizeInviteCode(qrData.tok);
       targetWs = qrData.ws.trim();
       if (qrData.cloudUrl.trim().isNotEmpty) {
         backendUrl = qrData.cloudUrl.trim();
@@ -1722,8 +1757,36 @@ class _JoinMemberDialogState extends ConsumerState<_JoinMemberDialog> {
       return;
     }
 
+    // 1) التحقق المسبق من صحة رمز الدعوة وحسم مساحة عمل المدير قبل أي مسح محلي
+    setState(() => _busy = true);
+    Sfx.click();
+    try {
+      final resolved = await CloudJoin.verifyAndResolveInvite(
+        backendUrl: backendUrl,
+        tokenOrPin: tokenOrPin,
+        workspaceId: targetWs.isEmpty ? 'default' : targetWs,
+      );
+      targetWs = resolved.workspaceId;
+      tokenOrPin = resolved.token;
+    } on CloudJoinException catch (e) {
+      Sfx.error();
+      if (mounted) {
+        setState(() => _busy = false);
+        showSnack(context, e.message, error: true);
+      }
+      return;
+    } catch (e) {
+      Sfx.error();
+      if (mounted) {
+        setState(() => _busy = false);
+        showSnack(context, 'تعذّر التحقق من رمز الدعوة: $e', error: true);
+      }
+      return;
+    }
+
     final pendingCount = await repo.pendingSyncOperationsCount();
     if (!mounted) return;
+    setState(() => _busy = false);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1787,17 +1850,6 @@ class _JoinMemberDialogState extends ConsumerState<_JoinMemberDialog> {
     setState(() => _busy = true);
     Sfx.click();
     try {
-      if (targetWs.isEmpty || targetWs == 'default') {
-        final foundWs = await CloudJoin.findWorkspaceByInvite(
-          backendUrl: backendUrl,
-          tokenOrPin: tokenOrPin,
-        );
-        if (foundWs != null && foundWs.isNotEmpty) {
-          targetWs = foundWs;
-        }
-      }
-      if (targetWs.isEmpty) targetWs = 'default';
-
       await CloudJoin.purgeAndIsolateJoiningMember(
         repo,
         backendUrl: backendUrl,
@@ -1914,9 +1966,11 @@ class _JoinMemberDialogState extends ConsumerState<_JoinMemberDialog> {
                 enabled: !_busy,
                 keyboardType: TextInputType.number,
                 textAlign: TextAlign.center,
-                maxLength: 12,
+                maxLength: 14,
                 inputFormatters: [
-                  FilteringTextInputFormatter.allow(RegExp(r'[0-9A-Za-z\-]')),
+                  FilteringTextInputFormatter.allow(
+                    RegExp(r'[0-9\u0660-\u0669\u06F0-\u06F9A-Za-z\-\s]'),
+                  ),
                 ],
                 decoration: const InputDecoration(
                   labelText: 'رمز الدعوة (6 أرقام)',

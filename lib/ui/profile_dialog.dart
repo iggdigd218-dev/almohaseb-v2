@@ -330,13 +330,13 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
       return;
     }
 
-    String tokenOrPin = _joinPinCtrl.text.trim();
+    String tokenOrPin = CloudJoin.normalizeInviteCode(_joinPinCtrl.text);
     String targetWs = '';
     final st = await repo.settings();
     String backendUrl = effectiveBackendUrl(st['cloudBackendUrl']);
 
     if (qrData != null) {
-      tokenOrPin = qrData.tok.trim();
+      tokenOrPin = CloudJoin.normalizeInviteCode(qrData.tok);
       targetWs = qrData.ws.trim();
       if (qrData.cloudUrl.trim().isNotEmpty) {
         backendUrl = qrData.cloudUrl.trim();
@@ -351,8 +351,35 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
       return;
     }
 
+    setState(() => _joinBusy = true);
+    Sfx.click();
+    try {
+      final resolved = await CloudJoin.verifyAndResolveInvite(
+        backendUrl: backendUrl,
+        tokenOrPin: tokenOrPin,
+        workspaceId: targetWs.isEmpty ? 'default' : targetWs,
+      );
+      targetWs = resolved.workspaceId;
+      tokenOrPin = resolved.token;
+    } on CloudJoinException catch (e) {
+      Sfx.error();
+      if (mounted) {
+        setState(() => _joinBusy = false);
+        showSnack(context, e.message, error: true);
+      }
+      return;
+    } catch (e) {
+      Sfx.error();
+      if (mounted) {
+        setState(() => _joinBusy = false);
+        showSnack(context, 'تعذّر التحقق من رمز الدعوة: $e', error: true);
+      }
+      return;
+    }
+
     final pendingCount = await repo.pendingSyncOperationsCount();
     if (!mounted) return;
+    setState(() => _joinBusy = false);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -416,17 +443,6 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
     setState(() => _joinBusy = true);
     Sfx.click();
     try {
-      if (targetWs.isEmpty || targetWs == 'default') {
-        final foundWs = await CloudJoin.findWorkspaceByInvite(
-          backendUrl: backendUrl,
-          tokenOrPin: tokenOrPin,
-        );
-        if (foundWs != null && foundWs.isNotEmpty) {
-          targetWs = foundWs;
-        }
-      }
-      if (targetWs.isEmpty) targetWs = 'default';
-
       await CloudJoin.purgeAndIsolateJoiningMember(
         repo,
         backendUrl: backendUrl,
@@ -910,10 +926,12 @@ class _ProfileDialogState extends ConsumerState<_ProfileDialog> {
                                 controller: _joinPinCtrl,
                                 keyboardType: TextInputType.number,
                                 textAlign: TextAlign.center,
-                                maxLength: 12,
+                                maxLength: 14,
                                 inputFormatters: [
                                   FilteringTextInputFormatter.allow(
-                                      RegExp(r'[0-9A-Za-z\-]')),
+                                    RegExp(
+                                        r'[0-9\u0660-\u0669\u06F0-\u06F9A-Za-z\-\s]'),
+                                  ),
                                 ],
                                 decoration: InputDecoration(
                                   hintText: 'رمز 6 أرقام',
