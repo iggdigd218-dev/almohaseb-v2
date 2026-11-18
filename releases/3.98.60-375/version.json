@@ -1,0 +1,37 @@
+{
+  "version": "3.98.60+375",
+  "minSupported": "3.13.0",
+  "sha256": "a67b3465b383c7f9f5e5bcf1ff79e477f8c765e77686ad2b5dea26d403291b5e",
+  "sha256Variants": {
+    "arm64": "a67b3465b383c7f9f5e5bcf1ff79e477f8c765e77686ad2b5dea26d403291b5e",
+    "armv7": "7cdaf7170468ebfd9cf76cd4c628836fcfe9a95f598c0e47eb6ee5c517b25aab"
+  },
+  "releaseUrl": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/tag/latest",
+  "download_url": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk",
+  "downloads": {
+    "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk",
+    "androidVariants": {
+      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk",
+      "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-armv7.apk"
+    },
+    "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe"
+  },
+  "downloadsMirror": {
+    "android": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.60-375/Almohaseb-Plus-arm64.apk",
+    "androidVariants": {
+      "arm64": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.60-375/Almohaseb-Plus-arm64.apk",
+      "armv7": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.60-375/nexora-armv7.apk"
+    },
+    "windows": "https://iggdigd218-dev.github.io/almohaseb-v2/releases/3.98.60-375/NexoraSetup.exe"
+  },
+  "downloadsFallbackGithub": {
+    "android": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk",
+    "androidVariants": {
+      "arm64": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/Almohaseb-Plus-arm64.apk",
+      "armv7": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/nexora-armv7.apk"
+    },
+    "windows": "https://github.com/iggdigd218-dev/almohaseb-v2/releases/download/latest/NexoraSetup.exe"
+  },
+  "publishedAt": "2026-11-18T00:47:11Z",
+  "notes": "• معالجة جذرية لمنطق الاقتران والانضمام السحابي (Cloud Join): التحقق المسبق من صلاحية رمز الاقتران وحسم مساحة العمل قبل أي مسح محلي أو تصفير للجلسة.\n• دعم إدخال رموز الاقتران بالأرقام العربية/الهندية أو مع المسافات والشرطات (مثل 606 108) وتطبيعها تلقائياً، مع معالجة فروق التوقيت والساعة بين جوال المدير وجهاز الكمبيوتر.\n• الحفاظ على هوية العضو السحابية المعتمدة (auth.uid) أثناء إتمام الربط، وإيقاف ابتلاع أخطاء السحابة والشبكة، وتفعيل فاحص التحديثات التلقائي في شاشة البداية."
+}
